@@ -155,3 +155,18 @@ code {
   border-color: #3b82f6;
   background: #1d2536;
 }
+
+.variants {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.3rem;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  color: #9a9aa3;
+}
+
+.variants__row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}

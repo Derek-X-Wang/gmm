@@ -208,3 +208,27 @@ export async function setProxyConfig(args: {
 export async function testProxyConnection(): Promise<void> {
   await invoke("test_proxy_connection");
 }
+
+export interface Variant {
+  id: string;
+  mod_id: string;
+  name: string;
+  subpath: string;
+}
+
+export interface ModVariants {
+  variants: Variant[];
+  activeVariantId: string | null;
+}
+
+export async function listVariants(modId: string): Promise<ModVariants> {
+  return invoke<ModVariants>("list_variants", { modId });
+}
+
+export async function setActiveVariant(
+  modId: string,
+  variantId: string,
+  game: GameCode,
+): Promise<void> {
+  await invoke("set_active_variant", { modId, variantId, game });
+}

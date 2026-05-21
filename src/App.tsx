@@ -12,8 +12,10 @@ import {
   importZip,
   installImporter,
   listMods,
+  listVariants,
   rebuildJunctions,
   rollbackImporter,
+  setActiveVariant,
   setGameInstallPath,
   setLibraryPathForGame,
   setLibraryRoot,
@@ -474,6 +476,7 @@ function ModList() {
             <div className="mods__main">
               <strong>{m.name}</strong>
               <span className="muted"> · {m.source}</span>
+              <VariantSelector modId={m.id} />
             </div>
             <label className="toggle">
               <input
@@ -539,6 +542,49 @@ function AdoptButton({ onAdopted }: { onAdopted: () => void }) {
         </button>
       </div>
       {adopt.isError ? <p className="error">{String(adopt.error)}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * Inline radio list of Variants for a Mod. Renders nothing for Mods
+ * with 0 or 1 Variants — the AC explicitly says single-folder mods
+ * see no UI change. Switching the active Variant retargets the
+ * junction in place; no full toggle cycle needed.
+ */
+function VariantSelector({ modId }: { modId: string }) {
+  const qc = useQueryClient();
+  const v = useQuery({
+    queryKey: ["variants", modId],
+    queryFn: () => listVariants(modId),
+  });
+  const switchVariant = useMutation({
+    mutationFn: (variantId: string) => setActiveVariant(modId, variantId, GAME),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["variants", modId] }),
+  });
+
+  if (!v.data || v.data.variants.length < 2) return null;
+
+  return (
+    <div className="variants">
+      {v.data.variants.map((variant) => {
+        const active = variant.id === v.data!.activeVariantId;
+        return (
+          <label key={variant.id} className="variants__row">
+            <input
+              type="radio"
+              name={`variant-${modId}`}
+              checked={active}
+              disabled={switchVariant.isPending}
+              onChange={() => switchVariant.mutate(variant.id)}
+            />
+            <span>{variant.name}</span>
+          </label>
+        );
+      })}
+      {switchVariant.isError ? (
+        <p className="error">{String(switchVariant.error)}</p>
+      ) : null}
     </div>
   );
 }

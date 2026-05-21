@@ -14,6 +14,7 @@ pub mod mods;
 pub mod network;
 pub mod reconcile;
 pub mod settings;
+pub mod variants;
 pub mod volume;
 pub mod zip_import;
 
@@ -420,6 +421,8 @@ impl Core {
         .execute(&self.pool)
         .await?;
 
+        self.detect_and_record_variants(&id, &library_path).await?;
+
         Ok(Mod {
             id,
             game,
@@ -479,6 +482,8 @@ impl Core {
         .execute(&self.pool)
         .await?;
 
+        self.detect_and_record_variants(&id, &library_path).await?;
+
         Ok(Mod {
             id,
             game,
@@ -487,6 +492,132 @@ impl Core {
             library_path,
             enabled: false,
         })
+    }
+
+    /// Run the Variant detection heuristic against the freshly extracted
+    /// Library subtree and persist the result. If 2+ Variants are
+    /// detected we set `active_variant_id` to the first alphabetical
+    /// row so the junction (created later via `set_enabled`) has a
+    /// concrete target. No-op when the heuristic finds 0 or 1 candidate.
+    async fn detect_and_record_variants(&self, mod_id: &str, library_path: &Path) -> Result<()> {
+        let detected = variants::detect_variants(library_path)?;
+        if detected.is_empty() {
+            return Ok(());
+        }
+
+        let mut first_variant_id: Option<String> = None;
+        for v in detected {
+            let variant_id = Ulid::new().to_string();
+            sqlx::query("INSERT INTO mod_variants (id, mod_id, name, subpath) VALUES (?, ?, ?, ?)")
+                .bind(&variant_id)
+                .bind(mod_id)
+                .bind(&v.name)
+                .bind(v.subpath.to_string_lossy().as_ref())
+                .execute(&self.pool)
+                .await?;
+            if first_variant_id.is_none() {
+                first_variant_id = Some(variant_id);
+            }
+        }
+
+        sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
+            .bind(&first_variant_id)
+            .bind(mod_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// List the Variants stored for `mod_id` (empty when none).
+    pub async fn list_variants(&self, mod_id: &str) -> Result<Vec<variants::Variant>> {
+        let rows = sqlx::query(
+            "SELECT id, mod_id, name, subpath FROM mod_variants WHERE mod_id = ? ORDER BY name ASC",
+        )
+        .bind(mod_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(variants::Variant {
+                    id: row.try_get("id")?,
+                    mod_id: row.try_get("mod_id")?,
+                    name: row.try_get("name")?,
+                    subpath: PathBuf::from(row.try_get::<String, _>("subpath")?),
+                })
+            })
+            .collect()
+    }
+
+    /// Read the active variant ID for a mod (None if no variants or
+    /// none active).
+    pub async fn active_variant_id(&self, mod_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT active_variant_id FROM mods WHERE id = ?")
+            .bind(mod_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.try_get::<Option<String>, _>("active_variant_id")?)
+    }
+
+    /// Switch the active Variant for `mod_id`. Drops the existing
+    /// junction (if any) and recreates it pointing at the new
+    /// variant subpath. The Library copy is never touched.
+    pub async fn set_active_variant(
+        &self,
+        mod_id: &str,
+        variant_id: &str,
+        game_mods_dir: &Path,
+    ) -> Result<()> {
+        // Validate the variant belongs to this mod and read its subpath.
+        let variant_row =
+            sqlx::query("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
+                .bind(variant_id)
+                .bind(mod_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let _subpath: String = variant_row.try_get("subpath")?;
+
+        // Load the mod row so we know whether to retarget a junction.
+        let mod_row =
+            sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
+                .bind(mod_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let junction_dir_name: String = mod_row.try_get("junction_dir_name")?;
+        let enabled: i64 = mod_row.try_get("enabled")?;
+        let library_path = PathBuf::from(mod_row.try_get::<String, _>("library_path")?);
+
+        sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
+            .bind(variant_id)
+            .bind(mod_id)
+            .execute(&self.pool)
+            .await?;
+
+        if enabled != 0 {
+            let link = game_mods_dir.join(&junction_dir_name);
+            if link_exists(&link) {
+                junction::remove(&link)?;
+            }
+            let target = self.junction_target_for(mod_id, &library_path).await?;
+            volume::require_ntfs_pair(game_mods_dir, &target)?;
+            junction::create(&link, &target)?;
+        }
+
+        Ok(())
+    }
+
+    /// Resolve the junction target for a Mod: Library path joined
+    /// with the active variant's subpath when one exists, else the
+    /// Library root.
+    async fn junction_target_for(&self, mod_id: &str, library_path: &Path) -> Result<PathBuf> {
+        if let Some(active_id) = self.active_variant_id(mod_id).await? {
+            let row = sqlx::query("SELECT subpath FROM mod_variants WHERE id = ?")
+                .bind(&active_id)
+                .fetch_one(&self.pool)
+                .await?;
+            let subpath: String = row.try_get("subpath")?;
+            return Ok(library_path.join(subpath));
+        }
+        Ok(library_path.to_path_buf())
     }
 
     /// Read the persisted install path for a game (None until the user
@@ -596,7 +727,8 @@ impl Core {
             }
 
             let link = game_mods_dir.join(&junction_dir_name);
-            let expected_target = PathBuf::from(&library_path);
+            let library_path = PathBuf::from(&library_path);
+            let expected_target = self.junction_target_for(&id, &library_path).await?;
 
             if !link_exists(&link) {
                 volume::require_ntfs_pair(game_mods_dir, &expected_target)?;
@@ -649,7 +781,7 @@ impl Core {
             let library_path: String = row.try_get("library_path")?;
             let enabled: i64 = row.try_get("enabled")?;
             let link = game_mods_dir.join(&junction_dir_name);
-            let target = PathBuf::from(library_path);
+            let library_path = PathBuf::from(library_path);
 
             // Always drop the existing link first; if the user relocated
             // the Library, the old link would resolve to thin air.
@@ -661,6 +793,7 @@ impl Core {
                 result.skipped.push(id);
                 continue;
             }
+            let target = self.junction_target_for(&id, &library_path).await?;
             volume::require_ntfs_pair(game_mods_dir, &target)?;
             junction::create(&link, &target)?;
             result.recreated.push(id);
@@ -720,7 +853,8 @@ impl Core {
     }
 
     /// Enable or disable a Mod. On enable, a Junction is created at
-    /// `<game_mods_dir>/<mod-name>/` pointing at the Mod's Library path.
+    /// `<game_mods_dir>/<mod-name>/` pointing at the Mod's Library path
+    /// (joined with the active Variant's subpath when one is set).
     /// On disable, the Junction is removed (the Library copy is never touched).
     pub async fn set_enabled(&self, id: &str, enabled: bool, game_mods_dir: &Path) -> Result<()> {
         let row =
@@ -734,7 +868,8 @@ impl Core {
         let current_enabled: i64 = row.try_get("enabled")?;
 
         let link = game_mods_dir.join(&junction_dir_name);
-        let target = PathBuf::from(library_path);
+        let library_path = PathBuf::from(library_path);
+        let target = self.junction_target_for(id, &library_path).await?;
 
         match (current_enabled != 0, enabled) {
             (false, true) => {
