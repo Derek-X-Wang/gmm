@@ -298,7 +298,7 @@ fn list_supported_games_returns_gimi_and_srmi_in_order() {
         codes.first() == Some(&"gimi"),
         "GIMI must remain the first tab so existing users land on a familiar screen, got {codes:?}",
     );
-    for needed in ["srmi", "zzmi", "wwmi", "himi"] {
+    for needed in ["srmi", "zzmi", "wwmi", "himi", "efmi"] {
         assert!(
             codes.contains(&needed),
             "{needed} must appear once its slice lands, got {codes:?}",
@@ -401,15 +401,46 @@ fn himi_profile_lists_bh3_exe_and_spectrumqt_repo() {
 }
 
 #[test]
-fn unported_games_report_not_wired_yet() {
+fn efmi_profile_uses_inject_mode_not_hook() {
+    use gmm_lib::core::games::InjectMode;
     use gmm_lib::core::GameCode;
-    let game = GameCode::Efmi;
-    let p = game.profile();
+    let p = GameCode::Efmi.profile();
+    assert_eq!(p.display_name, "Endfield");
+    let (repo, asset_filter) = p.importer_repo.expect("efmi importer repo wired");
+    assert_eq!(repo, "SpectrumQT/EFMI-Package");
+    assert_eq!(asset_filter, "EFMI");
     assert!(
-        !p.is_ported(),
-        "{} should not be reported as ported yet (open issue #20)",
-        game.as_str(),
+        p.executable_candidates
+            .contains(&"Endfield-Win64-Shipping.exe"),
+        "EFMI exe candidates must include the UE shipping exe, got {:?}",
+        p.executable_candidates,
     );
+    assert!(p.detect.is_some(), "EFMI detect fn must be wired");
+    assert!(p.is_ported());
+    // The headline quirk: XXMI marks EFMI as inject-mode rather than
+    // hook-mode. `launch_game` branches on this; the Hoyoverse + Kuro
+    // games all stay on Hook.
+    assert_eq!(p.inject_mode, InjectMode::Inject);
+}
+
+#[test]
+fn non_efmi_games_default_to_hook_inject_mode() {
+    use gmm_lib::core::games::InjectMode;
+    use gmm_lib::core::GameCode;
+    for game in [
+        GameCode::Gimi,
+        GameCode::Srmi,
+        GameCode::Zzmi,
+        GameCode::Wwmi,
+        GameCode::Himi,
+    ] {
+        assert_eq!(
+            game.profile().inject_mode,
+            InjectMode::Hook,
+            "{} must use Hook mode (default for Hoyoverse + Kuro titles)",
+            game.as_str(),
+        );
+    }
 }
 
 #[test]
