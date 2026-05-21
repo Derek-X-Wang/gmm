@@ -287,20 +287,23 @@ async fn import_zip_command_path_round_trips_through_serde() {
 
 #[test]
 fn list_supported_games_returns_gimi_and_srmi_in_order() {
-    // Slice 6 (#16) wires SRMI alongside the existing GIMI port. The
-    // React tab strip relies on this command to know which tabs to
-    // render. Order must be stable so the UI's "first tab is default"
-    // behaviour matches the registry.
+    // Each slice #16-#20 adds a ported game; the React tab strip
+    // relies on this command to know which tabs to render. Order must
+    // be stable so the UI's "first tab is default" behaviour matches
+    // the registry — GIMI stays first so existing users land on the
+    // familiar screen.
     let games = list_supported_games();
     let codes: Vec<&str> = games.iter().map(|g| g.code.as_str()).collect();
     assert!(
         codes.first() == Some(&"gimi"),
         "GIMI must remain the first tab so existing users land on a familiar screen, got {codes:?}",
     );
-    assert!(
-        codes.contains(&"srmi"),
-        "SRMI must appear once slice 6 lands, got {codes:?}",
-    );
+    for needed in ["srmi", "zzmi"] {
+        assert!(
+            codes.contains(&needed),
+            "{needed} must appear once its slice lands, got {codes:?}",
+        );
+    }
     // Every supported game serialises with the camelCase wire shape.
     let v = to_json(&games);
     let arr = v.as_array().expect("array");
@@ -346,18 +349,30 @@ fn srmi_profile_lists_star_rail_exe_and_spectrumqt_repo() {
 }
 
 #[test]
+fn zzmi_profile_lists_zzz_exe_and_spectrumqt_repo() {
+    use gmm_lib::core::GameCode;
+    let p = GameCode::Zzmi.profile();
+    assert_eq!(p.display_name, "Zenless Zone Zero");
+    let (repo, asset_filter) = p.importer_repo.expect("zzmi importer repo wired");
+    assert_eq!(repo, "SpectrumQT/ZZMI-Package");
+    assert_eq!(asset_filter, "ZZMI");
+    assert!(
+        p.executable_candidates.contains(&"ZenlessZoneZero.exe"),
+        "ZZMI exe candidates must include ZenlessZoneZero.exe, got {:?}",
+        p.executable_candidates,
+    );
+    assert!(p.detect.is_some(), "ZZMI detect fn must be wired");
+    assert!(p.is_ported());
+}
+
+#[test]
 fn unported_games_report_not_wired_yet() {
     use gmm_lib::core::GameCode;
-    for game in [
-        GameCode::Zzmi,
-        GameCode::Wwmi,
-        GameCode::Himi,
-        GameCode::Efmi,
-    ] {
+    for game in [GameCode::Wwmi, GameCode::Himi, GameCode::Efmi] {
         let p = game.profile();
         assert!(
             !p.is_ported(),
-            "{} should not be reported as ported yet (open issues #17-#20)",
+            "{} should not be reported as ported yet (open issues #18-#20)",
             game.as_str(),
         );
     }

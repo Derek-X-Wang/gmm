@@ -132,9 +132,9 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Zzmi,
         display_name: "Zenless Zone Zero",
-        importer_repo: None,
-        executable_candidates: &[],
-        detect: None,
+        importer_repo: Some(("SpectrumQT/ZZMI-Package", "ZZMI")),
+        executable_candidates: &["ZenlessZoneZero.exe"],
+        detect: Some(detect::zenless::detect),
     },
     GameProfile {
         code: GameCode::Wwmi,
