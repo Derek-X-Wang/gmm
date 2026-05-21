@@ -1,0 +1,212 @@
+//! Pure-Rust core of GMM.
+//!
+//! Tauri commands are thin shells over the functions in this module; the
+//! integration tests in `src-tauri/tests/` exercise this module directly so
+//! they can run on macOS without spinning up the Tauri runtime.
+
+pub mod error;
+pub mod games;
+pub mod junction;
+pub mod mods;
+
+use std::path::{Path, PathBuf};
+
+use chrono::Utc;
+use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
+use ulid::Ulid;
+
+pub use error::{Error, Result};
+pub use games::GameCode;
+pub use mods::{Mod, Source};
+
+/// The Core owns the SQLite pool and the Library root. Everything that
+/// reads from or writes to the user's data goes through here.
+#[derive(Clone)]
+pub struct Core {
+    pool: SqlitePool,
+    library_root: PathBuf,
+}
+
+impl Core {
+    /// Open (or create) the DB at `db_url`, run pending migrations, and
+    /// ensure the Library root exists.
+    pub async fn new(library_root: PathBuf, db_url: &str) -> Result<Self> {
+        std::fs::create_dir_all(&library_root).map_err(|source| Error::Io {
+            path: library_root.clone(),
+            source,
+        })?;
+
+        let opts: SqliteConnectOptions = db_url.parse::<SqliteConnectOptions>()?.create_if_missing(true);
+        let pool = SqlitePool::connect_with(opts).await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
+
+        Ok(Self { pool, library_root })
+    }
+
+    /// Adopt an already-extracted folder into the Library as a Mod with
+    /// `source = manual`. Copies the source tree into
+    /// `<library_root>/<game>/<ulid>/` and records the row.
+    pub async fn adopt_folder(
+        &self,
+        game: GameCode,
+        source_path: &Path,
+        display_name: &str,
+    ) -> Result<Mod> {
+        let id = Ulid::new().to_string();
+        let library_path = self.library_root.join(game.as_str()).join(&id);
+
+        copy_dir_recursive(source_path, &library_path)?;
+
+        let junction_dir_name = sanitize_dir_name(display_name);
+
+        let created_at = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO mods (
+                id, game_code, name, source, library_path,
+                junction_dir_name, enabled, created_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+        )
+        .bind(&id)
+        .bind(game.as_str())
+        .bind(display_name)
+        .bind(Source::Manual.as_str())
+        .bind(library_path.to_string_lossy().as_ref())
+        .bind(&junction_dir_name)
+        .bind(&created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(Mod {
+            id,
+            game,
+            name: display_name.to_string(),
+            source: Source::Manual,
+            library_path,
+            enabled: false,
+        })
+    }
+
+    /// Enable or disable a Mod. On enable, a Junction is created at
+    /// `<game_mods_dir>/<mod-name>/` pointing at the Mod's Library path.
+    /// On disable, the Junction is removed (the Library copy is never touched).
+    pub async fn set_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+        game_mods_dir: &Path,
+    ) -> Result<()> {
+        let row = sqlx::query(
+            "SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let junction_dir_name: String = row.try_get("junction_dir_name")?;
+        let library_path: String = row.try_get("library_path")?;
+        let current_enabled: i64 = row.try_get("enabled")?;
+
+        let link = game_mods_dir.join(&junction_dir_name);
+        let target = PathBuf::from(library_path);
+
+        match (current_enabled != 0, enabled) {
+            (false, true) => junction::create(&link, &target)?,
+            (true, false) => junction::remove(&link)?,
+            _ => {}
+        }
+
+        sqlx::query("UPDATE mods SET enabled = ? WHERE id = ?")
+            .bind(if enabled { 1_i64 } else { 0_i64 })
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// List every Mod for a given game, ordered by creation time ascending.
+    pub async fn list_mods(&self, game: GameCode) -> Result<Vec<Mod>> {
+        let rows = sqlx::query(
+            "SELECT id, game_code, name, source, library_path, enabled
+             FROM mods
+             WHERE game_code = ?
+             ORDER BY created_at ASC",
+        )
+        .bind(game.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: String = row.try_get("id")?;
+                let game_code: String = row.try_get("game_code")?;
+                let name: String = row.try_get("name")?;
+                let source: String = row.try_get("source")?;
+                let library_path: String = row.try_get("library_path")?;
+                let enabled: i64 = row.try_get("enabled")?;
+
+                Ok(Mod {
+                    id,
+                    game: GameCode::from_str(&game_code)?,
+                    name,
+                    source: Source::from_str(&source)?,
+                    library_path: PathBuf::from(library_path),
+                    enabled: enabled != 0,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Strip NTFS-reserved characters from a Mod's display name to produce a
+/// safe junction directory name. Does not yet handle reserved DOS device
+/// names (CON, PRN, ...) or collisions — those land in subsequent cycles.
+pub(crate) fn sanitize_dir_name(display: &str) -> String {
+    let stripped: String = display
+        .chars()
+        .filter(|c| {
+            !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') && !c.is_control()
+        })
+        .collect();
+    let trimmed = stripped.trim_end_matches(|c: char| c == '.' || c == ' ');
+    trimmed.to_string()
+}
+
+/// Recursive directory copy. Standard library has no built-in equivalent.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst).map_err(|source| Error::Io {
+        path: dst.to_path_buf(),
+        source,
+    })?;
+
+    let entries = std::fs::read_dir(src).map_err(|source| Error::Io {
+        path: src.to_path_buf(),
+        source,
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Io {
+            path: src.to_path_buf(),
+            source,
+        })?;
+        let entry_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        let metadata = entry.metadata().map_err(|source| Error::Io {
+            path: entry_path.clone(),
+            source,
+        })?;
+
+        if metadata.is_dir() {
+            copy_dir_recursive(&entry_path, &dst_path)?;
+        } else {
+            std::fs::copy(&entry_path, &dst_path).map_err(|source| Error::Io {
+                path: entry_path.clone(),
+                source,
+            })?;
+        }
+    }
+
+    Ok(())
+}
