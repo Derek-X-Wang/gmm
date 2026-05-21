@@ -1,7 +1,9 @@
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::detect;
 use super::error::Error;
 
 /// The six XXMI-family games GMM supports in v1.
@@ -30,6 +32,26 @@ impl GameCode {
             GameCode::Efmi => "efmi",
         }
     }
+
+    /// Look up the static per-game wiring profile. Always returns a
+    /// row (one per `GameCode`); rows for games that have not been
+    /// ported yet leave their `importer_repo` / `detect` / exe
+    /// candidates empty so callers can fall back gracefully.
+    pub fn profile(&self) -> &'static GameProfile {
+        for p in GAME_PROFILES {
+            if p.code as u8 == *self as u8 {
+                return p;
+            }
+        }
+        unreachable!("GAME_PROFILES must cover every GameCode variant")
+    }
+
+    /// Iterate every game whose backend wiring is complete (detect +
+    /// importer repo + at least one exe candidate). Drives the
+    /// per-game tab strip in the React UI.
+    pub fn ported() -> impl Iterator<Item = &'static GameProfile> {
+        GAME_PROFILES.iter().filter(|p| p.is_ported())
+    }
 }
 
 impl FromStr for GameCode {
@@ -47,3 +69,92 @@ impl FromStr for GameCode {
         }
     }
 }
+
+/// Function signature shared by every per-game detector.
+pub type DetectFn = fn() -> Option<PathBuf>;
+
+/// Static per-game wiring. The registry lets us add a new game (slices
+/// #16–#20) by appending a row instead of touching match arms across
+/// `commands.rs` / `detect/` / the UI.
+///
+/// An unported game ships with `importer_repo = None`, `detect = None`,
+/// and `executable_candidates = &[]`. Callers see `is_ported() == false`
+/// and surface a "wired up soon" message instead of pretending the game
+/// works.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameProfile {
+    pub code: GameCode,
+    /// Human-readable name for tabs and copy.
+    pub display_name: &'static str,
+    /// `(repo, asset_filter)` tuple matching the upstream Model
+    /// Importer release on GitHub. `None` until the per-game port
+    /// lands.
+    pub importer_repo: Option<(&'static str, &'static str)>,
+    /// Game executable file names tried in order under the install
+    /// directory. Empty `&[]` until the per-game port lands.
+    pub executable_candidates: &'static [&'static str],
+    /// Best-effort install-path auto-detector. `None` until the
+    /// per-game port lands.
+    #[serde(skip_serializing)]
+    pub detect: Option<DetectFn>,
+}
+
+impl GameProfile {
+    /// `true` iff the per-game port has wired importer + detect + exe.
+    /// Used by `GameCode::ported` to surface the tabs in the UI.
+    pub fn is_ported(&self) -> bool {
+        self.importer_repo.is_some()
+            && self.detect.is_some()
+            && !self.executable_candidates.is_empty()
+    }
+}
+
+/// The single registry of per-game wiring. Order is preserved by
+/// `GameCode::ported()` so the React tab strip renders games in the
+/// same sequence (Genshin / Star Rail / ZZZ / Wuthering Waves /
+/// Honkai Impact 3rd / Endfield).
+pub const GAME_PROFILES: &[GameProfile] = &[
+    GameProfile {
+        code: GameCode::Gimi,
+        display_name: "Genshin Impact",
+        importer_repo: Some(("SpectrumQT/GIMI-Package", "GIMI")),
+        executable_candidates: &["GenshinImpact.exe", "YuanShen.exe"],
+        detect: Some(detect::genshin::detect),
+    },
+    GameProfile {
+        code: GameCode::Srmi,
+        display_name: "Honkai: Star Rail",
+        importer_repo: Some(("SpectrumQT/SRMI-Package", "SRMI")),
+        executable_candidates: &["StarRail.exe"],
+        detect: Some(detect::star_rail::detect),
+    },
+    GameProfile {
+        code: GameCode::Zzmi,
+        display_name: "Zenless Zone Zero",
+        importer_repo: None,
+        executable_candidates: &[],
+        detect: None,
+    },
+    GameProfile {
+        code: GameCode::Wwmi,
+        display_name: "Wuthering Waves",
+        importer_repo: None,
+        executable_candidates: &[],
+        detect: None,
+    },
+    GameProfile {
+        code: GameCode::Himi,
+        display_name: "Honkai Impact 3rd",
+        importer_repo: None,
+        executable_candidates: &[],
+        detect: None,
+    },
+    GameProfile {
+        code: GameCode::Efmi,
+        display_name: "Endfield",
+        importer_repo: None,
+        executable_candidates: &[],
+        detect: None,
+    },
+];

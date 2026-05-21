@@ -18,10 +18,12 @@ use std::fs::{self, File};
 use std::io::Write;
 
 use gmm_lib::commands::{
-    AdoptArgs, GameBananaImportArgs, ImportZipArgs, LibraryPaths, NO_INSTALL_PATH_FOR_ENABLE_MSG,
+    list_supported_games, AdoptArgs, GameBananaImportArgs, ImportZipArgs, LibraryPaths,
+    NO_INSTALL_PATH_FOR_ENABLE_MSG,
 };
 use gmm_lib::core::av;
 use gmm_lib::core::conflicts::ConflictReport;
+use gmm_lib::core::games::GAME_PROFILES;
 use gmm_lib::core::reconcile::ReconcileResult;
 use gmm_lib::core::updates::UpdateStatus;
 use gmm_lib::core::variants::Variant;
@@ -281,6 +283,84 @@ async fn import_zip_command_path_round_trips_through_serde() {
     assert_eq!(mod_.name, "ZipMod");
     let json = to_json(&mod_);
     assert_eq!(json.get("source").and_then(|s| s.as_str()), Some("local"));
+}
+
+#[test]
+fn list_supported_games_returns_gimi_and_srmi_in_order() {
+    // Slice 6 (#16) wires SRMI alongside the existing GIMI port. The
+    // React tab strip relies on this command to know which tabs to
+    // render. Order must be stable so the UI's "first tab is default"
+    // behaviour matches the registry.
+    let games = list_supported_games();
+    let codes: Vec<&str> = games.iter().map(|g| g.code.as_str()).collect();
+    assert!(
+        codes.first() == Some(&"gimi"),
+        "GIMI must remain the first tab so existing users land on a familiar screen, got {codes:?}",
+    );
+    assert!(
+        codes.contains(&"srmi"),
+        "SRMI must appear once slice 6 lands, got {codes:?}",
+    );
+    // Every supported game serialises with the camelCase wire shape.
+    let v = to_json(&games);
+    let arr = v.as_array().expect("array");
+    assert!(arr.iter().all(|g| g
+        .as_object()
+        .map(|o| o.contains_key("code") && o.contains_key("displayName"))
+        .unwrap_or(false)));
+}
+
+#[test]
+fn game_profiles_cover_every_game_code() {
+    // The registry is keyed by `GameCode`; missing rows would crash
+    // `GameCode::profile()` at runtime via `unreachable!`. Asserting
+    // here keeps that contract from drifting silently.
+    use gmm_lib::core::GameCode;
+    let expected = [
+        GameCode::Gimi,
+        GameCode::Srmi,
+        GameCode::Zzmi,
+        GameCode::Wwmi,
+        GameCode::Himi,
+        GameCode::Efmi,
+    ];
+    let actual: Vec<GameCode> = GAME_PROFILES.iter().map(|p| p.code).collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn srmi_profile_lists_star_rail_exe_and_spectrumqt_repo() {
+    use gmm_lib::core::GameCode;
+    let p = GameCode::Srmi.profile();
+    assert_eq!(p.display_name, "Honkai: Star Rail");
+    let (repo, asset_filter) = p.importer_repo.expect("srmi importer repo wired");
+    assert_eq!(repo, "SpectrumQT/SRMI-Package");
+    assert_eq!(asset_filter, "SRMI");
+    assert!(
+        p.executable_candidates.contains(&"StarRail.exe"),
+        "SRMI exe candidates must include StarRail.exe, got {:?}",
+        p.executable_candidates,
+    );
+    assert!(p.detect.is_some(), "SRMI detect fn must be wired");
+    assert!(p.is_ported());
+}
+
+#[test]
+fn unported_games_report_not_wired_yet() {
+    use gmm_lib::core::GameCode;
+    for game in [
+        GameCode::Zzmi,
+        GameCode::Wwmi,
+        GameCode::Himi,
+        GameCode::Efmi,
+    ] {
+        let p = game.profile();
+        assert!(
+            !p.is_ported(),
+            "{} should not be reported as ported yet (open issues #17-#20)",
+            game.as_str(),
+        );
+    }
 }
 
 #[test]

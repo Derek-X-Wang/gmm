@@ -370,6 +370,22 @@ export async function launchGame(game: GameCode): Promise<SessionInfo> {
 export const SESSION_STARTED_EVENT = "session-started";
 export const SESSION_ENDED_EVENT = "session-ended";
 
+// ---- slice 6 (#16) — per-game registry ----
+
+/**
+ * Backend-supported game summary. The React tab strip uses this to
+ * decide which games to render. New per-game ports (#17–#20) light
+ * up additional entries as their Rust registry rows fill in.
+ */
+export interface GameSummary {
+  code: GameCode;
+  displayName: string;
+}
+
+export async function listSupportedGames(): Promise<GameSummary[]> {
+  return invoke<GameSummary[]>("list_supported_games");
+}
+
 // ---- slice NEW-AV (#13) — antivirus / SmartScreen guidance ----
 
 /**

@@ -14,7 +14,6 @@ use serde::Serialize;
 
 use crate::core::av;
 use crate::core::conflicts::ConflictReport;
-use crate::core::detect;
 use crate::core::diagnostics;
 use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
 use crate::core::mod_updates::ModUpdateRow;
@@ -403,12 +402,18 @@ pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> Result<(
 }
 
 /// Resolve the GitHub repo + asset filter for a Game's importer.
-/// Slice 3 wires GIMI only; other games are added in their port issues.
+///
+/// Dispatch goes through `core::games::GameProfile` so a new per-game
+/// port (slices #16–#20) only needs to fill in the registry row in
+/// `core::games`, not touch this function. Unported games surface a
+/// uniform user-facing error.
 fn importer_repo_for(game: GameCode) -> Result<(&'static str, &'static str), String> {
-    match game {
-        GameCode::Gimi => Ok(("SpectrumQT/GIMI-Package", "GIMI")),
-        _ => Err("Importer auto-install for this game is not wired in this slice.".to_string()),
-    }
+    game.profile().importer_repo.ok_or_else(|| {
+        format!(
+            "Importer auto-install for {} is not wired in this build.",
+            game.profile().display_name,
+        )
+    })
 }
 
 #[tauri::command]
@@ -596,11 +601,13 @@ pub async fn detect_game_install_path(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<Option<PathBuf>, String> {
-    let detected = match game {
-        GameCode::Gimi => tokio::task::spawn_blocking(detect::genshin::detect)
+    // Dispatch via the GameProfile registry so each per-game port
+    // adds itself to `core::games::GAME_PROFILES` and nothing else.
+    let detected = match game.profile().detect {
+        Some(f) => tokio::task::spawn_blocking(f)
             .await
             .map_err(|e| format!("detect task join error: {e}"))?,
-        _ => None,
+        None => None,
     };
     if let Some(path) = detected.as_ref() {
         core.set_game_install_path(game, path)
@@ -661,27 +668,28 @@ fn locate_loader_dll() -> Result<PathBuf, String> {
 }
 
 /// Pick the game executable to launch given a Game and its install
-/// directory. Currently GIMI-specific (the per-game ports — #16–#20 —
-/// fill in the other five).
+/// directory. Looks at `GameProfile::executable_candidates` so each
+/// per-game port (slices #16–#20) just adds its exe list to the
+/// registry in `core::games`.
 fn resolve_game_exe(game: GameCode, install: &std::path::Path) -> Result<PathBuf, String> {
-    match game {
-        GameCode::Gimi => {
-            for candidate in ["GenshinImpact.exe", "YuanShen.exe"] {
-                let p = install.join(candidate);
-                if p.exists() {
-                    return Ok(p);
-                }
-            }
-            Err(format!(
-                "GenshinImpact.exe / YuanShen.exe not found under {}.",
-                install.display()
-            ))
-        }
-        _ => Err(format!(
-            "Launching {:?} is not wired yet — see the per-game port issues.",
-            game
-        )),
+    let profile = game.profile();
+    if profile.executable_candidates.is_empty() {
+        return Err(format!(
+            "Launching {} is not wired yet — see the per-game port issues.",
+            profile.display_name,
+        ));
     }
+    for candidate in profile.executable_candidates {
+        let p = install.join(candidate);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    Err(format!(
+        "{} not found under {}.",
+        profile.executable_candidates.join(" / "),
+        install.display(),
+    ))
 }
 
 #[tauri::command]
@@ -871,4 +879,25 @@ pub async fn launch_game(
 #[tauri::command]
 pub fn av_guidance() -> av::AvGuidance {
     av::guidance()
+}
+
+/// Light per-game summary the React tab strip uses to render only the
+/// games whose backend wiring (detect + importer repo + exe
+/// candidates) is complete. Slices #16–#20 each light up the next
+/// game's row in `core::games::GAME_PROFILES`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSummary {
+    pub code: GameCode,
+    pub display_name: &'static str,
+}
+
+#[tauri::command]
+pub fn list_supported_games() -> Vec<GameSummary> {
+    GameCode::ported()
+        .map(|p| GameSummary {
+            code: p.code,
+            display_name: p.display_name,
+        })
+        .collect()
 }

@@ -11,3 +11,4 @@
 //! validation) are public.
 
 pub mod genshin;
+pub mod star_rail;
