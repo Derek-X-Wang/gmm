@@ -29,10 +29,31 @@ pub fn create(link: &Path, target: &Path) -> Result<()> {
 pub fn remove(link: &Path) -> Result<()> {
     #[cfg(windows)]
     {
-        junction::delete(link).map_err(|source| Error::Io {
-            path: link.to_path_buf(),
-            source,
-        })
+        // junction::delete clears the reparse point and is supposed to also
+        // remove the underlying directory entry, but in practice (observed
+        // on windows-latest GitHub runners) the directory sometimes lingers.
+        // Belt-and-suspenders: clear the reparse point, then fs::remove_dir
+        // if anything is left.
+        let primary = junction::delete(link);
+        if link.exists() {
+            std::fs::remove_dir(link).map_err(|source| Error::Io {
+                path: link.to_path_buf(),
+                source,
+            })?;
+        }
+        // If the initial delete erroed but the path is now gone we treat
+        // that as success; if it errored AND the path is still gone above's
+        // remove_dir would have already errored, so this only forwards
+        // genuine reparse-point removal failures.
+        if let Err(source) = primary {
+            if link.exists() {
+                return Err(Error::Io {
+                    path: link.to_path_buf(),
+                    source,
+                });
+            }
+        }
+        Ok(())
     }
     #[cfg(unix)]
     {
