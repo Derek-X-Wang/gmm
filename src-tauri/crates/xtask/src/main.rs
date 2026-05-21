@@ -85,11 +85,12 @@ mod test_loader {
 
         use gmm_loader::Loader;
 
-        // 3dmloader keys WaitForInjection off a substring match against the
-        // target process name. "victim" matches victim.exe regardless of
-        // path.
-        const TARGET_PROCESS: &str = "victim";
-        const WAIT_TIMEOUT_SECS: i32 = 15;
+        // 3dmloader does case-insensitive exact-filename match against
+        // the running process's image name (per Injector.cpp's
+        // wait_for_target / check_for_running_target). Must include the
+        // .exe extension.
+        const TARGET_PROCESS: &str = "victim.exe";
+        const WAIT_TIMEOUT_SECS: i32 = 30;
 
         pub fn run(workspace: &Path, vendor_dll: &Path) -> Result<(), String> {
             let target_dir = workspace.join("target");
