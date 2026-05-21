@@ -88,6 +88,11 @@ async fn windows_smoke_zzmi_session_round_trip() {
 }
 
 #[tokio::test]
+async fn windows_smoke_wwmi_session_round_trip() {
+    assert_session_round_trip_for(GameCode::Wwmi, "wwmi").await;
+}
+
+#[tokio::test]
 async fn windows_smoke_full_session_round_trip() {
     let target = target_dir();
     let victim_exe = target.join("victim.exe");

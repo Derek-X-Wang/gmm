@@ -139,9 +139,9 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Wwmi,
         display_name: "Wuthering Waves",
-        importer_repo: None,
-        executable_candidates: &[],
-        detect: None,
+        importer_repo: Some(("SpectrumQT/WWMI-Package", "WWMI")),
+        executable_candidates: &["Client-Win64-Shipping.exe"],
+        detect: Some(detect::wuthering::detect),
     },
     GameProfile {
         code: GameCode::Himi,

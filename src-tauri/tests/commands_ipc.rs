@@ -298,7 +298,7 @@ fn list_supported_games_returns_gimi_and_srmi_in_order() {
         codes.first() == Some(&"gimi"),
         "GIMI must remain the first tab so existing users land on a familiar screen, got {codes:?}",
     );
-    for needed in ["srmi", "zzmi"] {
+    for needed in ["srmi", "zzmi", "wwmi"] {
         assert!(
             codes.contains(&needed),
             "{needed} must appear once its slice lands, got {codes:?}",
@@ -366,13 +366,31 @@ fn zzmi_profile_lists_zzz_exe_and_spectrumqt_repo() {
 }
 
 #[test]
+fn wwmi_profile_lists_unreal_shipping_exe_and_spectrumqt_repo() {
+    use gmm_lib::core::GameCode;
+    let p = GameCode::Wwmi.profile();
+    assert_eq!(p.display_name, "Wuthering Waves");
+    let (repo, asset_filter) = p.importer_repo.expect("wwmi importer repo wired");
+    assert_eq!(repo, "SpectrumQT/WWMI-Package");
+    assert_eq!(asset_filter, "WWMI");
+    assert!(
+        p.executable_candidates
+            .contains(&"Client-Win64-Shipping.exe"),
+        "WWMI exe candidates must include the UE shipping exe, got {:?}",
+        p.executable_candidates,
+    );
+    assert!(p.detect.is_some(), "WWMI detect fn must be wired");
+    assert!(p.is_ported());
+}
+
+#[test]
 fn unported_games_report_not_wired_yet() {
     use gmm_lib::core::GameCode;
-    for game in [GameCode::Wwmi, GameCode::Himi, GameCode::Efmi] {
+    for game in [GameCode::Himi, GameCode::Efmi] {
         let p = game.profile();
         assert!(
             !p.is_ported(),
-            "{} should not be reported as ported yet (open issues #18-#20)",
+            "{} should not be reported as ported yet (open issues #19-#20)",
             game.as_str(),
         );
     }
