@@ -232,3 +232,18 @@ export async function setActiveVariant(
 ): Promise<void> {
   await invoke("set_active_variant", { modId, variantId, game });
 }
+
+export interface Conflict {
+  hash: string;
+  mod_ids: string[];
+  sections: string[];
+}
+
+export interface ConflictReport {
+  conflicts: Conflict[];
+  per_mod_count: Record<string, number>;
+}
+
+export async function detectConflicts(game: GameCode): Promise<ConflictReport> {
+  return invoke<ConflictReport>("detect_conflicts", { game });
+}

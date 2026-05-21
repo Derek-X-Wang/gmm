@@ -4,6 +4,7 @@
 //! integration tests in `src-tauri/tests/` exercise this module directly so
 //! they can run on macOS without spinning up the Tauri runtime.
 
+pub mod conflicts;
 pub mod detect;
 pub mod diagnostics;
 pub mod error;
@@ -603,6 +604,36 @@ impl Core {
         }
 
         Ok(())
+    }
+
+    /// Build a [`conflicts::ConflictReport`] for `game`. Walks the
+    /// enabled Mods, resolves each one's effective directory (Library
+    /// path joined with the active Variant's subpath when present),
+    /// extracts `[TextureOverride*]` / `[ResourceOverride*]` hash
+    /// bindings, and reports every hash bound by two or more Mods.
+    pub async fn detect_conflicts(&self, game: GameCode) -> Result<conflicts::ConflictReport> {
+        let rows = sqlx::query(
+            "SELECT id, library_path, active_variant_id, enabled FROM mods WHERE game_code = ?",
+        )
+        .bind(game.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut per_mod_bindings: Vec<(String, Vec<conflicts::HashBinding>)> = Vec::new();
+        for row in rows {
+            let enabled: i64 = row.try_get("enabled")?;
+            if enabled == 0 {
+                continue;
+            }
+            let id: String = row.try_get("id")?;
+            let library_path: String = row.try_get("library_path")?;
+            let library_path = PathBuf::from(library_path);
+            let effective = self.junction_target_for(&id, &library_path).await?;
+            let bindings = conflicts::extract_hashes_from_dir(&effective)?;
+            per_mod_bindings.push((id, bindings));
+        }
+
+        Ok(conflicts::build_report(&per_mod_bindings))
     }
 
     /// Resolve the junction target for a Mod: Library path joined
