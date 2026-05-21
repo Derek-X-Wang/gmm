@@ -15,6 +15,7 @@ use serde::Serialize;
 use crate::core::detect;
 use crate::core::diagnostics;
 use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
+use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
 use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport};
 
@@ -251,10 +252,12 @@ fn importer_repo_for(game: GameCode) -> Result<(&'static str, &'static str), Str
 
 #[tauri::command]
 pub async fn fetch_latest_importer_release(
+    core: State<'_, Core>,
     game: GameCode,
 ) -> Result<Option<LatestRelease>, String> {
     let (repo, filter) = importer_repo_for(game)?;
-    importer::fetch_latest_release(repo, filter, None)
+    let client = core.http_client().await.map_err(|e| e.to_string())?;
+    importer::fetch_latest_release(&client, repo, filter, None)
         .await
         .map_err(|e| e.to_string())
 }
@@ -271,7 +274,8 @@ pub async fn install_importer(
         .ok_or_else(|| "Set the game install path in Settings before installing.".to_string())?;
     let (repo, filter) = importer_repo_for(game)?;
 
-    let release = importer::fetch_latest_release(repo, filter, None)
+    let client = core.http_client().await.map_err(|e| e.to_string())?;
+    let release = importer::fetch_latest_release(&client, repo, filter, None)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no release returned for importer repo".to_string())?;
@@ -280,7 +284,7 @@ pub async fn install_importer(
     let backups_root = data.join("backups").join(game.as_str());
     let downloads_dir = data.join("downloads").join(game.as_str());
     let zip_path = downloads_dir.join(&release.asset_name);
-    importer::download_to(&release.asset_url, &zip_path)
+    importer::download_to(&client, &release.asset_url, &zip_path)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -292,6 +296,42 @@ pub async fn install_importer(
     .map_err(|e| e.to_string())?;
 
     Ok(report)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyArgs {
+    pub url: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_proxy_config(core: State<'_, Core>) -> Result<ProxyConfigPublic, String> {
+    core.proxy_config_public().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_proxy_config(
+    core: State<'_, Core>,
+    args: ProxyArgs,
+) -> Result<ProxyConfigPublic, String> {
+    let cfg = ProxyConfig {
+        url: args.url.filter(|s| !s.is_empty()),
+        username: args.username.filter(|s| !s.is_empty()),
+        password: args.password.filter(|s| !s.is_empty()),
+    };
+    core.set_proxy_config(&cfg)
+        .await
+        .map_err(|e| e.to_string())?;
+    core.proxy_config_public().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn test_proxy_connection(core: State<'_, Core>) -> Result<(), String> {
+    core.test_proxy_connection()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

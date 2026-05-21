@@ -54,6 +54,9 @@ pub enum Error {
 
     #[error("importer install error: {0}")]
     Importer(String),
+
+    #[error("network error: {0}")]
+    Network(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -186,3 +186,25 @@ export async function rollbackImporter(game: GameCode): Promise<string | null> {
     (await invoke<string | null>("rollback_importer", { game })) ?? null
   );
 }
+
+export interface ProxyConfigPublic {
+  url: string | null;
+  username: string | null;
+  passwordSet: boolean;
+}
+
+export async function getProxyConfig(): Promise<ProxyConfigPublic> {
+  return invoke<ProxyConfigPublic>("get_proxy_config");
+}
+
+export async function setProxyConfig(args: {
+  url: string | null;
+  username: string | null;
+  password: string | null;
+}): Promise<ProxyConfigPublic> {
+  return invoke<ProxyConfigPublic>("set_proxy_config", { args });
+}
+
+export async function testProxyConnection(): Promise<void> {
+  await invoke("test_proxy_connection");
+}

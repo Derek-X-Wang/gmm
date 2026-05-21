@@ -11,6 +11,7 @@ pub mod games;
 pub mod importer;
 pub mod junction;
 pub mod mods;
+pub mod network;
 pub mod reconcile;
 pub mod settings;
 pub mod volume;
@@ -100,6 +101,65 @@ impl Core {
         Ok(get_setting(&self.pool, &keys::library_root_for_game(game))
             .await?
             .map(PathBuf::from))
+    }
+
+    /// Load the proxy config from settings. Includes the password —
+    /// caller must not leak it. UI code should use
+    /// [`Core::proxy_config_public`] instead.
+    pub async fn proxy_config(&self) -> Result<network::ProxyConfig> {
+        network::load(&self.pool).await
+    }
+
+    /// Password-free view of the proxy config for the UI.
+    pub async fn proxy_config_public(&self) -> Result<network::ProxyConfigPublic> {
+        Ok(network::load(&self.pool).await?.public())
+    }
+
+    /// Persist a proxy config (URL/username/password). Pass `None`
+    /// fields to clear.
+    pub async fn set_proxy_config(&self, cfg: &network::ProxyConfig) -> Result<()> {
+        network::save(&self.pool, cfg).await
+    }
+
+    /// Build a reqwest `ClientBuilder` honouring the persisted proxy
+    /// config. Use this instead of `reqwest::Client::builder()` so
+    /// every outbound HTTP path routes through the user's proxy.
+    pub async fn http_client_builder(&self) -> Result<reqwest::ClientBuilder> {
+        let cfg = self.proxy_config().await?;
+        network::client_builder(&cfg)
+    }
+
+    /// Convenience: build a ready-to-use `reqwest::Client` from the
+    /// builder above.
+    pub async fn http_client(&self) -> Result<reqwest::Client> {
+        self.http_client_builder()
+            .await?
+            .build()
+            .map_err(|e| Error::Network(format!("client build: {e}")))
+    }
+
+    /// Probe the configured proxy by issuing a HEAD on a known-good
+    /// endpoint (`api.github.com`). Returns `Ok(())` on 2xx/3xx. The
+    /// error message is friendly enough for the UI to render verbatim.
+    pub async fn test_proxy_connection(&self) -> Result<()> {
+        let cfg = self.proxy_config().await?;
+        let client = network::client_builder(&cfg)?
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| Error::Network(format!("client build: {e}")))?;
+        let res = client
+            .head("https://api.github.com/")
+            .send()
+            .await
+            .map_err(|e| Error::Network(network::classify_error(&e, cfg.is_configured())))?;
+        if res.status().is_success() || res.status().is_redirection() {
+            Ok(())
+        } else {
+            Err(Error::Network(format!(
+                "Proxy reachable but probe returned {} from api.github.com",
+                res.status()
+            )))
+        }
     }
 
     /// Override the **global** Library root. Walks every Mod whose

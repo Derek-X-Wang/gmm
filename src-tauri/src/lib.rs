@@ -62,6 +62,9 @@ pub fn run() {
             commands::fetch_latest_importer_release,
             commands::install_importer,
             commands::rollback_importer,
+            commands::get_proxy_config,
+            commands::set_proxy_config,
+            commands::test_proxy_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
