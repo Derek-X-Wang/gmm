@@ -1,0 +1,61 @@
+name: release
+
+# Build + sign + publish a GMM release whenever a `v*` tag is pushed.
+# The signed updater manifest (`latest.json`) is what
+# tauri-plugin-updater fetches at runtime — see ADR 0004 + slice 13a
+# (#2) for the full design.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm build
+        run: pnpm build
+
+      # tauri-action builds the MSI, signs the updater manifest with
+      # TAURI_SIGNING_PRIVATE_KEY (decrypted using ..._PASSWORD), and
+      # uploads the binary + `latest.json` + `.sig` to a draft GitHub
+      # Release. We publish manually after smoke-testing the artefacts.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "GMM ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          # Emits `latest.json` alongside the MSI; that's the URL
+          # configured in tauri.conf.json's plugins.updater.endpoints.
+          includeUpdaterJson: true
+          projectPath: src-tauri
