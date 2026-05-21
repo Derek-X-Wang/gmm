@@ -19,8 +19,10 @@ use gmm_lib::core::{Core, GameCode, SessionInfo};
 use gmm_loader::Loader;
 use tempfile::TempDir;
 
-const TARGET_PROCESS: &str = "victim.exe";
-const WAIT_TIMEOUT_SECS: i32 = 30;
+// We don't call WaitForInjection here — that's slice 4a's smoke
+// (cargo xtask test-loader), which still runs in CI alongside this
+// test. Slice 4b's job is to verify the session state machine + lock
+// + cleanup, NOT to re-prove the loader binding.
 
 fn workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR points at src-tauri/. The workspace root is one
@@ -74,7 +76,10 @@ async fn windows_smoke_full_session_round_trip() {
         .expect("adopt");
 
     // Install the hook BEFORE spawning the victim — CBT hooks must be
-    // in place when the target window is created.
+    // in place when the target window is created. We don't wait for
+    // injection here (see top-of-file note); the assertion is that
+    // HookLibrary returns status 0, which Loader::hook surfaces as
+    // Ok(_).
     let loader = Loader::load(&loader_dll).expect("load 3dmloader");
     let session = loader.hook(&noop_dll).expect("install hook");
 
@@ -98,14 +103,6 @@ async fn windows_smoke_full_session_round_trip() {
             || lock_err.to_string().to_lowercase().contains("game running"),
         "lock error should mention session, got: {lock_err}",
     );
-
-    // Wait for the hook to inject noop_dll into victim. This is the
-    // same assertion as the test-loader smoke from slice 4a; we keep
-    // it here so a regression in the loader binding gets caught by
-    // the session smoke too.
-    session
-        .wait_for_injection(TARGET_PROCESS, WAIT_TIMEOUT_SECS)
-        .expect("wait_for_injection");
 
     // Kill victim → it exits cleanly enough for our purposes.
     let _ = victim.kill();
