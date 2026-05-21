@@ -12,3 +12,4 @@
 
 pub mod genshin;
 pub mod star_rail;
+pub mod zenless;
