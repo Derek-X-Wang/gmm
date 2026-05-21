@@ -4,6 +4,7 @@
 //! integration tests in `src-tauri/tests/` exercise this module directly so
 //! they can run on macOS without spinning up the Tauri runtime.
 
+pub mod diagnostics;
 pub mod error;
 pub mod games;
 pub mod junction;
@@ -172,6 +173,35 @@ impl Core {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Library root the Core was initialised with.
+    pub fn library_root(&self) -> &Path {
+        &self.library_root
+    }
+
+    /// Snapshot of the user-facing settings, for diagnostics bundles.
+    /// Sensitive fields are NOT redacted here — call
+    /// [`diagnostics::SettingsSnapshot::redacted`] before serialising.
+    pub async fn settings_snapshot(&self) -> Result<diagnostics::SettingsSnapshot> {
+        let rows = sqlx::query("SELECT code, install_path FROM games")
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut game_install_paths = std::collections::HashMap::new();
+        for row in rows {
+            let code: String = row.try_get("code")?;
+            let install_path: Option<String> = row.try_get("install_path")?;
+            game_install_paths.insert(code, install_path.map(PathBuf::from));
+        }
+
+        Ok(diagnostics::SettingsSnapshot {
+            library_root: Some(self.library_root.clone()),
+            game_install_paths,
+            // Populated by slice 10 (proxy settings). Leaving blank here
+            // means the bundle just shows `null` until then.
+            proxy_url: None,
+        })
     }
 
     /// Find an unused junction directory name for the given game, deduping

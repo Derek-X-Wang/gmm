@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 import {
   adoptFolder,
@@ -10,6 +10,7 @@ import {
   setGameInstallPath,
   setModEnabled,
 } from "./api";
+import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import "./App.css";
 
 const GAME = "gimi" as const;
@@ -21,8 +22,58 @@ function App() {
         <h1>GMM — Genshin (v0.1 foundation)</h1>
       </header>
       <Settings />
+      <Diagnostics />
       <ModList />
     </main>
+  );
+}
+
+/**
+ * Settings → Diagnostics panel. Shows the on-disk log directory and
+ * exposes a single "Export diagnostics bundle" button. Bundle export is
+ * always user-initiated; there is no background uploader.
+ */
+function Diagnostics() {
+  const logDir = useQuery({
+    queryKey: ["diagnostics", "logDir"],
+    queryFn: diagnosticsLogDir,
+  });
+
+  const exportBundle = useMutation({
+    mutationFn: async () => {
+      const dir = logDir.data;
+      if (!dir) throw new Error("log directory not yet known");
+      const dest = await save({
+        defaultPath: "gmm-diagnostics.zip",
+        filters: [{ name: "ZIP archive", extensions: ["zip"] }],
+      });
+      if (typeof dest !== "string") return null;
+      await exportDiagnosticsBundle(dir, dest);
+      return dest;
+    },
+  });
+
+  return (
+    <section className="card">
+      <h2>Diagnostics</h2>
+      <p className="muted">
+        Logs stay on this machine. No telemetry, no background uploads. Use
+        the bundle export to attach local logs and redacted settings to a bug
+        report.
+      </p>
+      <div className="row">
+        <input className="path" value={logDir.data ?? ""} readOnly placeholder="resolving…" />
+        <button onClick={() => exportBundle.mutate()} disabled={exportBundle.isPending}>
+          {exportBundle.isPending ? "Bundling…" : "Export diagnostics bundle"}
+        </button>
+      </div>
+      {exportBundle.data ? (
+        <p className="muted small">Saved bundle to <code>{exportBundle.data}</code>.</p>
+      ) : null}
+      {exportBundle.isError ? (
+        <p className="error">{String(exportBundle.error)}</p>
+      ) : null}
+    </section>
   );
 }
 

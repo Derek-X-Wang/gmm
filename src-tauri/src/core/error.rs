@@ -42,6 +42,9 @@ pub enum Error {
          Raise the limit in settings if you trust this archive."
     )]
     ZipEntryCap { cap: u32, actual: usize },
+
+    #[error("diagnostics error: {0}")]
+    Diagnostics(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
