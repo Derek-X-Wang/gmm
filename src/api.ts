@@ -331,3 +331,41 @@ export async function modUpdatesGloballyEnabled(): Promise<boolean> {
 export async function applyModUpdate(modId: string): Promise<void> {
   await invoke("apply_mod_update", { modId });
 }
+
+// ---- slice 4b (#12) — game session ----
+
+export interface SessionInfo {
+  game: GameCode;
+  pid: number;
+  startedAt: string; // RFC 3339
+}
+
+interface RawSessionInfo {
+  game: GameCode;
+  pid: number;
+  started_at: string;
+}
+
+const fromRawSession = (s: RawSessionInfo): SessionInfo => ({
+  game: s.game,
+  pid: s.pid,
+  startedAt: s.started_at,
+});
+
+export async function currentSession(): Promise<SessionInfo | null> {
+  const raw = await invoke<RawSessionInfo | null>("current_session");
+  return raw ? fromRawSession(raw) : null;
+}
+
+export async function cleanStaleSession(): Promise<SessionInfo | null> {
+  const raw = await invoke<RawSessionInfo | null>("clean_stale_session");
+  return raw ? fromRawSession(raw) : null;
+}
+
+export async function launchGame(game: GameCode): Promise<SessionInfo> {
+  const raw = await invoke<RawSessionInfo>("launch_game", { game });
+  return fromRawSession(raw);
+}
+
+export const SESSION_STARTED_EVENT = "session-started";
+export const SESSION_ENDED_EVENT = "session-ended";

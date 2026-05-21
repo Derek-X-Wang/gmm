@@ -21,7 +21,9 @@ use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
 use crate::core::updates::UpdateStatus;
 use crate::core::variants::Variant;
-use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport};
+use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport, SessionInfo};
+use crate::runtime::{SessionRuntime, SESSION_ENDED_EVENT, SESSION_STARTED_EVENT};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -425,6 +427,7 @@ pub async fn install_importer(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<InstallReport, String> {
+    refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
@@ -504,6 +507,7 @@ pub async fn rollback_importer(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<Option<PathBuf>, String> {
+    refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
@@ -546,6 +550,7 @@ pub async fn reconcile_junctions(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<ReconcileResult, String> {
+    refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
@@ -565,6 +570,7 @@ pub async fn rebuild_junctions(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<ReconcileResult, String> {
+    refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
@@ -601,4 +607,241 @@ pub async fn detect_game_install_path(
             .map_err(|e| e.to_string())?;
     }
     Ok(detected)
+}
+
+// ---- slice 4b (#12) — game session commands ----
+
+/// Helper: bail with a session-related error string if a session is
+/// currently active. Pair with mutating Tauri commands (importer
+/// install/rollback, reconcile/rebuild junctions, library moves) so
+/// the caller never gets a partial mutation while the game is
+/// running.
+async fn refuse_during_session(core: &State<'_, Core>) -> Result<(), String> {
+    if let Some(info) = core.session_info().await.map_err(|e| e.to_string())? {
+        return Err(format!(
+            "{} is running (session active since {}). Close the game before changing this.",
+            info.game.as_str(),
+            info.started_at,
+        ));
+    }
+    Ok(())
+}
+
+/// Locate the bundled / vendored `3dmloader.dll`. Resolution order:
+/// 1. `GMM_LOADER_DLL` env var (override for smoke tests + dev)
+/// 2. `<exe-dir>/3dmloader.dll` (production bundle layout)
+/// 3. `<repo-root>/vendor/3dmloader/3dmloader.dll` (dev convenience)
+fn locate_loader_dll() -> Result<PathBuf, String> {
+    if let Ok(env_path) = std::env::var("GMM_LOADER_DLL") {
+        let p = PathBuf::from(env_path);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if let Some(dir) = exe.parent() {
+        let candidate = dir.join("3dmloader.dll");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+        // Dev fallback: target/<profile>/gmm[.exe] → ../../../vendor/...
+        let mut walker = dir.to_path_buf();
+        for _ in 0..6 {
+            let candidate = walker.join("vendor/3dmloader/3dmloader.dll");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+            if !walker.pop() {
+                break;
+            }
+        }
+    }
+    Err("Couldn't find 3dmloader.dll. Set GMM_LOADER_DLL or reinstall.".to_string())
+}
+
+/// Pick the game executable to launch given a Game and its install
+/// directory. Currently GIMI-specific (the per-game ports — #16–#20 —
+/// fill in the other five).
+fn resolve_game_exe(game: GameCode, install: &std::path::Path) -> Result<PathBuf, String> {
+    match game {
+        GameCode::Gimi => {
+            for candidate in ["GenshinImpact.exe", "YuanShen.exe"] {
+                let p = install.join(candidate);
+                if p.exists() {
+                    return Ok(p);
+                }
+            }
+            Err(format!(
+                "GenshinImpact.exe / YuanShen.exe not found under {}.",
+                install.display()
+            ))
+        }
+        _ => Err(format!(
+            "Launching {:?} is not wired yet — see the per-game port issues.",
+            game
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn current_session(core: State<'_, Core>) -> Result<Option<SessionInfo>, String> {
+    core.session_info().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn clean_stale_session(core: State<'_, Core>) -> Result<Option<SessionInfo>, String> {
+    core.clean_stale_session().await.map_err(|e| e.to_string())
+}
+
+/// RAII wrapper that kills + reaps the wrapped child on drop. Used
+/// during `launch_game` between `Command::spawn` and the moment the
+/// `Child` is moved into `LiveSession`; on every error-return path
+/// the guard's drop runs so we never leak a started game.
+struct ChildGuard {
+    child: Option<std::process::Child>,
+}
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.as_ref().map(|c| c.id()).unwrap_or(0)
+    }
+
+    fn into_inner(mut self) -> std::process::Child {
+        self.child.take().expect("ChildGuard already consumed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn launch_game(
+    app: AppHandle,
+    core: State<'_, Core>,
+    runtime: State<'_, SessionRuntime>,
+    game: GameCode,
+) -> Result<SessionInfo, String> {
+    use gmm_loader::Loader;
+
+    // Cheap pre-check; the atomic INSERT in start_session is the real
+    // gate against double-launch races.
+    if let Some(existing) = core.session_info().await.map_err(|e| e.to_string())? {
+        return Err(format!(
+            "{} is already running (since {}).",
+            existing.game.as_str(),
+            existing.started_at
+        ));
+    }
+
+    let install = core
+        .game_install_path(game)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Set the game install path in Settings before launching.".to_string())?;
+
+    let game_exe = resolve_game_exe(game, &install)?;
+    let dll_to_inject = install.join("d3d11.dll");
+    if !dll_to_inject.exists() {
+        return Err(format!(
+            "Model Importer DLL not found at {}. Install the importer for this game first.",
+            dll_to_inject.display()
+        ));
+    }
+    let loader_dll = locate_loader_dll()?;
+
+    // Install the CBT hook BEFORE spawning so it's in place when the
+    // game creates its window.
+    let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
+    let hook = loader
+        .hook(&dll_to_inject)
+        .map_err(|e| format!("install hook: {e}"))?;
+
+    // Spawn the game; any failure between here and runtime.install()
+    // triggers ChildGuard::drop which kills the process so it doesn't
+    // outlive the failed launch.
+    let child = std::process::Command::new(&game_exe)
+        .current_dir(&install)
+        .spawn()
+        .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+    let child_guard = ChildGuard::new(child);
+
+    // Block until the importer DLL lands in a process whose image
+    // name matches the game exe, then DROP the hook session — holding
+    // the global CBT hook for the whole game session would inject the
+    // DLL into every unrelated process that creates a window.
+    let target_process = game_exe
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "GenshinImpact.exe".to_string());
+    hook.wait_for_injection(&target_process, 60)
+        .map_err(|e| format!("wait_for_injection: {e}"))?;
+    // Explicitly drop so the unhook runs immediately rather than at
+    // end-of-scope. clippy::drop_non_drop fires on the non-Windows
+    // stub HookSession (which has no Drop impl); silence it — on
+    // Windows this is the load-bearing line that takes the CBT hook
+    // back down.
+    #[allow(clippy::drop_non_drop)]
+    drop(hook);
+
+    let info = SessionInfo {
+        game,
+        pid: child_guard.pid(),
+        started_at: chrono::Utc::now(),
+    };
+
+    // Atomic claim: plain INSERT, no OR REPLACE. If anyone raced past
+    // the pre-check above, the singleton CHECK gives us a unique-
+    // constraint error and ChildGuard's drop kills our spawned game.
+    core.start_session(&info)
+        .await
+        .map_err(|e| format!("start_session: {e}"))?;
+
+    let child = child_guard.into_inner();
+
+    runtime
+        .inner()
+        .install(crate::runtime::session::LiveSession {
+            info: info.clone(),
+            child,
+            _loader: loader,
+        });
+
+    // Emit to the frontend so the banner appears immediately.
+    let _ = app.emit(SESSION_STARTED_EVENT, &info);
+
+    // Spawn the exit watcher. It polls every 500 ms; on child exit it
+    // drops the LiveSession (which unhooks via RAII), clears the DB
+    // row, and emits SESSION_ENDED_EVENT.
+    let app_for_watch = app.clone();
+    let runtime_for_watch = runtime.inner().inner_clone();
+    let core_for_watch = (*core).clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            match runtime_for_watch.try_wait_child() {
+                Ok(Some(_status)) => break,
+                Ok(None) => continue,
+                Err(_) => break, // process gone / handle invalid
+            }
+        }
+        // Drop the LiveSession → unhook + close child handle.
+        let _ = runtime_for_watch.take();
+        // Best-effort: clear the persisted row.
+        if let Err(e) = core_for_watch.end_session().await {
+            tracing::warn!(error = %e, "end_session failed in watcher");
+        }
+        let _ = app_for_watch.emit(SESSION_ENDED_EVENT, ());
+    });
+
+    Ok(info)
 }

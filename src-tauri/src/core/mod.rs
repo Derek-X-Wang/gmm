@@ -16,6 +16,7 @@ pub mod mod_updates;
 pub mod mods;
 pub mod network;
 pub mod reconcile;
+pub mod session;
 pub mod settings;
 pub mod updates;
 pub mod variants;
@@ -33,6 +34,7 @@ use ulid::Ulid;
 pub use error::{Error, Result};
 pub use games::GameCode;
 pub use mods::{Mod, Source};
+pub use session::SessionInfo;
 pub use zip_import::ImportZipOptions;
 
 use settings::{get as get_setting, keys, put as put_setting};
@@ -173,6 +175,7 @@ impl Core {
     /// affected games are dropped + rebuilt via the standard reconcile
     /// path. `new_root = None` resets the override to the default.
     pub async fn set_library_root(&self, new_root: Option<&Path>) -> Result<MoveReport> {
+        self.ensure_no_active_session().await?;
         let previous = self.resolved_library_root().await?;
         let next = new_root
             .map(Path::to_path_buf)
@@ -212,6 +215,7 @@ impl Core {
         game: GameCode,
         new_path: Option<&Path>,
     ) -> Result<MoveReport> {
+        self.ensure_no_active_session().await?;
         let previous = self.resolved_library_root_for(game).await?;
         let next = new_path.map(Path::to_path_buf).unwrap_or_else(|| {
             // When clearing, the effective path becomes
@@ -399,6 +403,7 @@ impl Core {
         source_path: &Path,
         display_name: &str,
     ) -> Result<Mod> {
+        self.ensure_no_active_session().await?;
         let id = Ulid::new().to_string();
         let library_path = self.resolved_library_root_for(game).await?.join(&id);
 
@@ -598,6 +603,7 @@ impl Core {
         mod_id: &str,
         endpoints: &gamebanana::Endpoints,
     ) -> Result<()> {
+        self.ensure_no_active_session().await?;
         let row = sqlx::query(
             "SELECT game_code, gamebanana_id, library_path, junction_dir_name, enabled
              FROM mods WHERE id = ?",
@@ -779,6 +785,7 @@ impl Core {
         url_or_id: &str,
         endpoints: &gamebanana::Endpoints,
     ) -> Result<Mod> {
+        self.ensure_no_active_session().await?;
         let id = gamebanana::parse_url_or_id(url_or_id).ok_or_else(|| {
             Error::GameBanana(format!("could not parse GameBanana URL or ID: {url_or_id}"))
         })?;
@@ -861,6 +868,7 @@ impl Core {
         display_name: &str,
         opts: ImportZipOptions,
     ) -> Result<Mod> {
+        self.ensure_no_active_session().await?;
         let id = Ulid::new().to_string();
         let library_path = self.resolved_library_root_for(game).await?.join(&id);
 
@@ -983,6 +991,7 @@ impl Core {
         variant_id: &str,
         game_mods_dir: &Path,
     ) -> Result<()> {
+        self.ensure_no_active_session().await?;
         // Validate the variant belongs to this mod and read its subpath.
         let variant_row =
             sqlx::query("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
@@ -1298,11 +1307,82 @@ impl Core {
         unreachable!("u32::MAX collisions on one display name is not a real scenario")
     }
 
+    /// Read the persisted active GameSession, if any.
+    pub async fn session_info(&self) -> Result<Option<SessionInfo>> {
+        let row = sqlx::query("SELECT game_code, pid, started_at FROM active_session WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        let game_code: String = row.try_get("game_code")?;
+        let pid: i64 = row.try_get("pid")?;
+        let started_at: String = row.try_get("started_at")?;
+        Ok(Some(SessionInfo {
+            game: GameCode::from_str(&game_code)?,
+            pid: pid as u32,
+            started_at: chrono::DateTime::parse_from_rfc3339(&started_at)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+        }))
+    }
+
+    /// Atomically claim the singleton active_session row. Fails with the
+    /// SQLite primary-key conflict if a session is already active —
+    /// callers that see this error must abandon their launch (and kill
+    /// any child process they may have already spawned). Pair with
+    /// `ensure_no_active_session()` to surface a friendlier error before
+    /// any side effects happen.
+    pub async fn start_session(&self, info: &SessionInfo) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO active_session (id, game_code, pid, started_at)
+             VALUES (1, ?, ?, ?)",
+        )
+        .bind(info.game.as_str())
+        .bind(info.pid as i64)
+        .bind(info.started_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clear the persisted active GameSession. Idempotent.
+    pub async fn end_session(&self) -> Result<()> {
+        sqlx::query("DELETE FROM active_session WHERE id = 1")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// If a session row points at a process that's no longer alive,
+    /// delete the row and return the evicted info so the UI can surface
+    /// "Genshin ended unexpectedly last time". Idempotent — returns
+    /// `Ok(None)` when no stale row exists.
+    pub async fn clean_stale_session(&self) -> Result<Option<SessionInfo>> {
+        let Some(info) = self.session_info().await? else {
+            return Ok(None);
+        };
+        if session::is_pid_alive(info.pid) {
+            return Ok(None);
+        }
+        self.end_session().await?;
+        Ok(Some(info))
+    }
+
+    async fn ensure_no_active_session(&self) -> Result<()> {
+        if let Some(info) = self.session_info().await? {
+            return Err(Error::SessionActive {
+                game: info.game.as_str().to_string(),
+                since: info.started_at.to_rfc3339(),
+            });
+        }
+        Ok(())
+    }
+
     /// Enable or disable a Mod. On enable, a Junction is created at
     /// `<game_mods_dir>/<mod-name>/` pointing at the Mod's Library path
     /// (joined with the active Variant's subpath when one is set).
     /// On disable, the Junction is removed (the Library copy is never touched).
     pub async fn set_enabled(&self, id: &str, enabled: bool, game_mods_dir: &Path) -> Result<()> {
+        self.ensure_no_active_session().await?;
         let row =
             sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
                 .bind(id)
