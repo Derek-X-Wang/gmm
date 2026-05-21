@@ -10,6 +10,8 @@ pub mod error;
 pub mod games;
 pub mod junction;
 pub mod mods;
+pub mod reconcile;
+pub mod volume;
 pub mod zip_import;
 
 use std::collections::HashSet;
@@ -181,6 +183,164 @@ impl Core {
         &self.library_root
     }
 
+    /// Run the startup reconcile pass across every game whose
+    /// `install_path` is set. The per-game result is logged via tracing
+    /// (NEW-LOG); the caller usually only cares about the aggregate
+    /// vector for status reporting.
+    pub async fn reconcile_all_set_games(
+        &self,
+    ) -> Result<Vec<(GameCode, reconcile::ReconcileResult)>> {
+        let rows = sqlx::query("SELECT code, install_path FROM games")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::new();
+        for row in rows {
+            let code: String = row.try_get("code")?;
+            let install_path: Option<String> = row.try_get("install_path")?;
+            let Some(install) = install_path else {
+                continue;
+            };
+            let game = GameCode::from_str(&code)?;
+            let mods_dir = PathBuf::from(install).join("Mods");
+            match self.reconcile_junctions(game, &mods_dir).await {
+                Ok(result) => {
+                    tracing::info!(
+                        target: "gmm::reconcile",
+                        game = code.as_str(),
+                        recreated = result.recreated.len(),
+                        healthy = result.healthy.len(),
+                        conflicting = result.conflicting.len(),
+                        skipped = result.skipped.len(),
+                        "startup reconcile completed",
+                    );
+                    out.push((game, result));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "gmm::reconcile",
+                        game = code.as_str(),
+                        error = %e,
+                        "startup reconcile failed; falling back to lazy creation on enable",
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Walk every Mod row for `game` and reconcile its junction with
+    /// reality. Recreates missing junctions for enabled mods. Surfaces
+    /// (but does not auto-fix) junctions that resolve to an unexpected
+    /// target — the UI prompts the user for those.
+    ///
+    /// See ADR 0003 — the Library is the source of truth, so we never
+    /// rewrite Library files from a stale junction.
+    pub async fn reconcile_junctions(
+        &self,
+        game: GameCode,
+        game_mods_dir: &Path,
+    ) -> Result<reconcile::ReconcileResult> {
+        let rows = sqlx::query(
+            "SELECT id, junction_dir_name, library_path, enabled FROM mods WHERE game_code = ?",
+        )
+        .bind(game.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        // Non-fatal: if the game mods dir does not exist yet we'll just
+        // recreate links into it; we ensure it exists first so the
+        // junction crate can write into it.
+        std::fs::create_dir_all(game_mods_dir).map_err(|source| Error::Io {
+            path: game_mods_dir.to_path_buf(),
+            source,
+        })?;
+
+        let mut result = reconcile::ReconcileResult::default();
+
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let junction_dir_name: String = row.try_get("junction_dir_name")?;
+            let library_path: String = row.try_get("library_path")?;
+            let enabled: i64 = row.try_get("enabled")?;
+
+            if enabled == 0 {
+                result.skipped.push(id);
+                continue;
+            }
+
+            let link = game_mods_dir.join(&junction_dir_name);
+            let expected_target = PathBuf::from(&library_path);
+
+            if !link_exists(&link) {
+                volume::require_ntfs_pair(game_mods_dir, &expected_target)?;
+                junction::create(&link, &expected_target)?;
+                result.recreated.push(id);
+                continue;
+            }
+
+            match resolve_link(&link) {
+                Some(actual) if same_path(&actual, &expected_target) => {
+                    result.healthy.push(id);
+                }
+                _ => {
+                    result.conflicting.push(reconcile::ConflictingJunction {
+                        mod_id: id,
+                        link,
+                        expected_target,
+                    });
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Drop every junction for `game` and recreate one per enabled Mod
+    /// against the current Library. The hammer to use after a user
+    /// relocates their Library directory (ADR 0003).
+    pub async fn rebuild_junctions(
+        &self,
+        game: GameCode,
+        game_mods_dir: &Path,
+    ) -> Result<reconcile::ReconcileResult> {
+        let rows = sqlx::query(
+            "SELECT id, junction_dir_name, library_path, enabled FROM mods WHERE game_code = ?",
+        )
+        .bind(game.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        std::fs::create_dir_all(game_mods_dir).map_err(|source| Error::Io {
+            path: game_mods_dir.to_path_buf(),
+            source,
+        })?;
+
+        let mut result = reconcile::ReconcileResult::default();
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let junction_dir_name: String = row.try_get("junction_dir_name")?;
+            let library_path: String = row.try_get("library_path")?;
+            let enabled: i64 = row.try_get("enabled")?;
+            let link = game_mods_dir.join(&junction_dir_name);
+            let target = PathBuf::from(library_path);
+
+            // Always drop the existing link first; if the user relocated
+            // the Library, the old link would resolve to thin air.
+            if link_exists(&link) {
+                let _ = junction::remove(&link);
+            }
+
+            if enabled == 0 {
+                result.skipped.push(id);
+                continue;
+            }
+            volume::require_ntfs_pair(game_mods_dir, &target)?;
+            junction::create(&link, &target)?;
+            result.recreated.push(id);
+        }
+        Ok(result)
+    }
+
     /// Snapshot of the user-facing settings, for diagnostics bundles.
     /// Sensitive fields are NOT redacted here — call
     /// [`diagnostics::SettingsSnapshot::redacted`] before serialising.
@@ -250,7 +410,10 @@ impl Core {
         let target = PathBuf::from(library_path);
 
         match (current_enabled != 0, enabled) {
-            (false, true) => junction::create(&link, &target)?,
+            (false, true) => {
+                volume::require_ntfs_pair(game_mods_dir, &target)?;
+                junction::create(&link, &target)?;
+            }
             (true, false) => junction::remove(&link)?,
             _ => {}
         }
@@ -340,6 +503,31 @@ fn is_dos_reserved(name: &str) -> bool {
         }
     }
     false
+}
+
+/// Does the path exist as a symlink/junction? `Path::exists` follows
+/// the link; we want "the link entry itself is there", which is what
+/// `symlink_metadata` returns.
+fn link_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Resolve the target of a junction/symlink. Returns `None` if `path`
+/// is not a link or the OS refuses to read it.
+fn resolve_link(path: &Path) -> Option<PathBuf> {
+    std::fs::read_link(path).ok()
+}
+
+/// Path equality that is tolerant of trailing separators and
+/// case-insensitivity quirks on Windows. We canonicalise both sides;
+/// on failure we fall back to a literal compare.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let canon_a = std::fs::canonicalize(a).ok();
+    let canon_b = std::fs::canonicalize(b).ok();
+    match (canon_a, canon_b) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 /// Recursive directory copy. Standard library has no built-in equivalent.

@@ -22,6 +22,23 @@ pub fn run() {
 
     let core = build_core(&data_dir).expect("initialise GMM core");
 
+    // Best-effort startup reconcile across every game whose install
+    // path is set. Logs per-game via tracing (NEW-LOG); never fatal.
+    {
+        let core_for_pass = core.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build reconcile runtime");
+            rt.block_on(async move {
+                if let Err(e) = core_for_pass.reconcile_all_set_games().await {
+                    tracing::warn!(error = %e, "startup reconcile pass errored");
+                }
+            });
+        });
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -37,6 +54,8 @@ pub fn run() {
             commands::export_diagnostics_bundle,
             commands::diagnostics_log_dir,
             commands::detect_game_install_path,
+            commands::reconcile_junctions,
+            commands::rebuild_junctions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

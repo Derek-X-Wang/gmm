@@ -8,6 +8,7 @@ import {
   getGameInstallPath,
   importZip,
   listMods,
+  rebuildJunctions,
   setGameInstallPath,
   setModEnabled,
 } from "./api";
@@ -159,7 +160,32 @@ function Settings() {
       ) : null}
       {setPath.isError ? <p className="error">{String(setPath.error)}</p> : null}
       {detect.isError ? <p className="error">{String(detect.error)}</p> : null}
+      <RebuildJunctions />
     </section>
+  );
+}
+
+/**
+ * Manual "Rebuild junctions" action — drops every junction for the
+ * active game and recreates one per enabled Mod against the current
+ * Library. The hammer to use after relocating the Library directory.
+ */
+function RebuildJunctions() {
+  const rebuild = useMutation({
+    mutationFn: () => rebuildJunctions(GAME),
+  });
+  return (
+    <div className="row">
+      <button onClick={() => rebuild.mutate()} disabled={rebuild.isPending}>
+        {rebuild.isPending ? "Rebuilding…" : "Rebuild junctions"}
+      </button>
+      {rebuild.data ? (
+        <span className="muted small">
+          Recreated {rebuild.data.recreated.length}, skipped {rebuild.data.skipped.length} disabled.
+        </span>
+      ) : null}
+      {rebuild.isError ? <p className="error">{String(rebuild.error)}</p> : null}
+    </div>
   );
 }
 

@@ -1529,6 +1529,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "ulid",
+ "windows-sys 0.59.0",
  "winreg",
  "zip",
 ]

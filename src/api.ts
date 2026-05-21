@@ -84,3 +84,46 @@ export async function detectGameInstallPath(
     (await invoke<string | null>("detect_game_install_path", { game })) ?? null
   );
 }
+
+export interface ConflictingJunction {
+  modId: string;
+  link: string;
+  expectedTarget: string;
+}
+
+export interface ReconcileResult {
+  recreated: string[];
+  healthy: string[];
+  conflicting: ConflictingJunction[];
+  skipped: string[];
+}
+
+interface RawReconcile {
+  recreated: string[];
+  healthy: string[];
+  conflicting: { mod_id: string; link: string; expected_target: string }[];
+  skipped: string[];
+}
+
+const fromRawReconcile = (r: RawReconcile): ReconcileResult => ({
+  recreated: r.recreated,
+  healthy: r.healthy,
+  conflicting: r.conflicting.map((c) => ({
+    modId: c.mod_id,
+    link: c.link,
+    expectedTarget: c.expected_target,
+  })),
+  skipped: r.skipped,
+});
+
+export async function reconcileJunctions(game: GameCode): Promise<ReconcileResult> {
+  return fromRawReconcile(
+    await invoke<RawReconcile>("reconcile_junctions", { game }),
+  );
+}
+
+export async function rebuildJunctions(game: GameCode): Promise<ReconcileResult> {
+  return fromRawReconcile(
+    await invoke<RawReconcile>("rebuild_junctions", { game }),
+  );
+}
