@@ -47,6 +47,17 @@ export async function adoptFolder(
   return fromRaw(raw);
 }
 
+export async function importZip(
+  game: GameCode,
+  zipPath: string,
+  name: string,
+): Promise<Mod> {
+  const raw = await invoke<RawMod>("import_zip", {
+    args: { game, zipPath, name },
+  });
+  return fromRaw(raw);
+}
+
 export async function setModEnabled(
   id: string,
   enabled: boolean,

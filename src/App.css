@@ -142,3 +142,16 @@ code {
   margin: 0;
   font-size: 0.85rem;
 }
+
+.dropzone {
+  border: 1.5px dashed #3a3a44;
+  border-radius: 10px;
+  padding: 1rem;
+  text-align: center;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.dropzone--hover {
+  border-color: #3b82f6;
+  background: #1d2536;
+}

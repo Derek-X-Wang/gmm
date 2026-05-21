@@ -8,6 +8,7 @@ pub mod error;
 pub mod games;
 pub mod junction;
 pub mod mods;
+pub mod zip_import;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,7 @@ use ulid::Ulid;
 pub use error::{Error, Result};
 pub use games::GameCode;
 pub use mods::{Mod, Source};
+pub use zip_import::ImportZipOptions;
 
 /// The Core owns the SQLite pool and the Library root. Everything that
 /// reads from or writes to the user's data goes through here.
@@ -87,6 +89,65 @@ impl Core {
             game,
             name: display_name.to_string(),
             source: Source::Manual,
+            library_path,
+            enabled: false,
+        })
+    }
+
+    /// Import a local ZIP into the Library as a Mod with `source = local`.
+    ///
+    /// Hardened against the dirty realities of GameBanana-style archives:
+    /// zip-slip path traversal, `__MACOSX/` / `.DS_Store` / `Thumbs.db`
+    /// junk files, single-root-directory shape, and size/entry caps. See
+    /// [`crate::core::zip_import`] for the extraction details.
+    ///
+    /// On any failure the partially-extracted Library path is removed so
+    /// the user is never left with a half-imported Mod row pointing at
+    /// half-extracted bytes.
+    pub async fn import_zip(
+        &self,
+        game: GameCode,
+        zip_path: &Path,
+        display_name: &str,
+        opts: ImportZipOptions,
+    ) -> Result<Mod> {
+        let id = Ulid::new().to_string();
+        let library_path = self.library_root.join(game.as_str()).join(&id);
+
+        if let Err(e) = zip_import::extract(zip_path, &library_path, opts) {
+            // Best-effort cleanup. We swallow remove_dir_all errors so the
+            // user sees the original extraction failure, not a noisy
+            // cleanup follow-up.
+            let _ = std::fs::remove_dir_all(&library_path);
+            return Err(e);
+        }
+
+        let base = sanitize_dir_name(display_name);
+        let junction_dir_name = self.pick_unique_junction_dir_name(game, &base).await?;
+
+        let created_at = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO mods (
+                id, game_code, name, source, library_path,
+                junction_dir_name, enabled, created_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+        )
+        .bind(&id)
+        .bind(game.as_str())
+        .bind(display_name)
+        .bind(Source::Local.as_str())
+        .bind(library_path.to_string_lossy().as_ref())
+        .bind(&junction_dir_name)
+        .bind(&created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(Mod {
+            id,
+            game,
+            name: display_name.to_string(),
+            source: Source::Local,
             library_path,
             enabled: false,
         })

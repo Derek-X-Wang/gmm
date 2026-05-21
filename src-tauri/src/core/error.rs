@@ -22,6 +22,26 @@ pub enum Error {
 
     #[error("invalid mod source: {0}")]
     InvalidSource(String),
+
+    #[error("zip error at {path:?}: {message}")]
+    Zip { path: PathBuf, message: String },
+
+    #[error(
+        "zip entry escapes the import target (zip-slip): {0}. Aborted before any files were written."
+    )]
+    ZipSlip(String),
+
+    #[error(
+        "archive declares {actual} bytes uncompressed, but the import limit is {cap} bytes. \
+         Raise the limit in settings if you trust this archive."
+    )]
+    ZipSizeCap { cap: u64, actual: u64 },
+
+    #[error(
+        "archive contains {actual} entries, but the import limit is {cap}. \
+         Raise the limit in settings if you trust this archive."
+    )]
+    ZipEntryCap { cap: u32, actual: usize },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
