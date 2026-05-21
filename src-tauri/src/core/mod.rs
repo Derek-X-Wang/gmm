@@ -16,6 +16,7 @@ pub mod mods;
 pub mod network;
 pub mod reconcile;
 pub mod settings;
+pub mod updates;
 pub mod variants;
 pub mod volume;
 pub mod zip_import;
@@ -438,6 +439,67 @@ impl Core {
             version: None,
             screenshot_url: None,
         })
+    }
+
+    /// Check whether the upstream importer release for `game` is newer
+    /// than the persisted `installed_version`. Returns an
+    /// [`updates::UpdateStatus`] that the UI can render directly. The
+    /// per-game pin suppresses the `available` flag but is still
+    /// surfaced separately so the dialog can show "pinned to vX".
+    ///
+    /// `repo` and `asset_filter` are passed in so the caller can decide
+    /// which importer repo applies (e.g. `SpectrumQT/GIMI-Package` for
+    /// GIMI). Future per-game ports can call this with their own repo.
+    pub async fn check_importer_update(
+        &self,
+        game: GameCode,
+        repo: &str,
+        asset_filter: &str,
+    ) -> Result<updates::UpdateStatus> {
+        let client = self.http_client().await?;
+        let latest = importer::fetch_latest_release(&client, repo, asset_filter, None)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.tag_name);
+        let installed = updates::importer_installed(&self.pool, game).await?;
+        let pinned = updates::importer_pinned(&self.pool, game).await?.is_some();
+        Ok(updates::compute_status(installed, latest, pinned))
+    }
+
+    /// Check the shared Loader (`3dmloader.dll` from
+    /// `SpectrumQT/XXMI-Libs-Package`). Loader updates apply globally,
+    /// so there is no per-game pin here — slice 13b expands this if
+    /// needed.
+    pub async fn check_loader_update(&self) -> Result<updates::UpdateStatus> {
+        let client = self.http_client().await?;
+        let latest =
+            importer::fetch_latest_release(&client, "SpectrumQT/XXMI-Libs-Package", "Libs", None)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.tag_name);
+        let installed = updates::loader_installed(&self.pool).await?;
+        Ok(updates::compute_status(installed, latest, false))
+    }
+
+    /// Pin (or unpin) the per-game importer version. While pinned,
+    /// the check still runs but the badge stays clear. Setting `None`
+    /// clears the pin.
+    pub async fn set_importer_pinned(&self, game: GameCode, version: Option<&str>) -> Result<()> {
+        updates::set_importer_pinned(&self.pool, game, version).await
+    }
+
+    /// Persist the per-game installed importer tag. Production calls
+    /// this from inside `install_importer` after a successful apply;
+    /// integration tests can call it directly to seed state.
+    pub async fn set_importer_installed(&self, game: GameCode, version: &str) -> Result<()> {
+        updates::set_importer_installed(&self.pool, game, version).await
+    }
+
+    /// Persist the installed Loader version.
+    pub async fn set_loader_installed(&self, version: &str) -> Result<()> {
+        updates::set_loader_installed(&self.pool, version).await
     }
 
     /// Resolve a GameBanana submission (URL or bare ID), download its

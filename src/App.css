@@ -199,3 +199,9 @@ code {
   border-left: 2px solid #f59e0b;
   border-radius: 6px;
 }
+
+.update-badge {
+  color: #60a5fa;
+  font-weight: 500;
+  font-size: 0.8rem;
+}

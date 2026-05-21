@@ -69,6 +69,9 @@ pub fn run() {
             commands::set_active_variant,
             commands::detect_conflicts,
             commands::import_gamebanana,
+            commands::check_importer_update,
+            commands::check_loader_update,
+            commands::set_importer_pinned,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
