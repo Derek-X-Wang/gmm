@@ -369,3 +369,46 @@ export async function launchGame(game: GameCode): Promise<SessionInfo> {
 
 export const SESSION_STARTED_EVENT = "session-started";
 export const SESSION_ENDED_EVENT = "session-ended";
+
+// ---- slice NEW-AV (#13) — antivirus / SmartScreen guidance ----
+
+/**
+ * Structured payload backing the in-app antivirus / SmartScreen
+ * guidance. The same shape is reused by the first-run onboarding
+ * wizard (#24) so both render from a single source of truth in
+ * `docs/antivirus-and-smartscreen.md`.
+ */
+export interface AvGuidance {
+  headline: string;
+  body: string;
+  exclusionSteps: string[];
+  docPath: string;
+  /**
+   * Sentinel prefix used on launch error strings classified as
+   * AV-pattern. The launch button strips this prefix and renders the
+   * structured guidance instead of dumping the raw error to the user.
+   */
+  sentinel: string;
+}
+
+export async function avGuidance(): Promise<AvGuidance> {
+  return invoke<AvGuidance>("av_guidance");
+}
+
+/**
+ * Inspect a thrown error string from `launch_game`. If the backend
+ * classifier matched a known AV / SmartScreen pattern, the message is
+ * prefixed with the sentinel from `AvGuidance`; we return the
+ * original (sentinel-stripped) message alongside an `isAvPattern`
+ * flag. Non-AV errors round-trip with the flag set to false.
+ */
+export function partitionLaunchError(
+  raw: unknown,
+  sentinel: string,
+): { isAvPattern: boolean; message: string } {
+  const message = String(raw);
+  if (message.startsWith(sentinel)) {
+    return { isAvPattern: true, message: message.slice(sentinel.length) };
+  }
+  return { isAvPattern: false, message };
+}

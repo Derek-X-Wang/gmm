@@ -4,6 +4,7 @@
 //! integration tests in `src-tauri/tests/` exercise this module directly so
 //! they can run on macOS without spinning up the Tauri runtime.
 
+pub mod av;
 pub mod conflicts;
 pub mod detect;
 pub mod diagnostics;

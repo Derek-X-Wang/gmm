@@ -5,11 +5,14 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
   adoptFolder,
+  avGuidance,
   cleanStaleSession,
   currentSession,
   launchGame,
+  partitionLaunchError,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
+  type AvGuidance,
   type SessionInfo,
   applyModUpdate,
   checkImporterUpdate,
@@ -149,12 +152,32 @@ function LaunchGameButton() {
   const queryClient = useQueryClient();
   const sessionActive = useSessionActive();
 
+  // Lazy-load the structured AV / SmartScreen guidance only when we
+  // need it (i.e. a launch failed with an AV-pattern error). The
+  // payload is small + cheap; we still avoid the IPC round-trip on
+  // happy-path launches.
+  const guidance = useQuery<AvGuidance>({
+    queryKey: ["avGuidance"],
+    queryFn: avGuidance,
+    enabled: false,
+  });
+
   const launch = useMutation({
     mutationFn: () => launchGame(GAME),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session"] });
     },
+    onError: () => {
+      // Fetch guidance on demand so the inline exclusion steps land in
+      // the next render. The classifier might say not-AV; we still
+      // refetch — it's idempotent and tiny.
+      guidance.refetch();
+    },
   });
+
+  const partitioned = launch.isError
+    ? partitionLaunchError(launch.error, guidance.data?.sentinel ?? "AV-PATTERN: ")
+    : null;
 
   return (
     <section className="card">
@@ -171,8 +194,53 @@ function LaunchGameButton() {
               : "Launch Genshin"}
         </button>
       </div>
-      {launch.isError ? <p className="error">{String(launch.error)}</p> : null}
+      {partitioned && partitioned.isAvPattern && guidance.data ? (
+        <AvGuidanceCallout
+          guidance={guidance.data}
+          underlyingError={partitioned.message}
+        />
+      ) : partitioned ? (
+        <p className="error">{partitioned.message}</p>
+      ) : null}
     </section>
+  );
+}
+
+/**
+ * Inline AV / SmartScreen guidance shown when `launch_game` fails with
+ * a classified AV-pattern error. Content comes verbatim from
+ * `docs/antivirus-and-smartscreen.md` (slice NEW-AV / #13) via the
+ * `av_guidance` Tauri command so the wizard (#24) and this component
+ * cannot drift.
+ */
+function AvGuidanceCallout({
+  guidance,
+  underlyingError,
+}: {
+  guidance: AvGuidance;
+  underlyingError: string;
+}) {
+  return (
+    <div className="av-guidance error" role="alert">
+      <strong>{guidance.headline}</strong>
+      <p>{guidance.body}</p>
+      <ul>
+        {guidance.exclusionSteps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ul>
+      <p className="muted small">
+        See{" "}
+        <code>{guidance.docPath}</code>
+        {" "}
+        for the full guide (Defender, Norton, Bitdefender, Avast, AVG,
+        ESET, Kaspersky, plus SmartScreen recovery).
+      </p>
+      <details>
+        <summary className="muted small">Underlying error</summary>
+        <pre className="muted small">{underlyingError}</pre>
+      </details>
+    </div>
   );
 }
 
