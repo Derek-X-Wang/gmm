@@ -11,6 +11,7 @@
 //! validation) are public.
 
 pub mod genshin;
+pub mod honkai_impact;
 pub mod star_rail;
 pub mod wuthering;
 pub mod zenless;
