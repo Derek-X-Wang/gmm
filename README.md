@@ -97,6 +97,39 @@ SQLite settings table and is excluded from the diagnostics bundle.
 Userinfo pasted into the URL field (e.g. `http://user:pass@proxy`) is
 also redacted in the bundle as defence-in-depth.
 
+## Updates and signature verification
+
+GMM checks for new releases on every launch through
+[`tauri-plugin-updater`](https://v2.tauri.app/plugin/updater/). The
+`tauri.conf.json`'s `plugins.updater.endpoints` points at
+`https://github.com/Derek-X-Wang/gmm/releases/latest/download/latest.json`;
+when a new tag is published, that URL resolves to a signed manifest
+produced by `.github/workflows/release.yml`.
+
+**Signing.** Each release is signed with a minisign keypair generated
+once via `pnpm tauri signer generate`. The public half is embedded in
+the binary (see `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`);
+the private half lives only as a repo secret (`TAURI_SIGNING_PRIVATE_KEY`
+plus `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) and on the maintainer's
+backups. `tauri-plugin-updater` refuses to install any release whose
+signature does not verify against the embedded public key.
+
+**On-demand checks.** Settings → Updates → *Check for updates* runs
+the same flow the auto-check does — fetch `latest.json`, verify the
+signature, download + install if newer, prompt to relaunch.
+
+**Releasing.** Push a tag matching `v*` (e.g. `v0.5.0-alpha.1`); the
+`release.yml` workflow builds the MSI on `windows-latest`, signs the
+manifest, and drafts a GitHub Release with the binary, `.sig`, and
+`latest.json`. The maintainer reviews the draft (smoke test on a real
+Windows machine, double-check the changelog) and clicks Publish; only
+after Publish does the `latest.../latest.json` URL resolve.
+
+**If the key rotates** (lost, leaked, or maintainer turnover), every
+existing GMM install becomes unable to install future updates and must
+be reinstalled manually from a fresh GitHub Release. There is no
+key-rotation flow in v1.
+
 ## Recommended IDE Setup
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)

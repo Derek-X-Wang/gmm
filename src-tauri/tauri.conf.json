@@ -31,5 +31,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Derek-X-Wang/gmm/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU0OERBREUzMDU4NDQ4MEQKUldRTlNJUUY0NjJOVkFFK2VpR0ZqaitLKzFWUEZnQTZoVktLV3BQUXY3cmlHc1Z0VGdNTlo2dWwK"
+    }
   }
 }
