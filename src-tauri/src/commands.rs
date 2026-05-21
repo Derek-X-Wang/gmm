@@ -936,3 +936,85 @@ pub fn list_supported_games() -> Vec<GameSummary> {
         })
         .collect()
 }
+
+// ---- slice 16-b (#24) — first-run onboarding wizard ----
+
+/// State the React App router uses to decide between rendering the
+/// onboarding wizard vs. the main app. `skipped == true` keeps the
+/// "Finish setup" banner alive on Settings until the user resumes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingStatus {
+    /// `true` once the user finished the wizard OR pressed Skip
+    /// setup. Either way the wizard does not auto-open on the next
+    /// launch.
+    pub complete: bool,
+    /// `true` iff the user skipped instead of completing.
+    pub skipped: bool,
+}
+
+#[tauri::command]
+pub async fn is_onboarding_complete(core: State<'_, Core>) -> Result<OnboardingStatus, String> {
+    core.onboarding_status().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn mark_onboarding_complete(core: State<'_, Core>, skipped: bool) -> Result<(), String> {
+    core.mark_onboarding_complete(skipped)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn reset_onboarding(core: State<'_, Core>) -> Result<(), String> {
+    core.reset_onboarding().await.map_err(|e| e.to_string())
+}
+
+/// Per-game install-path detection result returned by
+/// [`detect_all_games`]. The wizard's Step 2 renders one row per
+/// supported game; rows with `detected_path == None` fall through to
+/// the manual browse/skip controls.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameDetection {
+    pub code: GameCode,
+    pub display_name: &'static str,
+    /// `None` when no candidate passed the per-game validator, or
+    /// when the game has not been ported yet (its `GameProfile`
+    /// `detect` field is `None`).
+    pub detected_path: Option<PathBuf>,
+}
+
+#[tauri::command]
+pub async fn detect_all_games(core: State<'_, Core>) -> Result<Vec<GameDetection>, String> {
+    // Fan out one blocking task per ported game. Detection is IO-bound
+    // (registry probes + path stats) so blocking pool is the right
+    // venue. Order in the output preserves `GAME_PROFILES` order so
+    // the wizard rows render Genshin first, etc.
+    let profiles: Vec<_> = GameCode::ported().collect();
+    let mut tasks = Vec::with_capacity(profiles.len());
+    for p in &profiles {
+        let detect = p.detect.expect("ported profile has detect fn");
+        tasks.push(tokio::task::spawn_blocking(detect));
+    }
+
+    let mut out = Vec::with_capacity(profiles.len());
+    for (p, t) in profiles.into_iter().zip(tasks) {
+        let detected = t
+            .await
+            .map_err(|e| format!("detect task join error for {}: {e}", p.code.as_str()))?;
+        if let Some(path) = detected.as_ref() {
+            // Persist eagerly so subsequent wizard steps see the
+            // path without an extra round-trip.
+            core.set_game_install_path(p.code, path)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        out.push(GameDetection {
+            code: p.code,
+            display_name: p.display_name,
+            detected_path: detected,
+        });
+    }
+    Ok(out)
+}

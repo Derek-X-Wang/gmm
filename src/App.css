@@ -218,6 +218,94 @@ code {
 }
 
 /*
+ * Slice 16-b (#24): first-run onboarding wizard.
+ *
+ * Lives in its own grid layout so it can occupy the whole window
+ * without inheriting the main app's max-width.
+ */
+.onboarding {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+  display: grid;
+  gap: 1.25rem;
+}
+
+.onboarding__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.onboarding__header h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+.onboarding__body {
+  display: grid;
+  gap: 1rem;
+}
+
+.onboarding__welcome p {
+  margin: 0;
+}
+
+.onboarding__footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.onboarding__skip {
+  background: transparent;
+  color: #93c5fd;
+  border: 1px solid #2e2e36;
+}
+
+.onboarding__games,
+.onboarding__importers {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.onboarding__game-row,
+.onboarding__importer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #1b1b1f;
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid #2e2e36;
+}
+
+.onboarding__game-meta {
+  display: grid;
+  gap: 0.15rem;
+}
+
+/* The "Finish setup" banner on the main app when the user used Skip. */
+.finish-setup-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #1e2a3a;
+  border-color: #1e3a5f;
+}
+
+.app__help {
+  background: transparent;
+  color: #93c5fd;
+  border: 1px solid #2e2e36;
+  padding: 0.3rem 0.7rem;
+}
+
+/*
  * Slice 6 (#16): per-game tab strip. Renders between the session
  * banner and the per-game cards. Each new per-game port (#17-#20)
  * appends an entry to `GAME_PROFILES` in Rust; the React side picks

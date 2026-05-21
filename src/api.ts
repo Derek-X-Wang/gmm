@@ -370,6 +370,44 @@ export async function launchGame(game: GameCode): Promise<SessionInfo> {
 export const SESSION_STARTED_EVENT = "session-started";
 export const SESSION_ENDED_EVENT = "session-ended";
 
+// ---- slice 16-b (#24) — onboarding wizard ----
+
+/**
+ * Persistent onboarding state. The App router uses this on every
+ * cold start to choose between rendering the wizard vs. the main
+ * app.
+ */
+export interface OnboardingStatus {
+  complete: boolean;
+  /** `true` iff the user pressed Skip setup. The "Finish setup"
+   * banner in Settings stays alive until they Resume. */
+  skipped: boolean;
+}
+
+export async function isOnboardingComplete(): Promise<OnboardingStatus> {
+  return invoke<OnboardingStatus>("is_onboarding_complete");
+}
+
+export async function markOnboardingComplete(skipped: boolean): Promise<void> {
+  await invoke("mark_onboarding_complete", { skipped });
+}
+
+export async function resetOnboarding(): Promise<void> {
+  await invoke("reset_onboarding");
+}
+
+/** Per-game detection result returned by `detect_all_games`. The
+ * wizard's Step 2 renders one row per supported game. */
+export interface GameDetection {
+  code: GameCode;
+  displayName: string;
+  detectedPath: string | null;
+}
+
+export async function detectAllGames(): Promise<GameDetection[]> {
+  return invoke<GameDetection[]>("detect_all_games");
+}
+
 // ---- slice 6 (#16) — per-game registry ----
 
 /**
