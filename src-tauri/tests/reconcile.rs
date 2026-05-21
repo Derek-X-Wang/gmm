@@ -87,11 +87,13 @@ async fn reconcile_marks_unexpected_target_as_conflicting_without_overwriting() 
     let m = adopt_and_enable(&core, &game_mods, &fixture, "Conflict Mod").await;
 
     let link = game_mods.join("Conflict Mod");
-    // Replace the link with one that points somewhere unrelated.
-    fs::remove_file(&link).expect("remove original");
+    // Replace the link with one that points somewhere unrelated. Use the
+    // crate's own junction module so this works on Windows (NTFS junction)
+    // and macOS/Linux (directory symlink) alike.
+    gmm_lib::core::junction::remove(&link).expect("remove original");
     let bogus = tmp.path().join("not_the_library");
     fs::create_dir_all(&bogus).expect("bogus dir");
-    std::os::unix::fs::symlink(&bogus, &link).expect("plant bogus link");
+    gmm_lib::core::junction::create(&link, &bogus).expect("plant bogus link");
 
     let result = core
         .reconcile_junctions(GameCode::Gimi, &game_mods)
