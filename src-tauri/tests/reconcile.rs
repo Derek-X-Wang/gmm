@@ -54,8 +54,10 @@ async fn reconcile_recreates_missing_junction_for_enabled_mod() {
     let link = game_mods.join("Reconcile Mod");
     assert!(link.exists(), "precondition: junction exists after enable");
 
-    // Simulate the user nuking the junction by hand.
-    fs::remove_file(&link).expect("remove junction");
+    // Simulate the user nuking the junction by hand. Use the crate's
+    // own junction module so this works on Windows (where fs::remove_file
+    // on a junction returns "Access is denied") as well as macOS/Linux.
+    gmm_lib::core::junction::remove(&link).expect("remove junction");
     assert!(
         std::fs::symlink_metadata(&link).is_err(),
         "precondition: junction is gone",
