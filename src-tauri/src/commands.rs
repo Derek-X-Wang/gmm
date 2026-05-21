@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use tauri::State;
 
+use crate::core::detect;
 use crate::core::diagnostics;
 use crate::core::{Core, GameCode, ImportZipOptions, Mod};
 
@@ -145,4 +146,31 @@ pub async fn export_diagnostics_bundle(
 #[tauri::command]
 pub fn diagnostics_log_dir() -> Result<PathBuf, String> {
     crate::log_dir().map_err(|e| e.to_string())
+}
+
+/// Tauri command — auto-detect a game's install path. On success the
+/// detected path is persisted into the `games` table and returned.
+/// Returns `Ok(None)` when no candidate matched, so the frontend can
+/// surface the "Couldn't find Genshin automatically" copy and fall
+/// back to the manual picker.
+///
+/// Only GIMI (Genshin) is wired in this slice; other Game codes return
+/// `Ok(None)` until their port issues land (see #16–#20).
+#[tauri::command]
+pub async fn detect_game_install_path(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<Option<PathBuf>, String> {
+    let detected = match game {
+        GameCode::Gimi => tokio::task::spawn_blocking(detect::genshin::detect)
+            .await
+            .map_err(|e| format!("detect task join error: {e}"))?,
+        _ => None,
+    };
+    if let Some(path) = detected.as_ref() {
+        core.set_game_install_path(game, path)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(detected)
 }
