@@ -1,9 +1,16 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
   adoptFolder,
+  cleanStaleSession,
+  currentSession,
+  launchGame,
+  SESSION_ENDED_EVENT,
+  SESSION_STARTED_EVENT,
+  type SessionInfo,
   applyModUpdate,
   checkImporterUpdate,
   checkLoaderUpdate,
@@ -47,6 +54,8 @@ function App() {
       <header className="app__header">
         <h1>GMM — Genshin (v0.1 foundation)</h1>
       </header>
+      <SessionBanner />
+      <LaunchGameButton />
       <Settings />
       <NetworkPanel />
       <ImporterPanel />
@@ -55,6 +64,115 @@ function App() {
       <Diagnostics />
       <ModList />
     </main>
+  );
+}
+
+/**
+ * Sticky banner that appears whenever a GameSession is active. Also
+ * surfaces the "previous session ended unexpectedly" recovery prompt
+ * via clean_stale_session on first render.
+ */
+function SessionBanner() {
+  const queryClient = useQueryClient();
+  const session = useQuery({
+    queryKey: ["session"],
+    queryFn: currentSession,
+    refetchOnWindowFocus: true,
+  });
+  const [staleSession, setStaleSession] = useState<SessionInfo | null>(null);
+
+  // On first mount, ask the backend to clear any orphan row left by a
+  // GMM crash mid-session. If we got something back, surface it.
+  useEffect(() => {
+    cleanStaleSession()
+      .then((evicted) => {
+        if (evicted) setStaleSession(evicted);
+        queryClient.invalidateQueries({ queryKey: ["session"] });
+      })
+      .catch(() => {
+        /* best-effort */
+      });
+  }, [queryClient]);
+
+  // Listen for backend session events; refetch the session query.
+  useEffect(() => {
+    const unlisteners: Promise<UnlistenFn>[] = [
+      listen(SESSION_STARTED_EVENT, () => {
+        queryClient.invalidateQueries({ queryKey: ["session"] });
+      }),
+      listen(SESSION_ENDED_EVENT, () => {
+        queryClient.invalidateQueries({ queryKey: ["session"] });
+      }),
+    ];
+    return () => {
+      unlisteners.forEach((p) => {
+        p.then((u) => u()).catch(() => {});
+      });
+    };
+  }, [queryClient]);
+
+  if (staleSession && !session.data) {
+    return (
+      <section className="card session-banner session-banner--stale">
+        <strong>{staleSession.game.toUpperCase()} ended unexpectedly last time.</strong>
+        <span className="muted">
+          GMM cleaned up the orphaned session record (started {staleSession.startedAt}).
+        </span>
+        <button onClick={() => setStaleSession(null)}>Dismiss</button>
+      </section>
+    );
+  }
+
+  if (!session.data) return null;
+
+  return (
+    <section className="card session-banner session-banner--active" role="status">
+      <strong>{session.data.game.toUpperCase()} is running</strong>
+      <span className="muted">
+        Mod changes are locked. Close the game to re-enable editing. (PID {session.data.pid})
+      </span>
+    </section>
+  );
+}
+
+/** Hook surfaces whether a session is currently active. */
+function useSessionActive(): boolean {
+  const session = useQuery({
+    queryKey: ["session"],
+    queryFn: currentSession,
+  });
+  return !!session.data;
+}
+
+/** "Launch Genshin" button. Disabled while a session is already active. */
+function LaunchGameButton() {
+  const queryClient = useQueryClient();
+  const sessionActive = useSessionActive();
+
+  const launch = useMutation({
+    mutationFn: () => launchGame(GAME),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["session"] });
+    },
+  });
+
+  return (
+    <section className="card">
+      <div className="row row--between">
+        <h2>Launch</h2>
+        <button
+          onClick={() => launch.mutate()}
+          disabled={sessionActive || launch.isPending}
+        >
+          {sessionActive
+            ? "Game running…"
+            : launch.isPending
+              ? "Launching…"
+              : "Launch Genshin"}
+        </button>
+      </div>
+      {launch.isError ? <p className="error">{String(launch.error)}</p> : null}
+    </section>
   );
 }
 
@@ -617,6 +735,7 @@ function ModList() {
     queryKey: ["conflicts", GAME],
     queryFn: () => detectConflicts(GAME),
   });
+  const sessionActive = useSessionActive();
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
@@ -678,7 +797,7 @@ function ModList() {
               <input
                 type="checkbox"
                 checked={m.enabled}
-                disabled={toggle.isPending}
+                disabled={toggle.isPending || sessionActive}
                 onChange={(e) =>
                   toggle.mutate({ id: m.id, enabled: e.currentTarget.checked })
                 }

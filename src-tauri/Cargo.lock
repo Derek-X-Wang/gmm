@@ -1545,6 +1545,7 @@ dependencies = [
  "gmm-loader",
  "hex",
  "junction",
+ "libc",
  "mockito",
  "reqwest 0.12.28",
  "serde",

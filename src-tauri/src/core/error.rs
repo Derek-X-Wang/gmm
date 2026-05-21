@@ -60,6 +60,11 @@ pub enum Error {
 
     #[error("GameBanana error: {0}")]
     GameBanana(String),
+
+    #[error(
+        "{game} is running (game session active since {since}); close the game before changing mods."
+    )]
+    SessionActive { game: String, since: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

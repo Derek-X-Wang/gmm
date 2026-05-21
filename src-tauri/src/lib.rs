@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod core;
+pub mod runtime;
 
 use std::path::PathBuf;
 
@@ -43,6 +44,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(core)
+        .manage(crate::runtime::SessionRuntime::new())
         .invoke_handler(tauri::generate_handler![
             commands::list_mods,
             commands::adopt_folder,
@@ -78,6 +80,9 @@ pub fn run() {
             commands::set_mod_updates_globally_enabled,
             commands::mod_updates_globally_enabled,
             commands::apply_mod_update,
+            commands::launch_game,
+            commands::current_session,
+            commands::clean_stale_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

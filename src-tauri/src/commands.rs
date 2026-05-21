@@ -21,7 +21,9 @@ use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
 use crate::core::updates::UpdateStatus;
 use crate::core::variants::Variant;
-use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport};
+use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport, SessionInfo};
+use crate::runtime::{SessionRuntime, SESSION_ENDED_EVENT, SESSION_STARTED_EVENT};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -601,4 +603,167 @@ pub async fn detect_game_install_path(
             .map_err(|e| e.to_string())?;
     }
     Ok(detected)
+}
+
+// ---- slice 4b (#12) — game session commands ----
+
+/// Locate the bundled / vendored `3dmloader.dll`. Resolution order:
+/// 1. `GMM_LOADER_DLL` env var (override for smoke tests + dev)
+/// 2. `<exe-dir>/3dmloader.dll` (production bundle layout)
+/// 3. `<repo-root>/vendor/3dmloader/3dmloader.dll` (dev convenience)
+fn locate_loader_dll() -> Result<PathBuf, String> {
+    if let Ok(env_path) = std::env::var("GMM_LOADER_DLL") {
+        let p = PathBuf::from(env_path);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    if let Some(dir) = exe.parent() {
+        let candidate = dir.join("3dmloader.dll");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+        // Dev fallback: target/<profile>/gmm[.exe] → ../../../vendor/...
+        let mut walker = dir.to_path_buf();
+        for _ in 0..6 {
+            let candidate = walker.join("vendor/3dmloader/3dmloader.dll");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+            if !walker.pop() {
+                break;
+            }
+        }
+    }
+    Err("Couldn't find 3dmloader.dll. Set GMM_LOADER_DLL or reinstall.".to_string())
+}
+
+/// Pick the game executable to launch given a Game and its install
+/// directory. Currently GIMI-specific (the per-game ports — #16–#20 —
+/// fill in the other five).
+fn resolve_game_exe(game: GameCode, install: &std::path::Path) -> Result<PathBuf, String> {
+    match game {
+        GameCode::Gimi => {
+            for candidate in ["GenshinImpact.exe", "YuanShen.exe"] {
+                let p = install.join(candidate);
+                if p.exists() {
+                    return Ok(p);
+                }
+            }
+            Err(format!(
+                "GenshinImpact.exe / YuanShen.exe not found under {}.",
+                install.display()
+            ))
+        }
+        _ => Err(format!(
+            "Launching {:?} is not wired yet — see the per-game port issues.",
+            game
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn current_session(core: State<'_, Core>) -> Result<Option<SessionInfo>, String> {
+    core.session_info().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn clean_stale_session(core: State<'_, Core>) -> Result<Option<SessionInfo>, String> {
+    core.clean_stale_session().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn launch_game(
+    app: AppHandle,
+    core: State<'_, Core>,
+    runtime: State<'_, SessionRuntime>,
+    game: GameCode,
+) -> Result<SessionInfo, String> {
+    use gmm_loader::Loader;
+
+    // Reject if a session is already active.
+    if let Some(existing) = core.session_info().await.map_err(|e| e.to_string())? {
+        return Err(format!(
+            "{} is already running (since {}).",
+            existing.game.as_str(),
+            existing.started_at
+        ));
+    }
+
+    let install = core
+        .game_install_path(game)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Set the game install path in Settings before launching.".to_string())?;
+
+    let game_exe = resolve_game_exe(game, &install)?;
+    let dll_to_inject = install.join("d3d11.dll");
+    if !dll_to_inject.exists() {
+        return Err(format!(
+            "Model Importer DLL not found at {}. Install the importer for this game first.",
+            dll_to_inject.display()
+        ));
+    }
+    let loader_dll = locate_loader_dll()?;
+
+    // Load + hook BEFORE spawning the game so the CBT hook is in place
+    // when the game's window appears.
+    let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
+    let hook = loader
+        .hook(&dll_to_inject)
+        .map_err(|e| format!("install hook: {e}"))?;
+    // The HookSession borrows the Loader lifetime; transmute to 'static
+    // is sound because HookSession owns an Arc<LoadedDll> internally.
+    // SAFETY: the Arc keeps the DLL mapped for the session's lifetime,
+    // and we never drop the Loader before the HookSession.
+    let hook_static: gmm_loader::HookSession<'static> = unsafe { std::mem::transmute(hook) };
+
+    let child = std::process::Command::new(&game_exe)
+        .current_dir(&install)
+        .spawn()
+        .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+
+    let info = SessionInfo {
+        game,
+        pid: child.id(),
+        started_at: chrono::Utc::now(),
+    };
+    core.start_session(&info).await.map_err(|e| e.to_string())?;
+
+    runtime.install(crate::runtime::session::LiveSession {
+        info: info.clone(),
+        child,
+        _hook: hook_static,
+        _loader: loader,
+    });
+
+    // Emit to the frontend so the banner appears immediately.
+    let _ = app.emit(SESSION_STARTED_EVENT, &info);
+
+    // Spawn the exit watcher. It polls every 500 ms; on child exit it
+    // drops the LiveSession (which unhooks via RAII), clears the DB
+    // row, and emits SESSION_ENDED_EVENT.
+    let app_for_watch = app.clone();
+    let runtime_for_watch = runtime.inner_clone();
+    let core_for_watch = (*core).clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            match runtime_for_watch.try_wait_child() {
+                Ok(Some(_status)) => break,
+                Ok(None) => continue,
+                Err(_) => break, // process gone / handle invalid
+            }
+        }
+        // Drop the LiveSession → unhook + close child handle.
+        let _ = runtime_for_watch.take();
+        // Best-effort: clear the persisted row.
+        if let Err(e) = core_for_watch.end_session().await {
+            tracing::warn!(error = %e, "end_session failed in watcher");
+        }
+        let _ = app_for_watch.emit(SESSION_ENDED_EVENT, ());
+    });
+
+    Ok(info)
 }
