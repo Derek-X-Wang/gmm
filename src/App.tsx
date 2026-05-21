@@ -8,13 +8,16 @@ import {
   avGuidance,
   cleanStaleSession,
   currentSession,
+  isOnboardingComplete,
   launchGame,
   listSupportedGames,
   partitionLaunchError,
+  resetOnboarding,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
   type AvGuidance,
   type GameSummary,
+  type OnboardingStatus,
   type SessionInfo,
   applyModUpdate,
   checkImporterUpdate,
@@ -49,6 +52,7 @@ import {
   type GameCode as ApiGameCode,
 } from "./api";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
+import { OnboardingWizard } from "./OnboardingWizard";
 import "./App.css";
 
 /**
@@ -61,6 +65,55 @@ const FALLBACK_GAMES: GameSummary[] = [
 ];
 
 function App() {
+  const qc = useQueryClient();
+  const onboarding = useQuery<OnboardingStatus>({
+    queryKey: ["onboarding", "status"],
+    queryFn: isOnboardingComplete,
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
+  });
+
+  // The wizard can be force-opened from the main app (Help → Run setup
+  // again, or the "Finish setup" banner's Resume button). The query
+  // alone isn't enough — once `complete=true` we still need a way to
+  // re-show the wizard without resetting state to "not complete".
+  const [forceWizard, setForceWizard] = useState(false);
+
+  if (onboarding.isLoading) {
+    return (
+      <main className="app">
+        <p className="muted">Loading…</p>
+      </main>
+    );
+  }
+
+  const status = onboarding.data;
+  const showWizard = forceWizard || !status?.complete;
+
+  if (showWizard) {
+    return (
+      <OnboardingWizard
+        onDone={() => {
+          setForceWizard(false);
+          qc.invalidateQueries({ queryKey: ["onboarding", "status"] });
+          qc.invalidateQueries({ queryKey: ["installPath"] });
+          qc.invalidateQueries({ queryKey: ["libraryPaths"] });
+        }}
+      />
+    );
+  }
+
+  return <MainApp skipped={status?.skipped ?? false} onResumeWizard={() => setForceWizard(true)} />;
+}
+
+function MainApp({
+  skipped,
+  onResumeWizard,
+}: {
+  skipped: boolean;
+  onResumeWizard: () => void;
+}) {
+  const qc = useQueryClient();
   const games = useQuery<GameSummary[]>({
     queryKey: ["supportedGames"],
     queryFn: listSupportedGames,
@@ -79,11 +132,40 @@ function App() {
   }, [list, activeGame]);
   const active = list.find((g) => g.code === activeGame) ?? list[0];
 
+  const reopenSetup = useMutation({
+    mutationFn: () => resetOnboarding(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["onboarding", "status"] });
+      onResumeWizard();
+    },
+  });
+
   return (
     <main className="app">
       <header className="app__header">
         <h1>GMM — {active.displayName}</h1>
+        <div className="row">
+          <button
+            className="app__help"
+            onClick={() => reopenSetup.mutate()}
+            disabled={reopenSetup.isPending}
+            title="Help → Run setup again"
+          >
+            Run setup again
+          </button>
+        </div>
       </header>
+      {skipped ? (
+        <section className="card finish-setup-banner" role="status">
+          <div>
+            <strong>Setup isn't finished yet.</strong>
+            <span className="muted small">
+              {" "}You skipped one or more steps. Resume any time.
+            </span>
+          </div>
+          <button onClick={onResumeWizard}>Resume setup</button>
+        </section>
+      ) : null}
       <SessionBanner />
       <GameTabs games={list} active={activeGame} onChange={setActiveGame} />
       <LaunchGameButton game={activeGame} displayName={active.displayName} />

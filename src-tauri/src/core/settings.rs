@@ -49,6 +49,20 @@ pub mod keys {
     pub fn library_root_for_game(game: GameCode) -> String {
         format!("library.{}", game.as_str())
     }
+
+    /// Slice 16-b (#24) — first-run onboarding state. `true` once the
+    /// wizard either finishes or is skipped; the App router uses it to
+    /// route between `/onboarding` and the main view.
+    pub fn onboarding_complete() -> &'static str {
+        "onboarding.complete"
+    }
+
+    /// Slice 16-b (#24) — `true` iff the user pressed *Skip setup*
+    /// instead of completing the wizard. Drives the "Finish setup"
+    /// banner the spec puts on Settings until the user resumes.
+    pub fn onboarding_skipped() -> &'static str {
+        "onboarding.skipped"
+    }
 }
 
 /// Convenience: bring the keys into scope as `Error`-returning helpers

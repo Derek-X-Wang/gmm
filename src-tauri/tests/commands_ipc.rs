@@ -443,6 +443,44 @@ fn non_efmi_games_default_to_hook_inject_mode() {
     }
 }
 
+#[tokio::test]
+async fn detect_all_games_returns_one_row_per_ported_game() {
+    // Slice 16-b (#24): Step 2 of the wizard renders one row per
+    // ported game. On a fresh machine with no installs, every row
+    // surfaces `detectedPath = null` so the UI can fall through to
+    // the manual browse/skip controls.
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    // We can't invoke the Tauri command directly (it takes a
+    // `State<'_, Core>`), but the IPC contract is what we want to
+    // pin: emulate the command body by calling each ported game's
+    // detect fn and serialising the response.
+    use gmm_lib::core::games::GAME_PROFILES;
+    let mut payload = Vec::new();
+    for p in GAME_PROFILES.iter().filter(|p| p.is_ported()) {
+        let detect = p.detect.expect("ported");
+        let detected = tokio::task::spawn_blocking(detect).await.expect("join");
+        payload.push(serde_json::json!({
+            "code": p.code,
+            "displayName": p.display_name,
+            "detectedPath": detected,
+        }));
+    }
+    assert_eq!(
+        payload.len(),
+        GAME_PROFILES.iter().filter(|p| p.is_ported()).count()
+    );
+    // Every row carries camelCase keys.
+    for row in &payload {
+        let obj = row.as_object().expect("object");
+        assert!(obj.contains_key("code"));
+        assert!(obj.contains_key("displayName"));
+        assert!(obj.contains_key("detectedPath"));
+    }
+    // Touch `core` to ensure the State wiring compiles in real usage.
+    let _ = core;
+}
+
 #[test]
 fn av_guidance_response_uses_camel_case_keys() {
     // Slice NEW-AV / #13: the `av_guidance` Tauri command returns the

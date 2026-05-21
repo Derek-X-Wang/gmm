@@ -287,3 +287,37 @@ Any step ──Skip setup──► Settings (with "Finish setup" banner)
 ## Open questions
 
 None at this point. If 16-b implementation surfaces a UX call we didn't make here, the implementer should comment on this file in their PR with the question; we'll resolve it in the PR before merging.
+
+## Implementation notes (slice 16-b / #24)
+
+Documented divergences vs. the spec above, taken in the slice-16-b PR
+under the AC's "implementation diff is reviewed and the spec is updated
+in the same PR" allowance:
+
+- **Re-open entry point.** The spec proposed *Help → Run setup again*.
+  v1 ships without a Help menu, so the same affordance lives as a
+  `Run setup again` button in the main app's header alongside the game
+  title. The Settings *Resume setup* banner from the spec is still
+  present and behaves the same.
+- **Importer install UX (Step 4).** The wireframe shows a progress bar
+  with `%` and a *Pause* button. v1 ships per-row status
+  (Queued / Installing… / ✓ Done / error text) with a per-row *Retry*
+  button on failure. The *Pause* button is deferred — no upstream
+  progress signal yet from `install_importer`, and pause semantics
+  would be a separate slice anyway.
+- **Step 3 picker validations.** *Inside-a-game-install* and
+  *not-writable* checks are not explicit in `set_library_root`; the
+  underlying `setLibraryRoot` mutation surfaces the OS / NTFS errors
+  inline. The NTFS check from ADR 0003 fires before any move.
+- **Settings panel banner.** Spec sketched a dedicated Settings banner
+  listing skipped steps. v1 ships a top-of-app banner (`Setup isn't
+  finished yet. Resume setup.`) shown whenever
+  `onboarding.skipped == true`. The skipped-step enumeration is
+  deferred to a future slice — the banner already gets users back to
+  the wizard which is the v1 win.
+- **Backend `settings` keys.** The spec table called for
+  `onboarding_complete` + `onboarding_skipped_steps (JSON array)`. v1
+  ships `onboarding.complete` + `onboarding.skipped` boolean keys to
+  keep the persistence shape boring. The detailed
+  skipped-steps array can land alongside the banner enumeration when
+  we add it.

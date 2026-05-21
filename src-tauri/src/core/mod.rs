@@ -97,6 +97,43 @@ impl Core {
         Ok(self.resolved_library_root().await?.join(game.as_str()))
     }
 
+    /// Slice 16-b (#24): read the persisted onboarding state. The
+    /// App router uses this on every cold start to decide between
+    /// showing the wizard vs. the main app.
+    pub async fn onboarding_status(&self) -> Result<crate::commands::OnboardingStatus> {
+        let complete = get_setting(&self.pool, keys::onboarding_complete())
+            .await?
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        let skipped = get_setting(&self.pool, keys::onboarding_skipped())
+            .await?
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        Ok(crate::commands::OnboardingStatus { complete, skipped })
+    }
+
+    /// Slice 16-b (#24): persist that the user finished or skipped
+    /// the wizard. `skipped == true` keeps the "Finish setup" banner
+    /// alive in Settings until the user resumes.
+    pub async fn mark_onboarding_complete(&self, skipped: bool) -> Result<()> {
+        put_setting(&self.pool, keys::onboarding_complete(), Some("true")).await?;
+        put_setting(
+            &self.pool,
+            keys::onboarding_skipped(),
+            Some(if skipped { "true" } else { "false" }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Slice 16-b (#24): re-open the wizard on the next launch. Used
+    /// by the Help → Run setup again entry point.
+    pub async fn reset_onboarding(&self) -> Result<()> {
+        put_setting(&self.pool, keys::onboarding_complete(), Some("false")).await?;
+        put_setting(&self.pool, keys::onboarding_skipped(), Some("false")).await?;
+        Ok(())
+    }
+
     /// Read the user-set override (if any) for the global library root.
     pub async fn library_root_override(&self) -> Result<Option<PathBuf>> {
         Ok(get_setting(&self.pool, keys::library_root())
