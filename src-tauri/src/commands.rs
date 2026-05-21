@@ -8,10 +8,14 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use tauri::State;
 
+use std::collections::HashMap;
+
+use serde::Serialize;
+
 use crate::core::detect;
 use crate::core::diagnostics;
 use crate::core::reconcile::ReconcileResult;
-use crate::core::{Core, GameCode, ImportZipOptions, Mod};
+use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +151,92 @@ pub async fn export_diagnostics_bundle(
 #[tauri::command]
 pub fn diagnostics_log_dir() -> Result<PathBuf, String> {
     crate::log_dir().map_err(|e| e.to_string())
+}
+
+/// Effective + default library paths, returned to the Settings UI so
+/// it can render the global root + each per-game override row.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPaths {
+    /// Default root passed to [`crate::core::Core::new`] — what the user
+    /// would see if every override is cleared.
+    pub default_root: PathBuf,
+    /// Explicit user override (empty when the user has never changed it).
+    pub root_override: Option<PathBuf>,
+    /// Resolved root after applying any override.
+    pub effective_root: PathBuf,
+    /// Per-game override map (keys = lowercased game codes); `None`
+    /// means "no override, fall back to global root".
+    pub per_game_overrides: HashMap<String, Option<PathBuf>>,
+    /// Effective per-game library path (always present).
+    pub per_game_effective: HashMap<String, PathBuf>,
+}
+
+const ALL_GAMES: &[GameCode] = &[
+    GameCode::Gimi,
+    GameCode::Srmi,
+    GameCode::Zzmi,
+    GameCode::Wwmi,
+    GameCode::Himi,
+    GameCode::Efmi,
+];
+
+#[tauri::command]
+pub async fn get_library_paths(core: State<'_, Core>) -> Result<LibraryPaths, String> {
+    let default_root = core.default_library_root().to_path_buf();
+    let root_override = core
+        .library_root_override()
+        .await
+        .map_err(|e| e.to_string())?;
+    let effective_root = core
+        .resolved_library_root()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut per_game_overrides = HashMap::new();
+    let mut per_game_effective = HashMap::new();
+    for game in ALL_GAMES {
+        let key = game.as_str().to_string();
+        let over = core
+            .library_root_override_for_game(*game)
+            .await
+            .map_err(|e| e.to_string())?;
+        let eff = core
+            .resolved_library_root_for(*game)
+            .await
+            .map_err(|e| e.to_string())?;
+        per_game_overrides.insert(key.clone(), over);
+        per_game_effective.insert(key, eff);
+    }
+
+    Ok(LibraryPaths {
+        default_root,
+        root_override,
+        effective_root,
+        per_game_overrides,
+        per_game_effective,
+    })
+}
+
+#[tauri::command]
+pub async fn set_library_root(
+    core: State<'_, Core>,
+    path: Option<PathBuf>,
+) -> Result<MoveReport, String> {
+    core.set_library_root(path.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_library_path_for_game(
+    core: State<'_, Core>,
+    game: GameCode,
+    path: Option<PathBuf>,
+) -> Result<MoveReport, String> {
+    core.set_library_path_for_game(game, path.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Tauri command — reconcile junctions for a game in place. Used by

@@ -11,6 +11,7 @@ pub mod games;
 pub mod junction;
 pub mod mods;
 pub mod reconcile;
+pub mod settings;
 pub mod volume;
 pub mod zip_import;
 
@@ -27,20 +28,22 @@ pub use games::GameCode;
 pub use mods::{Mod, Source};
 pub use zip_import::ImportZipOptions;
 
+use settings::{get as get_setting, keys, put as put_setting};
+
 /// The Core owns the SQLite pool and the Library root. Everything that
 /// reads from or writes to the user's data goes through here.
 #[derive(Clone)]
 pub struct Core {
     pool: SqlitePool,
-    library_root: PathBuf,
+    default_library_root: PathBuf,
 }
 
 impl Core {
     /// Open (or create) the DB at `db_url`, run pending migrations, and
     /// ensure the Library root exists.
-    pub async fn new(library_root: PathBuf, db_url: &str) -> Result<Self> {
-        std::fs::create_dir_all(&library_root).map_err(|source| Error::Io {
-            path: library_root.clone(),
+    pub async fn new(default_library_root: PathBuf, db_url: &str) -> Result<Self> {
+        std::fs::create_dir_all(&default_library_root).map_err(|source| Error::Io {
+            path: default_library_root.clone(),
             source,
         })?;
 
@@ -50,12 +53,280 @@ impl Core {
         let pool = SqlitePool::connect_with(opts).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
 
-        Ok(Self { pool, library_root })
+        Ok(Self {
+            pool,
+            default_library_root,
+        })
+    }
+
+    /// Default Library root as supplied to [`Core::new`]. Not the
+    /// effective root — the user may have overridden it via settings.
+    /// Use [`Core::resolved_library_root`] when you actually need the
+    /// effective path.
+    pub fn default_library_root(&self) -> &Path {
+        &self.default_library_root
+    }
+
+    /// Effective Library root after applying any user override stored
+    /// in the `settings` table. Falls back to the default supplied at
+    /// construction time.
+    pub async fn resolved_library_root(&self) -> Result<PathBuf> {
+        let override_path = get_setting(&self.pool, keys::library_root()).await?;
+        Ok(override_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.default_library_root.clone()))
+    }
+
+    /// Effective Library subtree for `game`. Per-game override wins; if
+    /// none, fall back to `<resolved_library_root>/<game>`.
+    pub async fn resolved_library_root_for(&self, game: GameCode) -> Result<PathBuf> {
+        let per_game = get_setting(&self.pool, &keys::library_root_for_game(game)).await?;
+        if let Some(p) = per_game {
+            return Ok(PathBuf::from(p));
+        }
+        Ok(self.resolved_library_root().await?.join(game.as_str()))
+    }
+
+    /// Read the user-set override (if any) for the global library root.
+    pub async fn library_root_override(&self) -> Result<Option<PathBuf>> {
+        Ok(get_setting(&self.pool, keys::library_root())
+            .await?
+            .map(PathBuf::from))
+    }
+
+    /// Read the user-set override (if any) for a per-game library root.
+    pub async fn library_root_override_for_game(&self, game: GameCode) -> Result<Option<PathBuf>> {
+        Ok(get_setting(&self.pool, &keys::library_root_for_game(game))
+            .await?
+            .map(PathBuf::from))
+    }
+
+    /// Override the **global** Library root. Walks every Mod whose
+    /// current `library_path` sits under the previous effective root,
+    /// moves it on disk, and rewrites its DB entry. Junctions for
+    /// affected games are dropped + rebuilt via the standard reconcile
+    /// path. `new_root = None` resets the override to the default.
+    pub async fn set_library_root(&self, new_root: Option<&Path>) -> Result<MoveReport> {
+        let previous = self.resolved_library_root().await?;
+        let next = new_root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.default_library_root.clone());
+
+        if previous == next {
+            put_setting(
+                &self.pool,
+                keys::library_root(),
+                new_root.map(|p| p.to_string_lossy().to_string()).as_deref(),
+            )
+            .await?;
+            return Ok(MoveReport::default());
+        }
+
+        volume::require_ntfs(&next)?;
+
+        // Move every game's subtree from previous to next. Per-game
+        // overrides are unaffected — they're absolute and live elsewhere.
+        let report = self
+            .move_root(&previous, &next, /* per_game */ None)
+            .await?;
+        put_setting(
+            &self.pool,
+            keys::library_root(),
+            new_root.map(|p| p.to_string_lossy().to_string()).as_deref(),
+        )
+        .await?;
+        Ok(report)
+    }
+
+    /// Override the Library root for one game. Behaviour mirrors
+    /// [`Core::set_library_root`] but only the named game's subtree is
+    /// touched.
+    pub async fn set_library_path_for_game(
+        &self,
+        game: GameCode,
+        new_path: Option<&Path>,
+    ) -> Result<MoveReport> {
+        let previous = self.resolved_library_root_for(game).await?;
+        let next = new_path.map(Path::to_path_buf).unwrap_or_else(|| {
+            // When clearing, the effective path becomes
+            // `resolved_root().join(game)`. We compute it eagerly
+            // so the move flow knows where files go.
+            // (`resolved_library_root_for(game)` would still hit
+            // the now-cleared override, so we mirror its fallback
+            // here.)
+            PathBuf::new()
+        });
+
+        let fallback = self.resolved_library_root().await?.join(game.as_str());
+        let next_effective = if next.as_os_str().is_empty() {
+            fallback
+        } else {
+            next.clone()
+        };
+
+        if previous == next_effective {
+            put_setting(
+                &self.pool,
+                &keys::library_root_for_game(game),
+                new_path.map(|p| p.to_string_lossy().to_string()).as_deref(),
+            )
+            .await?;
+            return Ok(MoveReport::default());
+        }
+
+        volume::require_ntfs(&next_effective)?;
+
+        let report = self
+            .move_root(&previous, &next_effective, Some(game))
+            .await?;
+        put_setting(
+            &self.pool,
+            &keys::library_root_for_game(game),
+            new_path.map(|p| p.to_string_lossy().to_string()).as_deref(),
+        )
+        .await?;
+        Ok(report)
+    }
+
+    /// Shared body for the global + per-game moves.
+    ///
+    /// `per_game = Some(g)` restricts the move to mods for `g`.
+    /// `per_game = None` walks every game.
+    async fn move_root(
+        &self,
+        previous: &Path,
+        next: &Path,
+        per_game: Option<GameCode>,
+    ) -> Result<MoveReport> {
+        // Snapshot mods that need their library_path rewritten. For the
+        // global case we include every mod across every game; for the
+        // per-game case only that game.
+        let rows = match per_game {
+            Some(game) => {
+                sqlx::query(
+                    "SELECT id, game_code, library_path, enabled FROM mods WHERE game_code = ?",
+                )
+                .bind(game.as_str())
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query("SELECT id, game_code, library_path, enabled FROM mods")
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+        };
+
+        // Disable affected mods first to drop their junctions. We don't
+        // need the persisted enabled=0 flip — we'll re-enable in the
+        // same transaction-shaped flow below.
+        let mut previously_enabled: Vec<(String, GameCode)> = Vec::new();
+        for row in &rows {
+            let enabled: i64 = row.try_get("enabled")?;
+            if enabled == 0 {
+                continue;
+            }
+            let id: String = row.try_get("id")?;
+            let game_code: String = row.try_get("game_code")?;
+            let game = GameCode::from_str(&game_code)?;
+            let install = self.game_install_path(game).await?;
+            if let Some(install) = install {
+                let mods_dir = install.join("Mods");
+                let junction_row = sqlx::query("SELECT junction_dir_name FROM mods WHERE id = ?")
+                    .bind(&id)
+                    .fetch_one(&self.pool)
+                    .await?;
+                let junction_dir_name: String = junction_row.try_get("junction_dir_name")?;
+                let link = mods_dir.join(junction_dir_name);
+                if link_exists(&link) {
+                    let _ = junction::remove(&link);
+                }
+            }
+            previously_enabled.push((id, game));
+        }
+
+        // Move bytes. We move the **per-game** subtree as a unit when
+        // possible (one fs::rename per game). If that fails (cross-device,
+        // partial move) we fall back to a per-mod move with copy+delete.
+        let mut report = MoveReport::default();
+        std::fs::create_dir_all(next).map_err(|source| Error::Io {
+            path: next.to_path_buf(),
+            source,
+        })?;
+
+        match per_game {
+            Some(_) => {
+                // The whole `previous` directory is a single game's
+                // subtree; move it whole.
+                move_subtree(previous, next, &mut report)?;
+            }
+            None => {
+                // Global move: each game subdirectory under `previous`
+                // moves to the matching subdirectory under `next`.
+                for game in [
+                    GameCode::Gimi,
+                    GameCode::Srmi,
+                    GameCode::Zzmi,
+                    GameCode::Wwmi,
+                    GameCode::Himi,
+                    GameCode::Efmi,
+                ] {
+                    let from = previous.join(game.as_str());
+                    let to = next.join(game.as_str());
+                    if from.exists() {
+                        move_subtree(&from, &to, &mut report)?;
+                    }
+                }
+            }
+        }
+
+        // Rewrite mods.library_path entries. We use a literal
+        // `previous` → `next` string prefix swap; both paths are
+        // absolute and canonicalised on insert.
+        let previous_prefix = previous.to_string_lossy().to_string();
+        let next_prefix = next.to_string_lossy().to_string();
+        for row in &rows {
+            let id: String = row.try_get("id")?;
+            let library_path: String = row.try_get("library_path")?;
+            if !library_path.starts_with(&previous_prefix) {
+                continue;
+            }
+            let rewritten = format!("{}{}", next_prefix, &library_path[previous_prefix.len()..]);
+            sqlx::query("UPDATE mods SET library_path = ? WHERE id = ?")
+                .bind(&rewritten)
+                .bind(&id)
+                .execute(&self.pool)
+                .await?;
+            report.relocated.push(id);
+        }
+
+        // Re-enable previously-enabled mods (recreates junctions
+        // against the rewritten library_path).
+        for (id, game) in previously_enabled {
+            let install = self.game_install_path(game).await?;
+            if let Some(install) = install {
+                let mods_dir = install.join("Mods");
+                std::fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
+                    path: mods_dir.clone(),
+                    source,
+                })?;
+                // `set_enabled(false)` was effectively done by the
+                // junction::remove above without persisting; flip the
+                // bit through the proper path now so junctions land.
+                sqlx::query("UPDATE mods SET enabled = 0 WHERE id = ?")
+                    .bind(&id)
+                    .execute(&self.pool)
+                    .await?;
+                self.set_enabled(&id, true, &mods_dir).await?;
+            }
+        }
+
+        Ok(report)
     }
 
     /// Adopt an already-extracted folder into the Library as a Mod with
     /// `source = manual`. Copies the source tree into
-    /// `<library_root>/<game>/<ulid>/` and records the row.
+    /// `<resolved_library_root_for(game)>/<ulid>/` and records the row.
     pub async fn adopt_folder(
         &self,
         game: GameCode,
@@ -63,7 +334,7 @@ impl Core {
         display_name: &str,
     ) -> Result<Mod> {
         let id = Ulid::new().to_string();
-        let library_path = self.library_root.join(game.as_str()).join(&id);
+        let library_path = self.resolved_library_root_for(game).await?.join(&id);
 
         copy_dir_recursive(source_path, &library_path)?;
 
@@ -116,7 +387,7 @@ impl Core {
         opts: ImportZipOptions,
     ) -> Result<Mod> {
         let id = Ulid::new().to_string();
-        let library_path = self.library_root.join(game.as_str()).join(&id);
+        let library_path = self.resolved_library_root_for(game).await?.join(&id);
 
         if let Err(e) = zip_import::extract(zip_path, &library_path, opts) {
             // Best-effort cleanup. We swallow remove_dir_all errors so the
@@ -176,11 +447,6 @@ impl Core {
             .execute(&self.pool)
             .await?;
         Ok(())
-    }
-
-    /// Library root the Core was initialised with.
-    pub fn library_root(&self) -> &Path {
-        &self.library_root
     }
 
     /// Run the startup reconcile pass across every game whose
@@ -357,7 +623,7 @@ impl Core {
         }
 
         Ok(diagnostics::SettingsSnapshot {
-            library_root: Some(self.library_root.clone()),
+            library_root: Some(self.resolved_library_root().await?),
             game_install_paths,
             // Populated by slice 10 (proxy settings). Leaving blank here
             // means the bundle just shows `null` until then.
@@ -503,6 +769,44 @@ fn is_dos_reserved(name: &str) -> bool {
         }
     }
     false
+}
+
+/// Summary of a Library-path move. Returned by
+/// [`Core::set_library_root`] and
+/// [`Core::set_library_path_for_game`].
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MoveReport {
+    /// Mod IDs whose `library_path` was rewritten.
+    pub relocated: Vec<String>,
+    /// Top-level directories we moved (one per game, or a single entry
+    /// for the per-game case).
+    pub moved_directories: Vec<PathBuf>,
+}
+
+/// Move `from` to `to`. Prefer atomic rename; fall back to recursive
+/// copy + delete when rename fails (typically EXDEV, cross-volume).
+fn move_subtree(from: &Path, to: &Path, report: &mut MoveReport) -> Result<()> {
+    if !from.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| Error::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    match std::fs::rename(from, to) {
+        Ok(()) => {}
+        Err(_) => {
+            copy_dir_recursive(from, to)?;
+            std::fs::remove_dir_all(from).map_err(|source| Error::Io {
+                path: from.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+    report.moved_directories.push(to.to_path_buf());
+    Ok(())
 }
 
 /// Does the path exist as a symlink/junction? `Path::exists` follows
