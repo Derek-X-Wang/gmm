@@ -65,6 +65,8 @@ pub fn run() {
             commands::get_proxy_config,
             commands::set_proxy_config,
             commands::test_proxy_connection,
+            commands::list_variants,
+            commands::set_active_variant,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

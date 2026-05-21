@@ -17,6 +17,7 @@ use crate::core::diagnostics;
 use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
+use crate::core::variants::Variant;
 use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport};
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +238,49 @@ pub async fn set_library_path_for_game(
     path: Option<PathBuf>,
 ) -> Result<MoveReport, String> {
     core.set_library_path_for_game(game, path.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModVariants {
+    pub variants: Vec<Variant>,
+    pub active_variant_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn list_variants(core: State<'_, Core>, mod_id: String) -> Result<ModVariants, String> {
+    let variants = core
+        .list_variants(&mod_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let active_variant_id = core
+        .active_variant_id(&mod_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(ModVariants {
+        variants,
+        active_variant_id,
+    })
+}
+
+#[tauri::command]
+pub async fn set_active_variant(
+    core: State<'_, Core>,
+    mod_id: String,
+    variant_id: String,
+    game: GameCode,
+) -> Result<(), String> {
+    let install = core
+        .game_install_path(game)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Set the game install path before switching variants.".to_string())?;
+    let mods_dir = install.join("Mods");
+    std::fs::create_dir_all(&mods_dir)
+        .map_err(|e| format!("create {}: {e}", mods_dir.display()))?;
+    core.set_active_variant(&mod_id, &variant_id, &mods_dir)
         .await
         .map_err(|e| e.to_string())
 }
