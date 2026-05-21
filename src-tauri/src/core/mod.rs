@@ -9,6 +9,7 @@ pub mod games;
 pub mod junction;
 pub mod mods;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -57,7 +58,8 @@ impl Core {
 
         copy_dir_recursive(source_path, &library_path)?;
 
-        let junction_dir_name = sanitize_dir_name(display_name);
+        let base = sanitize_dir_name(display_name);
+        let junction_dir_name = self.pick_unique_junction_dir_name(game, &base).await?;
 
         let created_at = Utc::now().to_rfc3339();
         sqlx::query(
@@ -85,6 +87,37 @@ impl Core {
             library_path,
             enabled: false,
         })
+    }
+
+    /// Find an unused junction directory name for the given game, deduping
+    /// collisions by appending ` (2)`, ` (3)`, ... If `base` is already
+    /// unique we return it unchanged.
+    async fn pick_unique_junction_dir_name(
+        &self,
+        game: GameCode,
+        base: &str,
+    ) -> Result<String> {
+        let rows = sqlx::query("SELECT junction_dir_name FROM mods WHERE game_code = ?")
+            .bind(game.as_str())
+            .fetch_all(&self.pool)
+            .await?;
+
+        let existing: HashSet<String> = rows
+            .iter()
+            .filter_map(|r| r.try_get::<String, _>("junction_dir_name").ok())
+            .collect();
+
+        if !existing.contains(base) {
+            return Ok(base.to_string());
+        }
+
+        for n in 2..=u32::MAX {
+            let candidate = format!("{base} ({n})");
+            if !existing.contains(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        unreachable!("u32::MAX collisions on one display name is not a real scenario")
     }
 
     /// Enable or disable a Mod. On enable, a Junction is created at
@@ -159,9 +192,11 @@ impl Core {
     }
 }
 
-/// Strip NTFS-reserved characters from a Mod's display name to produce a
-/// safe junction directory name. Does not yet handle reserved DOS device
-/// names (CON, PRN, ...) or collisions — those land in subsequent cycles.
+/// Convert a Mod's display name into a directory name that NTFS will
+/// accept under `<Game>/Mods/`: strip reserved characters, trim trailing
+/// dots/spaces, and prefix any DOS device name (CON, PRN, AUX, NUL,
+/// COM1..9, LPT1..9) so it stops being reserved. Collision dedup happens
+/// at the Core layer (see `pick_unique_junction_dir_name`).
 pub(crate) fn sanitize_dir_name(display: &str) -> String {
     let stripped: String = display
         .chars()
@@ -170,7 +205,37 @@ pub(crate) fn sanitize_dir_name(display: &str) -> String {
         })
         .collect();
     let trimmed = stripped.trim_end_matches(|c: char| c == '.' || c == ' ');
-    trimmed.to_string()
+    let capped: String = trimmed.chars().take(MAX_JUNCTION_DIR_CHARS).collect();
+    let capped_trimmed = capped
+        .trim_end_matches(|c: char| c == '.' || c == ' ')
+        .to_string();
+
+    if is_dos_reserved(&capped_trimmed) {
+        format!("_{capped_trimmed}")
+    } else {
+        capped_trimmed
+    }
+}
+
+/// Conservative cap that leaves headroom for `<Game>/Mods/` prefix and any
+/// future suffix logic (e.g. ` (123)` dedup) while staying inside the
+/// MAX_PATH-friendly window used by most Windows tooling.
+const MAX_JUNCTION_DIR_CHARS: usize = 200;
+
+fn is_dos_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    for prefix in ["COM", "LPT"] {
+        if stem.len() == prefix.len() + 1 && stem.starts_with(prefix) {
+            let last = stem.as_bytes()[prefix.len()];
+            if last.is_ascii_digit() && last != b'0' {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Recursive directory copy. Standard library has no built-in equivalent.
