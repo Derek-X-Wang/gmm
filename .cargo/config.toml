@@ -1,0 +1,5 @@
+# Project-internal cargo config. The xtask alias lets us run
+# `cargo xtask <subcommand>` from anywhere inside src-tauri/.
+
+[alias]
+xtask = "run --manifest-path src-tauri/crates/xtask/Cargo.toml --release --"

@@ -1,0 +1,19 @@
+[package]
+name = "victim"
+version = "0.1.0"
+description = "Controlled target process for `cargo xtask test-loader`. Creates a window with class GMM-LOADER-TEST-VICTIM, idles, exits on WM_CLOSE or 30 s timeout."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "victim"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }

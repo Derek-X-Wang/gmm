@@ -1,11 +1,20 @@
+[workspace]
+members = [".", "crates/loader", "crates/xtask", "crates/victim", "crates/noop_dll"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Derek-X-Wang/gmm"
+
 [package]
 name = "gmm"
 version = "0.1.0"
 description = "Gacha Mod Manager — Tauri desktop mod manager for XXMI-family model importers"
 authors = ["Derek Wang <derek@getbite.com>"]
-edition = "2021"
-license = "GPL-3.0-or-later"
-repository = "https://github.com/Derek-X-Wang/gmm"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -40,6 +49,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sha2 = "0.10"
 hex = "0.4"
+gmm-loader = { path = "crates/loader" }
 
 [target.'cfg(windows)'.dependencies]
 junction = "1"

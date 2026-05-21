@@ -1542,6 +1542,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "filetime",
+ "gmm-loader",
  "hex",
  "junction",
  "mockito",
@@ -1565,6 +1566,16 @@ dependencies = [
  "windows-sys 0.59.0",
  "winreg",
  "zip",
+]
+
+[[package]]
+name = "gmm-loader"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2455,6 +2466,13 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+
+[[package]]
+name = "noop_dll"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "nu-ansi-term"
@@ -5308,6 +5326,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "victim"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "vswhom"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6306,6 +6331,13 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "gmm-loader",
 ]
 
 [[package]]

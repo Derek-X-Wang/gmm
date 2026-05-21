@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+description = "Project-internal task runner. `cargo xtask <subcommand>`."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+gmm-loader = { path = "../loader" }
