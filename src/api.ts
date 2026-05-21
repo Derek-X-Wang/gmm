@@ -127,3 +127,31 @@ export async function rebuildJunctions(game: GameCode): Promise<ReconcileResult>
     await invoke<RawReconcile>("rebuild_junctions", { game }),
   );
 }
+
+export interface LibraryPaths {
+  defaultRoot: string;
+  rootOverride: string | null;
+  effectiveRoot: string;
+  perGameOverrides: Record<string, string | null>;
+  perGameEffective: Record<string, string>;
+}
+
+export interface MoveReport {
+  relocated: string[];
+  moved_directories: string[];
+}
+
+export async function getLibraryPaths(): Promise<LibraryPaths> {
+  return invoke<LibraryPaths>("get_library_paths");
+}
+
+export async function setLibraryRoot(path: string | null): Promise<MoveReport> {
+  return invoke<MoveReport>("set_library_root", { path });
+}
+
+export async function setLibraryPathForGame(
+  game: GameCode,
+  path: string | null,
+): Promise<MoveReport> {
+  return invoke<MoveReport>("set_library_path_for_game", { game, path });
+}

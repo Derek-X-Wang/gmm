@@ -6,11 +6,15 @@ import {
   adoptFolder,
   detectGameInstallPath,
   getGameInstallPath,
+  getLibraryPaths,
   importZip,
   listMods,
   rebuildJunctions,
   setGameInstallPath,
+  setLibraryPathForGame,
+  setLibraryRoot,
   setModEnabled,
+  type GameCode as ApiGameCode,
 } from "./api";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import "./App.css";
@@ -24,9 +28,113 @@ function App() {
         <h1>GMM — Genshin (v0.1 foundation)</h1>
       </header>
       <Settings />
+      <LibraryPathsPanel />
       <Diagnostics />
       <ModList />
     </main>
+  );
+}
+
+/**
+ * Settings → Library panel. Global root + per-game override rows with
+ * Change / Reset buttons. Path moves go through the same
+ * disable → move → rebuild flow as a manual Rebuild action.
+ */
+function LibraryPathsPanel() {
+  const qc = useQueryClient();
+  const paths = useQuery({
+    queryKey: ["libraryPaths"],
+    queryFn: getLibraryPaths,
+  });
+
+  const refresh = () => qc.invalidateQueries({ queryKey: ["libraryPaths"] });
+
+  const setRoot = useMutation({
+    mutationFn: (next: string | null) => setLibraryRoot(next),
+    onSuccess: refresh,
+  });
+  const setPerGame = useMutation({
+    mutationFn: ({ game, path }: { game: ApiGameCode; path: string | null }) =>
+      setLibraryPathForGame(game, path),
+    onSuccess: refresh,
+  });
+
+  const pickAndApply = async (apply: (path: string) => void) => {
+    const picked = await open({ directory: true, multiple: false });
+    if (typeof picked === "string") apply(picked);
+  };
+
+  if (!paths.data) {
+    return (
+      <section className="card">
+        <h2>Library</h2>
+        <p className="muted">Resolving paths…</p>
+      </section>
+    );
+  }
+
+  const p = paths.data;
+  const games: ApiGameCode[] = ["gimi", "srmi", "zzmi", "wwmi", "himi", "efmi"];
+
+  return (
+    <section className="card">
+      <h2>Library</h2>
+      <p className="muted">
+        Where GMM keeps each game's Mod copies. Changing a path disables affected mods,
+        moves the bytes, then re-enables them against the new location. Non-NTFS targets
+        are refused before any move.
+      </p>
+
+      <div className="row">
+        <input
+          className="path"
+          value={p.effectiveRoot}
+          readOnly
+        />
+        <span className="muted small">
+          {p.rootOverride ? "Override" : `Default (${p.defaultRoot})`}
+        </span>
+      </div>
+      <div className="row">
+        <button onClick={() => pickAndApply((path) => setRoot.mutate(path))} disabled={setRoot.isPending}>
+          {setRoot.isPending ? "Moving…" : "Change global root…"}
+        </button>
+        <button
+          onClick={() => setRoot.mutate(null)}
+          disabled={setRoot.isPending || !p.rootOverride}
+        >
+          Reset to default
+        </button>
+      </div>
+      {setRoot.isError ? <p className="error">{String(setRoot.error)}</p> : null}
+
+      <h3 className="muted small">Per-game overrides</h3>
+      {games.map((game) => {
+        const override = p.perGameOverrides[game];
+        const effective = p.perGameEffective[game];
+        return (
+          <div className="row" key={game}>
+            <code className="small">{game}</code>
+            <input className="path" value={effective ?? ""} readOnly />
+            <button
+              onClick={() =>
+                pickAndApply((path) => setPerGame.mutate({ game, path }))
+              }
+              disabled={setPerGame.isPending}
+            >
+              Change…
+            </button>
+            <button
+              onClick={() => setPerGame.mutate({ game, path: null })}
+              disabled={setPerGame.isPending || !override}
+            >
+              Reset
+            </button>
+          </div>
+        );
+      })}
+      {setPerGame.isError ? <p className="error">{String(setPerGame.error)}</p> : null}
+    </section>
   );
 }
 

@@ -56,6 +56,9 @@ pub fn run() {
             commands::detect_game_install_path,
             commands::reconcile_junctions,
             commands::rebuild_junctions,
+            commands::get_library_paths,
+            commands::set_library_root,
+            commands::set_library_path_for_game,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
