@@ -223,6 +223,13 @@ pub struct HookSession<'loader> {
     _phantom: std::marker::PhantomData<&'loader Loader>,
 }
 
+// HHOOK / HANDLE are Win32 opaque pointers backed by kernel objects.
+// Win32 documents both as thread-safe; the only state the user code
+// touches is the `&mut` outparams during UnhookLibrary, which take place
+// behind the session's exclusive borrow.
+unsafe impl Send for HookSession<'_> {}
+unsafe impl Sync for HookSession<'_> {}
+
 impl HookSession<'_> {
     /// Block until a process whose name contains `target_process` has
     /// loaded the hooked DLL, or `timeout_secs` seconds elapse.

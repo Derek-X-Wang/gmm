@@ -731,7 +731,7 @@ pub async fn launch_game(
     };
     core.start_session(&info).await.map_err(|e| e.to_string())?;
 
-    runtime.install(crate::runtime::session::LiveSession {
+    runtime.inner().install(crate::runtime::session::LiveSession {
         info: info.clone(),
         child,
         _hook: hook_static,
@@ -745,7 +745,7 @@ pub async fn launch_game(
     // drops the LiveSession (which unhooks via RAII), clears the DB
     // row, and emits SESSION_ENDED_EVENT.
     let app_for_watch = app.clone();
-    let runtime_for_watch = runtime.inner_clone();
+    let runtime_for_watch = runtime.inner().inner_clone();
     let core_for_watch = (*core).clone();
     tokio::spawn(async move {
         loop {
