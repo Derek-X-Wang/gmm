@@ -31,6 +31,24 @@ required to reproduce path-dependent bugs.
 You decide where the bundle is written and whether to share it. GMM
 never uploads anything on your behalf.
 
+## Network / Proxy
+
+GMM's outbound traffic (GitHub release downloads, GameBanana API) can
+be routed through an HTTP or SOCKS5 proxy. Configure it under Settings →
+Network. Expected URL formats:
+
+- `http://host:port`
+- `http://host:port` with optional username/password fields (Basic auth)
+- `socks5://host:port`
+
+The "Test connection" button issues a HEAD request to
+`api.github.com` through the configured proxy and surfaces a clear
+"Proxy unreachable" error if it cannot connect. The proxy password is
+write-only in the UI and never read back — it lives in the local
+SQLite settings table and is excluded from the diagnostics bundle.
+Userinfo pasted into the URL field (e.g. `http://user:pass@proxy`) is
+also redacted in the bundle as defence-in-depth.
+
 ## Recommended IDE Setup
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)

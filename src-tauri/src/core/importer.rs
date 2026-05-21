@@ -375,16 +375,17 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// `SpectrumQT/GIMI-Package`). Picks the first asset matching
 /// `asset_filter` (a substring match) — typically the `.zip` package.
 /// Returns `Ok(None)` on a 304 Not Modified when `etag` is supplied.
+///
+/// The caller must build the `client` via
+/// [`crate::core::Core::http_client`] so the request honours any
+/// configured proxy.
 pub async fn fetch_latest_release(
+    client: &reqwest::Client,
     owner_repo: &str,
     asset_filter: &str,
     etag: Option<&str>,
 ) -> Result<Option<LatestRelease>> {
     let url = format!("https://api.github.com/repos/{owner_repo}/releases/latest");
-    let client = reqwest::Client::builder()
-        .user_agent("gmm/0.1 (+https://github.com/Derek-X-Wang/gmm)")
-        .build()
-        .map_err(|e| Error::Importer(format!("reqwest builder: {e}")))?;
     let mut req = client.get(&url);
     if let Some(tag) = etag {
         req = req.header("If-None-Match", tag);
@@ -463,11 +464,10 @@ pub async fn fetch_latest_release(
 
 /// Stream a release asset to `dest`. Returns the byte count written so
 /// the caller can sanity-check Content-Length.
-pub async fn download_to(url: &str, dest: &Path) -> Result<u64> {
-    let client = reqwest::Client::builder()
-        .user_agent("gmm/0.1 (+https://github.com/Derek-X-Wang/gmm)")
-        .build()
-        .map_err(|e| Error::Importer(format!("reqwest builder: {e}")))?;
+///
+/// The caller must build the `client` via
+/// [`crate::core::Core::http_client`].
+pub async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> Result<u64> {
     let bytes = client
         .get(url)
         .send()

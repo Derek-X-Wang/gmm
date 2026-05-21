@@ -1,4 +1,4 @@
-import { useState } from "react";
+import React, { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
@@ -8,6 +8,7 @@ import {
   fetchLatestImporterRelease,
   getGameInstallPath,
   getLibraryPaths,
+  getProxyConfig,
   importZip,
   installImporter,
   listMods,
@@ -17,6 +18,8 @@ import {
   setLibraryPathForGame,
   setLibraryRoot,
   setModEnabled,
+  setProxyConfig,
+  testProxyConnection,
   type GameCode as ApiGameCode,
 } from "./api";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
@@ -31,11 +34,90 @@ function App() {
         <h1>GMM — Genshin (v0.1 foundation)</h1>
       </header>
       <Settings />
+      <NetworkPanel />
       <ImporterPanel />
       <LibraryPathsPanel />
       <Diagnostics />
       <ModList />
     </main>
+  );
+}
+
+/**
+ * Settings → Network. HTTP / SOCKS5 proxy fields shared by every
+ * outbound HTTP path in the backend. The password is write-only — the
+ * UI never reads it back. A "Test connection" button hits api.github.com
+ * through the configured proxy to validate.
+ */
+function NetworkPanel() {
+  const qc = useQueryClient();
+  const cfg = useQuery({ queryKey: ["proxyConfig"], queryFn: getProxyConfig });
+  const [url, setUrl] = useState<string>("");
+  const [username, setUsername] = useState<string>("");
+  const [password, setPassword] = useState<string>("");
+
+  React.useEffect(() => {
+    if (cfg.data) {
+      setUrl(cfg.data.url ?? "");
+      setUsername(cfg.data.username ?? "");
+      setPassword(""); // never seeded
+    }
+  }, [cfg.data]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      setProxyConfig({
+        url: url || null,
+        username: username || null,
+        password: password ? password : null,
+      }),
+    onSuccess: () => {
+      setPassword("");
+      qc.invalidateQueries({ queryKey: ["proxyConfig"] });
+    },
+  });
+  const test = useMutation({ mutationFn: testProxyConnection });
+
+  return (
+    <section className="card">
+      <h2>Network</h2>
+      <p className="muted">
+        Optional HTTP or SOCKS5 proxy for GitHub release downloads and GameBanana
+        traffic. Formats: <code>http://host:port</code> or <code>socks5://host:port</code>.
+        Sensitive fields never reach the diagnostics bundle.
+      </p>
+      <div className="row">
+        <input
+          placeholder="proxy URL"
+          value={url}
+          onChange={(e) => setUrl(e.currentTarget.value)}
+        />
+      </div>
+      <div className="row">
+        <input
+          placeholder="username (optional)"
+          value={username}
+          onChange={(e) => setUsername(e.currentTarget.value)}
+        />
+        <input
+          type="password"
+          placeholder={cfg.data?.passwordSet ? "(set — leave blank to keep)" : "password"}
+          value={password}
+          onChange={(e) => setPassword(e.currentTarget.value)}
+        />
+      </div>
+      <div className="row">
+        <button onClick={() => save.mutate()} disabled={save.isPending}>
+          {save.isPending ? "Saving…" : "Save"}
+        </button>
+        <button onClick={() => test.mutate()} disabled={test.isPending}>
+          {test.isPending ? "Testing…" : "Test connection"}
+        </button>
+        {test.isSuccess ? <span className="muted small">Proxy reachable.</span> : null}
+      </div>
+      {save.isError ? <p className="error">{String(save.error)}</p> : null}
+      {test.isError ? <p className="error">{String(test.error)}</p> : null}
+    </section>
   );
 }
 
