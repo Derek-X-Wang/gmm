@@ -17,7 +17,10 @@ async fn game_install_path_round_trips_through_the_db() {
     let core = Core::new(library_root, &db_url).await.expect("init");
 
     // Fresh DB: no path persisted yet.
-    let initial = core.game_install_path(GameCode::Gimi).await.expect("read empty");
+    let initial = core
+        .game_install_path(GameCode::Gimi)
+        .await
+        .expect("read empty");
     assert!(initial.is_none(), "no install path set on a fresh DB");
 
     // Set, then read back.
@@ -35,6 +38,9 @@ async fn game_install_path_round_trips_through_the_db() {
         .await
         .expect("reopen");
 
-    let reopened = core2.game_install_path(GameCode::Gimi).await.expect("read after reopen");
+    let reopened = core2
+        .game_install_path(GameCode::Gimi)
+        .await
+        .expect("read after reopen");
     assert_eq!(reopened, Some(game_path));
 }

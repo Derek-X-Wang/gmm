@@ -1,8 +1,9 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::error::{Error, Result};
+use super::error::Error;
 use super::games::GameCode;
 
 /// How a Mod entered the Library. See `CONTEXT.md` § Source.
@@ -25,8 +26,12 @@ impl Source {
             Source::Gamebanana => "gamebanana",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self> {
+impl FromStr for Source {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "manual" => Ok(Source::Manual),
             "local" => Ok(Source::Local),

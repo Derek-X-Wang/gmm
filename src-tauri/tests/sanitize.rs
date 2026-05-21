@@ -18,9 +18,7 @@ async fn reserved_chars_in_display_name_are_stripped_from_junction_dir() {
     fs::write(fixture.join("merged.ini"), "").expect("fixture ini");
 
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
-    let core = Core::new(library_root, &db_url)
-        .await
-        .expect("init core");
+    let core = Core::new(library_root, &db_url).await.expect("init core");
 
     // Every NTFS-reserved character in one go.
     let nasty = r#"Hu<Tao>:"|?*\/"#;

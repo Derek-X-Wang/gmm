@@ -53,14 +53,21 @@ async fn dos_reserved_names_are_prefixed_underscore() {
     for n in &names {
         let upper = n.to_uppercase();
         let base = upper.split('.').next().unwrap_or(&upper);
-        let reserved =
-            matches!(base, "CON" | "PRN" | "AUX" | "NUL")
+        let reserved = matches!(base, "CON" | "PRN" | "AUX" | "NUL")
             || (base.starts_with("COM")
                 && base.len() == 4
-                && base.chars().nth(3).map(|c| c.is_ascii_digit() && c != '0').unwrap_or(false))
+                && base
+                    .chars()
+                    .nth(3)
+                    .map(|c| c.is_ascii_digit() && c != '0')
+                    .unwrap_or(false))
             || (base.starts_with("LPT")
                 && base.len() == 4
-                && base.chars().nth(3).map(|c| c.is_ascii_digit() && c != '0').unwrap_or(false));
+                && base
+                    .chars()
+                    .nth(3)
+                    .map(|c| c.is_ascii_digit() && c != '0')
+                    .unwrap_or(false));
         assert!(
             !reserved,
             "junction dir {n:?} is a reserved DOS device name — should have been prefixed",

@@ -19,18 +19,12 @@ pub struct AdoptArgs {
 }
 
 #[tauri::command]
-pub async fn list_mods(
-    core: State<'_, Core>,
-    game: GameCode,
-) -> Result<Vec<Mod>, String> {
+pub async fn list_mods(core: State<'_, Core>, game: GameCode) -> Result<Vec<Mod>, String> {
     core.list_mods(game).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn adopt_folder(
-    core: State<'_, Core>,
-    args: AdoptArgs,
-) -> Result<Mod, String> {
+pub async fn adopt_folder(core: State<'_, Core>, args: AdoptArgs) -> Result<Mod, String> {
     core.adopt_folder(args.game, &args.source_path, &args.name)
         .await
         .map_err(|e| e.to_string())
@@ -47,13 +41,10 @@ pub async fn set_mod_enabled(
         .game_install_path(game)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            "Set the game install path in Settings before enabling mods.".to_string()
-        })?;
+        .ok_or_else(|| "Set the game install path in Settings before enabling mods.".to_string())?;
     let mods_dir = install.join("Mods");
-    std::fs::create_dir_all(&mods_dir).map_err(|e| {
-        format!("create {}: {e}", mods_dir.display())
-    })?;
+    std::fs::create_dir_all(&mods_dir)
+        .map_err(|e| format!("create {}: {e}", mods_dir.display()))?;
     core.set_enabled(&id, enabled, &mods_dir)
         .await
         .map_err(|e| e.to_string())

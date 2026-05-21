@@ -16,8 +16,7 @@ async fn enable_creates_junction_disable_removes_it() {
 
     let fixture = tmp.path().join("fixture/Mod1");
     fs::create_dir_all(&fixture).expect("fixture dir");
-    fs::write(fixture.join("merged.ini"), "[TextureOverride]\nhash=42\n")
-        .expect("fixture ini");
+    fs::write(fixture.join("merged.ini"), "[TextureOverride]\nhash=42\n").expect("fixture ini");
 
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root.clone(), &db_url)
@@ -41,7 +40,10 @@ async fn enable_creates_junction_disable_removes_it() {
         "junction should resolve into the library copy",
     );
 
-    let listed = core.list_mods(GameCode::Gimi).await.expect("list after enable");
+    let listed = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list after enable");
     assert!(listed[0].enabled, "list_mods should reflect enabled=true");
 
     // Disable -> junction gone, library copy untouched
@@ -55,6 +57,9 @@ async fn enable_creates_junction_disable_removes_it() {
         "library copy must survive disable (junctions never own the files)",
     );
 
-    let listed = core.list_mods(GameCode::Gimi).await.expect("list after disable");
+    let listed = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list after disable");
     assert!(!listed[0].enabled, "list_mods should reflect enabled=false");
 }

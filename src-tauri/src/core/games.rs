@@ -1,6 +1,8 @@
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
-use super::error::{Error, Result};
+use super::error::Error;
 
 /// The six XXMI-family games GMM supports in v1.
 ///
@@ -28,8 +30,12 @@ impl GameCode {
             GameCode::Efmi => "efmi",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self> {
+impl FromStr for GameCode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "gimi" => Ok(GameCode::Gimi),
             "srmi" => Ok(GameCode::Srmi),

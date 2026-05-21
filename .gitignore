@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# cmux-team worktree isolation — teammates spawn here, must not be committed
+.claude/worktrees/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

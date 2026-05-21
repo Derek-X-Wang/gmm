@@ -20,9 +20,7 @@ async fn very_long_display_name_truncates_to_safe_length() {
     fs::write(fixture.join("merged.ini"), "").expect("fixture ini");
 
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
-    let core = Core::new(library_root, &db_url)
-        .await
-        .expect("init core");
+    let core = Core::new(library_root, &db_url).await.expect("init core");
 
     let nasty: String = "A".repeat(400);
     let adopted = core

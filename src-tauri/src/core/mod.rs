@@ -11,6 +11,7 @@ pub mod mods;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use chrono::Utc;
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
@@ -37,7 +38,9 @@ impl Core {
             source,
         })?;
 
-        let opts: SqliteConnectOptions = db_url.parse::<SqliteConnectOptions>()?.create_if_missing(true);
+        let opts: SqliteConnectOptions = db_url
+            .parse::<SqliteConnectOptions>()?
+            .create_if_missing(true);
         let pool = SqlitePool::connect_with(opts).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
 
@@ -113,11 +116,7 @@ impl Core {
     /// Find an unused junction directory name for the given game, deduping
     /// collisions by appending ` (2)`, ` (3)`, ... If `base` is already
     /// unique we return it unchanged.
-    async fn pick_unique_junction_dir_name(
-        &self,
-        game: GameCode,
-        base: &str,
-    ) -> Result<String> {
+    async fn pick_unique_junction_dir_name(&self, game: GameCode, base: &str) -> Result<String> {
         let rows = sqlx::query("SELECT junction_dir_name FROM mods WHERE game_code = ?")
             .bind(game.as_str())
             .fetch_all(&self.pool)
@@ -144,18 +143,12 @@ impl Core {
     /// Enable or disable a Mod. On enable, a Junction is created at
     /// `<game_mods_dir>/<mod-name>/` pointing at the Mod's Library path.
     /// On disable, the Junction is removed (the Library copy is never touched).
-    pub async fn set_enabled(
-        &self,
-        id: &str,
-        enabled: bool,
-        game_mods_dir: &Path,
-    ) -> Result<()> {
-        let row = sqlx::query(
-            "SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await?;
+    pub async fn set_enabled(&self, id: &str, enabled: bool, game_mods_dir: &Path) -> Result<()> {
+        let row =
+            sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await?;
 
         let junction_dir_name: String = row.try_get("junction_dir_name")?;
         let library_path: String = row.try_get("library_path")?;
@@ -225,11 +218,9 @@ pub(crate) fn sanitize_dir_name(display: &str) -> String {
             !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') && !c.is_control()
         })
         .collect();
-    let trimmed = stripped.trim_end_matches(|c: char| c == '.' || c == ' ');
+    let trimmed = stripped.trim_end_matches(['.', ' ']);
     let capped: String = trimmed.chars().take(MAX_JUNCTION_DIR_CHARS).collect();
-    let capped_trimmed = capped
-        .trim_end_matches(|c: char| c == '.' || c == ' ')
-        .to_string();
+    let capped_trimmed = capped.trim_end_matches(['.', ' ']).to_string();
 
     if is_dos_reserved(&capped_trimmed) {
         format!("_{capped_trimmed}")
