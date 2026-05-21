@@ -61,7 +61,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::HHOOK;
 use crate::Error;
 
 /// FFI types match upstream's ctypes declarations.
+#[allow(clippy::upper_case_acronyms)]
 type DWORD = u32;
+#[allow(clippy::upper_case_acronyms)]
 type LPCWSTR = *const u16;
 
 type FnHookLibrary = unsafe extern "system" fn(LPCWSTR, *mut HHOOK, *mut HANDLE) -> i32;
@@ -314,7 +316,7 @@ fn resolve_symbol(handle: HMODULE, symbol: &'static str) -> Result<*const (), Er
 
 fn to_wide_nul(s: &OsStr) -> Option<Vec<u16>> {
     let mut wide: Vec<u16> = s.encode_wide().collect();
-    if wide.iter().any(|&c| c == 0) {
+    if wide.contains(&0) {
         return None;
     }
     wide.push(0);
