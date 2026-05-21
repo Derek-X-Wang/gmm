@@ -216,3 +216,52 @@ code {
   cursor: pointer;
   margin-left: 0.3rem;
 }
+
+/*
+ * Slice NEW-AV (#13): the inline AV / SmartScreen callout that
+ * replaces a raw Win32 error when Launch fails with an AV-pattern
+ * error. Same colour as `.error` so the user sees this is bad news,
+ * but the structure (heading + bullets + details disclosure) is
+ * deliberately readable rather than crash-dump-shaped.
+ */
+.av-guidance {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #5b1f1f;
+  background: #2a1818;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: #fca5a5;
+}
+
+.av-guidance strong {
+  color: #fef2f2;
+  font-weight: 600;
+}
+
+.av-guidance p {
+  margin: 0;
+  color: #fecaca;
+}
+
+.av-guidance ul {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.av-guidance details {
+  margin-top: 0.25rem;
+}
+
+.av-guidance details pre {
+  margin: 0.3rem 0 0;
+  padding: 0.4rem 0.6rem;
+  background: #1b1b1f;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #9a9aa3;
+}

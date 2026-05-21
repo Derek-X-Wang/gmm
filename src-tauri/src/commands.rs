@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
+use crate::core::av;
 use crate::core::conflicts::ConflictReport;
 use crate::core::detect;
 use crate::core::diagnostics;
@@ -731,117 +732,143 @@ pub async fn launch_game(
     runtime: State<'_, SessionRuntime>,
     game: GameCode,
 ) -> Result<SessionInfo, String> {
-    use gmm_loader::Loader;
+    // Run the full launch flow in an inner async block so we can route
+    // every failure through `av::wrap_launch_error`. That helper
+    // prefixes the wire message with `AV-PATTERN: ` when the error
+    // text matches a known antivirus / SmartScreen signature (slice
+    // NEW-AV / #13); the React `LaunchGameButton` then swaps to the
+    // structured `<AvGuidance>` component instead of dumping a raw
+    // Win32 error onto the user.
+    let result: Result<SessionInfo, String> = async {
+        use gmm_loader::Loader;
 
-    // Cheap pre-check; the atomic INSERT in start_session is the real
-    // gate against double-launch races.
-    if let Some(existing) = core.session_info().await.map_err(|e| e.to_string())? {
-        return Err(format!(
-            "{} is already running (since {}).",
-            existing.game.as_str(),
-            existing.started_at
-        ));
-    }
+        // Cheap pre-check; the atomic INSERT in start_session is the
+        // real gate against double-launch races.
+        if let Some(existing) = core.session_info().await.map_err(|e| e.to_string())? {
+            return Err(format!(
+                "{} is already running (since {}).",
+                existing.game.as_str(),
+                existing.started_at
+            ));
+        }
 
-    let install = core
-        .game_install_path(game)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Set the game install path in Settings before launching.".to_string())?;
+        let install = core
+            .game_install_path(game)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Set the game install path in Settings before launching.".to_string())?;
 
-    let game_exe = resolve_game_exe(game, &install)?;
-    let dll_to_inject = install.join("d3d11.dll");
-    if !dll_to_inject.exists() {
-        return Err(format!(
-            "Model Importer DLL not found at {}. Install the importer for this game first.",
-            dll_to_inject.display()
-        ));
-    }
-    let loader_dll = locate_loader_dll()?;
+        let game_exe = resolve_game_exe(game, &install)?;
+        let dll_to_inject = install.join("d3d11.dll");
+        if !dll_to_inject.exists() {
+            return Err(format!(
+                "Model Importer DLL not found at {}. Install the importer for this game first.",
+                dll_to_inject.display()
+            ));
+        }
+        let loader_dll = locate_loader_dll()?;
 
-    // Install the CBT hook BEFORE spawning so it's in place when the
-    // game creates its window.
-    let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
-    let hook = loader
-        .hook(&dll_to_inject)
-        .map_err(|e| format!("install hook: {e}"))?;
+        // Install the CBT hook BEFORE spawning so it's in place when
+        // the game creates its window. `Loader::load` is the most
+        // likely AV-quarantine target — Defender frequently flags the
+        // vendored 3dmloader.dll on first run.
+        let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
+        let hook = loader
+            .hook(&dll_to_inject)
+            .map_err(|e| format!("install hook: {e}"))?;
 
-    // Spawn the game; any failure between here and runtime.install()
-    // triggers ChildGuard::drop which kills the process so it doesn't
-    // outlive the failed launch.
-    let child = std::process::Command::new(&game_exe)
-        .current_dir(&install)
-        .spawn()
-        .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
-    let child_guard = ChildGuard::new(child);
+        // Spawn the game; any failure between here and
+        // runtime.install() triggers ChildGuard::drop which kills the
+        // process so it doesn't outlive the failed launch.
+        let child = std::process::Command::new(&game_exe)
+            .current_dir(&install)
+            .spawn()
+            .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+        let child_guard = ChildGuard::new(child);
 
-    // Block until the importer DLL lands in a process whose image
-    // name matches the game exe, then DROP the hook session — holding
-    // the global CBT hook for the whole game session would inject the
-    // DLL into every unrelated process that creates a window.
-    let target_process = game_exe
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "GenshinImpact.exe".to_string());
-    hook.wait_for_injection(&target_process, 60)
-        .map_err(|e| format!("wait_for_injection: {e}"))?;
-    // Explicitly drop so the unhook runs immediately rather than at
-    // end-of-scope. clippy::drop_non_drop fires on the non-Windows
-    // stub HookSession (which has no Drop impl); silence it — on
-    // Windows this is the load-bearing line that takes the CBT hook
-    // back down.
-    #[allow(clippy::drop_non_drop)]
-    drop(hook);
+        // Block until the importer DLL lands in a process whose image
+        // name matches the game exe, then DROP the hook session —
+        // holding the global CBT hook for the whole game session
+        // would inject the DLL into every unrelated process that
+        // creates a window.
+        let target_process = game_exe
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "GenshinImpact.exe".to_string());
+        hook.wait_for_injection(&target_process, 60)
+            .map_err(|e| format!("wait_for_injection: {e}"))?;
+        // Explicitly drop so the unhook runs immediately rather than
+        // at end-of-scope. clippy::drop_non_drop fires on the
+        // non-Windows stub HookSession (which has no Drop impl);
+        // silence it — on Windows this is the load-bearing line that
+        // takes the CBT hook back down.
+        #[allow(clippy::drop_non_drop)]
+        drop(hook);
 
-    let info = SessionInfo {
-        game,
-        pid: child_guard.pid(),
-        started_at: chrono::Utc::now(),
-    };
+        let info = SessionInfo {
+            game,
+            pid: child_guard.pid(),
+            started_at: chrono::Utc::now(),
+        };
 
-    // Atomic claim: plain INSERT, no OR REPLACE. If anyone raced past
-    // the pre-check above, the singleton CHECK gives us a unique-
-    // constraint error and ChildGuard's drop kills our spawned game.
-    core.start_session(&info)
-        .await
-        .map_err(|e| format!("start_session: {e}"))?;
+        // Atomic claim: plain INSERT, no OR REPLACE. If anyone raced
+        // past the pre-check above, the singleton CHECK gives us a
+        // unique-constraint error and ChildGuard's drop kills our
+        // spawned game.
+        core.start_session(&info)
+            .await
+            .map_err(|e| format!("start_session: {e}"))?;
 
-    let child = child_guard.into_inner();
+        let child = child_guard.into_inner();
 
-    runtime
-        .inner()
-        .install(crate::runtime::session::LiveSession {
-            info: info.clone(),
-            child,
-            _loader: loader,
+        runtime
+            .inner()
+            .install(crate::runtime::session::LiveSession {
+                info: info.clone(),
+                child,
+                _loader: loader,
+            });
+
+        // Emit to the frontend so the banner appears immediately.
+        let _ = app.emit(SESSION_STARTED_EVENT, &info);
+
+        // Spawn the exit watcher. It polls every 500 ms; on child
+        // exit it drops the LiveSession (which unhooks via RAII),
+        // clears the DB row, and emits SESSION_ENDED_EVENT.
+        let app_for_watch = app.clone();
+        let runtime_for_watch = runtime.inner().inner_clone();
+        let core_for_watch = (*core).clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                match runtime_for_watch.try_wait_child() {
+                    Ok(Some(_status)) => break,
+                    Ok(None) => continue,
+                    Err(_) => break, // process gone / handle invalid
+                }
+            }
+            // Drop the LiveSession → unhook + close child handle.
+            let _ = runtime_for_watch.take();
+            // Best-effort: clear the persisted row.
+            if let Err(e) = core_for_watch.end_session().await {
+                tracing::warn!(error = %e, "end_session failed in watcher");
+            }
+            let _ = app_for_watch.emit(SESSION_ENDED_EVENT, ());
         });
 
-    // Emit to the frontend so the banner appears immediately.
-    let _ = app.emit(SESSION_STARTED_EVENT, &info);
+        Ok(info)
+    }
+    .await;
 
-    // Spawn the exit watcher. It polls every 500 ms; on child exit it
-    // drops the LiveSession (which unhooks via RAII), clears the DB
-    // row, and emits SESSION_ENDED_EVENT.
-    let app_for_watch = app.clone();
-    let runtime_for_watch = runtime.inner().inner_clone();
-    let core_for_watch = (*core).clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            match runtime_for_watch.try_wait_child() {
-                Ok(Some(_status)) => break,
-                Ok(None) => continue,
-                Err(_) => break, // process gone / handle invalid
-            }
-        }
-        // Drop the LiveSession → unhook + close child handle.
-        let _ = runtime_for_watch.take();
-        // Best-effort: clear the persisted row.
-        if let Err(e) = core_for_watch.end_session().await {
-            tracing::warn!(error = %e, "end_session failed in watcher");
-        }
-        let _ = app_for_watch.emit(SESSION_ENDED_EVENT, ());
-    });
+    result.map_err(av::wrap_launch_error)
+}
 
-    Ok(info)
+/// Tauri command — return the structured AV / SmartScreen guidance the
+/// in-app launch error component and the onboarding wizard both
+/// render. Single source of truth; see
+/// `docs/antivirus-and-smartscreen.md` and the `av` module for the
+/// drift-protection contract.
+#[tauri::command]
+pub fn av_guidance() -> av::AvGuidance {
+    av::guidance()
 }

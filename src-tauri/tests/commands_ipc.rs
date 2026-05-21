@@ -20,6 +20,7 @@ use std::io::Write;
 use gmm_lib::commands::{
     AdoptArgs, GameBananaImportArgs, ImportZipArgs, LibraryPaths, NO_INSTALL_PATH_FOR_ENABLE_MSG,
 };
+use gmm_lib::core::av;
 use gmm_lib::core::conflicts::ConflictReport;
 use gmm_lib::core::reconcile::ReconcileResult;
 use gmm_lib::core::updates::UpdateStatus;
@@ -280,6 +281,32 @@ async fn import_zip_command_path_round_trips_through_serde() {
     assert_eq!(mod_.name, "ZipMod");
     let json = to_json(&mod_);
     assert_eq!(json.get("source").and_then(|s| s.as_str()), Some("local"));
+}
+
+#[test]
+fn av_guidance_response_uses_camel_case_keys() {
+    // Slice NEW-AV / #13: the `av_guidance` Tauri command returns the
+    // structured payload the launch-error component renders. Wire-side
+    // it must come through as camelCase so the React component can
+    // read it without a fromRaw mapper.
+    let g = av::guidance();
+    let v = to_json(&g);
+    let obj = v.as_object().expect("object");
+    assert!(obj.contains_key("headline"));
+    assert!(obj.contains_key("body"));
+    assert!(obj.contains_key("exclusionSteps"));
+    assert!(obj.contains_key("docPath"));
+    assert!(obj.contains_key("sentinel"));
+    assert_eq!(
+        obj.get("sentinel").and_then(|s| s.as_str()),
+        Some(av::AV_PATTERN_SENTINEL),
+        "sentinel must round-trip verbatim — the React layer matches on this string"
+    );
+    assert!(obj
+        .get("docPath")
+        .and_then(|p| p.as_str())
+        .map(|p| p.ends_with("antivirus-and-smartscreen.md"))
+        .unwrap_or(false));
 }
 
 #[test]
