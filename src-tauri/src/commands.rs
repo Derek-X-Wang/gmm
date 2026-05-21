@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
+use crate::core::conflicts::ConflictReport;
 use crate::core::detect;
 use crate::core::diagnostics;
 use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
@@ -283,6 +284,14 @@ pub async fn set_active_variant(
     core.set_active_variant(&mod_id, &variant_id, &mods_dir)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn detect_conflicts(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<ConflictReport, String> {
+    core.detect_conflicts(game).await.map_err(|e| e.to_string())
 }
 
 /// Resolve the GitHub repo + asset filter for a Game's importer.

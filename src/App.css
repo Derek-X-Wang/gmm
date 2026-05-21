@@ -170,3 +170,32 @@ code {
   align-items: center;
   gap: 0.25rem;
 }
+
+.conflict-badge {
+  color: #f59e0b;
+  font-weight: 500;
+  font-size: 0.85rem;
+}
+
+.conflict-inline {
+  display: inline-block;
+  margin-left: 0.4rem;
+}
+
+.conflict-pill {
+  background: #5b3520;
+  color: #fbbf24;
+  border: none;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.conflict-detail {
+  margin-top: 0.3rem;
+  padding: 0.45rem 0.6rem;
+  background: #1b1b1f;
+  border-left: 2px solid #f59e0b;
+  border-radius: 6px;
+}

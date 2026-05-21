@@ -4,6 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import {
   adoptFolder,
+  detectConflicts,
   detectGameInstallPath,
   fetchLatestImporterRelease,
   getGameInstallPath,
@@ -22,6 +23,7 @@ import {
   setModEnabled,
   setProxyConfig,
   testProxyConnection,
+  type Conflict,
   type GameCode as ApiGameCode,
 } from "./api";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
@@ -445,17 +447,29 @@ function ModList() {
     queryKey: ["mods", GAME],
     queryFn: () => listMods(GAME),
   });
+  const conflicts = useQuery({
+    queryKey: ["conflicts", GAME],
+    queryFn: () => detectConflicts(GAME),
+  });
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
       setModEnabled(id, enabled, GAME),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mods", GAME] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mods", GAME] });
+      queryClient.invalidateQueries({ queryKey: ["conflicts", GAME] });
+    },
   });
 
   return (
     <section className="card">
       <div className="row row--between">
-        <h2>Mods ({mods.data?.length ?? 0})</h2>
+        <h2>
+          Mods ({mods.data?.length ?? 0})
+          {conflicts.data && conflicts.data.conflicts.length > 0 ? (
+            <span className="conflict-badge"> · {conflicts.data.conflicts.length} conflict{conflicts.data.conflicts.length === 1 ? "" : "s"}</span>
+          ) : null}
+        </h2>
         <div className="row">
           <AdoptButton onAdopted={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
           <ImportZipButton onImported={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
@@ -476,6 +490,11 @@ function ModList() {
             <div className="mods__main">
               <strong>{m.name}</strong>
               <span className="muted"> · {m.source}</span>
+              <ConflictBadge
+                modId={m.id}
+                conflicts={conflicts.data?.conflicts ?? []}
+                count={conflicts.data?.per_mod_count[m.id] ?? 0}
+              />
               <VariantSelector modId={m.id} />
             </div>
             <label className="toggle">
@@ -547,6 +566,48 @@ function AdoptButton({ onAdopted }: { onAdopted: () => void }) {
 }
 
 /**
+ * Per-mod conflict count + click-to-expand list of the conflicting
+ * hashes with which other Mods share them. v1 just shows the
+ * information — priority-order resolution (MO2-style) is v1.1.
+ */
+function ConflictBadge({
+  modId,
+  conflicts,
+  count,
+}: {
+  modId: string;
+  conflicts: Conflict[];
+  count: number;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!count) return null;
+  const mine = conflicts.filter((c) => c.mod_ids.includes(modId));
+  return (
+    <span className="conflict-inline">
+      <button
+        className="conflict-pill"
+        onClick={() => setOpen((v) => !v)}
+        title="Click for details"
+      >
+        {count} conflict{count === 1 ? "" : "s"}
+      </button>
+      {open ? (
+        <div className="conflict-detail">
+          {mine.map((c) => {
+            const others = c.mod_ids.filter((m) => m !== modId);
+            return (
+              <p key={c.hash} className="muted small">
+                <code>{c.hash}</code> shared with {others.length} other mod{others.length === 1 ? "" : "s"}.
+              </p>
+            );
+          })}
+        </div>
+      ) : null}
+    </span>
+  );
+}
+
+/**
  * Inline radio list of Variants for a Mod. Renders nothing for Mods
  * with 0 or 1 Variants — the AC explicitly says single-folder mods
  * see no UI change. Switching the active Variant retargets the
@@ -560,7 +621,10 @@ function VariantSelector({ modId }: { modId: string }) {
   });
   const switchVariant = useMutation({
     mutationFn: (variantId: string) => setActiveVariant(modId, variantId, GAME),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["variants", modId] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["variants", modId] });
+      qc.invalidateQueries({ queryKey: ["conflicts", GAME] });
+    },
   });
 
   if (!v.data || v.data.variants.length < 2) return null;
