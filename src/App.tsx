@@ -10,6 +10,7 @@ import {
   getGameInstallPath,
   getLibraryPaths,
   getProxyConfig,
+  importGamebanana,
   importZip,
   installImporter,
   listMods,
@@ -473,6 +474,7 @@ function ModList() {
         <div className="row">
           <AdoptButton onAdopted={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
           <ImportZipButton onImported={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
+          <GameBananaImport onImported={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
         </div>
       </div>
       <ZipDropZone onImported={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
@@ -490,6 +492,15 @@ function ModList() {
             <div className="mods__main">
               <strong>{m.name}</strong>
               <span className="muted"> · {m.source}</span>
+              {m.source === "gamebanana" && m.sourceUrl ? (
+                <>
+                  {" · "}
+                  <a href={m.sourceUrl} target="_blank" rel="noreferrer" className="muted small">
+                    View on GameBanana
+                  </a>
+                  {m.version ? <span className="muted small"> · v{m.version}</span> : null}
+                </>
+              ) : null}
               <ConflictBadge
                 modId={m.id}
                 conflicts={conflicts.data?.conflicts ?? []}
@@ -561,6 +572,50 @@ function AdoptButton({ onAdopted }: { onAdopted: () => void }) {
         </button>
       </div>
       {adopt.isError ? <p className="error">{String(adopt.error)}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * GameBanana URL paste form. User pastes a mod URL or bare submission
+ * ID; backend resolves it via apiv11, downloads the first .zip, and
+ * routes through the slice-1b ingest path. Network goes through the
+ * configured proxy (slice 14).
+ */
+function GameBananaImport({ onImported }: { onImported: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState("");
+  const ingest = useMutation({
+    mutationFn: () => importGamebanana(GAME, input.trim()),
+    onSuccess: () => {
+      onImported();
+      setInput("");
+      setOpen(false);
+    },
+  });
+
+  if (!open) {
+    return <button onClick={() => setOpen(true)}>Paste GameBanana URL…</button>;
+  }
+  return (
+    <div className="adopt">
+      <input
+        placeholder="https://gamebanana.com/mods/1234567 or a bare ID"
+        value={input}
+        onChange={(e) => setInput(e.currentTarget.value)}
+      />
+      <div className="row">
+        <button
+          onClick={() => ingest.mutate()}
+          disabled={ingest.isPending || !input.trim()}
+        >
+          {ingest.isPending ? "Resolving…" : "Import"}
+        </button>
+        <button onClick={() => setOpen(false)} disabled={ingest.isPending}>
+          Cancel
+        </button>
+      </div>
+      {ingest.isError ? <p className="error">{String(ingest.error)}</p> : null}
     </div>
   );
 }

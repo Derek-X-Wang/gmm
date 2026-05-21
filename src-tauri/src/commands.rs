@@ -294,6 +294,23 @@ pub async fn detect_conflicts(
     core.detect_conflicts(game).await.map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameBananaImportArgs {
+    pub game: GameCode,
+    pub url_or_id: String,
+}
+
+#[tauri::command]
+pub async fn import_gamebanana(
+    core: State<'_, Core>,
+    args: GameBananaImportArgs,
+) -> Result<Mod, String> {
+    core.import_gamebanana(args.game, &args.url_or_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Resolve the GitHub repo + asset filter for a Game's importer.
 /// Slice 3 wires GIMI only; other games are added in their port issues.
 fn importer_repo_for(game: GameCode) -> Result<(&'static str, &'static str), String> {
