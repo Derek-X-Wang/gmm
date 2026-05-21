@@ -59,6 +59,9 @@ pub fn run() {
             commands::get_library_paths,
             commands::set_library_root,
             commands::set_library_path_for_game,
+            commands::fetch_latest_importer_release,
+            commands::install_importer,
+            commands::rollback_importer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -78,6 +81,12 @@ fn resolve_data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// Public entry point for the `diagnostics_log_dir` Tauri command.
 pub fn log_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(resolve_data_dir()?.join("logs"))
+}
+
+/// Where importer install backups + downloaded ZIPs land. Public so
+/// the importer Tauri commands can compose paths without re-resolving.
+pub fn data_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    resolve_data_dir()
 }
 
 /// Build the GMM Core against the user's app-data directory. Synchronous

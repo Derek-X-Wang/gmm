@@ -51,6 +51,9 @@ pub enum Error {
          Move the Library or the game install to an NTFS drive, or convert the volume."
     )]
     NonNtfsVolume { path: PathBuf, format: String },
+
+    #[error("importer install error: {0}")]
+    Importer(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

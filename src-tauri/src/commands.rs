@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use crate::core::detect;
 use crate::core::diagnostics;
+use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
 use crate::core::reconcile::ReconcileResult;
 use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport};
 
@@ -237,6 +238,100 @@ pub async fn set_library_path_for_game(
     core.set_library_path_for_game(game, path.as_deref())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Resolve the GitHub repo + asset filter for a Game's importer.
+/// Slice 3 wires GIMI only; other games are added in their port issues.
+fn importer_repo_for(game: GameCode) -> Result<(&'static str, &'static str), String> {
+    match game {
+        GameCode::Gimi => Ok(("SpectrumQT/GIMI-Package", "GIMI")),
+        _ => Err("Importer auto-install for this game is not wired in this slice.".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_latest_importer_release(
+    game: GameCode,
+) -> Result<Option<LatestRelease>, String> {
+    let (repo, filter) = importer_repo_for(game)?;
+    importer::fetch_latest_release(repo, filter, None)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn install_importer(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<InstallReport, String> {
+    let install = core
+        .game_install_path(game)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Set the game install path in Settings before installing.".to_string())?;
+    let (repo, filter) = importer_repo_for(game)?;
+
+    let release = importer::fetch_latest_release(repo, filter, None)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no release returned for importer repo".to_string())?;
+
+    let data = crate::data_dir().map_err(|e| e.to_string())?;
+    let backups_root = data.join("backups").join(game.as_str());
+    let downloads_dir = data.join("downloads").join(game.as_str());
+    let zip_path = downloads_dir.join(&release.asset_name);
+    importer::download_to(&release.asset_url, &zip_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let report = tokio::task::spawn_blocking(move || {
+        importer::install_from_local_zip(&zip_path, &install, &backups_root, DEFAULT_LOADER_EXE)
+    })
+    .await
+    .map_err(|e| format!("install task join error: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn rollback_importer(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<Option<PathBuf>, String> {
+    let install = core
+        .game_install_path(game)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Set the game install path in Settings before rolling back.".to_string())?;
+    let data = crate::data_dir().map_err(|e| e.to_string())?;
+    let backups_root = data.join("backups").join(game.as_str());
+
+    if !backups_root.exists() {
+        return Ok(None);
+    }
+    // Pick the lexicographically-newest backup (we name them with an
+    // ISO-8601 timestamp).
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&backups_root)
+        .map_err(|e| format!("read backups dir: {e}"))?
+        .filter_map(|r| r.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    entries.sort();
+    let Some(latest) = entries.pop() else {
+        return Ok(None);
+    };
+
+    let latest_for_blocking = latest.clone();
+    let install_for_blocking = install.clone();
+    tokio::task::spawn_blocking(move || {
+        importer::rollback_to(&latest_for_blocking, &install_for_blocking)
+    })
+    .await
+    .map_err(|e| format!("rollback task join error: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    Ok(Some(latest))
 }
 
 /// Tauri command — reconcile junctions for a game in place. Used by
