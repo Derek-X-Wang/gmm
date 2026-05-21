@@ -26,13 +26,13 @@ The loader lives in the `src-tauri/crates/` workspace alongside the helpers need
 `3dmloader.dll` exposes four C functions. Signatures from upstream's `XXMI-Launcher/src/xxmi_launcher/core/utils/dll_injector.py`:
 
 ```c
-int HookLibrary(LPCWSTR target_window_class,
+int HookLibrary(LPCWSTR dll_to_inject_path,
                 HHOOK*  out_hook_handle,
                 HANDLE* out_named_mutex);
 
-int WaitForInjection(LPCWSTR injected_dll_path,
-                     LPCWSTR observed_dll_path,
-                     int     timeout_ms);
+int WaitForInjection(LPCWSTR dll_to_inject_path,
+                     LPCWSTR target_process_name,
+                     int     timeout_secs);
 
 int UnhookLibrary(HHOOK*  in_out_hook_handle,
                   HANDLE* in_out_named_mutex);
@@ -42,7 +42,17 @@ int Inject(DWORD   target_pid,
            int     flags);
 ```
 
-All four return `0` on success. The upstream library does not publish a stable error-code table; we surface non-zero statuses verbatim through `Error::NonZeroStatus { symbol, status }`.
+All four return `0` on success. The upstream library does not publish a stable error-code table; we surface non-zero statuses verbatim through `Error::NonZeroStatus { symbol, status }`. XXMI's Python wrapper documents these meaningful values for `HookLibrary`:
+
+| status | meaning |
+|-------:|---------|
+| 0      | success |
+| 100    | another instance of the loader is already hooked |
+| 200    | failed to `LoadLibraryW` the supplied DLL — DLL missing or invalid |
+| 300    | DLL missing the entry point upstream expects |
+| 400    | failed to install the CBT hook |
+
+`HookLibrary`'s first argument is **the DLL to inject**, not a window class. 3dmloader watches all window creations in every process; when a window appears, it `LoadLibraryW`'s the configured DLL inside that process. `WaitForInjection` then blocks until the DLL has loaded into a process whose name matches `target_process_name` (substring match).
 
 ## Argument lifetimes
 
@@ -88,9 +98,9 @@ The end-to-end smoke runs in two places:
 The test is intentionally tiny:
 
 1. Load `vendor/3dmloader/3dmloader.dll` via `Loader::load`.
-2. `loader.hook("GMM-LOADER-TEST-VICTIM", noop_dll_path)` installs the CBT hook before the target process exists.
-3. Spawn `victim.exe`. Its window class matches the hook target; `3dmloader` should observe the window creation and inject `noop_dll.dll`.
-4. `session.wait_for_injection(noop_dll_path, 15_000)` waits up to 15 s for injection to complete.
+2. `loader.hook(noop_dll_path)` installs the CBT hook configured to inject `noop_dll.dll` into any process that creates a window.
+3. Spawn `victim.exe`. It creates a hidden window; 3dmloader observes the creation and `LoadLibraryW`s `noop_dll.dll` inside victim's address space.
+4. `session.wait_for_injection("victim", 15)` waits up to 15 s for `noop_dll.dll` to land in a process whose name contains `"victim"`.
 5. Drop `HookSession` (unhook) and `Loader` (FreeLibrary). Confirm `victim` exits cleanly.
 
 The smoke does **not** assert anything inside `victim`'s memory space — we trust `wait_for_injection`'s success as proof. If a future regression makes that signal unreliable we can extend `victim` to write a sentinel value to a named-pipe on `DLL_PROCESS_ATTACH`.

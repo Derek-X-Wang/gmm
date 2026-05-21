@@ -13,22 +13,14 @@ pub struct Loader {
 }
 
 impl Loader {
-    /// Pretends to load the library; always errors with
-    /// [`Error::UnsupportedPlatform`] on non-Windows hosts.
     pub fn load(_dll_path: &Path) -> Result<Self, Error> {
         Err(Error::UnsupportedPlatform)
     }
 
-    /// See [`crate::Loader::hook`] for the real signature.
-    pub fn hook(
-        &self,
-        _target_window_class: &str,
-        _dll_to_inject: &Path,
-    ) -> Result<HookSession<'_>, Error> {
+    pub fn hook(&self, _dll_to_inject: &Path) -> Result<HookSession<'_>, Error> {
         Err(Error::UnsupportedPlatform)
     }
 
-    /// See [`crate::Loader::inject`] for the real signature.
     pub fn inject(&self, _pid: u32, _dll_path: &Path) -> Result<(), Error> {
         Err(Error::UnsupportedPlatform)
     }
@@ -41,8 +33,15 @@ pub struct HookSession<'loader> {
 }
 
 impl HookSession<'_> {
-    /// See [`crate::HookSession::wait_for_injection`].
-    pub fn wait_for_injection(&self, _injected_dll: &Path, _timeout_ms: i32) -> Result<(), Error> {
+    pub fn wait_for_injection(
+        &self,
+        _target_process: &str,
+        _timeout_secs: i32,
+    ) -> Result<(), Error> {
+        Err(Error::UnsupportedPlatform)
+    }
+
+    pub fn unhook(self) -> Result<(), Error> {
         Err(Error::UnsupportedPlatform)
     }
 }

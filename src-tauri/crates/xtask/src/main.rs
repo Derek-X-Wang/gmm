@@ -85,8 +85,11 @@ mod test_loader {
 
         use gmm_loader::Loader;
 
-        const WINDOW_CLASS: &str = "GMM-LOADER-TEST-VICTIM";
-        const WAIT_TIMEOUT_MS: i32 = 15_000;
+        // 3dmloader keys WaitForInjection off a substring match against the
+        // target process name. "victim" matches victim.exe regardless of
+        // path.
+        const TARGET_PROCESS: &str = "victim";
+        const WAIT_TIMEOUT_SECS: i32 = 15;
 
         pub fn run(workspace: &Path, vendor_dll: &Path) -> Result<(), String> {
             let target_dir = workspace.join("target");
@@ -111,7 +114,7 @@ mod test_loader {
             // Install the hook before spawning victim — the CBT hook must
             // be in place when victim's window is created.
             let session = loader
-                .hook(WINDOW_CLASS, &noop_dll)
+                .hook(&noop_dll)
                 .map_err(|e| format!("install hook: {e}"))?;
 
             // Spawn victim.
@@ -123,7 +126,7 @@ mod test_loader {
                 .map_err(|e| format!("spawn victim: {e}"))?;
 
             // Wait for injection.
-            let inject_result = session.wait_for_injection(&noop_dll, WAIT_TIMEOUT_MS);
+            let inject_result = session.wait_for_injection(TARGET_PROCESS, WAIT_TIMEOUT_SECS);
             // Drop the hook session regardless (covers panic path too).
             drop(session);
 
