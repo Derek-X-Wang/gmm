@@ -63,6 +63,12 @@ pub async fn import_zip(core: State<'_, Core>, args: ImportZipArgs) -> Result<Mo
     .map_err(|e| e.to_string())
 }
 
+/// Error string returned when a user tries to enable a mod before
+/// the game install path has been set. Extracted as a constant so
+/// tests can assert against it without duplicating the literal.
+pub const NO_INSTALL_PATH_FOR_ENABLE_MSG: &str =
+    "Set the game install path in Settings before enabling mods.";
+
 #[tauri::command]
 pub async fn set_mod_enabled(
     core: State<'_, Core>,
@@ -74,7 +80,7 @@ pub async fn set_mod_enabled(
         .game_install_path(game)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Set the game install path in Settings before enabling mods.".to_string())?;
+        .ok_or_else(|| NO_INSTALL_PATH_FOR_ENABLE_MSG.to_string())?;
     let mods_dir = install.join("Mods");
     std::fs::create_dir_all(&mods_dir)
         .map_err(|e| format!("create {}: {e}", mods_dir.display()))?;
