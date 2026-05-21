@@ -146,9 +146,9 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Himi,
         display_name: "Honkai Impact 3rd",
-        importer_repo: None,
-        executable_candidates: &[],
-        detect: None,
+        importer_repo: Some(("SpectrumQT/HIMI-Package", "HIMI")),
+        executable_candidates: &["BH3.exe", "Bh3.exe"],
+        detect: Some(detect::honkai_impact::detect),
     },
     GameProfile {
         code: GameCode::Efmi,
