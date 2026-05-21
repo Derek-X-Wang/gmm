@@ -9,10 +9,12 @@ import {
   cleanStaleSession,
   currentSession,
   launchGame,
+  listSupportedGames,
   partitionLaunchError,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
   type AvGuidance,
+  type GameSummary,
   type SessionInfo,
   applyModUpdate,
   checkImporterUpdate,
@@ -49,24 +51,86 @@ import {
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import "./App.css";
 
-const GAME = "gimi" as const;
+/**
+ * Fallback used if `list_supported_games` ever returns empty (broken
+ * backend wiring) or the query is still loading on first paint. Keeps
+ * the UI usable instead of rendering an empty shell.
+ */
+const FALLBACK_GAMES: GameSummary[] = [
+  { code: "gimi", displayName: "Genshin Impact" },
+];
 
 function App() {
+  const games = useQuery<GameSummary[]>({
+    queryKey: ["supportedGames"],
+    queryFn: listSupportedGames,
+    // The registry is static at build time; refetch on focus is wasteful.
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
+  });
+  const list = (games.data ?? FALLBACK_GAMES).length > 0 ? games.data ?? FALLBACK_GAMES : FALLBACK_GAMES;
+  const [activeGame, setActiveGame] = useState<ApiGameCode>(list[0].code);
+  // If the registry updates after first render (new port lands) and the
+  // active tab is no longer in the list, snap back to the first entry.
+  useEffect(() => {
+    if (!list.some((g) => g.code === activeGame)) {
+      setActiveGame(list[0].code);
+    }
+  }, [list, activeGame]);
+  const active = list.find((g) => g.code === activeGame) ?? list[0];
+
   return (
     <main className="app">
       <header className="app__header">
-        <h1>GMM — Genshin (v0.1 foundation)</h1>
+        <h1>GMM — {active.displayName}</h1>
       </header>
       <SessionBanner />
-      <LaunchGameButton />
-      <Settings />
+      <GameTabs games={list} active={activeGame} onChange={setActiveGame} />
+      <LaunchGameButton game={activeGame} displayName={active.displayName} />
+      <Settings game={activeGame} displayName={active.displayName} />
       <NetworkPanel />
-      <ImporterPanel />
-      <ModUpdatesPanel />
+      <ImporterPanel game={activeGame} displayName={active.displayName} />
+      <ModUpdatesPanel game={activeGame} />
       <LibraryPathsPanel />
       <Diagnostics />
-      <ModList />
+      <ModList game={activeGame} />
     </main>
+  );
+}
+
+/**
+ * Per-game tab strip. Rendered between the session banner and the
+ * per-game cards so the user can switch contexts without leaving the
+ * single-page shell. Only games whose backend wiring is complete (per
+ * the Rust `GameProfile::is_ported` predicate) show up here.
+ */
+function GameTabs({
+  games,
+  active,
+  onChange,
+}: {
+  games: GameSummary[];
+  active: ApiGameCode;
+  onChange: (next: ApiGameCode) => void;
+}) {
+  if (games.length <= 1) return null;
+  return (
+    <nav className="game-tabs" role="tablist" aria-label="Game">
+      {games.map((g) => {
+        const isActive = g.code === active;
+        return (
+          <button
+            key={g.code}
+            role="tab"
+            aria-selected={isActive}
+            className={`game-tabs__tab${isActive ? " game-tabs__tab--active" : ""}`}
+            onClick={() => onChange(g.code)}
+          >
+            {g.displayName}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -147,8 +211,14 @@ function useSessionActive(): boolean {
   return !!session.data;
 }
 
-/** "Launch Genshin" button. Disabled while a session is already active. */
-function LaunchGameButton() {
+/** Per-game Launch button. Disabled while a session is already active. */
+function LaunchGameButton({
+  game,
+  displayName,
+}: {
+  game: ApiGameCode;
+  displayName: string;
+}) {
   const queryClient = useQueryClient();
   const sessionActive = useSessionActive();
 
@@ -163,7 +233,7 @@ function LaunchGameButton() {
   });
 
   const launch = useMutation({
-    mutationFn: () => launchGame(GAME),
+    mutationFn: () => launchGame(game),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["session"] });
     },
@@ -191,7 +261,7 @@ function LaunchGameButton() {
             ? "Game running…"
             : launch.isPending
               ? "Launching…"
-              : "Launch Genshin"}
+              : `Launch ${displayName}`}
         </button>
       </div>
       {partitioned && partitioned.isAvPattern && guidance.data ? (
@@ -249,19 +319,19 @@ function AvGuidanceCallout({
  * status line showing how many mods have upstream updates available.
  * Per-mod badges live in each Mod row (see ModUpdateBadge).
  */
-function ModUpdatesPanel() {
+function ModUpdatesPanel({ game }: { game: ApiGameCode }) {
   const qc = useQueryClient();
   const global = useQuery({
     queryKey: ["modUpdates", "globalEnabled"],
     queryFn: modUpdatesGloballyEnabled,
   });
   const rows = useQuery({
-    queryKey: ["modUpdates", GAME],
-    queryFn: () => listModUpdates(GAME),
+    queryKey: ["modUpdates", game],
+    queryFn: () => listModUpdates(game),
   });
   const check = useMutation({
-    mutationFn: () => checkModUpdatesNow(GAME),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", GAME] }),
+    mutationFn: () => checkModUpdatesNow(game),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", game] }),
   });
   const toggleGlobal = useMutation({
     mutationFn: (enabled: boolean) => setModUpdatesGloballyEnabled(enabled),
@@ -303,22 +373,22 @@ function ModUpdatesPanel() {
  * + per-mod opt-out toggle. Renders nothing for mods without a
  * gamebanana_id.
  */
-function ModUpdateBadge({ modId }: { modId: string }) {
+function ModUpdateBadge({ modId, game }: { modId: string; game: ApiGameCode }) {
   const qc = useQueryClient();
   const rows = useQuery({
-    queryKey: ["modUpdates", GAME],
-    queryFn: () => listModUpdates(GAME),
+    queryKey: ["modUpdates", game],
+    queryFn: () => listModUpdates(game),
   });
   const apply = useMutation({
     mutationFn: () => applyModUpdate(modId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["mods", GAME] });
-      qc.invalidateQueries({ queryKey: ["modUpdates", GAME] });
+      qc.invalidateQueries({ queryKey: ["mods", game] });
+      qc.invalidateQueries({ queryKey: ["modUpdates", game] });
     },
   });
   const toggle = useMutation({
     mutationFn: (enabled: boolean) => setModUpdateCheckEnabled(modId, enabled),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", GAME] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", game] }),
   });
 
   const row = rows.data?.find((r) => r.modId === modId);
@@ -428,18 +498,26 @@ function NetworkPanel() {
 
 /**
  * Settings → Model Importer. Lets the user (re)install the latest
- * GIMI release and roll back to the previously-backed-up files.
+ * Model Importer release for the active game and roll back to the
+ * previously-backed-up files. Repo + asset name come from the Rust
+ * `GameProfile` registry, so per-game ports light up here for free.
  */
-function ImporterPanel() {
+function ImporterPanel({
+  game,
+  displayName,
+}: {
+  game: ApiGameCode;
+  displayName: string;
+}) {
   const qc = useQueryClient();
   const release = useQuery({
-    queryKey: ["importer", "latest", GAME],
-    queryFn: () => fetchLatestImporterRelease(GAME),
+    queryKey: ["importer", "latest", game],
+    queryFn: () => fetchLatestImporterRelease(game),
     retry: false,
   });
   const update = useQuery({
-    queryKey: ["importer", "update", GAME],
-    queryFn: () => checkImporterUpdate(GAME),
+    queryKey: ["importer", "update", game],
+    queryFn: () => checkImporterUpdate(game),
     retry: false,
   });
   const loaderUpdate = useQuery({
@@ -449,37 +527,40 @@ function ImporterPanel() {
   });
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["importer", "update", GAME] });
+    qc.invalidateQueries({ queryKey: ["importer", "update", game] });
     qc.invalidateQueries({ queryKey: ["loader", "update"] });
   };
 
   const install = useMutation({
-    mutationFn: () => installImporter(GAME),
+    mutationFn: () => installImporter(game),
     onSuccess: invalidate,
   });
   const rollback = useMutation({
-    mutationFn: () => rollbackImporter(GAME),
+    mutationFn: () => rollbackImporter(game),
     onSuccess: invalidate,
   });
   const pin = useMutation({
-    mutationFn: (version: string | null) => setImporterPinned(GAME, version),
+    mutationFn: (version: string | null) => setImporterPinned(game, version),
     onSuccess: invalidate,
   });
+
+  const importerLabel = game.toUpperCase();
 
   return (
     <section className="card">
       <h2>
-        Model Importer (GIMI)
+        Model Importer ({importerLabel})
         {update.data?.available ? <span className="update-badge"> · update</span> : null}
         {loaderUpdate.data?.available ? (
           <span className="update-badge"> · loader update</span>
         ) : null}
       </h2>
       <p className="muted">
-        Downloads the latest <code>GIMI-Package</code> release, verifies the SHA-256,
-        backs up any existing importer files, and rewrites <code>d3dx.ini</code>'s
-        <code> loader</code> line to <code>gmm.exe</code>. Per ADR 0004 we never
-        update without an explicit click here.
+        Downloads the latest <code>{importerLabel}-Package</code> release for{" "}
+        {displayName}, verifies the SHA-256, backs up any existing importer
+        files, and rewrites <code>d3dx.ini</code>'s <code>loader</code> line
+        to <code>gmm.exe</code>. Per ADR 0004 we never update without an
+        explicit click here.
       </p>
       <div className="row">
         <span className="muted small">
@@ -683,35 +764,46 @@ function Diagnostics() {
   );
 }
 
-function Settings() {
+function Settings({
+  game,
+  displayName,
+}: {
+  game: ApiGameCode;
+  displayName: string;
+}) {
   const queryClient = useQueryClient();
   const { data: installPath } = useQuery({
-    queryKey: ["installPath", GAME],
-    queryFn: () => getGameInstallPath(GAME),
+    queryKey: ["installPath", game],
+    queryFn: () => getGameInstallPath(game),
   });
 
   // Tracks whether the most recent path came from auto-detect, so we
   // can show the "Auto-detected" badge. Cleared as soon as the user
-  // overrides via the manual picker.
+  // overrides via the manual picker. Reset when the active game changes
+  // so a stale "Auto-detected" badge doesn't survive a tab switch.
   const [lastSource, setLastSource] = useState<"manual" | "auto" | null>(null);
   const [detectFailed, setDetectFailed] = useState(false);
+  useEffect(() => {
+    setLastSource(null);
+    setDetectFailed(false);
+  }, [game]);
 
   const setPath = useMutation({
-    mutationFn: (path: string) => setGameInstallPath(GAME, path),
+    mutationFn: (path: string) => setGameInstallPath(game, path),
     onSuccess: () => {
       setLastSource("manual");
       setDetectFailed(false);
-      queryClient.invalidateQueries({ queryKey: ["installPath", GAME] });
+      queryClient.invalidateQueries({ queryKey: ["installPath", game] });
     },
   });
 
   const detect = useMutation({
-    mutationFn: () => detectGameInstallPath(GAME),
+    mutationFn: () => detectGameInstallPath(game),
     onSuccess: (path) => {
       if (path) {
         setLastSource("auto");
         setDetectFailed(false);
-        queryClient.invalidateQueries({ queryKey: ["installPath", GAME] });
+        queryClient.invalidateQueries({ queryKey: ["installPath", game] });
       } else {
         setDetectFailed(true);
       }
@@ -736,9 +828,9 @@ function Settings() {
     <section className="card">
       <h2>Settings</h2>
       <p className="muted">
-        GMM looks for <code>GenshinImpact.exe</code> (or <code>YuanShen.exe</code>) plus the
-        <code> GenshinImpact_Data</code> folder. Use <strong>Auto-detect</strong> to scan known
-        install locations, or pick the folder manually.
+        GMM looks for the {displayName} executable plus its Unity{" "}
+        <code>_Data</code> folder. Use <strong>Auto-detect</strong> to scan
+        known install locations, or pick the folder manually.
       </p>
       <div className="row">
         <input
@@ -759,12 +851,13 @@ function Settings() {
       </div>
       {detectFailed ? (
         <p className="muted small">
-          Couldn't find Genshin automatically. Pick the install folder manually.
+          Couldn't find {displayName} automatically. Pick the install folder
+          manually.
         </p>
       ) : null}
       {setPath.isError ? <p className="error">{String(setPath.error)}</p> : null}
       {detect.isError ? <p className="error">{String(detect.error)}</p> : null}
-      <RebuildJunctions />
+      <RebuildJunctions game={game} />
     </section>
   );
 }
@@ -774,9 +867,9 @@ function Settings() {
  * active game and recreates one per enabled Mod against the current
  * Library. The hammer to use after relocating the Library directory.
  */
-function RebuildJunctions() {
+function RebuildJunctions({ game }: { game: ApiGameCode }) {
   const rebuild = useMutation({
-    mutationFn: () => rebuildJunctions(GAME),
+    mutationFn: () => rebuildJunctions(game),
   });
   return (
     <div className="row">
@@ -793,26 +886,28 @@ function RebuildJunctions() {
   );
 }
 
-function ModList() {
+function ModList({ game }: { game: ApiGameCode }) {
   const queryClient = useQueryClient();
   const mods = useQuery({
-    queryKey: ["mods", GAME],
-    queryFn: () => listMods(GAME),
+    queryKey: ["mods", game],
+    queryFn: () => listMods(game),
   });
   const conflicts = useQuery({
-    queryKey: ["conflicts", GAME],
-    queryFn: () => detectConflicts(GAME),
+    queryKey: ["conflicts", game],
+    queryFn: () => detectConflicts(game),
   });
   const sessionActive = useSessionActive();
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
-      setModEnabled(id, enabled, GAME),
+      setModEnabled(id, enabled, game),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["mods", GAME] });
-      queryClient.invalidateQueries({ queryKey: ["conflicts", GAME] });
+      queryClient.invalidateQueries({ queryKey: ["mods", game] });
+      queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
     },
   });
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["mods", game] });
 
   return (
     <section className="card">
@@ -824,12 +919,12 @@ function ModList() {
           ) : null}
         </h2>
         <div className="row">
-          <AdoptButton onAdopted={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
-          <ImportZipButton onImported={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
-          <GameBananaImport onImported={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
+          <AdoptButton game={game} onAdopted={invalidate} />
+          <ImportZipButton game={game} onImported={invalidate} />
+          <GameBananaImport game={game} onImported={invalidate} />
         </div>
       </div>
-      <ZipDropZone onImported={() => queryClient.invalidateQueries({ queryKey: ["mods", GAME] })} />
+      <ZipDropZone game={game} onImported={invalidate} />
 
       {mods.isLoading ? <p>Loading…</p> : null}
       {mods.isError ? <p className="error">{String(mods.error)}</p> : null}
@@ -851,7 +946,7 @@ function ModList() {
                     View on GameBanana
                   </a>
                   {m.version ? <span className="muted small"> · v{m.version}</span> : null}
-                  <ModUpdateBadge modId={m.id} />
+                  <ModUpdateBadge modId={m.id} game={game} />
                 </>
               ) : null}
               <ConflictBadge
@@ -859,7 +954,7 @@ function ModList() {
                 conflicts={conflicts.data?.conflicts ?? []}
                 count={conflicts.data?.per_mod_count[m.id] ?? 0}
               />
-              <VariantSelector modId={m.id} />
+              <VariantSelector modId={m.id} game={game} />
             </div>
             <label className="toggle">
               <input
@@ -880,7 +975,13 @@ function ModList() {
   );
 }
 
-function AdoptButton({ onAdopted }: { onAdopted: () => void }) {
+function AdoptButton({
+  game,
+  onAdopted,
+}: {
+  game: ApiGameCode;
+  onAdopted: () => void;
+}) {
   const [name, setName] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   const [open_, setOpen_] = useState(false);
@@ -888,7 +989,7 @@ function AdoptButton({ onAdopted }: { onAdopted: () => void }) {
   const adopt = useMutation({
     mutationFn: async () => {
       if (!picked || !name.trim()) throw new Error("pick a folder and enter a name");
-      return adoptFolder(GAME, picked, name.trim());
+      return adoptFolder(game, picked, name.trim());
     },
     onSuccess: () => {
       onAdopted();
@@ -935,11 +1036,17 @@ function AdoptButton({ onAdopted }: { onAdopted: () => void }) {
  * routes through the slice-1b ingest path. Network goes through the
  * configured proxy (slice 14).
  */
-function GameBananaImport({ onImported }: { onImported: () => void }) {
+function GameBananaImport({
+  game,
+  onImported,
+}: {
+  game: ApiGameCode;
+  onImported: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
   const ingest = useMutation({
-    mutationFn: () => importGamebanana(GAME, input.trim()),
+    mutationFn: () => importGamebanana(game, input.trim()),
     onSuccess: () => {
       onImported();
       setInput("");
@@ -1021,17 +1128,17 @@ function ConflictBadge({
  * see no UI change. Switching the active Variant retargets the
  * junction in place; no full toggle cycle needed.
  */
-function VariantSelector({ modId }: { modId: string }) {
+function VariantSelector({ modId, game }: { modId: string; game: ApiGameCode }) {
   const qc = useQueryClient();
   const v = useQuery({
     queryKey: ["variants", modId],
     queryFn: () => listVariants(modId),
   });
   const switchVariant = useMutation({
-    mutationFn: (variantId: string) => setActiveVariant(modId, variantId, GAME),
+    mutationFn: (variantId: string) => setActiveVariant(modId, variantId, game),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["variants", modId] });
-      qc.invalidateQueries({ queryKey: ["conflicts", GAME] });
+      qc.invalidateQueries({ queryKey: ["conflicts", game] });
     },
   });
 
@@ -1066,7 +1173,13 @@ function VariantSelector({ modId }: { modId: string }) {
  * — both flows produce a Mod row in the same list. The drop-zone below
  * calls the same `importZip` Tauri command.
  */
-function ImportZipButton({ onImported }: { onImported: () => void }) {
+function ImportZipButton({
+  game,
+  onImported,
+}: {
+  game: ApiGameCode;
+  onImported: () => void;
+}) {
   const [name, setName] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   const [open_, setOpen_] = useState(false);
@@ -1074,7 +1187,7 @@ function ImportZipButton({ onImported }: { onImported: () => void }) {
   const importMutation = useMutation({
     mutationFn: async () => {
       if (!picked || !name.trim()) throw new Error("pick a ZIP and enter a name");
-      return importZip(GAME, picked, name.trim());
+      return importZip(game, picked, name.trim());
     },
     onSuccess: () => {
       onImported();
@@ -1128,7 +1241,13 @@ function ImportZipButton({ onImported }: { onImported: () => void }) {
  * the surface this component listens to. Falls back to a visible affordance
  * when no drop hovers.
  */
-function ZipDropZone({ onImported }: { onImported: () => void }) {
+function ZipDropZone({
+  game,
+  onImported,
+}: {
+  game: ApiGameCode;
+  onImported: () => void;
+}) {
   const [hover, setHover] = useState(false);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -1136,7 +1255,7 @@ function ZipDropZone({ onImported }: { onImported: () => void }) {
   const importMutation = useMutation({
     mutationFn: async () => {
       if (!pendingPath || !name.trim()) throw new Error("enter a name");
-      return importZip(GAME, pendingPath, name.trim());
+      return importZip(game, pendingPath, name.trim());
     },
     onSuccess: () => {
       onImported();

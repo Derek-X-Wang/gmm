@@ -106,6 +106,7 @@ pub fn run() {
             commands::current_session,
             commands::clean_stale_session,
             commands::av_guidance,
+            commands::list_supported_games,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

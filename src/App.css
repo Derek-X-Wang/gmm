@@ -218,6 +218,35 @@ code {
 }
 
 /*
+ * Slice 6 (#16): per-game tab strip. Renders between the session
+ * banner and the per-game cards. Each new per-game port (#17-#20)
+ * appends an entry to `GAME_PROFILES` in Rust; the React side picks
+ * them up via `listSupportedGames` without further changes here.
+ */
+.game-tabs {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: -0.25rem 0 0.25rem;
+}
+
+.game-tabs__tab {
+  background: #23232a;
+  color: #c0c0c8;
+  border: 1px solid #2e2e36;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.game-tabs__tab--active {
+  background: #3b82f6;
+  color: white;
+  border-color: #3b82f6;
+}
+
+/*
  * Slice NEW-AV (#13): the inline AV / SmartScreen callout that
  * replaces a raw Win32 error when Launch fails with an AV-pattern
  * error. Same colour as `.error` so the user sees this is bad news,

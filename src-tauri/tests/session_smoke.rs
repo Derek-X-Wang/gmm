@@ -41,6 +41,45 @@ fn vendor_loader_dll() -> PathBuf {
         .join("vendor/3dmloader/3dmloader.dll")
 }
 
+/// Slice 6 (#16) — SRMI mirrors slice 4b's session machinery. The
+/// loader / hook / victim plumbing is GameCode-agnostic, so the value
+/// of a per-game smoke is verifying that
+/// `start_session(SessionInfo { game: Srmi, ... })` round-trips through
+/// the singleton lock just like GIMI did. Cheap to add (no extra
+/// victim.exe spawn) and lights up the AC's "Windows runner smoke
+/// mirroring slice 4b's" bullet.
+#[tokio::test]
+async fn windows_smoke_srmi_session_round_trip() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_root = tmp.path().join("library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_root, &db_url).await.expect("init core");
+
+    let info = SessionInfo {
+        game: GameCode::Srmi,
+        pid: 0,
+        started_at: Utc::now(),
+    };
+    core.start_session(&info).await.expect("start srmi session");
+
+    let active = core
+        .session_info()
+        .await
+        .expect("session info")
+        .expect("session row");
+    assert_eq!(
+        active.game.as_str(),
+        "srmi",
+        "SRMI session tagged correctly"
+    );
+
+    core.end_session().await.expect("end srmi session");
+    assert!(
+        core.session_info().await.expect("info").is_none(),
+        "session row cleared after end_session",
+    );
+}
+
 #[tokio::test]
 async fn windows_smoke_full_session_round_trip() {
     let target = target_dir();
