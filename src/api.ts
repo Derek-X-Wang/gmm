@@ -155,3 +155,34 @@ export async function setLibraryPathForGame(
 ): Promise<MoveReport> {
   return invoke<MoveReport>("set_library_path_for_game", { game, path });
 }
+
+export interface LatestRelease {
+  tag_name: string;
+  asset_url: string;
+  asset_name: string;
+  sha256_digest: string | null;
+}
+
+export interface InstallReport {
+  backup_dir: string | null;
+  sha256: string;
+  rewrote_files: string[];
+}
+
+export async function fetchLatestImporterRelease(
+  game: GameCode,
+): Promise<LatestRelease | null> {
+  return (
+    (await invoke<LatestRelease | null>("fetch_latest_importer_release", { game })) ?? null
+  );
+}
+
+export async function installImporter(game: GameCode): Promise<InstallReport> {
+  return invoke<InstallReport>("install_importer", { game });
+}
+
+export async function rollbackImporter(game: GameCode): Promise<string | null> {
+  return (
+    (await invoke<string | null>("rollback_importer", { game })) ?? null
+  );
+}

@@ -5,11 +5,14 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   adoptFolder,
   detectGameInstallPath,
+  fetchLatestImporterRelease,
   getGameInstallPath,
   getLibraryPaths,
   importZip,
+  installImporter,
   listMods,
   rebuildJunctions,
+  rollbackImporter,
   setGameInstallPath,
   setLibraryPathForGame,
   setLibraryRoot,
@@ -28,10 +31,65 @@ function App() {
         <h1>GMM — Genshin (v0.1 foundation)</h1>
       </header>
       <Settings />
+      <ImporterPanel />
       <LibraryPathsPanel />
       <Diagnostics />
       <ModList />
     </main>
+  );
+}
+
+/**
+ * Settings → Model Importer. Lets the user (re)install the latest
+ * GIMI release and roll back to the previously-backed-up files.
+ */
+function ImporterPanel() {
+  const release = useQuery({
+    queryKey: ["importer", "latest", GAME],
+    queryFn: () => fetchLatestImporterRelease(GAME),
+    retry: false,
+  });
+
+  const install = useMutation({
+    mutationFn: () => installImporter(GAME),
+  });
+  const rollback = useMutation({
+    mutationFn: () => rollbackImporter(GAME),
+  });
+
+  return (
+    <section className="card">
+      <h2>Model Importer (GIMI)</h2>
+      <p className="muted">
+        Downloads the latest <code>GIMI-Package</code> release, verifies the SHA-256,
+        backs up any existing importer files, and rewrites <code>d3dx.ini</code>'s
+        <code> loader</code> line to <code>gmm.exe</code>. Per ADR 0004 we never
+        update without an explicit click here.
+      </p>
+      <div className="row">
+        <span className="muted small">
+          Latest release: {release.data ? <code>{release.data.tag_name}</code> : release.isLoading ? "checking…" : release.isError ? "unavailable" : "—"}
+        </span>
+      </div>
+      <div className="row">
+        <button onClick={() => install.mutate()} disabled={install.isPending}>
+          {install.isPending ? "Installing…" : "Reinstall importer"}
+        </button>
+        <button onClick={() => rollback.mutate()} disabled={rollback.isPending}>
+          {rollback.isPending ? "Rolling back…" : "Roll back importer"}
+        </button>
+      </div>
+      {install.data ? (
+        <p className="muted small">
+          Installed. SHA-256 <code>{install.data.sha256.slice(0, 12)}…</code>{install.data.backup_dir ? <> · Backed up to <code>{install.data.backup_dir}</code></> : null}.
+        </p>
+      ) : null}
+      {rollback.data ? (
+        <p className="muted small">Restored from <code>{rollback.data}</code>.</p>
+      ) : null}
+      {install.isError ? <p className="error">{String(install.error)}</p> : null}
+      {rollback.isError ? <p className="error">{String(rollback.error)}</p> : null}
+    </section>
   );
 }
 

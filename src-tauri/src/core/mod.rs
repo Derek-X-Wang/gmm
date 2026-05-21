@@ -8,6 +8,7 @@ pub mod detect;
 pub mod diagnostics;
 pub mod error;
 pub mod games;
+pub mod importer;
 pub mod junction;
 pub mod mods;
 pub mod reconcile;
