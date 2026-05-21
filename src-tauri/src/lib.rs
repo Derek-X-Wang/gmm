@@ -14,6 +14,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_mods,
             commands::adopt_folder,
+            commands::import_zip,
             commands::set_mod_enabled,
             commands::get_game_install_path,
             commands::set_game_install_path,

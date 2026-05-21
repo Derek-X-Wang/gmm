@@ -8,13 +8,21 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use tauri::State;
 
-use crate::core::{Core, GameCode, Mod};
+use crate::core::{Core, GameCode, ImportZipOptions, Mod};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoptArgs {
     pub game: GameCode,
     pub source_path: PathBuf,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportZipArgs {
+    pub game: GameCode,
+    pub zip_path: PathBuf,
     pub name: String,
 }
 
@@ -28,6 +36,18 @@ pub async fn adopt_folder(core: State<'_, Core>, args: AdoptArgs) -> Result<Mod,
     core.adopt_folder(args.game, &args.source_path, &args.name)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn import_zip(core: State<'_, Core>, args: ImportZipArgs) -> Result<Mod, String> {
+    core.import_zip(
+        args.game,
+        &args.zip_path,
+        &args.name,
+        ImportZipOptions::default(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
