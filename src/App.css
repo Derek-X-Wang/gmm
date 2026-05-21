@@ -205,3 +205,14 @@ code {
   font-weight: 500;
   font-size: 0.8rem;
 }
+
+.update-pill {
+  background: #1e3a5f;
+  color: #93c5fd;
+  border: none;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  margin-left: 0.3rem;
+}

@@ -72,6 +72,12 @@ pub fn run() {
             commands::check_importer_update,
             commands::check_loader_update,
             commands::set_importer_pinned,
+            commands::list_mod_updates,
+            commands::check_mod_updates_now,
+            commands::set_mod_update_check_enabled,
+            commands::set_mod_updates_globally_enabled,
+            commands::mod_updates_globally_enabled,
+            commands::apply_mod_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
