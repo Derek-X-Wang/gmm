@@ -10,6 +10,7 @@
 //! but the heuristics (registry uninstall keys, exe + Data-folder
 //! validation) are public.
 
+pub mod endfield;
 pub mod genshin;
 pub mod honkai_impact;
 pub mod star_rail;

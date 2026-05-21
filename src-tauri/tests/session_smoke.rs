@@ -98,6 +98,11 @@ async fn windows_smoke_himi_session_round_trip() {
 }
 
 #[tokio::test]
+async fn windows_smoke_efmi_session_round_trip() {
+    assert_session_round_trip_for(GameCode::Efmi, "efmi").await;
+}
+
+#[tokio::test]
 async fn windows_smoke_full_session_round_trip() {
     let target = target_dir();
     let victim_exe = target.join("victim.exe");

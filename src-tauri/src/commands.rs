@@ -748,6 +748,7 @@ pub async fn launch_game(
     // structured `<AvGuidance>` component instead of dumping a raw
     // Win32 error onto the user.
     let result: Result<SessionInfo, String> = async {
+        use crate::core::games::InjectMode;
         use gmm_loader::Loader;
 
         // Cheap pre-check; the atomic INSERT in start_session is the
@@ -776,42 +777,76 @@ pub async fn launch_game(
         }
         let loader_dll = locate_loader_dll()?;
 
-        // Install the CBT hook BEFORE spawning so it's in place when
-        // the game creates its window. `Loader::load` is the most
-        // likely AV-quarantine target — Defender frequently flags the
-        // vendored 3dmloader.dll on first run.
+        // Loading the 3dmloader DLL is the most common AV-quarantine
+        // target (Defender frequently flags the vendored DLL on first
+        // run); errors from this step land in the AV classifier via
+        // the outer `wrap_launch_error`.
         let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
-        let hook = loader
-            .hook(&dll_to_inject)
-            .map_err(|e| format!("install hook: {e}"))?;
 
-        // Spawn the game; any failure between here and
-        // runtime.install() triggers ChildGuard::drop which kills the
-        // process so it doesn't outlive the failed launch.
-        let child = std::process::Command::new(&game_exe)
-            .current_dir(&install)
-            .spawn()
-            .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
-        let child_guard = ChildGuard::new(child);
+        let inject_mode = game.profile().inject_mode;
+        let child_guard = match inject_mode {
+            InjectMode::Hook => {
+                // CBT hook MUST be installed before spawning so it
+                // catches the window-creation event the game fires on
+                // startup.
+                let hook = loader
+                    .hook(&dll_to_inject)
+                    .map_err(|e| format!("install hook: {e}"))?;
 
-        // Block until the importer DLL lands in a process whose image
-        // name matches the game exe, then DROP the hook session —
-        // holding the global CBT hook for the whole game session
-        // would inject the DLL into every unrelated process that
-        // creates a window.
-        let target_process = game_exe
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "GenshinImpact.exe".to_string());
-        hook.wait_for_injection(&target_process, 60)
-            .map_err(|e| format!("wait_for_injection: {e}"))?;
-        // Explicitly drop so the unhook runs immediately rather than
-        // at end-of-scope. clippy::drop_non_drop fires on the
-        // non-Windows stub HookSession (which has no Drop impl);
-        // silence it — on Windows this is the load-bearing line that
-        // takes the CBT hook back down.
-        #[allow(clippy::drop_non_drop)]
-        drop(hook);
+                let child = std::process::Command::new(&game_exe)
+                    .current_dir(&install)
+                    .spawn()
+                    .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+                let child_guard = ChildGuard::new(child);
+
+                // Block until the importer DLL lands in a process
+                // whose image name matches the game exe, then DROP
+                // the hook session — holding the global CBT hook for
+                // the whole game session would inject the DLL into
+                // every unrelated process that creates a window.
+                let target_process = game_exe
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "GenshinImpact.exe".to_string());
+                hook.wait_for_injection(&target_process, 60)
+                    .map_err(|e| format!("wait_for_injection: {e}"))?;
+                // Explicitly drop so the unhook runs immediately
+                // rather than at end-of-scope. clippy::drop_non_drop
+                // fires on the non-Windows stub HookSession (no Drop
+                // impl); silence it — on Windows this is the
+                // load-bearing line that takes the CBT hook back
+                // down.
+                #[allow(clippy::drop_non_drop)]
+                drop(hook);
+
+                child_guard
+            }
+            InjectMode::Inject => {
+                // EFMI path (slice 10 / #20): spawn first, then call
+                // `Loader::inject` against the live PID. Upstream
+                // XXMI uses `custom_launch_inject_mode = 'Inject'`
+                // here; the CBT-hook path doesn't fire for EFMI's
+                // launch sequence.
+                let child = std::process::Command::new(&game_exe)
+                    .current_dir(&install)
+                    .spawn()
+                    .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+                let child_guard = ChildGuard::new(child);
+
+                // Give the process a beat to start its main module
+                // before injecting; injecting into a process that has
+                // not finished creating its main thread is fragile.
+                // 1 s is what XXMI uses in practice; we match it.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                let pid = child_guard.pid();
+                loader
+                    .inject(pid, &dll_to_inject)
+                    .map_err(|e| format!("inject into pid {pid}: {e}"))?;
+
+                child_guard
+            }
+        };
 
         let info = SessionInfo {
             game,

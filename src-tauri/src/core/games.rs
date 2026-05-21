@@ -73,6 +73,23 @@ impl FromStr for GameCode {
 /// Function signature shared by every per-game detector.
 pub type DetectFn = fn() -> Option<PathBuf>;
 
+/// How `launch_game` gets the Model Importer DLL into the running
+/// game process. Defaults to `Hook` for every game where XXMI uses
+/// the CBT-hook + window-created path; switches to `Inject` for
+/// titles upstream marks `custom_launch_inject_mode = 'Inject'` (EFMI
+/// today; see slice 10 / #20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InjectMode {
+    /// Install a CBT hook before spawning; wait for the game window
+    /// creation to trigger LoadLibraryW inside the game process. The
+    /// default for the Hoyoverse trio + Kuro's Wuthering Waves.
+    Hook,
+    /// Spawn first, then call `Loader::inject(pid, dll)` directly
+    /// against the running process. Used by EFMI per XXMI upstream.
+    Inject,
+}
+
 /// Static per-game wiring. The registry lets us add a new game (slices
 /// #16–#20) by appending a row instead of touching match arms across
 /// `commands.rs` / `detect/` / the UI.
@@ -98,6 +115,9 @@ pub struct GameProfile {
     /// per-game port lands.
     #[serde(skip_serializing)]
     pub detect: Option<DetectFn>,
+    /// How `launch_game` injects the Model Importer DLL. See
+    /// [`InjectMode`]; defaults to `Hook` everywhere except EFMI.
+    pub inject_mode: InjectMode,
 }
 
 impl GameProfile {
@@ -121,6 +141,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         importer_repo: Some(("SpectrumQT/GIMI-Package", "GIMI")),
         executable_candidates: &["GenshinImpact.exe", "YuanShen.exe"],
         detect: Some(detect::genshin::detect),
+        inject_mode: InjectMode::Hook,
     },
     GameProfile {
         code: GameCode::Srmi,
@@ -128,6 +149,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         importer_repo: Some(("SpectrumQT/SRMI-Package", "SRMI")),
         executable_candidates: &["StarRail.exe"],
         detect: Some(detect::star_rail::detect),
+        inject_mode: InjectMode::Hook,
     },
     GameProfile {
         code: GameCode::Zzmi,
@@ -135,6 +157,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         importer_repo: Some(("SpectrumQT/ZZMI-Package", "ZZMI")),
         executable_candidates: &["ZenlessZoneZero.exe"],
         detect: Some(detect::zenless::detect),
+        inject_mode: InjectMode::Hook,
     },
     GameProfile {
         code: GameCode::Wwmi,
@@ -142,6 +165,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         importer_repo: Some(("SpectrumQT/WWMI-Package", "WWMI")),
         executable_candidates: &["Client-Win64-Shipping.exe"],
         detect: Some(detect::wuthering::detect),
+        inject_mode: InjectMode::Hook,
     },
     GameProfile {
         code: GameCode::Himi,
@@ -149,12 +173,14 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         importer_repo: Some(("SpectrumQT/HIMI-Package", "HIMI")),
         executable_candidates: &["BH3.exe", "Bh3.exe"],
         detect: Some(detect::honkai_impact::detect),
+        inject_mode: InjectMode::Hook,
     },
     GameProfile {
         code: GameCode::Efmi,
         display_name: "Endfield",
-        importer_repo: None,
-        executable_candidates: &[],
-        detect: None,
+        importer_repo: Some(("SpectrumQT/EFMI-Package", "EFMI")),
+        executable_candidates: &["Endfield-Win64-Shipping.exe", "Endfield.exe"],
+        detect: Some(detect::endfield::detect),
+        inject_mode: InjectMode::Inject,
     },
 ];
