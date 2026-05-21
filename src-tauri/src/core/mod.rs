@@ -89,6 +89,27 @@ impl Core {
         })
     }
 
+    /// Read the persisted install path for a game (None until the user
+    /// has picked one or slice 2 has auto-detected one).
+    pub async fn game_install_path(&self, game: GameCode) -> Result<Option<PathBuf>> {
+        let row = sqlx::query("SELECT install_path FROM games WHERE code = ?")
+            .bind(game.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+        let install_path: Option<String> = row.try_get("install_path")?;
+        Ok(install_path.map(PathBuf::from))
+    }
+
+    /// Persist a game's install path.
+    pub async fn set_game_install_path(&self, game: GameCode, path: &Path) -> Result<()> {
+        sqlx::query("UPDATE games SET install_path = ? WHERE code = ?")
+            .bind(path.to_string_lossy().as_ref())
+            .bind(game.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Find an unused junction directory name for the given game, deduping
     /// collisions by appending ` (2)`, ` (3)`, ... If `base` is already
     /// unique we return it unchanged.

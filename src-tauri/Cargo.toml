@@ -30,6 +30,8 @@ ulid = "1"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
+dirs = "5"
+tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 junction = "1"
