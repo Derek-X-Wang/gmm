@@ -4,6 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import {
   adoptFolder,
+  detectGameInstallPath,
   getGameInstallPath,
   importZip,
   listMods,
@@ -84,9 +85,32 @@ function Settings() {
     queryFn: () => getGameInstallPath(GAME),
   });
 
+  // Tracks whether the most recent path came from auto-detect, so we
+  // can show the "Auto-detected" badge. Cleared as soon as the user
+  // overrides via the manual picker.
+  const [lastSource, setLastSource] = useState<"manual" | "auto" | null>(null);
+  const [detectFailed, setDetectFailed] = useState(false);
+
   const setPath = useMutation({
     mutationFn: (path: string) => setGameInstallPath(GAME, path),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["installPath", GAME] }),
+    onSuccess: () => {
+      setLastSource("manual");
+      setDetectFailed(false);
+      queryClient.invalidateQueries({ queryKey: ["installPath", GAME] });
+    },
+  });
+
+  const detect = useMutation({
+    mutationFn: () => detectGameInstallPath(GAME),
+    onSuccess: (path) => {
+      if (path) {
+        setLastSource("auto");
+        setDetectFailed(false);
+        queryClient.invalidateQueries({ queryKey: ["installPath", GAME] });
+      } else {
+        setDetectFailed(true);
+      }
+    },
   });
 
   const pickPath = async () => {
@@ -94,10 +118,23 @@ function Settings() {
     if (typeof picked === "string") setPath.mutate(picked);
   };
 
+  const label =
+    lastSource === "auto"
+      ? "Auto-detected"
+      : lastSource === "manual"
+        ? "Set manually"
+        : installPath
+          ? "Saved"
+          : "No install path set";
+
   return (
     <section className="card">
       <h2>Settings</h2>
-      <p className="muted">Pick the directory that contains <code>GenshinImpact.exe</code> (or <code>YuanShen.exe</code>).</p>
+      <p className="muted">
+        GMM looks for <code>GenshinImpact.exe</code> (or <code>YuanShen.exe</code>) plus the
+        <code> GenshinImpact_Data</code> folder. Use <strong>Auto-detect</strong> to scan known
+        install locations, or pick the folder manually.
+      </p>
       <div className="row">
         <input
           className="path"
@@ -105,11 +142,23 @@ function Settings() {
           placeholder="No install path set"
           readOnly
         />
+        <span className="muted small">{label}</span>
+      </div>
+      <div className="row">
+        <button onClick={() => detect.mutate()} disabled={detect.isPending || setPath.isPending}>
+          {detect.isPending ? "Scanning…" : installPath ? "Re-detect" : "Auto-detect"}
+        </button>
         <button onClick={pickPath} disabled={setPath.isPending}>
-          {setPath.isPending ? "Saving…" : "Pick folder"}
+          {installPath ? "Change…" : "Pick folder"}
         </button>
       </div>
+      {detectFailed ? (
+        <p className="muted small">
+          Couldn't find Genshin automatically. Pick the install folder manually.
+        </p>
+      ) : null}
       {setPath.isError ? <p className="error">{String(setPath.error)}</p> : null}
+      {detect.isError ? <p className="error">{String(detect.error)}</p> : null}
     </section>
   );
 }

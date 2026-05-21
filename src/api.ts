@@ -76,3 +76,11 @@ export async function setGameInstallPath(
 ): Promise<void> {
   await invoke("set_game_install_path", { game, path });
 }
+
+export async function detectGameInstallPath(
+  game: GameCode,
+): Promise<string | null> {
+  return (
+    (await invoke<string | null>("detect_game_install_path", { game })) ?? null
+  );
+}

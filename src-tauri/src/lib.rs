@@ -36,6 +36,7 @@ pub fn run() {
             commands::log_frontend_error,
             commands::export_diagnostics_bundle,
             commands::diagnostics_log_dir,
+            commands::detect_game_install_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
