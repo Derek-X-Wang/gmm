@@ -68,13 +68,16 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
 
-      - name: cargo test
-        working-directory: src-tauri
-        run: cargo test --workspace
-
+      # Build the whole workspace BEFORE running tests — session_smoke.rs
+      # (slice 4b, Windows-only) needs victim.exe + noop_dll.dll present
+      # in target/debug/ at test-launch time.
       - name: cargo build
         working-directory: src-tauri
         run: cargo build --workspace
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --workspace
 
       # Windows-only: smoke-test the gmm-loader FFI binding against the
       # vendored 3dmloader.dll. Builds victim.exe + noop_dll.dll first,
