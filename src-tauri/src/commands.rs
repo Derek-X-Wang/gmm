@@ -18,6 +18,7 @@ use crate::core::diagnostics;
 use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
+use crate::core::updates::UpdateStatus;
 use crate::core::variants::Variant;
 use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport};
 
@@ -311,6 +312,33 @@ pub async fn import_gamebanana(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn check_importer_update(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<UpdateStatus, String> {
+    let (repo, filter) = importer_repo_for(game)?;
+    core.check_importer_update(game, repo, filter)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn check_loader_update(core: State<'_, Core>) -> Result<UpdateStatus, String> {
+    core.check_loader_update().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_importer_pinned(
+    core: State<'_, Core>,
+    game: GameCode,
+    version: Option<String>,
+) -> Result<(), String> {
+    core.set_importer_pinned(game, version.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Resolve the GitHub repo + asset filter for a Game's importer.
 /// Slice 3 wires GIMI only; other games are added in their port issues.
 fn importer_repo_for(game: GameCode) -> Result<(&'static str, &'static str), String> {
@@ -364,6 +392,13 @@ pub async fn install_importer(
     .await
     .map_err(|e| format!("install task join error: {e}"))?
     .map_err(|e| e.to_string())?;
+
+    // Record the installed tag so the update-check pass can compare
+    // against it next launch. Best-effort; never fails the install.
+    let _ = core
+        .set_importer_installed(game, &release.tag_name)
+        .await
+        .map_err(|e| e.to_string());
 
     Ok(report)
 }

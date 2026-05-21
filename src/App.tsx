@@ -4,6 +4,8 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import {
   adoptFolder,
+  checkImporterUpdate,
+  checkLoaderUpdate,
   detectConflicts,
   detectGameInstallPath,
   fetchLatestImporterRelease,
@@ -19,6 +21,7 @@ import {
   rollbackImporter,
   setActiveVariant,
   setGameInstallPath,
+  setImporterPinned,
   setLibraryPathForGame,
   setLibraryRoot,
   setModEnabled,
@@ -131,22 +134,50 @@ function NetworkPanel() {
  * GIMI release and roll back to the previously-backed-up files.
  */
 function ImporterPanel() {
+  const qc = useQueryClient();
   const release = useQuery({
     queryKey: ["importer", "latest", GAME],
     queryFn: () => fetchLatestImporterRelease(GAME),
     retry: false,
   });
+  const update = useQuery({
+    queryKey: ["importer", "update", GAME],
+    queryFn: () => checkImporterUpdate(GAME),
+    retry: false,
+  });
+  const loaderUpdate = useQuery({
+    queryKey: ["loader", "update"],
+    queryFn: () => checkLoaderUpdate(),
+    retry: false,
+  });
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["importer", "update", GAME] });
+    qc.invalidateQueries({ queryKey: ["loader", "update"] });
+  };
 
   const install = useMutation({
     mutationFn: () => installImporter(GAME),
+    onSuccess: invalidate,
   });
   const rollback = useMutation({
     mutationFn: () => rollbackImporter(GAME),
+    onSuccess: invalidate,
+  });
+  const pin = useMutation({
+    mutationFn: (version: string | null) => setImporterPinned(GAME, version),
+    onSuccess: invalidate,
   });
 
   return (
     <section className="card">
-      <h2>Model Importer (GIMI)</h2>
+      <h2>
+        Model Importer (GIMI)
+        {update.data?.available ? <span className="update-badge"> · update</span> : null}
+        {loaderUpdate.data?.available ? (
+          <span className="update-badge"> · loader update</span>
+        ) : null}
+      </h2>
       <p className="muted">
         Downloads the latest <code>GIMI-Package</code> release, verifies the SHA-256,
         backs up any existing importer files, and rewrites <code>d3dx.ini</code>'s
@@ -157,15 +188,38 @@ function ImporterPanel() {
         <span className="muted small">
           Latest release: {release.data ? <code>{release.data.tag_name}</code> : release.isLoading ? "checking…" : release.isError ? "unavailable" : "—"}
         </span>
+        {update.data?.installedVersion ? (
+          <span className="muted small">
+            · Installed <code>{update.data.installedVersion}</code>
+          </span>
+        ) : null}
+        {update.data?.pinned ? <span className="muted small"> · pinned</span> : null}
       </div>
       <div className="row">
         <button onClick={() => install.mutate()} disabled={install.isPending}>
-          {install.isPending ? "Installing…" : "Reinstall importer"}
+          {install.isPending ? "Installing…" : update.data?.available ? "Apply update" : "Reinstall importer"}
         </button>
         <button onClick={() => rollback.mutate()} disabled={rollback.isPending}>
           {rollback.isPending ? "Rolling back…" : "Roll back importer"}
         </button>
+        {update.data?.installedVersion ? (
+          <button
+            onClick={() =>
+              pin.mutate(update.data?.pinned ? null : update.data?.installedVersion ?? null)
+            }
+            disabled={pin.isPending}
+          >
+            {update.data?.pinned ? "Unpin" : "Pin to current"}
+          </button>
+        ) : null}
       </div>
+      {loaderUpdate.data?.available && loaderUpdate.data?.latestVersion ? (
+        <p className="muted small">
+          Loader <code>3dmloader.dll</code> has an update available
+          (<code>{loaderUpdate.data.latestVersion}</code>). Loader updates apply globally
+          (re-run the importer install to pull the new Loader package).
+        </p>
+      ) : null}
       {install.data ? (
         <p className="muted small">
           Installed. SHA-256 <code>{install.data.sha256.slice(0, 12)}…</code>{install.data.backup_dir ? <> · Backed up to <code>{install.data.backup_dir}</code></> : null}.

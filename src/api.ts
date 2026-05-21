@@ -272,3 +272,26 @@ export async function importGamebanana(
   });
   return fromRaw(raw);
 }
+
+export interface UpdateStatus {
+  available: boolean;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  pinned: boolean;
+  upstreamAhead: boolean;
+}
+
+export async function checkImporterUpdate(game: GameCode): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("check_importer_update", { game });
+}
+
+export async function checkLoaderUpdate(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("check_loader_update");
+}
+
+export async function setImporterPinned(
+  game: GameCode,
+  version: string | null,
+): Promise<void> {
+  await invoke("set_importer_pinned", { game, version });
+}
