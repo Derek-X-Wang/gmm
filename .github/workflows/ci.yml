@@ -12,9 +12,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: check
-    runs-on: ubuntu-latest
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +32,7 @@ jobs:
           cache: pnpm
 
       - name: Install Tauri Linux build deps
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -54,19 +59,41 @@ jobs:
       - name: pnpm build
         run: pnpm build
 
-      # Rust check chain. fmt + clippy + test + build, all strict.
+      # Rust check chain across the workspace.
       - name: cargo fmt --check
         working-directory: src-tauri
         run: cargo fmt --check
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets --no-deps -- -D warnings
+        run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
 
       - name: cargo test
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --workspace
 
       - name: cargo build
         working-directory: src-tauri
-        run: cargo build
+        run: cargo build --workspace
+
+      # Windows-only: smoke-test the gmm-loader FFI binding against the
+      # vendored 3dmloader.dll. Builds victim.exe + noop_dll.dll first,
+      # then runs `cargo xtask test-loader` which loads the DLL, installs
+      # the CBT hook, spawns victim, waits for injection, and unhooks.
+      - name: cargo xtask test-loader
+        if: runner.os == 'Windows'
+        run: cargo xtask test-loader
+
+  # Aggregator: branch protection keys off this single name.
+  check:
+    name: check
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Verify matrix succeeded
+        run: |
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "matrix build did not all succeed (result=${{ needs.build.result }})"
+            exit 1
+          fi

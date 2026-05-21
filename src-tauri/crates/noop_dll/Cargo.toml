@@ -1,0 +1,14 @@
+[package]
+name = "noop_dll"
+version = "0.1.0"
+description = "Minimal DLL whose DllMain returns TRUE. Injected into `victim.exe` by `cargo xtask test-loader`."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation"] }
