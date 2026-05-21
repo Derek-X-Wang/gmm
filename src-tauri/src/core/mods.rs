@@ -51,4 +51,22 @@ pub struct Mod {
     pub source: Source,
     pub library_path: PathBuf,
     pub enabled: bool,
+    /// GameBanana submission ID when `source == "gamebanana"`. None for
+    /// manual/local mods.
+    #[serde(default)]
+    pub gamebanana_id: Option<u64>,
+    /// Public URL on the source platform (e.g. the GameBanana
+    /// submission page). Used by the UI's "View on GameBanana" link.
+    #[serde(default)]
+    pub source_url: Option<String>,
+    /// Author name as the upstream platform records it.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Version string captured at ingest time. Slice 13c surfaces a
+    /// badge when the upstream version moves ahead.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Screenshot URL (preview thumbnail).
+    #[serde(default)]
+    pub screenshot_url: Option<String>,
 }

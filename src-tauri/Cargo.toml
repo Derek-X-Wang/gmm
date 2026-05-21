@@ -52,4 +52,5 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 filetime = "0.2"
+mockito = "1"
 

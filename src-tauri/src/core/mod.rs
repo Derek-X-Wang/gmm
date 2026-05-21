@@ -8,6 +8,7 @@ pub mod conflicts;
 pub mod detect;
 pub mod diagnostics;
 pub mod error;
+pub mod gamebanana;
 pub mod games;
 pub mod importer;
 pub mod junction;
@@ -431,7 +432,97 @@ impl Core {
             source: Source::Manual,
             library_path,
             enabled: false,
+            gamebanana_id: None,
+            source_url: None,
+            author: None,
+            version: None,
+            screenshot_url: None,
         })
+    }
+
+    /// Resolve a GameBanana submission (URL or bare ID), download its
+    /// first `.zip` asset, ingest it through the slice-1b zip path, and
+    /// persist `source = gamebanana` plus the upstream metadata
+    /// (author, version, screenshot URL, source URL) on the new mod
+    /// row. The async HTTP path uses [`Core::http_client`] so the
+    /// network goes through the user's proxy.
+    pub async fn import_gamebanana(&self, game: GameCode, url_or_id: &str) -> Result<Mod> {
+        self.import_gamebanana_with_endpoints(game, url_or_id, &gamebanana::Endpoints::default())
+            .await
+    }
+
+    /// Test seam for [`Self::import_gamebanana`] — production uses the
+    /// `Endpoints::default()` overload. Integration tests inject a
+    /// mockito server URL through this entry point.
+    pub async fn import_gamebanana_with_endpoints(
+        &self,
+        game: GameCode,
+        url_or_id: &str,
+        endpoints: &gamebanana::Endpoints,
+    ) -> Result<Mod> {
+        let id = gamebanana::parse_url_or_id(url_or_id).ok_or_else(|| {
+            Error::GameBanana(format!("could not parse GameBanana URL or ID: {url_or_id}"))
+        })?;
+
+        let client = self.http_client().await?;
+        let submission = gamebanana::fetch_submission(&client, endpoints, id).await?;
+
+        // Stash the download in a Library-adjacent cache (the same
+        // data_dir tree the diagnostics + importer modules use) so
+        // it's easy to inspect / wipe.
+        let cache = self
+            .default_library_root
+            .parent()
+            .map(|p| p.join("downloads").join("gamebanana"))
+            .unwrap_or_else(|| std::path::PathBuf::from("./downloads/gamebanana"));
+        std::fs::create_dir_all(&cache).map_err(|source| Error::Io {
+            path: cache.clone(),
+            source,
+        })?;
+        let zip_path = cache.join(format!("{}-{}", id, submission.file_name));
+        gamebanana::download_to(&client, &submission.file_url, &zip_path).await?;
+
+        // Reuse the slice-1b ingest path verbatim; that gives us
+        // zip-slip protection, junk-file drop, single-root
+        // normalisation, plus the variant detection from slice 5.
+        let mut imported = self
+            .import_zip(
+                game,
+                &zip_path,
+                &submission.name,
+                ImportZipOptions::default(),
+            )
+            .await?;
+
+        // Rewrite the row to GameBanana provenance.
+        sqlx::query(
+            "UPDATE mods
+               SET source = ?,
+                   gamebanana_id = ?,
+                   source_url = ?,
+                   author = ?,
+                   version = ?,
+                   screenshot_url = ?
+             WHERE id = ?",
+        )
+        .bind(Source::Gamebanana.as_str())
+        .bind(id as i64)
+        .bind(&submission.profile_url)
+        .bind(&submission.author)
+        .bind(&submission.version)
+        .bind(&submission.screenshot_url)
+        .bind(&imported.id)
+        .execute(&self.pool)
+        .await?;
+
+        imported.source = Source::Gamebanana;
+        imported.gamebanana_id = Some(id);
+        imported.source_url = Some(submission.profile_url);
+        imported.author = submission.author;
+        imported.version = submission.version;
+        imported.screenshot_url = submission.screenshot_url;
+
+        Ok(imported)
     }
 
     /// Import a local ZIP into the Library as a Mod with `source = local`.
@@ -492,6 +583,11 @@ impl Core {
             source: Source::Local,
             library_path,
             enabled: false,
+            gamebanana_id: None,
+            source_url: None,
+            author: None,
+            version: None,
+            screenshot_url: None,
         })
     }
 
@@ -923,7 +1019,8 @@ impl Core {
     /// List every Mod for a given game, ordered by creation time ascending.
     pub async fn list_mods(&self, game: GameCode) -> Result<Vec<Mod>> {
         let rows = sqlx::query(
-            "SELECT id, game_code, name, source, library_path, enabled
+            "SELECT id, game_code, name, source, library_path, enabled,
+                    gamebanana_id, source_url, author, version, screenshot_url
              FROM mods
              WHERE game_code = ?
              ORDER BY created_at ASC",
@@ -948,6 +1045,13 @@ impl Core {
                     source: Source::from_str(&source)?,
                     library_path: PathBuf::from(library_path),
                     enabled: enabled != 0,
+                    gamebanana_id: row
+                        .try_get::<Option<i64>, _>("gamebanana_id")?
+                        .map(|v| v as u64),
+                    source_url: row.try_get("source_url")?,
+                    author: row.try_get("author")?,
+                    version: row.try_get("version")?,
+                    screenshot_url: row.try_get("screenshot_url")?,
                 })
             })
             .collect()

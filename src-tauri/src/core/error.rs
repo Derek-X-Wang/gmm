@@ -57,6 +57,9 @@ pub enum Error {
 
     #[error("network error: {0}")]
     Network(String),
+
+    #[error("GameBanana error: {0}")]
+    GameBanana(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

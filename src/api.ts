@@ -11,6 +11,11 @@ export interface Mod {
   source: Source;
   libraryPath: string;
   enabled: boolean;
+  gamebananaId: number | null;
+  sourceUrl: string | null;
+  author: string | null;
+  version: string | null;
+  screenshotUrl: string | null;
 }
 
 interface RawMod {
@@ -20,6 +25,11 @@ interface RawMod {
   source: Source;
   library_path: string;
   enabled: boolean;
+  gamebanana_id?: number | null;
+  source_url?: string | null;
+  author?: string | null;
+  version?: string | null;
+  screenshot_url?: string | null;
 }
 
 const fromRaw = (m: RawMod): Mod => ({
@@ -29,6 +39,11 @@ const fromRaw = (m: RawMod): Mod => ({
   source: m.source,
   libraryPath: m.library_path,
   enabled: m.enabled,
+  gamebananaId: m.gamebanana_id ?? null,
+  sourceUrl: m.source_url ?? null,
+  author: m.author ?? null,
+  version: m.version ?? null,
+  screenshotUrl: m.screenshot_url ?? null,
 });
 
 export async function listMods(game: GameCode): Promise<Mod[]> {
@@ -246,4 +261,14 @@ export interface ConflictReport {
 
 export async function detectConflicts(game: GameCode): Promise<ConflictReport> {
   return invoke<ConflictReport>("detect_conflicts", { game });
+}
+
+export async function importGamebanana(
+  game: GameCode,
+  urlOrId: string,
+): Promise<Mod> {
+  const raw = await invoke<RawMod>("import_gamebanana", {
+    args: { game, urlOrId },
+  });
+  return fromRaw(raw);
 }
