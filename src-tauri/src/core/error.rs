@@ -45,6 +45,12 @@ pub enum Error {
 
     #[error("diagnostics error: {0}")]
     Diagnostics(String),
+
+    #[error(
+        "the path {path:?} is on a {format} volume, but GMM junctions require NTFS. \
+         Move the Library or the game install to an NTFS drive, or convert the volume."
+    )]
+    NonNtfsVolume { path: PathBuf, format: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

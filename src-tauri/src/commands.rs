@@ -10,6 +10,7 @@ use tauri::State;
 
 use crate::core::detect;
 use crate::core::diagnostics;
+use crate::core::reconcile::ReconcileResult;
 use crate::core::{Core, GameCode, ImportZipOptions, Mod};
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +147,43 @@ pub async fn export_diagnostics_bundle(
 #[tauri::command]
 pub fn diagnostics_log_dir() -> Result<PathBuf, String> {
     crate::log_dir().map_err(|e| e.to_string())
+}
+
+/// Tauri command — reconcile junctions for a game in place. Used by
+/// the UI on demand; the startup pass runs the same logic.
+#[tauri::command]
+pub async fn reconcile_junctions(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<ReconcileResult, String> {
+    let install = core
+        .game_install_path(game)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Set the game install path in Settings first.".to_string())?;
+    let mods_dir = install.join("Mods");
+    core.reconcile_junctions(game, &mods_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Tauri command — drop and recreate every junction for `game` against
+/// the current Library. Use after the user relocates the Library
+/// directory.
+#[tauri::command]
+pub async fn rebuild_junctions(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<ReconcileResult, String> {
+    let install = core
+        .game_install_path(game)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Set the game install path in Settings first.".to_string())?;
+    let mods_dir = install.join("Mods");
+    core.rebuild_junctions(game, &mods_dir)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Tauri command — auto-detect a game's install path. On success the
