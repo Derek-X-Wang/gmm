@@ -731,12 +731,14 @@ pub async fn launch_game(
     };
     core.start_session(&info).await.map_err(|e| e.to_string())?;
 
-    runtime.inner().install(crate::runtime::session::LiveSession {
-        info: info.clone(),
-        child,
-        _hook: hook_static,
-        _loader: loader,
-    });
+    runtime
+        .inner()
+        .install(crate::runtime::session::LiveSession {
+            info: info.clone(),
+            child,
+            _hook: hook_static,
+            _loader: loader,
+        });
 
     // Emit to the frontend so the banner appears immediately.
     let _ = app.emit(SESSION_STARTED_EVENT, &info);
