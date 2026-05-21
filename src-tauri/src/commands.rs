@@ -427,6 +427,7 @@ pub async fn install_importer(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<InstallReport, String> {
+    refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
@@ -506,6 +507,7 @@ pub async fn rollback_importer(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<Option<PathBuf>, String> {
+    refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
@@ -548,6 +550,7 @@ pub async fn reconcile_junctions(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<ReconcileResult, String> {
+    refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
@@ -567,6 +570,7 @@ pub async fn rebuild_junctions(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<ReconcileResult, String> {
+    refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
@@ -606,6 +610,22 @@ pub async fn detect_game_install_path(
 }
 
 // ---- slice 4b (#12) — game session commands ----
+
+/// Helper: bail with a session-related error string if a session is
+/// currently active. Pair with mutating Tauri commands (importer
+/// install/rollback, reconcile/rebuild junctions, library moves) so
+/// the caller never gets a partial mutation while the game is
+/// running.
+async fn refuse_during_session(core: &State<'_, Core>) -> Result<(), String> {
+    if let Some(info) = core.session_info().await.map_err(|e| e.to_string())? {
+        return Err(format!(
+            "{} is running (session active since {}). Close the game before changing this.",
+            info.game.as_str(),
+            info.started_at,
+        ));
+    }
+    Ok(())
+}
 
 /// Locate the bundled / vendored `3dmloader.dll`. Resolution order:
 /// 1. `GMM_LOADER_DLL` env var (override for smoke tests + dev)
@@ -673,6 +693,37 @@ pub async fn clean_stale_session(core: State<'_, Core>) -> Result<Option<Session
     core.clean_stale_session().await.map_err(|e| e.to_string())
 }
 
+/// RAII wrapper that kills + reaps the wrapped child on drop. Used
+/// during `launch_game` between `Command::spawn` and the moment the
+/// `Child` is moved into `LiveSession`; on every error-return path
+/// the guard's drop runs so we never leak a started game.
+struct ChildGuard {
+    child: Option<std::process::Child>,
+}
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.as_ref().map(|c| c.id()).unwrap_or(0)
+    }
+
+    fn into_inner(mut self) -> std::process::Child {
+        self.child.take().expect("ChildGuard already consumed")
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn launch_game(
     app: AppHandle,
@@ -682,7 +733,8 @@ pub async fn launch_game(
 ) -> Result<SessionInfo, String> {
     use gmm_loader::Loader;
 
-    // Reject if a session is already active.
+    // Cheap pre-check; the atomic INSERT in start_session is the real
+    // gate against double-launch races.
     if let Some(existing) = core.session_info().await.map_err(|e| e.to_string())? {
         return Err(format!(
             "{} is already running (since {}).",
@@ -707,36 +759,60 @@ pub async fn launch_game(
     }
     let loader_dll = locate_loader_dll()?;
 
-    // Load + hook BEFORE spawning the game so the CBT hook is in place
-    // when the game's window appears.
+    // Install the CBT hook BEFORE spawning so it's in place when the
+    // game creates its window.
     let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
     let hook = loader
         .hook(&dll_to_inject)
         .map_err(|e| format!("install hook: {e}"))?;
-    // The HookSession borrows the Loader lifetime; transmute to 'static
-    // is sound because HookSession owns an Arc<LoadedDll> internally.
-    // SAFETY: the Arc keeps the DLL mapped for the session's lifetime,
-    // and we never drop the Loader before the HookSession.
-    let hook_static: gmm_loader::HookSession<'static> = unsafe { std::mem::transmute(hook) };
 
+    // Spawn the game; any failure between here and runtime.install()
+    // triggers ChildGuard::drop which kills the process so it doesn't
+    // outlive the failed launch.
     let child = std::process::Command::new(&game_exe)
         .current_dir(&install)
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+    let child_guard = ChildGuard::new(child);
+
+    // Block until the importer DLL lands in a process whose image
+    // name matches the game exe, then DROP the hook session — holding
+    // the global CBT hook for the whole game session would inject the
+    // DLL into every unrelated process that creates a window.
+    let target_process = game_exe
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "GenshinImpact.exe".to_string());
+    hook.wait_for_injection(&target_process, 60)
+        .map_err(|e| format!("wait_for_injection: {e}"))?;
+    // Explicitly drop so the unhook runs immediately rather than at
+    // end-of-scope. clippy::drop_non_drop fires on the non-Windows
+    // stub HookSession (which has no Drop impl); silence it — on
+    // Windows this is the load-bearing line that takes the CBT hook
+    // back down.
+    #[allow(clippy::drop_non_drop)]
+    drop(hook);
 
     let info = SessionInfo {
         game,
-        pid: child.id(),
+        pid: child_guard.pid(),
         started_at: chrono::Utc::now(),
     };
-    core.start_session(&info).await.map_err(|e| e.to_string())?;
+
+    // Atomic claim: plain INSERT, no OR REPLACE. If anyone raced past
+    // the pre-check above, the singleton CHECK gives us a unique-
+    // constraint error and ChildGuard's drop kills our spawned game.
+    core.start_session(&info)
+        .await
+        .map_err(|e| format!("start_session: {e}"))?;
+
+    let child = child_guard.into_inner();
 
     runtime
         .inner()
         .install(crate::runtime::session::LiveSession {
             info: info.clone(),
             child,
-            _hook: hook_static,
             _loader: loader,
         });
 

@@ -175,6 +175,7 @@ impl Core {
     /// affected games are dropped + rebuilt via the standard reconcile
     /// path. `new_root = None` resets the override to the default.
     pub async fn set_library_root(&self, new_root: Option<&Path>) -> Result<MoveReport> {
+        self.ensure_no_active_session().await?;
         let previous = self.resolved_library_root().await?;
         let next = new_root
             .map(Path::to_path_buf)
@@ -214,6 +215,7 @@ impl Core {
         game: GameCode,
         new_path: Option<&Path>,
     ) -> Result<MoveReport> {
+        self.ensure_no_active_session().await?;
         let previous = self.resolved_library_root_for(game).await?;
         let next = new_path.map(Path::to_path_buf).unwrap_or_else(|| {
             // When clearing, the effective path becomes
@@ -1323,11 +1325,15 @@ impl Core {
         }))
     }
 
-    /// Persist a new active GameSession. Replaces any prior row (the
-    /// singleton CHECK enforces only one row exists).
+    /// Atomically claim the singleton active_session row. Fails with the
+    /// SQLite primary-key conflict if a session is already active —
+    /// callers that see this error must abandon their launch (and kill
+    /// any child process they may have already spawned). Pair with
+    /// `ensure_no_active_session()` to surface a friendlier error before
+    /// any side effects happen.
     pub async fn start_session(&self, info: &SessionInfo) -> Result<()> {
         sqlx::query(
-            "INSERT OR REPLACE INTO active_session (id, game_code, pid, started_at)
+            "INSERT INTO active_session (id, game_code, pid, started_at)
              VALUES (1, ?, ?, ?)",
         )
         .bind(info.game.as_str())

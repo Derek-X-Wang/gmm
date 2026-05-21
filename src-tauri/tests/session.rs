@@ -119,6 +119,60 @@ async fn set_active_variant_is_rejected_while_a_session_is_active() {
 }
 
 #[tokio::test]
+async fn start_session_twice_without_end_errors_on_the_second() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+
+    let info = SessionInfo {
+        game: GameCode::Gimi,
+        pid: 12345,
+        started_at: Utc::now(),
+    };
+    core.start_session(&info).await.expect("first start");
+
+    let err = core
+        .start_session(&SessionInfo {
+            game: GameCode::Srmi,
+            pid: 67890,
+            started_at: Utc::now(),
+        })
+        .await
+        .expect_err(
+            "the singleton CHECK + plain INSERT must reject a second concurrent start_session",
+        );
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("constraint") || msg.contains("unique") || msg.contains("primary key"),
+        "expected a uniqueness-related db error, got: {err}",
+    );
+
+    // The first session row must survive.
+    let still = core
+        .session_info()
+        .await
+        .expect("info")
+        .expect("first session still active");
+    assert_eq!(still.pid, 12345);
+}
+
+#[tokio::test]
+async fn set_library_root_is_rejected_while_a_session_is_active() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+
+    start_a_session(&core).await;
+
+    let new_root = tmp.path().join("new-library");
+    fs::create_dir_all(&new_root).expect("new root");
+
+    let err = core
+        .set_library_root(Some(&new_root))
+        .await
+        .expect_err("set_library_root must error during a session");
+    assert_session_error(&err);
+}
+
+#[tokio::test]
 async fn clean_stale_session_evicts_a_dead_pid() {
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;

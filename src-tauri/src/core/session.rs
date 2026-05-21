@@ -39,18 +39,22 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
         use windows_sys::Win32::System::Threading::{
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
         const STILL_ACTIVE: u32 = 259;
         // SAFETY: OpenProcess returns a valid handle or null; we
         // CloseHandle whatever it gives us. GetExitCodeProcess writes
-        // through a pointer to a local u32.
+        // through a pointer to a local u32. GetLastError is thread-local
+        // and reads our own thread's last error.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if handle.is_null() {
-                return false;
+                // ERROR_ACCESS_DENIED means the PID exists but our
+                // token can't query it (privileged process). Treat as
+                // alive to avoid false-evicting a real session.
+                return GetLastError() == ERROR_ACCESS_DENIED;
             }
             let mut exit_code: u32 = 0;
             let ok = GetExitCodeProcess(handle, &mut exit_code) != 0;

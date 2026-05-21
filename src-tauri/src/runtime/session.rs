@@ -8,7 +8,7 @@
 use std::process::Child;
 use std::sync::{Arc, Mutex};
 
-use gmm_loader::{HookSession, Loader};
+use gmm_loader::Loader;
 
 use crate::core::SessionInfo;
 
@@ -21,16 +21,18 @@ pub const SESSION_ENDED_EVENT: &str = "session-ended";
 /// Live, in-process state for the currently-running GameSession.
 ///
 /// Held in Tauri State as `Arc<Mutex<Option<LiveSession>>>` — `None`
-/// means no session is active. Dropping the value also drops the
-/// `HookSession` (which unhooks via RAII) and the `Child` handle (which
-/// does NOT kill the process; the caller is expected to have already
-/// killed it or observed its clean exit before clearing).
+/// means no session is active. The session no longer holds a
+/// `HookSession`: the launch flow calls `wait_for_injection` and drops
+/// the hook immediately, so the CBT hook is alive only for the brief
+/// injection window. We still hold the `Loader` so the loader DLL
+/// stays mapped (drives no behaviour on its own, but cheap and tidy).
+///
+/// Dropping the `Child` handle does NOT kill the process; the watcher
+/// task is the only place we observe clean exit, and the launch flow
+/// uses a separate `ChildGuard` to kill on early-failure paths.
 pub struct LiveSession {
     pub info: SessionInfo,
     pub child: Child,
-    /// HookSession owns an Arc<LoadedDll> internally so it can outlive
-    /// the `Loader` value we built it from.
-    pub _hook: HookSession<'static>,
     pub _loader: Loader,
 }
 

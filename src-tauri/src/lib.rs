@@ -25,6 +25,11 @@ pub fn run() {
 
     // Best-effort startup reconcile across every game whose install
     // path is set. Logs per-game via tracing (NEW-LOG); never fatal.
+    //
+    // Pre-pass: clear any orphan active_session row left by a crashed
+    // GMM. If after cleanup a session is STILL marked active (meaning
+    // the PID happens to be alive), skip reconcile — yanking junctions
+    // out from under a running game corrupts it.
     {
         let core_for_pass = core.clone();
         std::thread::spawn(move || {
@@ -33,6 +38,23 @@ pub fn run() {
                 .build()
                 .expect("build reconcile runtime");
             rt.block_on(async move {
+                if let Err(e) = core_for_pass.clean_stale_session().await {
+                    tracing::warn!(error = %e, "startup clean_stale_session errored");
+                }
+                match core_for_pass.session_info().await {
+                    Ok(Some(info)) => {
+                        tracing::warn!(
+                            game = %info.game.as_str(),
+                            pid = info.pid,
+                            "skipping startup reconcile — a game session is active",
+                        );
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "startup session_info errored");
+                    }
+                }
                 if let Err(e) = core_for_pass.reconcile_all_set_games().await {
                     tracing::warn!(error = %e, "startup reconcile pass errored");
                 }
