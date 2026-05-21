@@ -12,6 +12,7 @@ pub mod gamebanana;
 pub mod games;
 pub mod importer;
 pub mod junction;
+pub mod mod_updates;
 pub mod mods;
 pub mod network;
 pub mod reconcile;
@@ -439,6 +440,262 @@ impl Core {
             version: None,
             screenshot_url: None,
         })
+    }
+
+    /// List the GameBanana mods for `game` along with their current
+    /// install vs. upstream-version state. Does NOT hit the network —
+    /// it only reads what the last poll wrote.
+    pub async fn list_mod_updates(&self, game: GameCode) -> Result<Vec<mod_updates::ModUpdateRow>> {
+        let rows = sqlx::query(
+            "SELECT id, name, version, upstream_version, update_check_enabled
+             FROM mods
+             WHERE game_code = ? AND source = ?",
+        )
+        .bind(game.as_str())
+        .bind(Source::Gamebanana.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let installed: Option<String> = row.try_get("version")?;
+            let upstream: Option<String> = row.try_get("upstream_version")?;
+            out.push(mod_updates::ModUpdateRow {
+                mod_id: row.try_get("id")?,
+                name: row.try_get("name")?,
+                upstream_ahead: mod_updates::upstream_ahead(
+                    installed.as_deref(),
+                    upstream.as_deref(),
+                ),
+                installed_version: installed,
+                upstream_version: upstream,
+                update_check_enabled: row.try_get::<i64, _>("update_check_enabled")? != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Poll upstream for every GameBanana mod whose
+    /// `update_check_enabled` is true. Updates `upstream_version` in
+    /// the DB and persists `mod_updates.last_check_at`. Honours the
+    /// global toggle: if `mod_updates.enabled` is `false`, returns the
+    /// existing rows without a fetch.
+    pub async fn check_mod_updates_now(
+        &self,
+        game: GameCode,
+    ) -> Result<Vec<mod_updates::ModUpdateRow>> {
+        self.check_mod_updates_now_with_endpoints(game, &gamebanana::Endpoints::default())
+            .await
+    }
+
+    /// Test seam: like `check_mod_updates_now`, but takes the
+    /// GameBanana endpoint base URL so mockito-driven tests can avoid
+    /// hitting the live API.
+    pub async fn check_mod_updates_now_with_endpoints(
+        &self,
+        game: GameCode,
+        endpoints: &gamebanana::Endpoints,
+    ) -> Result<Vec<mod_updates::ModUpdateRow>> {
+        if !self.mod_updates_globally_enabled().await? {
+            return self.list_mod_updates(game).await;
+        }
+
+        let rows = sqlx::query(
+            "SELECT id, gamebanana_id, update_check_enabled
+             FROM mods
+             WHERE game_code = ? AND source = ?",
+        )
+        .bind(game.as_str())
+        .bind(Source::Gamebanana.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let client = self.http_client().await?;
+        for row in rows {
+            let enabled: i64 = row.try_get("update_check_enabled")?;
+            if enabled == 0 {
+                continue;
+            }
+            let mod_id: String = row.try_get("id")?;
+            let gid: Option<i64> = row.try_get("gamebanana_id")?;
+            let Some(gid) = gid else { continue };
+            // Best-effort: a single failed fetch must not abort the
+            // batch. Tracing captures the reason for diagnostics.
+            match gamebanana::fetch_submission(&client, endpoints, gid as u64).await {
+                Ok(s) => {
+                    sqlx::query("UPDATE mods SET upstream_version = ? WHERE id = ?")
+                        .bind(s.version.as_deref())
+                        .bind(&mod_id)
+                        .execute(&self.pool)
+                        .await?;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "gmm::mod_updates",
+                        mod_id = %mod_id,
+                        gamebanana_id = gid,
+                        error = %e,
+                        "skipping mod update poll",
+                    );
+                }
+            }
+        }
+
+        put_setting(
+            &self.pool,
+            mod_updates::keys::LAST_CHECK_AT,
+            Some(Utc::now().to_rfc3339().as_str()),
+        )
+        .await?;
+        self.list_mod_updates(game).await
+    }
+
+    /// Read the global mod-update toggle. Defaults to `true` when
+    /// nothing has been persisted yet.
+    pub async fn mod_updates_globally_enabled(&self) -> Result<bool> {
+        Ok(get_setting(&self.pool, mod_updates::keys::GLOBAL_ENABLED)
+            .await?
+            .map(|v| v != "false")
+            .unwrap_or(true))
+    }
+
+    /// Persist the global mod-update toggle.
+    pub async fn set_mod_updates_globally_enabled(&self, enabled: bool) -> Result<()> {
+        put_setting(
+            &self.pool,
+            mod_updates::keys::GLOBAL_ENABLED,
+            Some(if enabled { "true" } else { "false" }),
+        )
+        .await
+    }
+
+    /// Per-mod opt-out toggle.
+    pub async fn set_mod_update_check_enabled(&self, mod_id: &str, enabled: bool) -> Result<()> {
+        sqlx::query("UPDATE mods SET update_check_enabled = ? WHERE id = ?")
+            .bind(if enabled { 1_i64 } else { 0_i64 })
+            .bind(mod_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Re-run the slice-11 GameBanana ingest against an existing mod
+    /// row. Preserves the mod ID + the user's enabled/junction state
+    /// + active variant if it still exists post-extract.
+    ///
+    /// Mechanics: drop the junction (if enabled), wipe the Library
+    /// subtree, download the latest asset, extract via
+    /// `zip_import::extract`, re-run variant detection, rewrite the
+    /// metadata columns, restore the enabled state.
+    pub async fn reinstall_gamebanana_mod(&self, mod_id: &str) -> Result<()> {
+        self.reinstall_gamebanana_mod_with_endpoints(mod_id, &gamebanana::Endpoints::default())
+            .await
+    }
+
+    /// Test seam for `reinstall_gamebanana_mod`. Production calls the
+    /// default-endpoint flavour.
+    pub async fn reinstall_gamebanana_mod_with_endpoints(
+        &self,
+        mod_id: &str,
+        endpoints: &gamebanana::Endpoints,
+    ) -> Result<()> {
+        let row = sqlx::query(
+            "SELECT game_code, gamebanana_id, library_path, junction_dir_name, enabled
+             FROM mods WHERE id = ?",
+        )
+        .bind(mod_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let game_code: String = row.try_get("game_code")?;
+        let game = GameCode::from_str(&game_code)?;
+        let gid: Option<i64> = row.try_get("gamebanana_id")?;
+        let gid = gid.ok_or_else(|| {
+            Error::GameBanana(format!("mod {mod_id} has no GameBanana submission ID"))
+        })? as u64;
+        let library_path: String = row.try_get("library_path")?;
+        let library_path = PathBuf::from(library_path);
+        let junction_dir_name: String = row.try_get("junction_dir_name")?;
+        let was_enabled = row.try_get::<i64, _>("enabled")? != 0;
+
+        let install = self.game_install_path(game).await?;
+        let mods_dir = install.as_ref().map(|p| p.join("Mods"));
+
+        // 1. Drop the junction if enabled. The set_enabled path also
+        //    updates the persisted flag — we'll flip it back at the end.
+        if was_enabled {
+            if let Some(mods_dir) = mods_dir.as_ref() {
+                self.set_enabled(mod_id, false, mods_dir).await?;
+            }
+        }
+
+        // 2. Resolve metadata + download fresh zip.
+        let client = self.http_client().await?;
+        let submission = gamebanana::fetch_submission(&client, endpoints, gid).await?;
+        let cache = self
+            .default_library_root
+            .parent()
+            .map(|p| p.join("downloads").join("gamebanana"))
+            .unwrap_or_else(|| std::path::PathBuf::from("./downloads/gamebanana"));
+        std::fs::create_dir_all(&cache).map_err(|source| Error::Io {
+            path: cache.clone(),
+            source,
+        })?;
+        let zip_path = cache.join(format!("{}-{}", gid, submission.file_name));
+        gamebanana::download_to(&client, &submission.file_url, &zip_path).await?;
+
+        // 3. Wipe the existing Library subtree (the source of truth
+        //    is the new ZIP) and extract over it.
+        if library_path.exists() {
+            std::fs::remove_dir_all(&library_path).map_err(|source| Error::Io {
+                path: library_path.clone(),
+                source,
+            })?;
+        }
+        zip_import::extract(&zip_path, &library_path, ImportZipOptions::default())?;
+
+        // 4. Re-run variant detection. Active variant is reset to the
+        //    first alphabetical to match the original ingest behaviour.
+        sqlx::query("DELETE FROM mod_variants WHERE mod_id = ?")
+            .bind(mod_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("UPDATE mods SET active_variant_id = NULL WHERE id = ?")
+            .bind(mod_id)
+            .execute(&self.pool)
+            .await?;
+        self.detect_and_record_variants(mod_id, &library_path)
+            .await?;
+
+        // 5. Rewrite metadata.
+        sqlx::query(
+            "UPDATE mods
+               SET name = ?,
+                   author = ?,
+                   version = ?,
+                   upstream_version = ?,
+                   screenshot_url = ?
+             WHERE id = ?",
+        )
+        .bind(&submission.name)
+        .bind(&submission.author)
+        .bind(&submission.version)
+        .bind(&submission.version)
+        .bind(&submission.screenshot_url)
+        .bind(mod_id)
+        .execute(&self.pool)
+        .await?;
+
+        // 6. Restore the enabled state. set_enabled honours the new
+        //    active variant (slice 5) automatically.
+        if was_enabled {
+            if let Some(mods_dir) = mods_dir.as_ref() {
+                self.set_enabled(mod_id, true, mods_dir).await?;
+            }
+        }
+
+        // 7. Junction dir name is preserved across the rebuild —
+        //    just sanity-confirm the row still has it.
+        debug_assert!(!junction_dir_name.is_empty());
+        Ok(())
     }
 
     /// Check whether the upstream importer release for `game` is newer

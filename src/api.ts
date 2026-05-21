@@ -295,3 +295,39 @@ export async function setImporterPinned(
 ): Promise<void> {
   await invoke("set_importer_pinned", { game, version });
 }
+
+export interface ModUpdateRow {
+  modId: string;
+  name: string;
+  installedVersion: string | null;
+  upstreamVersion: string | null;
+  upstreamAhead: boolean;
+  updateCheckEnabled: boolean;
+}
+
+export async function listModUpdates(game: GameCode): Promise<ModUpdateRow[]> {
+  return invoke<ModUpdateRow[]>("list_mod_updates", { game });
+}
+
+export async function checkModUpdatesNow(game: GameCode): Promise<ModUpdateRow[]> {
+  return invoke<ModUpdateRow[]>("check_mod_updates_now", { game });
+}
+
+export async function setModUpdateCheckEnabled(
+  modId: string,
+  enabled: boolean,
+): Promise<void> {
+  await invoke("set_mod_update_check_enabled", { modId, enabled });
+}
+
+export async function setModUpdatesGloballyEnabled(enabled: boolean): Promise<void> {
+  await invoke("set_mod_updates_globally_enabled", { enabled });
+}
+
+export async function modUpdatesGloballyEnabled(): Promise<boolean> {
+  return invoke<boolean>("mod_updates_globally_enabled");
+}
+
+export async function applyModUpdate(modId: string): Promise<void> {
+  await invoke("apply_mod_update", { modId });
+}

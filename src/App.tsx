@@ -4,8 +4,10 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import {
   adoptFolder,
+  applyModUpdate,
   checkImporterUpdate,
   checkLoaderUpdate,
+  checkModUpdatesNow,
   detectConflicts,
   detectGameInstallPath,
   fetchLatestImporterRelease,
@@ -16,7 +18,9 @@ import {
   importZip,
   installImporter,
   listMods,
+  listModUpdates,
   listVariants,
+  modUpdatesGloballyEnabled,
   rebuildJunctions,
   rollbackImporter,
   setActiveVariant,
@@ -25,6 +29,8 @@ import {
   setLibraryPathForGame,
   setLibraryRoot,
   setModEnabled,
+  setModUpdateCheckEnabled,
+  setModUpdatesGloballyEnabled,
   setProxyConfig,
   testProxyConnection,
   type Conflict,
@@ -44,10 +50,115 @@ function App() {
       <Settings />
       <NetworkPanel />
       <ImporterPanel />
+      <ModUpdatesPanel />
       <LibraryPathsPanel />
       <Diagnostics />
       <ModList />
     </main>
+  );
+}
+
+/**
+ * Settings → Mod updates. Global toggle, "Check now" button, and a
+ * status line showing how many mods have upstream updates available.
+ * Per-mod badges live in each Mod row (see ModUpdateBadge).
+ */
+function ModUpdatesPanel() {
+  const qc = useQueryClient();
+  const global = useQuery({
+    queryKey: ["modUpdates", "globalEnabled"],
+    queryFn: modUpdatesGloballyEnabled,
+  });
+  const rows = useQuery({
+    queryKey: ["modUpdates", GAME],
+    queryFn: () => listModUpdates(GAME),
+  });
+  const check = useMutation({
+    mutationFn: () => checkModUpdatesNow(GAME),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", GAME] }),
+  });
+  const toggleGlobal = useMutation({
+    mutationFn: (enabled: boolean) => setModUpdatesGloballyEnabled(enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", "globalEnabled"] }),
+  });
+  const ahead = rows.data?.filter((r) => r.upstreamAhead).length ?? 0;
+  return (
+    <section className="card">
+      <h2>
+        Mod updates
+        {ahead > 0 ? <span className="update-badge"> · {ahead}</span> : null}
+      </h2>
+      <p className="muted">
+        Weekly poll of every <code>source = gamebanana</code> Mod. Updates never apply
+        automatically — click a badge on the Mod row to review + Apply. Pin a Mod's
+        check off via its row toggle. Network goes through the configured proxy.
+      </p>
+      <div className="row">
+        <button onClick={() => check.mutate()} disabled={check.isPending}>
+          {check.isPending ? "Checking…" : "Check now"}
+        </button>
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={global.data ?? true}
+            disabled={toggleGlobal.isPending}
+            onChange={(e) => toggleGlobal.mutate(e.currentTarget.checked)}
+          />
+          <span>Weekly check enabled</span>
+        </label>
+      </div>
+      {check.isError ? <p className="error">{String(check.error)}</p> : null}
+    </section>
+  );
+}
+
+/**
+ * Per-mod badge that surfaces an available upstream version + Apply
+ * + per-mod opt-out toggle. Renders nothing for mods without a
+ * gamebanana_id.
+ */
+function ModUpdateBadge({ modId }: { modId: string }) {
+  const qc = useQueryClient();
+  const rows = useQuery({
+    queryKey: ["modUpdates", GAME],
+    queryFn: () => listModUpdates(GAME),
+  });
+  const apply = useMutation({
+    mutationFn: () => applyModUpdate(modId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["mods", GAME] });
+      qc.invalidateQueries({ queryKey: ["modUpdates", GAME] });
+    },
+  });
+  const toggle = useMutation({
+    mutationFn: (enabled: boolean) => setModUpdateCheckEnabled(modId, enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", GAME] }),
+  });
+
+  const row = rows.data?.find((r) => r.modId === modId);
+  if (!row) return null;
+  return (
+    <span className="conflict-inline">
+      {row.upstreamAhead ? (
+        <button
+          className="update-pill"
+          onClick={() => apply.mutate()}
+          disabled={apply.isPending}
+          title={`Upstream ${row.upstreamVersion}`}
+        >
+          {apply.isPending ? "Applying…" : `Update → ${row.upstreamVersion}`}
+        </button>
+      ) : null}
+      <label className="toggle" style={{ marginLeft: "0.4rem" }}>
+        <input
+          type="checkbox"
+          checked={row.updateCheckEnabled}
+          disabled={toggle.isPending}
+          onChange={(e) => toggle.mutate(e.currentTarget.checked)}
+        />
+        <span className="muted small">check</span>
+      </label>
+    </span>
   );
 }
 
@@ -553,6 +664,7 @@ function ModList() {
                     View on GameBanana
                   </a>
                   {m.version ? <span className="muted small"> · v{m.version}</span> : null}
+                  <ModUpdateBadge modId={m.id} />
                 </>
               ) : null}
               <ConflictBadge

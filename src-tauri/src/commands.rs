@@ -16,6 +16,7 @@ use crate::core::conflicts::ConflictReport;
 use crate::core::detect;
 use crate::core::diagnostics;
 use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
+use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
 use crate::core::updates::UpdateStatus;
@@ -335,6 +336,59 @@ pub async fn set_importer_pinned(
     version: Option<String>,
 ) -> Result<(), String> {
     core.set_importer_pinned(game, version.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_mod_updates(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<Vec<ModUpdateRow>, String> {
+    core.list_mod_updates(game).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn check_mod_updates_now(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<Vec<ModUpdateRow>, String> {
+    core.check_mod_updates_now(game)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_mod_update_check_enabled(
+    core: State<'_, Core>,
+    mod_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    core.set_mod_update_check_enabled(&mod_id, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_mod_updates_globally_enabled(
+    core: State<'_, Core>,
+    enabled: bool,
+) -> Result<(), String> {
+    core.set_mod_updates_globally_enabled(enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn mod_updates_globally_enabled(core: State<'_, Core>) -> Result<bool, String> {
+    core.mod_updates_globally_enabled()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> Result<(), String> {
+    core.reinstall_gamebanana_mod(&mod_id)
         .await
         .map_err(|e| e.to_string())
 }
