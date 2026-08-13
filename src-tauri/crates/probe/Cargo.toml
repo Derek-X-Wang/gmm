@@ -1,0 +1,18 @@
+[package]
+name = "concurrency-probe"
+version = "0.1.0"
+description = "Test-only GMM process. Performs exactly one Core operation against a given DB + Library and prints a JSON outcome, so `tests/concurrency.rs` can race two real processes instead of two tasks."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "concurrency-probe"
+path = "src/main.rs"
+
+[dependencies]
+gmm = { path = "../.." }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+chrono = "0.4"

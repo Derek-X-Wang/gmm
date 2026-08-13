@@ -1,0 +1,284 @@
+//! Test-only GMM stand-in. Not shipped: `tauri build` bundles only the
+//! `gmm` binary, and nothing in the app depends on this crate.
+//!
+//! One invocation performs exactly one `Core` operation against a given
+//! `gmm.db` and Library, then prints a single JSON line and exits. That
+//! is the whole design: `tests/concurrency.rs` (issue #58) needs two
+//! *operating-system processes* contending for one SQLite file and one
+//! Library, which no amount of Tokio concurrency inside one test binary
+//! can simulate. SQLite's locking is per-process; so are file handles.
+//!
+//! ```text
+//! concurrency-probe --data-dir D --db URL --library L \
+//!     [--take-lock] [--at EPOCH_MILLIS] <op> [op args…]
+//! ```
+//!
+//! `--take-lock` opts into the single-instance policy. It is opt-in
+//! rather than default because most of the suite deliberately bypasses
+//! the gate to test the layer underneath it.
+//!
+//! `--at` is a wall-clock rendezvous: the probe spins until that instant
+//! before touching anything, so two probes started sequentially still
+//! collide. Both sides being a few milliseconds out only weakens the
+//! test; it cannot make it flaky, because every assertion is on the
+//! final state rather than on who won.
+//!
+//! Exit status: 0 when the operation succeeded, 2 when it failed, 1 on a
+//! usage error. The JSON line is printed either way — a probe that was
+//! *correctly refused* and a probe that failed to start must not look
+//! alike to the test.
+
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use gmm_lib::core::{importer, instance_lock, Core, GameCode, SessionInfo};
+
+fn main() {
+    let args = match Args::parse() {
+        Ok(a) => a,
+        Err(msg) => {
+            report(false, &msg);
+            std::process::exit(1);
+        }
+    };
+
+    // Held for the process lifetime when requested. Binding to `_` would
+    // release it immediately and silently defeat the test.
+    let _lock = if args.take_lock {
+        match instance_lock::acquire(&args.data_dir) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                report(false, &e.to_string());
+                std::process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
+
+    // `hold-lock` reports before it blocks: the whole point is for the
+    // parent to know the lock is held before it races against it.
+    if args.op == "hold-lock" {
+        report(true, "");
+        let ms: u64 = args.get("--ms").and_then(|v| v.parse().ok()).unwrap_or(0);
+        std::thread::sleep(Duration::from_millis(ms));
+        return;
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build runtime");
+
+    match rt.block_on(run(&args)) {
+        Ok(()) => {
+            report(true, "");
+        }
+        Err(msg) => {
+            report(false, &msg);
+            std::process::exit(2);
+        }
+    }
+}
+
+async fn run(args: &Args) -> Result<(), String> {
+    // The rendezvous sits as close to the operation as possible so the
+    // race is not diluted by pool-open jitter: `Core::new` runs
+    // migrations and warms a connection pool, tens of milliseconds that
+    // vary per process.
+    //
+    // Measured either way, a concurrent enable/disable tears roughly 5%
+    // of rounds — moving the wait here did not obviously improve on
+    // waiting before `Core::new`, so do not read this placement as a
+    // tuned number. It is the principled spot, not a fast one. The
+    // deterministic coverage of both torn directions lives in
+    // `tests/reconcile.rs`; this race is evidence that the tear is real,
+    // not the regression guard for it.
+    //
+    // `migrate` is the exception: opening the Core *is* the operation
+    // under test there, so its rendezvous has to stay in front.
+    let migrating = args.op == "migrate";
+    if migrating {
+        wait_until(args.at);
+    }
+
+    let core = Core::new(args.library.clone(), &args.db_url)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !migrating {
+        wait_until(args.at);
+    }
+
+    match args.op.as_str() {
+        "migrate" => Ok(()),
+
+        "adopt" => {
+            let from = args.req("--from")?;
+            let name = args.req("--name")?;
+            core.adopt_folder(args.game()?, &PathBuf::from(from), &name)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
+        "set-enabled" => {
+            let id = args.req("--mod-id")?;
+            let enabled = args.req("--enabled")? == "1";
+            let mods_dir = PathBuf::from(args.req("--mods-dir")?);
+            core.set_enabled(&id, enabled, &mods_dir)
+                .await
+                .map_err(|e| e.to_string())
+        }
+
+        "reconcile" => {
+            let mods_dir = PathBuf::from(args.req("--mods-dir")?);
+            core.reconcile_junctions(args.game()?, &mods_dir)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
+        "start-session" => {
+            let pid: u32 = args
+                .req("--pid")?
+                .parse()
+                .map_err(|_| "--pid must be a number".to_string())?;
+            core.start_session(&SessionInfo {
+                game: args.game()?,
+                pid,
+                started_at: chrono::Utc::now(),
+            })
+            .await
+            .map_err(|e| e.to_string())
+        }
+
+        // Mirrors what the `install_importer` command does after the
+        // download: refuse during a Game Session, then lay the importer
+        // into the game directory. The network half is not interesting
+        // here — the contention is over the game directory and the
+        // session row.
+        "install-importer" => {
+            let zip = PathBuf::from(args.req("--zip")?);
+            let game_dir = PathBuf::from(args.req("--game-dir")?);
+            let backups = PathBuf::from(args.req("--backups")?);
+            if let Some(info) = core.session_info().await.map_err(|e| e.to_string())? {
+                return Err(format!(
+                    "{} is running (game session active since {}); \
+                     close the game before installing an importer.",
+                    info.game.as_str(),
+                    info.started_at.to_rfc3339(),
+                ));
+            }
+            importer::install_from_local_zip(&zip, &game_dir, &backups, "GMM.exe")
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
+        other => Err(format!("unknown op {other:?}")),
+    }
+}
+
+/// Spin until the rendezvous instant. A short sleep loop rather than a
+/// busy wait so two probes on a one-core CI runner still both get there.
+fn wait_until(at: Option<u128>) {
+    let Some(at) = at else { return };
+    loop {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        if now >= at {
+            return;
+        }
+        let remaining = (at - now) as u64;
+        std::thread::sleep(Duration::from_millis(remaining.min(2)));
+    }
+}
+
+fn report(ok: bool, error: &str) {
+    let line = serde_json::json!({ "ok": ok, "error": error });
+    let mut stdout = std::io::stdout();
+    // Stdout is a pipe here, so it is block-buffered; the parent blocks
+    // on this line, so an unflushed write is a deadlock.
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
+}
+
+struct Args {
+    data_dir: PathBuf,
+    db_url: String,
+    library: PathBuf,
+    take_lock: bool,
+    at: Option<u128>,
+    op: String,
+    flags: HashMap<String, String>,
+}
+
+impl Args {
+    fn parse() -> Result<Self, String> {
+        let argv: Vec<String> = std::env::args().skip(1).collect();
+        let mut flags = HashMap::new();
+        let mut op = None;
+
+        let mut i = 0;
+        while i < argv.len() {
+            let a = &argv[i];
+            if let Some(name) = a.strip_prefix("--") {
+                // `--take-lock` is the only valueless flag.
+                if name == "take-lock" {
+                    flags.insert(a.clone(), "1".to_string());
+                    i += 1;
+                    continue;
+                }
+                let value = argv
+                    .get(i + 1)
+                    .ok_or_else(|| format!("{a} needs a value"))?
+                    .clone();
+                flags.insert(a.clone(), value);
+                i += 2;
+            } else {
+                if op.is_some() {
+                    return Err(format!("unexpected positional argument {a:?}"));
+                }
+                op = Some(a.clone());
+                i += 1;
+            }
+        }
+
+        let take = |k: &str| -> Result<String, String> {
+            flags
+                .get(k)
+                .cloned()
+                .ok_or_else(|| format!("missing required {k}"))
+        };
+
+        Ok(Self {
+            data_dir: PathBuf::from(take("--data-dir")?),
+            db_url: take("--db")?,
+            library: PathBuf::from(take("--library")?),
+            take_lock: flags.contains_key("--take-lock"),
+            at: flags.get("--at").and_then(|v| v.parse().ok()),
+            op: op.ok_or_else(|| "missing operation".to_string())?,
+            flags,
+        })
+    }
+
+    fn get(&self, key: &str) -> Option<&String> {
+        self.flags.get(key)
+    }
+
+    fn req(&self, key: &str) -> Result<String, String> {
+        self.get(key)
+            .cloned()
+            .ok_or_else(|| format!("missing required {key}"))
+    }
+
+    fn game(&self) -> Result<GameCode, String> {
+        let raw = self.get("--game").cloned().unwrap_or_else(|| "gimi".into());
+        raw.parse::<GameCode>()
+            .map_err(|_| format!("invalid game code {raw:?}"))
+    }
+}
