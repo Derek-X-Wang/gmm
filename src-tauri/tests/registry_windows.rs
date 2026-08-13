@@ -17,6 +17,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 use gmm_lib::core::detect;
 use tempfile::TempDir;
@@ -33,6 +34,25 @@ const UNINSTALL_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninsta
 /// ERROR_FILE_NOT_FOUND. The product handles that correctly
 /// (`detect_from_registry` skips roots it cannot open); it was only
 /// this test that assumed the key was already there.
+/// Serialises tests that both mutate the shared uninstall root *and*
+/// assert on the result of a global scan.
+///
+/// The registry is process-external shared state: two tests each
+/// registering a "Genshin Impact" entry and then calling `detect()`
+/// will see each other's fixtures, and whichever the scan reaches first
+/// wins. That produced a failure comparing one test's TempDir against
+/// another's. Tests that only assert on their *own* entry don't need
+/// the lock.
+static REGISTRY_SCAN_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take the lock, ignoring poisoning — a panicking test has already
+/// failed and shouldn't cascade into every other test in the file.
+fn scan_guard() -> std::sync::MutexGuard<'static, ()> {
+    REGISTRY_SCAN_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn uninstall_root() -> RegKey {
     RegKey::predef(HKEY_CURRENT_USER)
         .create_subkey(UNINSTALL_PATH)
@@ -83,6 +103,7 @@ fn make_game_dir(tmp: &TempDir, folder: &str, exe: &str, data_dir: &str) -> std:
 
 #[test]
 fn genshin_detect_from_registry_finds_a_matching_uninstall_entry() {
+    let _serial = scan_guard();
     let tmp = TempDir::new().expect("tmp");
     let game = make_game_dir(
         &tmp,
@@ -102,6 +123,7 @@ fn genshin_detect_from_registry_finds_a_matching_uninstall_entry() {
 
 #[test]
 fn genshin_registry_entry_with_a_foreign_display_name_is_ignored() {
+    let _serial = scan_guard();
     let tmp = TempDir::new().expect("tmp");
     let game = make_game_dir(
         &tmp,
@@ -145,6 +167,7 @@ fn genshin_registry_entry_with_empty_install_location_is_skipped() {
 /// that passes validation, and the top-level `detect()` returns it.
 #[test]
 fn genshin_detect_prefers_a_valid_registry_hit() {
+    let _serial = scan_guard();
     let tmp = TempDir::new().expect("tmp");
     let game = make_game_dir(
         &tmp,
@@ -160,9 +183,18 @@ fn genshin_detect_prefers_a_valid_registry_hit() {
     assert!(detect::genshin::validate(&game));
 
     match detect::genshin::detect() {
-        Some(found) => assert_eq!(
-            found, game,
-            "detect() should return the registry hit when no real install is present",
+        Some(found) if found == game => {}
+        // A developer machine may have Genshin genuinely installed, and
+        // a real entry can legitimately outrank our fixture. Only treat
+        // that as a pass when the winner is a real install outside our
+        // temp tree — otherwise it's the cross-talk this test exists to
+        // catch.
+        Some(found) if !found.starts_with(std::env::temp_dir()) => {
+            eprintln!("detect() returned a real install at {found:?}; fixture not preferred");
+        }
+        Some(found) => panic!(
+            "detect() returned another test's fixture ({found:?}) instead of ours ({game:?}) \
+             — the registry scan lock is not holding",
         ),
         None => panic!("detect() returned None despite a valid registry entry"),
     }
