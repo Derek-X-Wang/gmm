@@ -307,6 +307,36 @@ still diagnose from the CI output. Artifacts are uploaded too.
 This is the layer that would have caught a broken bundle, a missing
 WebView2 dependency, or a migration that fails on a clean machine.
 
+## 6. Signed-update round trip (`.github/scripts/updater-e2e.ps1`)
+
+`tests/updater_config.rs` checks that `tauri.conf.json` *says* the right
+things — a well-formed pubkey, HTTPS endpoints,
+`createUpdaterArtifacts: true`. That is shape only, and the flag was
+missing from the very first release tag, so installers shipped with no
+update path at all.
+
+Two layers cover the rest:
+
+- **`tests/updater_signature.rs`** (host-runnable). Generates a
+  throwaway keypair with `tauri signer generate`, signs with
+  `tauri signer sign`, and re-runs the exact verification
+  `tauri-plugin-updater` performs (`PublicKey::decode` →
+  `Signature::decode` → `verify(data, sig, true)`). Asserts a tampered
+  artifact, a tampered signature, and a signature from a different key
+  are all refused. The real signing key is a release secret and is never
+  read.
+- **`.github/scripts/updater-e2e.ps1`** (Windows). Builds two versions
+  with the throwaway key, serves the newer one's `latest.json` over
+  `127.0.0.1`, downloads it back, verifies it via the ignored
+  `the_bundled_artifact_verifies_against_the_key_that_signed_it` test,
+  then installs the update over the older build and asserts the version
+  moved, the app still starts (via the IPC readiness marker), and
+  `%APPDATA%\GMM` survived.
+
+Run it by hand from a Windows checkout with `pwsh
+.github/scripts/updater-e2e.ps1`. **It is not wired into CI yet** — see
+the follow-up issue; `.github/workflows/` is maintained by hand.
+
 ## Running the suite
 
 ```bash

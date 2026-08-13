@@ -78,6 +78,9 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 base64 = "0.22"
+# The updater round-trip re-runs tauri-plugin-updater's own verification
+# against artifacts the real `tauri signer` produced.
+minisign-verify = "0.2"
 # The migration-corpus tests read `_sqlx_migrations` directly and seed
 # fixtures at old schema versions; both need raw SQL, not Core's API.
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
