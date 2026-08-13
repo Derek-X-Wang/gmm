@@ -44,8 +44,19 @@ fn repo_root() -> PathBuf {
 /// Run the Tauri CLI the same way the release workflow does. `pnpm`
 /// rather than a vendored binary so the test exercises the version the
 /// repo actually pins.
+///
+/// On Windows pnpm is a `.cmd` shim, and `Command` only ever appends
+/// `.exe` when resolving a bare name — so it has to go through the shell
+/// there or the call fails with "program not found".
 fn tauri_cli(args: &[&str]) {
-    let out = Command::new("pnpm")
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "pnpm"]);
+        c
+    } else {
+        Command::new("pnpm")
+    };
+    let out = cmd
         .arg("--silent")
         .arg("tauri")
         .args(args)
