@@ -43,6 +43,9 @@ pub enum Error {
     )]
     ZipEntryCap { cap: u32, actual: usize },
 
+    #[error("zip entry {name:?} is unsafe: {reason}. Aborted before any files were written.")]
+    ZipUnsafeEntry { name: String, reason: &'static str },
+
     #[error("diagnostics error: {0}")]
     Diagnostics(String),
 

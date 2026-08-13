@@ -319,3 +319,358 @@ async fn size_cap_refuses_oversize_archive_with_cleanup() {
     let listed = core.list_mods(GameCode::Gimi).await.expect("list");
     assert_eq!(listed.len(), 0);
 }
+
+// ---------------------------------------------------------------------
+// Adversarial archive shapes (issue #60).
+//
+// GameBanana archives are arbitrary user uploads. Everything below is a
+// shape a malicious or merely sloppy one can contain, and the rule for
+// each is the same: extract safely, or refuse with an error that says
+// what was wrong. Never write outside the import target, never leave a
+// half-extracted Mod behind.
+//
+// These are host-runnable even for the NTFS-specific shapes, because the
+// defence lives in the planner — the archive is rejected before any path
+// reaches the OS, so the assertion holds identically on every platform.
+// Gating them to Windows would only mean testing them less often.
+// ---------------------------------------------------------------------
+
+/// Import `entries` as a Mod and return the error, asserting that
+/// nothing was left behind for the caller to clean up. Every refusal
+/// test below shares this shape.
+async fn refuse(entries: &[(&str, &[u8])], name: &str) -> String {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, library_root) = fresh_core(&tmp).await;
+    let zip_path = tmp.path().join("adversarial.zip");
+    build_zip(&zip_path, entries);
+
+    let err = core
+        .import_zip(GameCode::Gimi, &zip_path, name, ImportZipOptions::default())
+        .await
+        .expect_err("this archive shape must be refused");
+
+    let game_dir = library_root.join(GameCode::Gimi.as_str());
+    let leftover = game_dir.read_dir().map(|d| d.count()).unwrap_or(0);
+    assert_eq!(
+        leftover, 0,
+        "a refused archive must leave no partial Library subtree",
+    );
+    err.to_string()
+}
+
+/// `..\..\` is traversal on Windows and an ordinary filename byte
+/// everywhere else. Reading entry names with the host's path rules means
+/// the same archive escapes on one platform and produces a file with a
+/// silly name on another; the planner normalises backslashes so the
+/// verdict is the same everywhere.
+#[tokio::test]
+async fn backslash_traversal_is_refused_like_forward_slash() {
+    let msg = refuse(
+        &[
+            (r"..\..\..\escape.txt", b"never" as &[u8]),
+            ("merged.ini", b"[TextureOverride]\nhash=1\n"),
+        ],
+        "Backslash Escape",
+    )
+    .await;
+    assert!(
+        msg.contains("zip-slip"),
+        "backslash traversal should be reported as zip-slip, got: {msg}",
+    );
+}
+
+/// An absolute POSIX path. `enclosed_name` already rejects these, but
+/// they are cheap to keep honest.
+#[tokio::test]
+async fn an_absolute_entry_path_is_refused() {
+    let msg = refuse(
+        &[("/etc/passwd", b"never" as &[u8]), ("merged.ini", b"x")],
+        "Absolute Path",
+    )
+    .await;
+    assert!(msg.contains("zip-slip"), "got: {msg}");
+}
+
+/// A drive-qualified path. On Windows `C:\Windows\System32\x.dll` is an
+/// absolute write outside the target; elsewhere it is one long filename.
+#[tokio::test]
+async fn a_drive_qualified_entry_path_is_refused() {
+    let msg = refuse(
+        &[
+            (r"C:\Windows\System32\evil.dll", b"never" as &[u8]),
+            ("merged.ini", b"x"),
+        ],
+        "Drive Path",
+    )
+    .await;
+    assert!(
+        msg.contains("zip-slip") || msg.contains("drive-qualified"),
+        "got: {msg}",
+    );
+}
+
+/// A UNC path reaches another machine entirely.
+#[tokio::test]
+async fn a_unc_entry_path_is_refused() {
+    let msg = refuse(
+        &[
+            (r"\\attacker\share\evil.dll", b"never" as &[u8]),
+            ("merged.ini", b"x"),
+        ],
+        "UNC Path",
+    )
+    .await;
+    assert!(
+        msg.contains("zip-slip") || msg.contains("unsafe"),
+        "got: {msg}",
+    );
+}
+
+/// `merged.ini:hidden` writes an NTFS alternate data stream on
+/// `merged.ini` rather than a file — content that never shows up in a
+/// directory listing, inside a Mod the user thinks they can read.
+#[tokio::test]
+async fn an_alternate_data_stream_name_is_refused() {
+    let msg = refuse(
+        &[
+            ("merged.ini:payload", b"hidden" as &[u8]),
+            ("merged.ini", b"x"),
+        ],
+        "ADS Mod",
+    )
+    .await;
+    assert!(
+        msg.contains("unsafe") || msg.contains("stream"),
+        "the error should explain the stream name, got: {msg}",
+    );
+}
+
+/// NTFS silently strips trailing dots and spaces, so `merged.ini.` and
+/// `merged.ini ` both land on `merged.ini` — two archive entries, one
+/// file, last one wins.
+#[tokio::test]
+async fn trailing_dots_and_spaces_are_refused() {
+    for name in ["merged.ini.", "merged.ini ", "textures./body.dds"] {
+        let msg = refuse(&[(name, b"x" as &[u8])], "Trailing Junk").await;
+        assert!(
+            msg.contains("unsafe"),
+            "{name} should be refused as unsafe, got: {msg}",
+        );
+    }
+}
+
+/// Reserved DOS device names are unusable as *any* path component, not
+/// just the last one: `CON/body.dds` cannot be created on Windows at
+/// all, and the OS error it produces explains nothing.
+#[tokio::test]
+async fn a_reserved_dos_name_in_an_intermediate_component_is_refused() {
+    let msg = refuse(
+        &[("CON/body.dds", b"x" as &[u8]), ("merged.ini", b"y")],
+        "Reserved Component",
+    )
+    .await;
+    assert!(
+        msg.contains("reserved"),
+        "the error should name the reserved component, got: {msg}",
+    );
+}
+
+/// Distinct entries in the zip, one file on NTFS: the second silently
+/// overwrites the first, so what the user gets depends on archive order
+/// rather than on anything they can see.
+#[tokio::test]
+async fn case_insensitively_colliding_entries_are_refused() {
+    let msg = refuse(
+        &[("merged.ini", b"first" as &[u8]), ("MERGED.INI", b"second")],
+        "Case Collision",
+    )
+    .await;
+    assert!(
+        msg.contains("collide") || msg.contains("collision"),
+        "the error should explain the collision, got: {msg}",
+    );
+}
+
+/// The same collision one directory up: `Textures/` and `textures/` are
+/// two prefixes in the archive and one directory on disk.
+#[tokio::test]
+async fn case_insensitively_colliding_directories_are_refused() {
+    let msg = refuse(
+        &[
+            ("Textures/body.dds", b"first" as &[u8]),
+            ("textures/body.dds", b"second"),
+        ],
+        "Case Collision Dir",
+    )
+    .await;
+    assert!(
+        msg.contains("collide") || msg.contains("collision"),
+        "the error should explain the collision, got: {msg}",
+    );
+}
+
+/// A zip can carry a Unix symlink: mode bits say "link", and the entry's
+/// content is the target path. Extracting it as an ordinary file writes
+/// a Mod that lies about what it contains; honouring it would let an
+/// archive point into the game directory. Refuse either way.
+#[tokio::test]
+async fn a_symlink_entry_is_refused() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, library_root) = fresh_core(&tmp).await;
+    let zip_path = tmp.path().join("symlink.zip");
+
+    {
+        use std::io::Write as _;
+        let file = File::create(&zip_path).expect("create zip");
+        let mut zw = ZipWriter::new(file);
+        // The real thing: `add_symlink` sets S_IFLNK in the entry's
+        // mode bits, which is what `zip -y` produces and what the
+        // planner looks for.
+        zw.add_symlink(
+            "link.ini",
+            "../../../../etc/passwd",
+            SimpleFileOptions::default(),
+        )
+        .expect("add symlink entry");
+        zw.start_file("merged.ini", SimpleFileOptions::default())
+            .expect("start file");
+        zw.write_all(b"[TextureOverride]\nhash=1\n").expect("write");
+        zw.finish().expect("finalise");
+    }
+
+    let err = core
+        .import_zip(
+            GameCode::Gimi,
+            &zip_path,
+            "Symlink Mod",
+            ImportZipOptions::default(),
+        )
+        .await
+        .expect_err("a symlink entry must be refused");
+    assert!(
+        err.to_string().contains("symlink"),
+        "the error should name the symlink, got: {err}",
+    );
+
+    let game_dir = library_root.join(GameCode::Gimi.as_str());
+    assert_eq!(
+        game_dir.read_dir().map(|d| d.count()).unwrap_or(0),
+        0,
+        "a refused archive must leave no partial Library subtree",
+    );
+}
+
+/// A zip bomb is a compression *ratio*, and the guard is a size cap —
+/// so a legitimately compressible Mod (8 MiB of texture padding down to
+/// a few KiB) must still import, while the same bytes against a smaller
+/// cap must not. Testing both directions keeps the guard from drifting
+/// into "refuse anything that compresses well", which would reject real
+/// mods.
+#[tokio::test]
+async fn a_high_compression_ratio_is_judged_by_size_not_by_ratio() {
+    // 8 MiB of zeroes: a ~1000:1 ratio, the shape of a zip bomb.
+    let payload = vec![0u8; 8 * 1024 * 1024];
+
+    {
+        let tmp = TempDir::new().expect("tmp");
+        let (core, _library_root) = fresh_core(&tmp).await;
+        let zip_path = tmp.path().join("compressible.zip");
+        build_zip(&zip_path, &[("blob.bin", &payload)]);
+        let compressed = std::fs::metadata(&zip_path).expect("stat zip").len();
+        assert!(
+            compressed < payload.len() as u64 / 100,
+            "fixture must actually be highly compressible, got {compressed} bytes",
+        );
+
+        let imported = core
+            .import_zip(
+                GameCode::Gimi,
+                &zip_path,
+                "Compressible",
+                ImportZipOptions::default(),
+            )
+            .await
+            .expect("a compressible Mod under the cap must import");
+        assert_eq!(
+            std::fs::metadata(imported.library_path.join("blob.bin"))
+                .expect("stat extracted blob")
+                .len(),
+            payload.len() as u64,
+            "the whole entry must be extracted, not a truncated prefix",
+        );
+    }
+
+    let tmp = TempDir::new().expect("tmp");
+    let (core, library_root) = fresh_core(&tmp).await;
+    let zip_path = tmp.path().join("bomb.zip");
+    build_zip(&zip_path, &[("blob.bin", &payload)]);
+
+    let err = core
+        .import_zip(
+            GameCode::Gimi,
+            &zip_path,
+            "Bomb",
+            ImportZipOptions {
+                max_uncompressed_bytes: 64 * 1024,
+                max_entries: 10_000,
+            },
+        )
+        .await
+        .expect_err("the same archive must be refused once it exceeds the cap");
+    assert!(
+        err.to_string().contains("import limit"),
+        "the error should name the limit, got: {err}",
+    );
+
+    let game_dir = library_root.join(GameCode::Gimi.as_str());
+    assert_eq!(
+        game_dir.read_dir().map(|d| d.count()).unwrap_or(0),
+        0,
+        "a refused archive must leave no partial Library subtree",
+    );
+}
+
+/// Failure partway through extraction: an entry names a directory whose
+/// path an earlier entry already occupies as a file. Some of the Mod is
+/// on disk when it fails, which is exactly when a leftover would slip
+/// through.
+#[tokio::test]
+async fn a_failure_partway_through_extraction_leaves_nothing_behind() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, library_root) = fresh_core(&tmp).await;
+    let zip_path = tmp.path().join("torn.zip");
+
+    build_zip(
+        &zip_path,
+        &[
+            ("merged.ini", b"[TextureOverride]\nhash=1\n" as &[u8]),
+            ("body", b"a file, not a directory"),
+            // `body` is already a file, so creating `body/` fails after
+            // two entries have been written.
+            ("body/texture.dds", b"never"),
+        ],
+    );
+
+    let err = core
+        .import_zip(
+            GameCode::Gimi,
+            &zip_path,
+            "Torn Mod",
+            ImportZipOptions::default(),
+        )
+        .await
+        .expect_err("extraction must fail once an entry collides with a file");
+    let _ = err;
+
+    let game_dir = library_root.join(GameCode::Gimi.as_str());
+    assert_eq!(
+        game_dir.read_dir().map(|d| d.count()).unwrap_or(0),
+        0,
+        "a Mod that failed halfway through extraction must not survive",
+    );
+    let listed = core.list_mods(GameCode::Gimi).await.expect("list mods");
+    assert!(
+        listed.is_empty(),
+        "a Mod that failed to extract must not be recorded, got: {listed:?}",
+    );
+}
