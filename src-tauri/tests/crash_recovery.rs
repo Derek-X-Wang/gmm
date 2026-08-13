@@ -1,0 +1,668 @@
+//! Issue #59: kill the process between the filesystem step and the DB
+//! step of every durable mutation, restart, and assert recovery.
+//!
+//! # What this is for
+//!
+//! `tests/session.rs` covers crash recovery for a Game Session, which is
+//! easy because a Game Session has an external witness: a PID that is or
+//! is not alive. Ordinary mutations have no witness. `set_enabled`
+//! creates a Junction and *then* writes the row; nothing was stopping
+//! the process in between, so the invariant that matters —
+//!
+//! > never a DB row saying enabled with a missing or wrong Junction
+//!
+//! — was maintained by inspection alone.
+//!
+//! Each test here runs one mutation in a child process
+//! (`crates/probe`), kills it at a named point via
+//! [`Core::with_crash_hook`], then reopens the database the way a
+//! restart would and asserts that a reconcile pass restores the
+//! invariant. `std::process::abort` rather than a clean exit: no
+//! unwinding, no destructors, no flushed buffers — a process that
+//! stopped existing, not one that shut down badly.
+//!
+//! # Why several of these assert repair rather than prevention
+//!
+//! Reconcile exists because the Library is the source of truth (ADR
+//! 0003) and the Junctions in `<Game>/Mods/` are projections that can
+//! drift. Making each mutation individually crash-atomic would mean a
+//! filesystem transaction we do not have on NTFS. So for the torn
+//! states reconcile can name, "torn on disk, then reconcile fixes it" is
+//! the real guarantee, and it is what these tests assert.
+//!
+//! # Known limitations, deliberately not fixed here
+//!
+//! Two torn states are *not* enabled-state violations and are not
+//! repaired. Both are asserted below as the behaviour they actually
+//! have, so that a future change to either is visible:
+//!
+//! * **Orphaned Library directory.** A crash after `adopt_folder` or
+//!   `import_zip` copies files into the Library but before the row is
+//!   inserted leaves bytes on disk that nothing references. Reconcile
+//!   walks Mod rows, so it cannot see them. The fix is a Library-side
+//!   sweep, and it should *report* rather than delete: the directory
+//!   holds the user's only copy of whatever they just imported, and
+//!   deleting user data to reclaim disk space is not a trade GMM should
+//!   make silently. Worth its own issue.
+//!
+//! * **Missing Variant rows.** A crash between the row insert and
+//!   `detect_and_record_variants` leaves a Mod whose Library subtree has
+//!   Variant subfolders but whose `mod_variants` table is empty, so
+//!   enabling it junctions to the Mod root instead of a Variant. The
+//!   enabled-state invariant still holds — the Junction matches what the
+//!   row says — so this is a content bug, not a consistency bug.
+//!   Re-running detection on load would fix it.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use gmm_lib::core::{crash_points, Core, GameCode};
+use tempfile::TempDir;
+
+// ---------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------
+
+fn probe_bin() -> PathBuf {
+    let name = if cfg!(windows) {
+        "concurrency-probe.exe"
+    } else {
+        "concurrency-probe"
+    };
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/debug")
+        .join(name);
+    assert!(
+        p.exists(),
+        "{name} missing at {p:?} — run `cargo build --workspace` before this test",
+    );
+    p
+}
+
+struct TestEnv {
+    tmp: TempDir,
+    data_dir: PathBuf,
+    db_url: String,
+    library: PathBuf,
+    game_mods: PathBuf,
+}
+
+impl TestEnv {
+    fn new() -> Self {
+        let tmp = TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("data");
+        let library = data_dir.join("library");
+        let game_mods = tmp.path().join("Genshin/Mods");
+        std::fs::create_dir_all(&game_mods).expect("game mods dir");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let db_url = format!("sqlite://{}/gmm.db?mode=rwc", data_dir.display());
+        Self {
+            tmp,
+            data_dir,
+            db_url,
+            library,
+            game_mods,
+        }
+    }
+
+    /// Reopen the database the way a restart does — a brand new `Core`
+    /// against the same file, with no memory of what the dead process
+    /// was doing.
+    async fn restart(&self) -> Core {
+        Core::new(self.library.clone(), &self.db_url)
+            .await
+            .expect("reopen the DB after a crash")
+    }
+
+    /// Run one mutation in a child process that aborts at `crash_at`.
+    /// Asserts the child really died rather than completing, so a
+    /// mis-typed point name fails loudly instead of silently testing a
+    /// clean run.
+    fn crash_during(&self, crash_at: &str, op: &[&str]) {
+        assert!(
+            crash_points::ALL.contains(&crash_at),
+            "{crash_at:?} is not a known crash point; \
+             add it to crash_points::ALL so it cannot silently never fire",
+        );
+
+        let out = Command::new(probe_bin())
+            .arg("--data-dir")
+            .arg(&self.data_dir)
+            .arg("--db")
+            .arg(&self.db_url)
+            .arg("--library")
+            .arg(&self.library)
+            .arg("--crash-at")
+            .arg(crash_at)
+            .args(op)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("spawn probe");
+
+        assert!(
+            !out.status.success(),
+            "the probe was supposed to die at {crash_at} but exited cleanly — \
+             the crash point never fired, so this test proves nothing. \
+             stdout: {}",
+            String::from_utf8_lossy(&out.stdout),
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "the probe printed an outcome, so it finished the operation \
+             instead of dying at {crash_at}: {}",
+            String::from_utf8_lossy(&out.stdout),
+        );
+    }
+
+    fn link(&self, name: &str) -> PathBuf {
+        self.game_mods.join(name)
+    }
+}
+
+/// The invariant, asserted the way `tests/concurrency.rs` asserts it:
+/// a reconcile pass that repairs nothing is a pass that found nothing
+/// torn.
+async fn assert_invariant(core: &Core, game_mods: &Path, context: &str) {
+    let r = core
+        .reconcile_junctions(GameCode::Gimi, game_mods)
+        .await
+        .expect("reconcile for invariant check");
+    assert!(
+        r.recreated.is_empty(),
+        "{context}: enabled Mod(s) still without a Junction: {:?}",
+        r.recreated,
+    );
+    assert!(
+        r.removed.is_empty(),
+        "{context}: disabled Mod(s) still with a stranded Junction: {:?}",
+        r.removed,
+    );
+    assert!(
+        r.conflicting.is_empty(),
+        "{context}: Junction(s) still resolving somewhere unexpected: {:?}",
+        r.conflicting,
+    );
+}
+
+/// Restart, run the documented recovery pass, then assert the invariant
+/// holds — i.e. a second pass finds nothing left to do.
+async fn recover_and_assert(env: &TestEnv, context: &str) -> Core {
+    let core = env.restart().await;
+    core.reconcile_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("recovery reconcile");
+    assert_invariant(&core, &env.game_mods, context).await;
+    core
+}
+
+/// Every enabled Mod has a Junction and every disabled Mod has none —
+/// checked against the directory rather than through reconcile, so the
+/// two checks cannot agree with each other while both being wrong.
+async fn assert_rows_match_disk(core: &Core, env: &TestEnv, context: &str) {
+    for m in core.list_mods(GameCode::Gimi).await.expect("list") {
+        let present = std::fs::symlink_metadata(env.link(&m.name)).is_ok();
+        assert_eq!(
+            m.enabled, present,
+            "{context}: Mod {:?} has enabled={} but Junction present={present}",
+            m.name, m.enabled,
+        );
+    }
+}
+
+async fn seed_mod(env: &TestEnv, core: &Core, name: &str) -> gmm_lib::core::Mod {
+    let src = env.tmp.path().join("fixtures").join(name);
+    std::fs::create_dir_all(&src).expect("fixture dir");
+    std::fs::write(src.join("merged.ini"), b"[TextureOverride]\nhash=42\n").expect("ini");
+    core.adopt_folder(GameCode::Gimi, &src, name)
+        .await
+        .expect("adopt")
+}
+
+// ---------------------------------------------------------------------
+// set_enabled
+// ---------------------------------------------------------------------
+
+/// Crash after the Junction is created, before the row is written.
+///
+/// On restart the row says disabled and the Junction is on disk. Left
+/// alone, the Model Importer loads a Mod the UI says is off.
+#[tokio::test]
+async fn enable_crashing_after_the_junction_is_created_recovers() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+    let m = seed_mod(&env, &core, "Enable Crash").await;
+    drop(core);
+
+    env.crash_during(
+        crash_points::SET_ENABLED_AFTER_JUNCTION_CREATE,
+        &[
+            "set-enabled",
+            "--mod-id",
+            &m.id,
+            "--enabled",
+            "1",
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ],
+    );
+
+    // The torn state we expect to find, asserted so the test fails
+    // loudly if the crash point ever moves and stops tearing anything.
+    assert!(
+        env.link("Enable Crash").exists(),
+        "precondition: the crash left the Junction on disk",
+    );
+    let core = env.restart().await;
+    assert!(
+        !core.list_mods(GameCode::Gimi).await.expect("list")[0].enabled,
+        "precondition: the row never got its update",
+    );
+    drop(core);
+
+    let core = recover_and_assert(&env, "enable crashed after junction create").await;
+    assert_rows_match_disk(&core, &env, "enable crashed after junction create").await;
+}
+
+/// Crash after the Junction is removed, before the row is written.
+///
+/// On restart the row says enabled and there is no Junction — the
+/// canonical form of the invariant this issue names.
+#[tokio::test]
+async fn disable_crashing_after_the_junction_is_removed_recovers() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+    let m = seed_mod(&env, &core, "Disable Crash").await;
+    core.set_enabled(&m.id, true, &env.game_mods)
+        .await
+        .expect("enable");
+    drop(core);
+
+    env.crash_during(
+        crash_points::SET_ENABLED_AFTER_JUNCTION_REMOVE,
+        &[
+            "set-enabled",
+            "--mod-id",
+            &m.id,
+            "--enabled",
+            "0",
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ],
+    );
+
+    assert!(
+        std::fs::symlink_metadata(env.link("Disable Crash")).is_err(),
+        "precondition: the crash left no Junction",
+    );
+    let core = env.restart().await;
+    assert!(
+        core.list_mods(GameCode::Gimi).await.expect("list")[0].enabled,
+        "precondition: the row still says enabled",
+    );
+    drop(core);
+
+    let core = recover_and_assert(&env, "disable crashed after junction remove").await;
+    assert_rows_match_disk(&core, &env, "disable crashed after junction remove").await;
+}
+
+// ---------------------------------------------------------------------
+// adopt_folder / import_zip
+// ---------------------------------------------------------------------
+
+/// Crash after the Library copy, before the row insert.
+///
+/// The enabled-state invariant is untouched — there is no row, so there
+/// is nothing to be inconsistent with. What is left is an orphaned
+/// Library directory that nothing references. Asserted as the known
+/// limitation it is; see the module docs.
+#[tokio::test]
+async fn adopt_crashing_after_the_library_copy_leaves_only_an_orphan() {
+    let env = TestEnv::new();
+    let src = env.tmp.path().join("to-adopt");
+    std::fs::create_dir_all(&src).expect("src");
+    std::fs::write(src.join("merged.ini"), b"hash=7\n").expect("ini");
+
+    env.crash_during(
+        crash_points::ADOPT_AFTER_LIBRARY_COPY,
+        &[
+            "adopt",
+            "--from",
+            &src.display().to_string(),
+            "--name",
+            "Orphaned Mod",
+        ],
+    );
+
+    let core = recover_and_assert(&env, "adopt crashed after the library copy").await;
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list")
+            .is_empty(),
+        "no Mod row should exist — the insert never ran",
+    );
+
+    // Known limitation: the bytes are still there and nothing will
+    // reclaim them. Asserted so that adding a Library sweep later fails
+    // this test and forces the docs above to be updated with it.
+    let game_lib = env.library.join("gimi");
+    let orphans: Vec<_> = std::fs::read_dir(&game_lib)
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        orphans.len(),
+        1,
+        "expected exactly one orphaned Library directory, found {orphans:?}",
+    );
+    assert!(
+        orphans[0].join("merged.ini").exists(),
+        "the orphan holds the user's only copy of the import — which is \
+         why a future sweep must report it rather than delete it",
+    );
+}
+
+/// Crash between the row insert and Variant detection.
+///
+/// The Mod exists and is disabled, so the enabled-state invariant holds.
+/// The Variant rows are missing, which is a content bug rather than a
+/// consistency one — see the module docs.
+#[tokio::test]
+async fn adopt_crashing_before_variant_detection_still_holds_the_invariant() {
+    let env = TestEnv::new();
+    let src = env.tmp.path().join("multi-variant");
+    for variant in ["Red", "Blue"] {
+        let d = src.join(variant);
+        std::fs::create_dir_all(&d).expect("variant dir");
+        std::fs::write(d.join("merged.ini"), b"hash=9\n").expect("ini");
+    }
+
+    env.crash_during(
+        crash_points::ADOPT_AFTER_ROW_INSERT,
+        &[
+            "adopt",
+            "--from",
+            &src.display().to_string(),
+            "--name",
+            "Half Adopted",
+        ],
+    );
+
+    let core = recover_and_assert(&env, "adopt crashed before variant detection").await;
+    let listed = core.list_mods(GameCode::Gimi).await.expect("list");
+    assert_eq!(listed.len(), 1, "the row insert committed before the crash");
+    assert!(!listed[0].enabled, "a freshly adopted Mod is disabled");
+    assert_rows_match_disk(&core, &env, "adopt crashed before variant detection").await;
+
+    // Known limitation, pinned: detection never ran, so the Mod looks
+    // single-folder even though its Library subtree has two Variants.
+    assert!(
+        core.list_variants(&listed[0].id)
+            .await
+            .expect("variants")
+            .is_empty(),
+        "Variant rows are missing after a crash before detection",
+    );
+}
+
+/// Build a Mod archive with two Variant subfolders.
+fn build_mod_zip(zip_path: &Path) {
+    use std::io::Write as _;
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(zip_path).expect("create zip");
+    let mut zw = zip::ZipWriter::new(file);
+    let opts = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    for variant in ["Red", "Blue"] {
+        zw.add_directory(format!("{variant}/"), opts).expect("dir");
+        zw.start_file(format!("{variant}/merged.ini"), opts)
+            .expect("ini");
+        zw.write_all(format!("; {variant}\n").as_bytes())
+            .expect("write ini");
+    }
+    zw.finish().expect("finish zip");
+}
+
+/// Crash after the archive is extracted into the Library, before the row
+/// insert. Same orphan shape as `adopt`, reached by the other import
+/// path — worth its own case because `import_zip` has a cleanup branch
+/// that `adopt_folder` does not, and that branch runs only on a returned
+/// error, never on a crash.
+#[tokio::test]
+async fn import_zip_crashing_after_extract_leaves_only_an_orphan() {
+    let env = TestEnv::new();
+    let zip = env.tmp.path().join("mod.zip");
+    build_mod_zip(&zip);
+
+    env.crash_during(
+        crash_points::IMPORT_ZIP_AFTER_EXTRACT,
+        &[
+            "import-zip",
+            "--zip",
+            &zip.display().to_string(),
+            "--name",
+            "Zip Orphan",
+        ],
+    );
+
+    let core = recover_and_assert(&env, "import_zip crashed after extract").await;
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list")
+            .is_empty(),
+        "no Mod row should exist — the insert never ran",
+    );
+
+    // Known limitation, pinned: the extracted bytes survive with nothing
+    // referencing them. The error path would have removed them; the
+    // crash path cannot.
+    let game_lib = env.library.join("gimi");
+    let orphans: Vec<_> = std::fs::read_dir(&game_lib)
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert_eq!(
+        orphans.len(),
+        1,
+        "expected exactly one orphaned Library directory, found {orphans:?}",
+    );
+}
+
+/// Crash between `import_zip`'s row insert and Variant detection. The
+/// enabled-state invariant holds; the Variant rows are missing.
+#[tokio::test]
+async fn import_zip_crashing_before_variant_detection_still_holds_the_invariant() {
+    let env = TestEnv::new();
+    let zip = env.tmp.path().join("mod2.zip");
+    build_mod_zip(&zip);
+
+    env.crash_during(
+        crash_points::IMPORT_ZIP_AFTER_ROW_INSERT,
+        &[
+            "import-zip",
+            "--zip",
+            &zip.display().to_string(),
+            "--name",
+            "Half Imported",
+        ],
+    );
+
+    let core = recover_and_assert(&env, "import_zip crashed before variant detection").await;
+    let listed = core.list_mods(GameCode::Gimi).await.expect("list");
+    assert_eq!(listed.len(), 1, "the row insert committed before the crash");
+    assert!(!listed[0].enabled, "a freshly imported Mod is disabled");
+    assert_rows_match_disk(&core, &env, "import_zip crashed before variant detection").await;
+    assert!(
+        core.list_variants(&listed[0].id)
+            .await
+            .expect("variants")
+            .is_empty(),
+        "Variant rows are missing after a crash before detection",
+    );
+}
+
+// ---------------------------------------------------------------------
+// set_active_variant
+// ---------------------------------------------------------------------
+
+/// Crash after the row names the new Variant but before the Junction is
+/// re-pointed.
+///
+/// The Junction still resolves into the *old* Variant's subfolder, so
+/// the game loads content the UI says is not selected. The row is the
+/// source of truth for which Variant is active, and the stale target is
+/// inside this Mod's own Library path — nobody but GMM put it there —
+/// so this is unambiguously repairable.
+#[tokio::test]
+async fn variant_switch_crashing_before_the_junction_moves_recovers() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+
+    let src = env.tmp.path().join("variant-src");
+    for variant in ["Red", "Blue"] {
+        let d = src.join(variant);
+        std::fs::create_dir_all(&d).expect("variant dir");
+        std::fs::write(d.join("merged.ini"), format!("; {variant}\n")).expect("ini");
+    }
+    let m = core
+        .adopt_folder(GameCode::Gimi, &src, "Variant Mod")
+        .await
+        .expect("adopt");
+    let variants = core.list_variants(&m.id).await.expect("variants");
+    assert_eq!(variants.len(), 2, "fixture has two Variants");
+    core.set_enabled(&m.id, true, &env.game_mods)
+        .await
+        .expect("enable");
+
+    // Switch to whichever Variant is not currently active.
+    let active = core
+        .active_variant_id(&m.id)
+        .await
+        .expect("active")
+        .expect("an active variant");
+    let target_variant = variants
+        .iter()
+        .find(|v| v.id != active)
+        .expect("the other variant");
+    let target_name = target_variant.name.clone();
+    let target_id = target_variant.id.clone();
+    drop(core);
+
+    env.crash_during(
+        crash_points::SET_ACTIVE_VARIANT_AFTER_DB_UPDATE,
+        &[
+            "set-active-variant",
+            "--mod-id",
+            &m.id,
+            "--variant-id",
+            &target_id,
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ],
+    );
+
+    // Precondition: the Junction still resolves into the old Variant.
+    let resolved = std::fs::canonicalize(env.link("Variant Mod")).expect("resolve junction");
+    assert!(
+        !resolved.ends_with(&target_name),
+        "precondition: the Junction has not moved to {target_name} yet, got {resolved:?}",
+    );
+
+    let core = recover_and_assert(&env, "variant switch crashed before the junction moved").await;
+
+    let resolved = std::fs::canonicalize(env.link("Variant Mod")).expect("resolve junction");
+    assert!(
+        resolved.ends_with(&target_name),
+        "reconcile must re-point the Junction at the Variant the row selects; \
+         expected it to end with {target_name:?}, got {resolved:?}",
+    );
+    assert_rows_match_disk(&core, &env, "variant switch recovered").await;
+}
+
+/// Crash after the old Junction is removed and before the new one is
+/// created. The row says enabled with no Junction at all — the plain
+/// case reconcile already handled.
+#[tokio::test]
+async fn variant_switch_crashing_between_junctions_recovers() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+
+    let src = env.tmp.path().join("variant-src-2");
+    for variant in ["Red", "Blue"] {
+        let d = src.join(variant);
+        std::fs::create_dir_all(&d).expect("variant dir");
+        std::fs::write(d.join("merged.ini"), format!("; {variant}\n")).expect("ini");
+    }
+    let m = core
+        .adopt_folder(GameCode::Gimi, &src, "Between Mod")
+        .await
+        .expect("adopt");
+    let variants = core.list_variants(&m.id).await.expect("variants");
+    core.set_enabled(&m.id, true, &env.game_mods)
+        .await
+        .expect("enable");
+    let active = core
+        .active_variant_id(&m.id)
+        .await
+        .expect("active")
+        .expect("active variant");
+    let target_id = variants
+        .iter()
+        .find(|v| v.id != active)
+        .expect("other variant")
+        .id
+        .clone();
+    drop(core);
+
+    env.crash_during(
+        crash_points::SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE,
+        &[
+            "set-active-variant",
+            "--mod-id",
+            &m.id,
+            "--variant-id",
+            &target_id,
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ],
+    );
+
+    assert!(
+        std::fs::symlink_metadata(env.link("Between Mod")).is_err(),
+        "precondition: the crash left no Junction",
+    );
+
+    let core = recover_and_assert(&env, "variant switch crashed between junctions").await;
+    assert_rows_match_disk(&core, &env, "variant switch crashed between junctions").await;
+}
+
+// ---------------------------------------------------------------------
+// Coverage
+// ---------------------------------------------------------------------
+
+/// Every crash point must be exercised by some test in this file.
+///
+/// Without this, adding a point to `crash_points::ALL` and forgetting to
+/// cover it looks exactly like covering it — the constant compiles, the
+/// suite is green, and the new durable step has no crash test at all.
+#[test]
+fn every_crash_point_is_covered_by_a_test() {
+    let source = include_str!("crash_recovery.rs");
+    let uncovered: Vec<_> = crash_points::ALL
+        .iter()
+        .filter(|point| {
+            // Match on the constant's Rust name, which is what the
+            // tests actually reference — `set_enabled.after_x` is
+            // declared as `SET_ENABLED_AFTER_X`. Matching the string
+            // literal instead would only ever find `crash_points.rs`.
+            let const_name = point.replace('.', "_").to_uppercase();
+            !source.contains(&const_name)
+        })
+        .collect();
+    assert!(
+        uncovered.is_empty(),
+        "crash points with no test in this file: {uncovered:?}",
+    );
+}
