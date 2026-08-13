@@ -4,6 +4,7 @@
 //! commands are the only consumers and they're exercised by the Windows
 //! smoke (`cargo xtask test-session`) and manual `pnpm tauri dev` runs.
 
+pub mod launch;
 pub mod session;
 
 pub use session::{SessionRuntime, SESSION_ENDED_EVENT, SESSION_STARTED_EVENT};

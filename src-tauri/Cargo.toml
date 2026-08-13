@@ -79,6 +79,9 @@ windows-sys = { version = "0.59", features = [
 [dev-dependencies]
 base64 = "0.22"
 tempfile = "3"
+# `tauri::test::mock_app` — the launch-orchestration tests need a real
+# AppHandle to assert the session events the command emits.
+tauri = { version = "2", features = ["test"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
