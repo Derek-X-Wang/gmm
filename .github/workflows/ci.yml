@@ -130,10 +130,21 @@ jobs:
 
       # `tauri build` runs `pnpm build` itself via beforeBuildCommand.
       # createUpdaterArtifacts is switched off here because signing the
-      # manifest needs TAURI_SIGNING_PRIVATE_KEY, which is a
-      # release-only secret and must not be exposed to PR builds.
+      # manifest needs TAURI_SIGNING_PRIVATE_KEY, a release-only secret
+      # that must not be exposed to PR builds.
+      #
+      # The override goes through a file rather than an inline `--config`
+      # string: pwsh strips the double quotes out of inline JSON, and
+      # tauri then rejects `{bundle:{...}}` as invalid.
+      - name: Write CI bundle config override
+        shell: pwsh
+        run: |
+          '{"bundle":{"createUpdaterArtifacts":false}}' |
+            Set-Content -Path ci-bundle.conf.json -Encoding utf8
+          Get-Content ci-bundle.conf.json
+
       - name: Build the app bundle
-        run: pnpm tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: pnpm tauri build --config ci-bundle.conf.json
 
       - name: Install, launch, verify, uninstall
         shell: pwsh

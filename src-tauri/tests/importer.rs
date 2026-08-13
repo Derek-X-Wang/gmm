@@ -120,3 +120,143 @@ fn rewrite_d3dx_loader_idempotent() {
     assert!(!after_first.contains("XXMI Launcher"));
     assert!(after_first.contains("other = 1"), "other keys preserved");
 }
+
+// ---------------------------------------------------------------------
+// Regression: `Mods/` is user data and must survive importer installs.
+//
+// `Mods/` is where GMM materialises Junctions for enabled mods
+// (ADR 0003). It used to be listed in IMPORTER_ROOT_DIRS, which meant
+// `backup_existing` renamed the whole directory into the backup folder
+// on every install — silently stripping every enabled mod out of the
+// game while the DB still said `enabled = 1`. Caught by the Windows
+// end-to-end test on its first real run; these keep it dead.
+// ---------------------------------------------------------------------
+
+/// Build a zip that also ships its own `Mods/` folder, the way some
+/// importer packages do (usually example mods).
+fn build_importer_zip_with_mods(zip_path: &Path) {
+    let file = File::create(zip_path).expect("create zip");
+    let mut zw = ZipWriter::new(file);
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    zw.start_file("d3dx.ini", opts).expect("d3dx.ini");
+    zw.write_all(b"[Loader]\nloader = XXMI Launcher.exe\n")
+        .expect("write d3dx");
+    zw.start_file("d3d11.dll", opts).expect("d3d11.dll");
+    zw.write_all(b"MZ\x00\x00fake-dll").expect("write dll");
+    zw.add_directory("Mods/", opts).expect("Mods dir");
+    zw.start_file("Mods/ExampleMod.ini", opts).expect("example");
+    zw.write_all(b"; shipped example\n").expect("write example");
+    zw.finish().expect("finish zip");
+}
+
+#[test]
+fn install_never_moves_an_existing_mods_directory() {
+    let tmp = TempDir::new().expect("tmp");
+    let game = tmp.path().join("game");
+    let mods = game.join("Mods");
+    fs::create_dir_all(mods.join("Hu Tao Skin")).expect("existing mod dir");
+    fs::write(mods.join("Hu Tao Skin/merged.ini"), b"hash = deadbeef\n").expect("mod ini");
+
+    let zip = tmp.path().join("GIMI.zip");
+    build_importer_zip(&zip);
+
+    install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
+        .expect("install");
+
+    assert!(
+        mods.join("Hu Tao Skin/merged.ini").exists(),
+        "an enabled mod's deployment directory must survive an importer install",
+    );
+    assert_eq!(
+        fs::read_to_string(mods.join("Hu Tao Skin/merged.ini")).expect("read"),
+        "hash = deadbeef\n",
+        "contents must be untouched, not restored from a backup copy",
+    );
+}
+
+#[test]
+fn reinstall_leaves_mods_in_place_while_replacing_importer_files() {
+    let tmp = TempDir::new().expect("tmp");
+    let game = tmp.path().join("game");
+    let backups = tmp.path().join("backups");
+    let zip = tmp.path().join("GIMI.zip");
+    build_importer_zip(&zip);
+
+    // First install, then the user enables a mod.
+    install_from_local_zip(&zip, &game, &backups, DEFAULT_LOADER_EXE).expect("first install");
+    let mods = game.join("Mods");
+    fs::create_dir_all(mods.join("Nahida")).expect("mod dir");
+    fs::write(mods.join("Nahida/merged.ini"), b"hash = 1234\n").expect("mod ini");
+
+    // Reinstall — the exact flow behind "Reinstall importer" and an
+    // importer update.
+    install_from_local_zip(&zip, &game, &backups, DEFAULT_LOADER_EXE).expect("reinstall");
+
+    assert!(
+        mods.join("Nahida/merged.ini").exists(),
+        "reinstalling the importer must not orphan enabled mods",
+    );
+    assert!(
+        game.join("d3d11.dll").exists(),
+        "importer files should still be replaced normally",
+    );
+}
+
+#[test]
+fn a_package_shipping_its_own_mods_folder_merges_instead_of_replacing() {
+    let tmp = TempDir::new().expect("tmp");
+    let game = tmp.path().join("game");
+    let mods = game.join("Mods");
+    fs::create_dir_all(mods.join("Existing")).expect("existing dir");
+    fs::write(mods.join("Existing/merged.ini"), b"mine\n").expect("existing ini");
+
+    let zip = tmp.path().join("GIMI-with-mods.zip");
+    build_importer_zip_with_mods(&zip);
+
+    install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
+        .expect("install");
+
+    assert!(
+        mods.join("Existing/merged.ini").exists(),
+        "the user's own mod must survive a package that ships Mods/",
+    );
+    assert_eq!(
+        fs::read_to_string(mods.join("Existing/merged.ini")).expect("read"),
+        "mine\n",
+    );
+    assert!(
+        mods.join("ExampleMod.ini").exists(),
+        "the package's shipped example should still be merged in",
+    );
+}
+
+#[test]
+fn rollback_does_not_restore_a_mods_directory_over_the_live_one() {
+    let tmp = TempDir::new().expect("tmp");
+    let game = tmp.path().join("game");
+    let mods = game.join("Mods");
+    fs::create_dir_all(&mods).expect("mods");
+    fs::write(mods.join("live.ini"), b"live\n").expect("live");
+
+    // Simulate a backup taken by an older GMM that still captured Mods/.
+    let backup = tmp.path().join("backups/20260101T000000");
+    fs::create_dir_all(backup.join("Mods")).expect("backup mods");
+    fs::write(backup.join("Mods/stale.ini"), b"stale\n").expect("stale");
+    fs::write(backup.join("d3d11.dll"), b"old-dll").expect("old dll");
+
+    rollback_to(&backup, &game).expect("rollback");
+
+    assert!(
+        mods.join("live.ini").exists(),
+        "rollback must not delete the live Mods directory",
+    );
+    assert!(
+        !mods.join("stale.ini").exists(),
+        "a stale backed-up Mods/ must not be restored over the live one",
+    );
+    assert!(
+        game.join("d3d11.dll").exists(),
+        "non-user-owned files should still roll back normally",
+    );
+}

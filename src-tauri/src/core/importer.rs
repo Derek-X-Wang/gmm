@@ -38,8 +38,23 @@ use super::zip_import;
 /// even when extracting a fresh release for the first time.
 pub const IMPORTER_ROOT_FILES: &[&str] = &["d3d11.dll", "d3dcompiler_46.dll", "d3dx.ini"];
 
-/// Directories the Model Importer drops alongside the DLLs.
-pub const IMPORTER_ROOT_DIRS: &[&str] = &["Mods", "ShaderCache", "ShaderFixes"];
+/// Directories the Model Importer owns and may freely replace.
+///
+/// **`Mods` is deliberately absent.** It is the deployment target for
+/// GMM's Junctions (ADR 0003) — user data, not importer state. Moving
+/// or deleting it during an install would silently strip every enabled
+/// mod out of the game while the DB still reported `enabled = 1`. See
+/// [`USER_OWNED_DIRS`].
+pub const IMPORTER_ROOT_DIRS: &[&str] = &["ShaderCache", "ShaderFixes"];
+
+/// Directories inside the game folder that the importer subsystem must
+/// never move, replace, or delete.
+///
+/// `Mods/` holds the Junctions GMM creates when a Mod is enabled. An
+/// importer package may ship its own `Mods/` (usually examples); those
+/// contents are merged in rather than swapped over the top, so a
+/// reinstall or importer update can never orphan a user's enabled mods.
+pub const USER_OWNED_DIRS: &[&str] = &["Mods"];
 
 /// The executable name written into `d3dx.ini`'s `loader:` line. GMM
 /// runs as the loader process per ADR 0001.
@@ -222,7 +237,18 @@ fn swap_in(staging: &Path, game_dir: &Path) -> Result<()> {
             source,
         })?;
         let from = entry.path();
-        let to = game_dir.join(entry.file_name());
+        let name = entry.file_name();
+        let to = game_dir.join(&name);
+
+        // User-owned directories are merged, never replaced — blowing
+        // away `Mods/` here would take every Junction with it.
+        let is_user_owned = USER_OWNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d));
+        if is_user_owned && to.is_dir() {
+            merge_into(&from, &to)?;
+            remove_any(&from)?;
+            continue;
+        }
+
         if to.exists() {
             remove_any(&to)?;
         }
@@ -230,6 +256,30 @@ fn swap_in(staging: &Path, game_dir: &Path) -> Result<()> {
             copy_any(&from, &to)?;
             remove_any(&from)?;
         }
+    }
+    Ok(())
+}
+
+/// Copy everything under `from` into the existing directory `to`,
+/// leaving entries already present in `to` untouched. Used for
+/// [`USER_OWNED_DIRS`] so importer-shipped example mods can land
+/// without disturbing the user's Junctions.
+fn merge_into(from: &Path, to: &Path) -> Result<()> {
+    for entry in fs::read_dir(from).map_err(|source| Error::Io {
+        path: from.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| Error::Io {
+            path: from.to_path_buf(),
+            source,
+        })?;
+        let src = entry.path();
+        let dest = to.join(entry.file_name());
+        if dest.exists() {
+            // Never clobber something the user (or GMM) already put here.
+            continue;
+        }
+        copy_any(&src, &dest)?;
     }
     Ok(())
 }
@@ -246,7 +296,17 @@ pub fn rollback_to(backup_dir: &Path, game_dir: &Path) -> Result<()> {
             source,
         })?;
         let from = entry.path();
-        let to = game_dir.join(entry.file_name());
+        let name = entry.file_name();
+
+        // Backups taken before `Mods` was reclassified as user-owned
+        // may still contain it. Restoring would delete the live
+        // directory (and its Junctions), so skip it — the live copy is
+        // authoritative.
+        if USER_OWNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d)) {
+            continue;
+        }
+
+        let to = game_dir.join(&name);
         if to.exists() {
             remove_any(&to)?;
         }
