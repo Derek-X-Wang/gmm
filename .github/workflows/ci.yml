@@ -155,10 +155,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installer-smoke-diagnostics
-          path: |
-            ${{ runner.temp }}/msi-install.log
-            ${{ runner.temp }}/msi-uninstall.log
-            ${{ env.APPDATA }}/GMM/logs
+          path: ci-diagnostics
           if-no-files-found: ignore
 
   # Aggregator: branch protection keys off this single name.

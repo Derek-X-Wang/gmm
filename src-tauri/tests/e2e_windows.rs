@@ -38,7 +38,24 @@ use gmm_loader::Loader;
 use tempfile::TempDir;
 
 const TARGET_PROCESS: &str = "GenshinImpact.exe";
-const WAIT_TIMEOUT_SECS: i32 = 60;
+const WAIT_TIMEOUT_SECS: i32 = 30;
+
+/// The DLL the injection step actually hooks.
+///
+/// The importer installs a real `d3d11.dll` and we assert on that — but
+/// we deliberately do **not** inject it here. `LoadLibraryW` resolves by
+/// module base name: if a DLL called `d3d11.dll` is already mapped into
+/// the target process (it usually is, from System32), Windows hands back
+/// the existing module instead of loading ours, and
+/// `WaitForInjection`'s exact path comparison then never matches.
+///
+/// A real game doesn't hit this, because the DLL search order loads the
+/// proxy from the game's own directory before anything pulls in the
+/// system copy. Our `victim.exe` stand-in never loads D3D at all, so the
+/// collision is an artefact of the fixture, not a product bug. Using a
+/// unique name keeps the injection assertion honest while leaving the
+/// path realistic (game directory, spaces, temp-dir depth).
+const PROBE_DLL: &str = "gmm-e2e-probe.dll";
 
 fn src_tauri_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -187,10 +204,13 @@ async fn full_vertical_against_a_fake_game_install() {
     );
 
     // ---- 5. launch: hook, spawn, inject -------------------------------
+    // Same bytes as the installed d3d11.dll, unique base name — see
+    // PROBE_DLL for why the installed one can't be injected here.
+    let probe = game_dir.join(PROBE_DLL);
+    fs::copy(game_dir.join("d3d11.dll"), &probe).expect("stage probe dll");
+
     let loader = Loader::load(&vendor_loader_dll()).expect("load 3dmloader");
-    let hook = loader
-        .hook(&game_dir.join("d3d11.dll"))
-        .expect("install CBT hook");
+    let hook = loader.hook(&probe).expect("install CBT hook");
 
     let mut game = Command::new(game_dir.join(TARGET_PROCESS))
         .current_dir(&game_dir)

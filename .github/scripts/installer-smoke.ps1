@@ -28,8 +28,12 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $BundleDir = Join-Path $RepoRoot "src-tauri\target\release\bundle\msi"
 $AppData = Join-Path $env:APPDATA "GMM"
-$InstallLog = Join-Path $env:RUNNER_TEMP "msi-install.log"
-$UninstallLog = Join-Path $env:RUNNER_TEMP "msi-uninstall.log"
+# Logs live inside the workspace: actions/upload-artifact requires every
+# uploaded path to share one root, and RUNNER_TEMP sits outside it.
+$LogDir = Join-Path $RepoRoot "ci-diagnostics"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$InstallLog = Join-Path $LogDir "msi-install.log"
+$UninstallLog = Join-Path $LogDir "msi-uninstall.log"
 
 function Write-Section($msg) {
     Write-Host ""
@@ -155,8 +159,18 @@ if ($proc.HasExited) {
 }
 Write-Host "process still alive after startup — no crash loop"
 
+# ---------------------------------------------------------------------
+Write-Section "Shut down"
+
+# Must happen before reading gmm.db: the running app holds the SQLite
+# file open, and a read while it's locked fails with a sharing violation.
+Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
+
+# ---------------------------------------------------------------------
 # The six supported games must be seeded by the initial migration.
 Write-Section "Verify seeded schema"
+
 $dbBytes = [System.IO.File]::ReadAllBytes($dbPath)
 $dbText = [System.Text.Encoding]::ASCII.GetString($dbBytes)
 foreach ($code in @("gimi", "srmi", "zzmi", "wwmi", "himi", "efmi")) {
@@ -165,12 +179,6 @@ foreach ($code in @("gimi", "srmi", "zzmi", "wwmi", "himi", "efmi")) {
     }
 }
 Write-Host "all six game codes present in gmm.db"
-
-# ---------------------------------------------------------------------
-Write-Section "Shut down"
-
-Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 2
 
 # ---------------------------------------------------------------------
 Write-Section "Uninstall"
