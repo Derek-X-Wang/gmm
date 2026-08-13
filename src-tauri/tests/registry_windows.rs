@@ -25,6 +25,21 @@ use winreg::RegKey;
 
 const UNINSTALL_PATH: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 
+/// Open the per-user uninstall root, **creating it if absent**.
+///
+/// Only the HKLM copy of this key is guaranteed to exist. A fresh
+/// Windows image — a CI runner, or any machine where no per-user
+/// installer has ever run — has no HKCU copy, and opening it fails with
+/// ERROR_FILE_NOT_FOUND. The product handles that correctly
+/// (`detect_from_registry` skips roots it cannot open); it was only
+/// this test that assumed the key was already there.
+fn uninstall_root() -> RegKey {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .create_subkey(UNINSTALL_PATH)
+        .expect("open-or-create HKCU uninstall root")
+        .0
+}
+
 /// Creates an uninstall entry under HKCU and deletes it on drop, so a
 /// panicking assertion can't leave residue in the runner's registry.
 struct UninstallEntry {
@@ -33,10 +48,7 @@ struct UninstallEntry {
 
 impl UninstallEntry {
     fn new(key_name: &str, display_name: &str, install_location: &Path) -> Self {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let uninstall = hkcu
-            .open_subkey_with_flags(UNINSTALL_PATH, KEY_ALL_ACCESS)
-            .expect("open HKCU uninstall root");
+        let uninstall = uninstall_root();
         let (key, _) = uninstall
             .create_subkey(key_name)
             .expect("create fake uninstall entry");
@@ -110,10 +122,7 @@ fn genshin_registry_entry_with_a_foreign_display_name_is_ignored() {
 
 #[test]
 fn genshin_registry_entry_with_empty_install_location_is_skipped() {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let uninstall = hkcu
-        .open_subkey_with_flags(UNINSTALL_PATH, KEY_ALL_ACCESS)
-        .expect("open uninstall root");
+    let uninstall = uninstall_root();
     let (key, _) = uninstall
         .create_subkey("GMM-TEST-GenshinEmptyLocation")
         .expect("create entry");
@@ -164,10 +173,7 @@ fn genshin_detect_prefers_a_valid_registry_hit() {
 /// half-written keys.
 #[test]
 fn registry_scan_tolerates_entries_missing_values() {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let uninstall = hkcu
-        .open_subkey_with_flags(UNINSTALL_PATH, KEY_ALL_ACCESS)
-        .expect("open uninstall root");
+    let uninstall = uninstall_root();
     let (_key, _) = uninstall
         .create_subkey("GMM-TEST-Malformed")
         .expect("create empty entry");
