@@ -963,7 +963,8 @@ function RebuildJunctions({ game }: { game: ApiGameCode }) {
       </button>
       {rebuild.data ? (
         <span className="muted small">
-          Recreated {rebuild.data.recreated.length}, skipped {rebuild.data.skipped.length} disabled.
+          Recreated {rebuild.data.recreated.length}, removed {rebuild.data.removed.length} stranded,
+          skipped {rebuild.data.skipped.length} disabled.
         </span>
       ) : null}
       {rebuild.isError ? <p className="error">{String(rebuild.error)}</p> : null}

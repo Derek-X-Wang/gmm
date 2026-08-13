@@ -1215,14 +1215,38 @@ impl Core {
             let library_path: String = row.try_get("library_path")?;
             let enabled: i64 = row.try_get("enabled")?;
 
-            if enabled == 0 {
-                result.skipped.push(id);
-                continue;
-            }
-
             let link = game_mods_dir.join(&junction_dir_name);
             let library_path = PathBuf::from(&library_path);
             let expected_target = self.junction_target_for(&id, &library_path).await?;
+
+            // A disabled Mod should have no junction. If one is there,
+            // something tore between `set_enabled`'s filesystem step and
+            // its DB step — a crash (#59) or, on an unsupported second
+            // instance, a race (#58). Left alone, the Model Importer
+            // keeps loading a Mod the UI says is off.
+            if enabled == 0 {
+                if !link_exists(&link) {
+                    result.skipped.push(id);
+                    continue;
+                }
+                match resolve_link(&link) {
+                    // Ours: we put it there, the row says it should be
+                    // gone, and deleting it cannot touch the Library.
+                    Some(actual) if same_path(&actual, &expected_target) => {
+                        junction::remove(&link)?;
+                        result.removed.push(id);
+                    }
+                    // Points somewhere we never pointed it. Same rule as
+                    // the enabled-but-drifted case: surface, don't
+                    // clobber whatever the user intended.
+                    _ => result.conflicting.push(reconcile::ConflictingJunction {
+                        mod_id: id,
+                        link,
+                        expected_target,
+                    }),
+                }
+                continue;
+            }
 
             if !link_exists(&link) {
                 volume::require_ntfs_pair(game_mods_dir, &expected_target)?;
@@ -1296,12 +1320,21 @@ impl Core {
 
             // Always drop the existing link first; if the user relocated
             // the Library, the old link would resolve to thin air.
-            if link_exists(&link) {
+            let had_link = link_exists(&link);
+            if had_link {
                 let _ = junction::remove(&link);
             }
 
             if enabled == 0 {
-                result.skipped.push(id);
+                // Rebuild already deletes stranded junctions as a side
+                // effect of dropping every link. Report it the same way
+                // reconcile does, so `removed` means one thing across
+                // both passes rather than depending on which the user ran.
+                if had_link {
+                    result.removed.push(id);
+                } else {
+                    result.skipped.push(id);
+                }
                 continue;
             }
             let target = self.junction_target_for(&id, &library_path).await?;

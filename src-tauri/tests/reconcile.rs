@@ -216,3 +216,96 @@ async fn a_junction_whose_target_was_deleted_is_not_healthy() {
         "it should be surfaced as conflicting so the UI can prompt, got {after:?}",
     );
 }
+
+/// The inverse tear: the DB says a Mod is *disabled* but a Junction for
+/// it is still sitting in `<Game>/Mods/`.
+///
+/// This is strictly worse than the missing-Junction direction the tests
+/// above cover. A missing Junction means a Mod the user turned on isn't
+/// loading — visible, annoying, self-evident. A stranded Junction means
+/// the Model Importer keeps loading a Mod that GMM's UI says is off, and
+/// nothing in the app will ever tell the user why their game looks wrong.
+///
+/// Found by `tests/concurrency.rs` (issue #58): a concurrent
+/// enable/disable can produce it, as can a crash between `set_enabled`'s
+/// filesystem step and its DB step (issue #59). Reconcile has to be able
+/// to repair both directions or "run reconcile" is not a real answer.
+#[tokio::test]
+async fn reconcile_removes_a_stranded_junction_for_a_disabled_mod() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, _, game_mods) = fresh_core(&tmp).await;
+
+    let fixture = tmp.path().join("fixture/Stranded");
+    let m = adopt_and_enable(&core, &game_mods, &fixture, "Stranded Mod").await;
+
+    let link = game_mods.join("Stranded Mod");
+    let target = fs::canonicalize(&link).expect("resolve the enabled junction");
+
+    // Disable through the public API, then put the Junction back by hand
+    // — the same end state a torn write leaves, reached without reaching
+    // into the DB.
+    core.set_enabled(&m.id, false, &game_mods)
+        .await
+        .expect("disable");
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "precondition: disable removed the junction",
+    );
+    gmm_lib::core::junction::create(&link, &target).expect("strand a junction");
+    assert!(link.exists(), "precondition: junction is stranded");
+
+    let result = core
+        .reconcile_junctions(GameCode::Gimi, &game_mods)
+        .await
+        .expect("reconcile");
+
+    assert_eq!(
+        result.removed.as_slice(),
+        std::slice::from_ref(&m.id),
+        "the stranded junction must be reported as removed, got {result:?}",
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "the stranded junction must actually be gone",
+    );
+    assert!(
+        fixture.join("merged.ini").exists() || target.join("merged.ini").exists(),
+        "removing a junction must never touch the Library copy (ADR 0003)",
+    );
+}
+
+/// ...but only when it points where we put it. A junction the user aimed
+/// somewhere else is theirs, and clobbering it would lose data we did not
+/// own. Same reasoning as the enabled-but-drifted case: surface it, don't
+/// auto-fix it.
+#[tokio::test]
+async fn reconcile_leaves_a_disabled_mods_junction_alone_when_it_points_elsewhere() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, _, game_mods) = fresh_core(&tmp).await;
+
+    let fixture = tmp.path().join("fixture/Elsewhere");
+    let m = adopt_and_enable(&core, &game_mods, &fixture, "Elsewhere Mod").await;
+    core.set_enabled(&m.id, false, &game_mods)
+        .await
+        .expect("disable");
+
+    let somewhere_else = tmp.path().join("not-the-library");
+    fs::create_dir_all(&somewhere_else).expect("other dir");
+    let link = game_mods.join("Elsewhere Mod");
+    gmm_lib::core::junction::create(&link, &somewhere_else).expect("user's own junction");
+
+    let result = core
+        .reconcile_junctions(GameCode::Gimi, &game_mods)
+        .await
+        .expect("reconcile");
+
+    assert!(
+        result.removed.is_empty(),
+        "a junction pointing outside the Library is not ours to delete, got {result:?}",
+    );
+    assert!(
+        result.conflicting.iter().any(|c| c.mod_id == m.id),
+        "it should be surfaced as conflicting instead, got {result:?}",
+    );
+    assert!(link.exists(), "the user's junction survives");
+}
