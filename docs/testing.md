@@ -127,6 +127,16 @@ it:
   `JoinHandle`. Prod drops it (the task is detached); tests `.await`
   it and get deterministic teardown instead of sleeping.
 
+**Windows gotcha.** A test binary that builds a Tauri `App` needs the
+Common-Controls v6 manifest linked into it, or it dies at load with
+`STATUS_ENTRYPOINT_NOT_FOUND` (exit code `0xc0000139`) before running a
+single case. tauri-build links the manifest with
+`cargo:rustc-link-arg-bins`, which covers bins and nothing else
+([tauri#13419](https://github.com/tauri-apps/tauri/issues/13419)), so
+`src-tauri/build.rs` embeds `windows-app-manifest.xml` itself via plain
+`rustc-link-arg`. Don't remove that without checking `cargo test` still
+runs on Windows.
+
 Coverage lands in two files:
 
 - `tests/launch_command.rs` — host-runnable. Everything that fails
