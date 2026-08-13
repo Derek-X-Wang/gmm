@@ -290,6 +290,40 @@ pub fn build_bundle(
     Ok(())
 }
 
+/// Distinctive log line proving the frontend reached the Rust side.
+///
+/// `.github/scripts/installer-smoke.ps1` greps the installed app's own
+/// log for it. Getting this line written requires the WebView to boot,
+/// the IPC channel to come up, the command to be registered in
+/// `generate_handler![]`, and the ACL to allow the call — none of which
+/// the smoke's other checks (gmm.db exists, a log file exists) can
+/// distinguish from a build where every command is denied. See issue
+/// #54.
+pub const IPC_READY_MARKER: &str = "gmm-ipc-ready";
+
+/// The command that carries the marker. `is_onboarding_complete` is the
+/// App router's own query: it runs on every start, before the first
+/// paint, on both the wizard and main-app branches — so it is the one
+/// call the smoke can count on. Exposed as a constant so
+/// `tests/ipc_contract.rs` can assert it is still registered and still
+/// invoked by the frontend.
+pub const IPC_READY_COMMAND: &str = "is_onboarding_complete";
+
+/// Emit [`IPC_READY_MARKER`]. Called from the [`IPC_READY_COMMAND`]
+/// command body — after routing and the ACL check, so it cannot fire on
+/// a build where the invoke is denied.
+///
+/// Deliberately not `Once`-guarded: the command runs a handful of times
+/// per session at most, and a plain call keeps the marker free of global
+/// state (and testable without one).
+pub fn record_ipc_ready() {
+    tracing::info!(
+        marker = IPC_READY_MARKER,
+        command = IPC_READY_COMMAND,
+        "frontend IPC round-trip reached the backend",
+    );
+}
+
 /// Record a structured event sourced from the frontend. The Tauri
 /// command shell calls this; nothing else should.
 pub fn record_frontend_error(message: &str, stack: Option<&str>, route: Option<&str>) {

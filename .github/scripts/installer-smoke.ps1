@@ -15,8 +15,16 @@
       2. the installed gmm.exe exists on disk
       3. launching it creates %APPDATA%\GMM\gmm.db (migrations ran)
       4. it creates %APPDATA%\GMM\logs\*.log (tracing subscriber up)
-      5. the process is still alive after startup (no crash loop)
-      6. msiexec uninstalls cleanly
+      5. that log carries the IPC readiness marker, i.e. the WebView
+         actually invoked a command and the Rust side answered
+      6. the process is still alive after startup (no crash loop)
+      7. msiexec uninstalls cleanly
+
+    Criterion 5 is the one that distinguishes a working app from one
+    whose UI is entirely broken: the DB and the log both appear on a
+    build where every command is denied or unregistered, because the
+    Rust side comes up regardless of whether the frontend can reach it.
+    See issue #54.
 
     Any failure dumps the MSI verbose log and GMM's own logs to stdout so
     a CI reader can diagnose without a Windows machine.
@@ -127,9 +135,15 @@ Write-Host "launched pid $($proc.Id)"
 
 $dbPath = Join-Path $AppData "gmm.db"
 $logDir = Join-Path $AppData "logs"
+
+# Must match `IPC_READY_MARKER` in src-tauri/src/core/diagnostics.rs.
+# tests/ipc_contract.rs fails if the two drift apart.
+$IpcReadyMarker = "gmm-ipc-ready"
+
 $deadline = (Get-Date).AddSeconds(90)
 $dbSeen = $false
 $logSeen = $false
+$ipcSeen = $false
 
 while ((Get-Date) -lt $deadline) {
     if (-not $dbSeen -and (Test-Path $dbPath)) {
@@ -141,7 +155,18 @@ while ((Get-Date) -lt $deadline) {
         $logSeen = $true
         Write-Host "log file created (tracing subscriber up)"
     }
-    if ($dbSeen -and $logSeen) { break }
+    if ($logSeen -and -not $ipcSeen) {
+        # The app holds these files open; read a copy of the bytes
+        # rather than fighting the writer for a lock.
+        $hit = Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue } |
+            Select-String -SimpleMatch $IpcReadyMarker -Quiet
+        if ($hit) {
+            $ipcSeen = $true
+            Write-Host "IPC readiness marker seen (frontend reached the backend)"
+        }
+    }
+    if ($dbSeen -and $logSeen -and $ipcSeen) { break }
 
     if ($proc.HasExited) {
         throw "GMM exited early with code $($proc.ExitCode) before finishing startup"
@@ -151,6 +176,11 @@ while ((Get-Date) -lt $deadline) {
 
 if (-not $dbSeen) { throw "timed out waiting for $dbPath" }
 if (-not $logSeen) { throw "timed out waiting for a log file in $logDir" }
+if (-not $ipcSeen) {
+    throw "timed out waiting for the IPC readiness marker '$IpcReadyMarker' in $logDir — " +
+          "the backend started but the frontend never completed a command round-trip " +
+          "(unregistered command, ACL denial, or a WebView that never loaded)"
+}
 
 # A crash-on-idle would show up here.
 Start-Sleep -Seconds 5

@@ -712,6 +712,14 @@ pub struct OnboardingStatus {
 
 #[tauri::command]
 pub async fn is_onboarding_complete(core: State<'_, Core>) -> Result<OnboardingStatus, String> {
+    // Doubles as the IPC readiness marker (#54). This is the App
+    // router's own query — first invoke of every session, on both the
+    // wizard and main-app branches — and reaching this line means the
+    // WebView booted, the IPC channel came up, the command was
+    // registered, and the ACL allowed it. `installer-smoke.ps1` waits
+    // for the resulting log line; without it, a build where every
+    // command is denied still passes the smoke.
+    diagnostics::record_ipc_ready();
     core.onboarding_status().await.map_err(|e| e.to_string())
 }
 
