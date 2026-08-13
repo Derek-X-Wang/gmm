@@ -1231,14 +1231,23 @@ impl Core {
             }
 
             match resolve_link(&link) {
+                // A junction whose target directory has been deleted
+                // still resolves to the expected path string, so
+                // reporting on the string alone would leave the UI
+                // showing an enabled mod the game cannot load.
                 // Pointing at the right place is necessary but not
-                // sufficient: a junction whose target directory has been
-                // deleted still resolves to the expected path string.
-                // Reporting that as healthy would leave the UI showing
-                // an enabled mod the game cannot load, with nothing
-                // anywhere saying otherwise.
+                // sufficient — the target directory has to actually be
+                // there. `try_exists` rather than `exists` so a
+                // permission error or disconnected drive doesn't
+                // masquerade as "deleted": on an inconclusive answer we
+                // leave the mod healthy rather than nagging the user
+                // about a Library that is merely temporarily
+                // unreachable. `is_dir` because a plain file at the
+                // target path is not a usable junction target.
                 Some(actual)
-                    if same_path(&actual, &expected_target) && expected_target.exists() =>
+                    if same_path(&actual, &expected_target)
+                        && matches!(expected_target.try_exists(), Ok(true) | Err(_))
+                        && !expected_target.is_file() =>
                 {
                     result.healthy.push(id);
                 }

@@ -47,11 +47,25 @@ const VICTIM_WINDOW_CLASS: &str = "GMM-LOADER-TEST-VICTIM";
 #[cfg(windows)]
 const VICTIM_TIMEOUT_SECS_DEFAULT: u32 = 30;
 
+/// Upper bound on the self-destruct timer, in seconds.
+///
+/// `SetTimer` takes milliseconds as a `u32`, so anything above
+/// `u32::MAX / 1000` overflows the multiplication. Ten minutes is far
+/// beyond any harness's needs and leaves the arithmetic trivially safe.
+#[cfg(windows)]
+const VICTIM_TIMEOUT_SECS_MAX: u32 = 600;
+
 #[cfg(windows)]
 fn victim_timeout_secs() -> u32 {
+    // A zero here would make SetTimer substitute the platform minimum
+    // and the victim would vanish almost immediately, producing a
+    // baffling "target process not found" in the harness. Clamp rather
+    // than trust the caller.
     std::env::var("GMM_VICTIM_TIMEOUT_SECS")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|secs| *secs > 0)
+        .map(|secs| secs.min(VICTIM_TIMEOUT_SECS_MAX))
         .unwrap_or(VICTIM_TIMEOUT_SECS_DEFAULT)
 }
 #[cfg(windows)]

@@ -356,7 +356,26 @@ fn to_long_path(path: &Path) -> PathBuf {
     // the target process the whole time and only the verification
     // string-compare failed.
     let normalised = to_full_path(path);
-    to_expanded_path(&normalised).unwrap_or(normalised)
+    let expanded = to_expanded_path(&normalised).unwrap_or(normalised);
+    strip_verbatim_prefix(expanded)
+}
+
+/// Drop a `\\?\` extended-length prefix.
+///
+/// `MODULEENTRY32.szExePath` is reported in ordinary drive-letter form,
+/// so a verbatim path would fail the comparison for the same reason an
+/// 8.3 or forward-slash path does. `std::fs::canonicalize` produces this
+/// form, and a caller could reasonably hand us one.
+///
+/// Only the plain `\\?\C:\...` shape is unwrapped; `\\?\UNC\...` is left
+/// alone because there is no equivalent drive-letter spelling to fall
+/// back to.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest.to_string()),
+        _ => path,
+    }
 }
 
 /// `GetFullPathNameW` — separator + relative-component normalisation.
@@ -469,13 +488,50 @@ mod tests {
         );
     }
 
-    /// A path that doesn't exist can't be expanded; we must return it
-    /// unchanged rather than erroring, so the caller still gets a
-    /// sensible message from the loader instead of a path error.
+    /// A path that doesn't exist can't have its 8.3 aliases expanded.
+    /// It still comes back separator-normalised and absolute — the
+    /// GetFullPathNameW half always applies — rather than erroring, so
+    /// the caller gets a loader error rather than a path error.
     #[test]
-    fn missing_paths_fall_back_to_the_input() {
+    fn missing_paths_still_normalise_rather_than_erroring() {
         let missing = Path::new(r"C:\this\does\not\exist\anywhere\d3d11.dll");
+        // Already absolute and backslash-separated, so it round-trips.
         assert_eq!(to_long_path(missing), missing.to_path_buf());
+
+        // A missing path with forward slashes still gets normalised.
+        let mixed = Path::new(r"C:/this/does/not/exist/d3d11.dll");
+        let out = to_long_path(mixed);
+        assert!(
+            !out.to_string_lossy().contains('/'),
+            "separator normalisation applies even when expansion fails, got {out:?}",
+        );
+    }
+
+    /// `\\?\` verbatim paths must be unwrapped: the module list
+    /// reports ordinary drive-letter paths, so a verbatim spelling
+    /// fails the comparison exactly like an 8.3 one does.
+    #[test]
+    fn verbatim_prefix_is_stripped() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let file = tmp.path().join("probe.dll");
+        std::fs::write(&file, b"MZ").expect("write");
+
+        let verbatim = std::fs::canonicalize(&file).expect("canonicalize");
+        assert!(
+            verbatim.to_string_lossy().starts_with(r"\\?\"),
+            "precondition: canonicalize should produce a verbatim path, got {verbatim:?}",
+        );
+
+        let out = to_long_path(&verbatim);
+        assert!(
+            !out.to_string_lossy().starts_with(r"\\?\"),
+            "verbatim prefix must be stripped, got {out:?}",
+        );
+        assert_eq!(
+            out,
+            to_long_path(&file),
+            "verbatim and plain spellings must normalise identically",
+        );
     }
 
     /// Forward slashes are legal input to most Windows APIs, but the

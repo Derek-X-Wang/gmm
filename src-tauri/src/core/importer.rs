@@ -242,8 +242,12 @@ fn swap_in(staging: &Path, game_dir: &Path) -> Result<()> {
 
         // User-owned directories are merged, never replaced — blowing
         // away `Mods/` here would take every Junction with it.
+        // `is_dir()` follows reparse points, so a dangling junction at
+        // `<game>/Mods` would look absent and we would try to rename
+        // onto an occupied directory entry. Ask whether an entry exists
+        // at all instead.
         let is_user_owned = USER_OWNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d));
-        if is_user_owned && to.is_dir() {
+        if is_user_owned && fs::symlink_metadata(&to).is_ok() {
             merge_into(&from, &to)?;
             remove_any(&from)?;
             continue;
@@ -265,6 +269,11 @@ fn swap_in(staging: &Path, game_dir: &Path) -> Result<()> {
 /// [`USER_OWNED_DIRS`] so importer-shipped example mods can land
 /// without disturbing the user's Junctions.
 fn merge_into(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to).map_err(|source| Error::Io {
+        path: to.to_path_buf(),
+        source,
+    })?;
+
     for entry in fs::read_dir(from).map_err(|source| Error::Io {
         path: from.to_path_buf(),
         source,
@@ -275,10 +284,29 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
         })?;
         let src = entry.path();
         let dest = to.join(entry.file_name());
-        if dest.exists() {
-            // Never clobber something the user (or GMM) already put here.
+
+        // `exists()` follows reparse points, so a *dangling* junction —
+        // one whose Library target was deleted — reports false and we
+        // would try to copy straight onto the existing directory entry.
+        // `symlink_metadata` answers "is there an entry here" without
+        // following, which is the question we actually have.
+        let occupied = fs::symlink_metadata(&dest).is_ok();
+
+        if occupied {
+            // Recurse only when both sides are ordinary directories.
+            // A junction/reparse point on the destination side belongs
+            // to the user (it is an enabled mod) and is left alone.
+            let dest_is_plain_dir = fs::symlink_metadata(&dest)
+                .map(|m| m.is_dir() && !m.file_type().is_symlink())
+                .unwrap_or(false);
+            if src.is_dir() && dest_is_plain_dir {
+                merge_into(&src, &dest)?;
+            }
+            // Otherwise keep whatever is already there — never clobber
+            // something the user (or GMM) put in place.
             continue;
         }
+
         copy_any(&src, &dest)?;
     }
     Ok(())
@@ -297,17 +325,29 @@ pub fn rollback_to(backup_dir: &Path, game_dir: &Path) -> Result<()> {
         })?;
         let from = entry.path();
         let name = entry.file_name();
+        let to = game_dir.join(&name);
 
         // Backups taken before `Mods` was reclassified as user-owned
-        // may still contain it. Restoring would delete the live
-        // directory (and its Junctions), so skip it — the live copy is
-        // authoritative.
+        // still contain it — that is exactly the wreckage of the bug
+        // this reclassification fixes, and rollback is the recovery
+        // path for it. Skipping would strand those Junctions in the
+        // backup forever; replacing wholesale would delete whatever
+        // the user has enabled since. So merge, preferring live.
         if USER_OWNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d)) {
+            if fs::symlink_metadata(&to).is_ok() {
+                merge_into(&from, &to)?;
+                remove_any(&from)?;
+            } else {
+                // Nothing live to preserve — restore it outright.
+                if let Err(_rename_err) = fs::rename(&from, &to) {
+                    copy_any(&from, &to)?;
+                    remove_any(&from)?;
+                }
+            }
             continue;
         }
 
-        let to = game_dir.join(&name);
-        if to.exists() {
+        if fs::symlink_metadata(&to).is_ok() {
             remove_any(&to)?;
         }
         if let Err(_rename_err) = fs::rename(&from, &to) {
