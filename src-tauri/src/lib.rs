@@ -5,6 +5,7 @@ pub mod runtime;
 use std::path::PathBuf;
 
 use crate::core::diagnostics;
+use crate::core::instance_lock::{self, InstanceLockError};
 use crate::core::Core;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,6 +21,40 @@ pub fn run() {
     {
         tracing::warn!(error = %e, "prune_old_logs failed at startup");
     }
+
+    // Single-instance gate (issue #58). Must come before `build_core`:
+    // opening the pool runs migrations, and two cold instances racing
+    // there is one of the pairings we refuse to support. See
+    // `core::instance_lock` for why the lock is scoped to the data
+    // directory rather than to the executable.
+    //
+    // Held for the rest of `run()` — the binding must not be `_`, or the
+    // lock would drop immediately and gate nothing.
+    let _instance_lock = match instance_lock::acquire(&data_dir) {
+        Ok(lock) => Some(lock),
+        Err(e @ InstanceLockError::AlreadyRunning { .. }) => {
+            tracing::warn!(
+                target: "gmm::instance",
+                error = %e,
+                "refusing to start: another GMM instance owns this data directory",
+            );
+            report_already_running(&e.to_string());
+            return;
+        }
+        // Fail open. If the lock file itself is unopenable — an
+        // antivirus holding it mid-scan is the realistic cause, and
+        // `core::av` exists because that happens to GMM users — the
+        // safety net is unavailable, but bricking every launch is a
+        // worse outcome than the race it was guarding against.
+        Err(e) => {
+            tracing::warn!(
+                target: "gmm::instance",
+                error = %e,
+                "could not take the single-instance lock; starting anyway without it",
+            );
+            None
+        }
+    };
 
     let core = build_core(&data_dir).expect("initialise GMM core");
 
@@ -116,6 +151,43 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Tell the user why the second instance vanished.
+///
+/// Release builds set `windows_subsystem = "windows"`, so there is no
+/// console to print to: a bare `return` would look exactly like the
+/// shortcut doing nothing. A native message box is the only channel
+/// available before a Tauri window exists.
+///
+/// Focusing the already-running window instead would be nicer, but that
+/// needs an IPC channel to the live instance. Tracked as a follow-up.
+#[cfg(windows)]
+fn report_already_running(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND,
+    };
+
+    let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let caption: Vec<u16> = "GMM".encode_utf16().chain(std::iter::once(0)).collect();
+
+    // SAFETY: both buffers are NUL-terminated and outlive the call; a
+    // null owner HWND is documented as "no owner window".
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        );
+    }
+}
+
+/// Non-Windows hosts only ever run GMM from a terminal (dev builds), so
+/// stderr reaches a human.
+#[cfg(not(windows))]
+fn report_already_running(message: &str) {
+    eprintln!("GMM: {message}");
 }
 
 /// Resolve `%AppData%/GMM` (or the platform equivalent), creating it if

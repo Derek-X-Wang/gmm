@@ -64,6 +64,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Threading",
+    # `MessageBoxW`: the only way to tell the user why a second instance
+    # exited, since release builds have no console.
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]

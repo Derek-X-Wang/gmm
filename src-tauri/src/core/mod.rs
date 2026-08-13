@@ -12,6 +12,7 @@ pub mod error;
 pub mod gamebanana;
 pub mod games;
 pub mod importer;
+pub mod instance_lock;
 pub mod junction;
 pub mod mod_updates;
 pub mod mods;
