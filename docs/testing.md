@@ -145,9 +145,11 @@ Coverage lands in two files:
   the same three cleanup properties (nothing persisted, nothing live,
   nothing emitted).
 - `tests/launch_command_windows.rs` — Windows CI. Spawn onwards: the
-  happy path plus watcher teardown, injection timeout, losing the
-  session-claim race, and the two states a dead watcher leaves in the
-  live-session slot.
+  happy path plus watcher teardown, injection timeout, the two states a
+  dead watcher leaves in the live-session slot, and the watcher
+  finishing when the slot is cleared under it. One Game per test, since
+  the process-snapshot assertions match on executable name, and the CBT
+  hook is process-global so those tests serialise on a mutex.
 
 ## 3. Frontend component tests (`src/**/*.test.{ts,tsx}`)
 

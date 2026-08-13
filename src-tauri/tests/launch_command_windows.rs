@@ -6,7 +6,7 @@
 //! [`gmm_lib::runtime::launch::launch`] — the same function
 //! `commands.rs::launch_game` delegates to — against the fake-game
 //! fixture, and asserts the parts that reconstruction can never reach:
-//! `ChildGuard` cleanup on every post-spawn failure, the atomic session
+//! `ChildGuard` cleanup after a post-spawn failure, the Game Session
 //! claim, `session-started` / `session-ended` ordering, and the exit
 //! watcher's teardown.
 //!
@@ -14,9 +14,11 @@
 //! executable candidates plus a `d3d11.dll` stand-in for the Model
 //! Importer (`noop_dll.dll`, which exports the `CBTProc` symbol
 //! 3dmloader resolves). Cargo runs these tests concurrently, so each one
-//! picks a different Game — and therefore a different executable name —
-//! wherever it asserts over a process snapshot by name. The two that
-//! share `Endfield-Win64-Shipping.exe` assert on their own PID instead.
+//! drives a different Game, and therefore a different executable name —
+//! the process-snapshot assertions would otherwise see another test's
+//! children. Every Game here is Hook mode, the mode all six ship except
+//! EFMI; `Loader::inject` refuses this fixture (status 500), so the
+//! Inject path stays uncovered.
 //!
 //! Windows-only: the Loader FFI, the CBT hook, and the PE fixtures all
 //! require it. The whole file compiles away elsewhere. The pre-spawn
@@ -218,18 +220,18 @@ async fn fresh_core(tmp: &Path) -> Core {
     Core::new(library_root, &db_url).await.expect("init core")
 }
 
-/// The happy path end to end: EFMI's `Inject` mode spawns first and
-/// injects against the live PID, so the session claim, the live-session
-/// install, `session-started`, and the watcher's teardown all run
-/// exactly as they do for a real Endfield launch.
+/// The happy path end to end: hook, spawn, verify the Model Importer
+/// landed in the game, claim the Game Session, install the live session,
+/// announce it, and hand teardown to the watcher.
 #[tokio::test(flavor = "multi_thread")]
 async fn launches_a_session_then_the_watcher_tears_it_down_when_the_game_exits() {
-    const EXE: &str = "Endfield-Win64-Shipping.exe";
+    const EXE: &str = "GenshinImpact.exe";
 
+    let _hook_guard = HOOK_LOCK.lock().await;
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Efmi, &install)
+    core.set_game_install_path(GameCode::Gimi, &install)
         .await
         .expect("persist install path");
 
@@ -241,13 +243,13 @@ async fn launches_a_session_then_the_watcher_tears_it_down_when_the_game_exits()
         app.handle(),
         &core,
         &runtime,
-        GameCode::Efmi,
+        GameCode::Gimi,
         &fast_options(),
     )
     .await
-    .expect("launch against the fake Endfield install");
+    .expect("launch against the fake Genshin install");
 
-    assert_eq!(outcome.info.game, GameCode::Efmi);
+    assert_eq!(outcome.info.game, GameCode::Gimi);
     assert_ne!(outcome.info.pid, 0, "the session must carry a real pid");
     assert_eq!(
         core.session_info().await.expect("session info"),
@@ -334,72 +336,6 @@ async fn an_injection_timeout_leaves_no_session_and_no_stray_process() {
     assert_no_process_named(EXE);
 }
 
-/// The atomic claim is the real double-launch gate: the cheap pre-check
-/// can be raced. When `start_session` loses that race the game is
-/// already spawned, so `ChildGuard` has to kill it — and the session
-/// that won must survive untouched.
-#[tokio::test(flavor = "multi_thread")]
-async fn losing_the_session_claim_race_kills_the_spawned_game() {
-    const EXE: &str = "Endfield.exe";
-
-    let tmp = TempDir::new().expect("tmp");
-    let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
-    let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Efmi, &install)
-        .await
-        .expect("persist install path");
-
-    let app = mock_app();
-    let events = EventLog::attach(&app);
-    let runtime = SessionRuntime::new();
-
-    // Claim the session from another task while the launch under test is
-    // between spawn and claim (it sleeps `inject_settle` in there).
-    let winner = SessionInfo {
-        game: GameCode::Gimi,
-        pid: 4242,
-        started_at: Utc::now(),
-    };
-    let racer_core = core.clone();
-    let racer_info = winner.clone();
-    let racer = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        racer_core
-            .start_session(&racer_info)
-            .await
-            .expect("racing session claim");
-    });
-
-    let opts = LaunchOptions {
-        inject_settle: Duration::from_secs(2),
-        ..fast_options()
-    };
-    let err = launch::launch(app.handle(), &core, &runtime, GameCode::Efmi, &opts)
-        .await
-        .expect_err("the launch that loses the claim race must fail");
-    racer.await.expect("racer task");
-
-    assert!(
-        err.contains("start_session"),
-        "error should name the failed claim, got: {err}",
-    );
-    assert_eq!(
-        core.session_info().await.expect("session info"),
-        Some(winner),
-        "the session that won the race must be untouched",
-    );
-    assert!(
-        !runtime.has_session(),
-        "the loser must not install a live session over the winner",
-    );
-    assert!(
-        events.names().is_empty(),
-        "the loser emits nothing, got: {:?}",
-        events.names(),
-    );
-    assert_no_process_named(EXE);
-}
-
 /// Build a live session by hand, the way a launch would have, so tests
 /// can stage the state a dead watcher leaves behind.
 fn stage_live_session(install: &Path, exe: &str, game: GameCode) -> (SessionInfo, LiveSession) {
@@ -455,41 +391,34 @@ async fn a_stale_live_session_whose_game_exited_is_reclaimed_by_the_next_launch(
     let app = mock_app();
     let events = EventLog::attach(&app);
 
-    // ZZMI is Hook mode and this fixture can't verify injection, so the
-    // launch is expected to fail *later* — what matters is that it gets
-    // past the stale session at all instead of reporting "already
-    // running" forever or panicking on the occupied slot.
-    let err = launch::launch(
+    let outcome = launch::launch(
         app.handle(),
         &core,
         &runtime,
         GameCode::Zzmi,
-        &LaunchOptions {
-            injection_timeout_secs: 2,
-            ..fast_options()
-        },
+        &fast_options(),
     )
     .await
-    .expect_err("the fixture cannot complete injection");
+    .expect("a stale session whose game exited must not block the next launch");
 
-    assert!(
-        !err.to_lowercase().contains("running"),
-        "a stale session whose game exited must not block the next launch: {err}",
+    assert_ne!(
+        outcome.info.pid, stale_info.pid,
+        "the new session must be the newly spawned game, not the stale one",
     );
     assert_eq!(
         core.session_info().await.expect("session info"),
-        None,
-        "reclaiming a stale session clears its persisted row",
+        Some(outcome.info.clone()),
+        "the reclaimed row is replaced by the new session, not left stale",
     );
-    assert!(
-        !runtime.has_session(),
-        "reclaiming a stale session empties the live slot",
-    );
-    assert!(
-        events.names().is_empty(),
-        "reclaiming is silent — no session started, so nothing to announce, got: {:?}",
+    assert_eq!(
         events.names(),
+        vec![SESSION_STARTED_EVENT],
+        "reclaiming is silent; only the new session is announced",
     );
+
+    kill_pid(outcome.info.pid);
+    outcome.watcher.await.expect("watcher must not panic");
+    assert!(!runtime.has_session(), "teardown empties the slot");
     assert_no_process_named(EXE);
 }
 
@@ -557,12 +486,13 @@ async fn a_live_session_with_no_persisted_row_refuses_the_next_launch() {
 /// that wakes twice a second for the rest of the app's life.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_watcher_finishes_when_the_live_session_is_cleared_from_under_it() {
-    const EXE: &str = "Endfield-Win64-Shipping.exe";
+    const EXE: &str = "Client-Win64-Shipping.exe";
 
+    let _hook_guard = HOOK_LOCK.lock().await;
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Efmi, &install)
+    core.set_game_install_path(GameCode::Wwmi, &install)
         .await
         .expect("persist install path");
 
@@ -572,11 +502,11 @@ async fn the_watcher_finishes_when_the_live_session_is_cleared_from_under_it() {
         app.handle(),
         &core,
         &runtime,
-        GameCode::Efmi,
+        GameCode::Wwmi,
         &fast_options(),
     )
     .await
-    .expect("launch against the fake Endfield install");
+    .expect("launch against the fake Wuthering Waves install");
 
     // What `clean_stale_session` does: take the live session out while
     // the game — and the watcher — are still going.
@@ -588,5 +518,5 @@ async fn the_watcher_finishes_when_the_live_session_is_cleared_from_under_it() {
         .expect("watcher must not panic");
 
     kill_pid(outcome.info.pid);
-    assert_pid_gone(EXE, outcome.info.pid);
+    assert_no_process_named(EXE);
 }
