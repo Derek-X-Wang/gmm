@@ -1540,7 +1540,7 @@ pub(crate) fn sanitize_dir_name(display: &str) -> String {
 /// MAX_PATH-friendly window used by most Windows tooling.
 const MAX_JUNCTION_DIR_CHARS: usize = 200;
 
-fn is_dos_reserved(name: &str) -> bool {
+pub(crate) fn is_dos_reserved(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
     if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
         return true;
