@@ -6,6 +6,7 @@
 
 pub mod av;
 pub mod conflicts;
+pub mod crash_points;
 pub mod detect;
 pub mod diagnostics;
 pub mod error;
@@ -28,6 +29,7 @@ pub mod zip_import;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use chrono::Utc;
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
@@ -47,7 +49,16 @@ use settings::{get as get_setting, keys, put as put_setting};
 pub struct Core {
     pool: SqlitePool,
     default_library_root: PathBuf,
+    /// Test-only failure injection (issue #59). `None` in every shipped
+    /// code path; only `crates/probe` ever sets it. See
+    /// [`crash_points`] for why this is an injected field rather than a
+    /// cfg flag or an environment variable.
+    crash_hook: Option<CrashHook>,
 }
+
+/// Callback invoked at each named point in a durable mutation. See
+/// [`crash_points`].
+pub type CrashHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl Core {
     /// Open (or create) the DB at `db_url`, run pending migrations, and
@@ -67,7 +78,24 @@ impl Core {
         Ok(Self {
             pool,
             default_library_root,
+            crash_hook: None,
         })
+    }
+
+    /// Install a failure-injection hook (issue #59). Test-only: nothing
+    /// in the app calls this, so `crash_point` is a null check that
+    /// never fires in a shipped build.
+    pub fn with_crash_hook(mut self, hook: CrashHook) -> Self {
+        self.crash_hook = Some(hook);
+        self
+    }
+
+    /// Fire the crash hook, if one is installed. Placed after each step
+    /// of a mutation that has already been made durable.
+    fn crash_point(&self, name: &str) {
+        if let Some(hook) = &self.crash_hook {
+            hook(name);
+        }
     }
 
     /// Default Library root as supplied to [`Core::new`]. Not the
@@ -447,6 +475,7 @@ impl Core {
         let library_path = self.resolved_library_root_for(game).await?.join(&id);
 
         copy_dir_recursive(source_path, &library_path)?;
+        self.crash_point(crash_points::ADOPT_AFTER_LIBRARY_COPY);
 
         let base = sanitize_dir_name(display_name);
         let junction_dir_name = self.pick_unique_junction_dir_name(game, &base).await?;
@@ -468,6 +497,7 @@ impl Core {
         .bind(&created_at)
         .execute(&self.pool)
         .await?;
+        self.crash_point(crash_points::ADOPT_AFTER_ROW_INSERT);
 
         self.detect_and_record_variants(&id, &library_path).await?;
 
@@ -918,6 +948,7 @@ impl Core {
             let _ = std::fs::remove_dir_all(&library_path);
             return Err(e);
         }
+        self.crash_point(crash_points::IMPORT_ZIP_AFTER_EXTRACT);
 
         let base = sanitize_dir_name(display_name);
         let junction_dir_name = self.pick_unique_junction_dir_name(game, &base).await?;
@@ -939,6 +970,7 @@ impl Core {
         .bind(&created_at)
         .execute(&self.pool)
         .await?;
+        self.crash_point(crash_points::IMPORT_ZIP_AFTER_ROW_INSERT);
 
         self.detect_and_record_variants(&id, &library_path).await?;
 
@@ -1055,11 +1087,13 @@ impl Core {
             .bind(mod_id)
             .execute(&self.pool)
             .await?;
+        self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_DB_UPDATE);
 
         if enabled != 0 {
             let link = game_mods_dir.join(&junction_dir_name);
             if link_exists(&link) {
                 junction::remove(&link)?;
+                self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE);
             }
             let target = self.junction_target_for(mod_id, &library_path).await?;
             volume::require_ntfs_pair(game_mods_dir, &target)?;
@@ -1276,6 +1310,29 @@ impl Core {
                 {
                     result.healthy.push(id);
                 }
+                // The Junction points somewhere other than the row
+                // says. If that somewhere is still inside *this Mod's*
+                // own Library directory, it is a stale Variant target
+                // and nobody but GMM could have created it: the row is
+                // the source of truth for which Variant is active, so
+                // re-point it. This is the state a crash between
+                // `set_active_variant`'s DB write and its junction swap
+                // leaves behind (#59), and reporting it as conflicting
+                // left the game loading a Variant the UI says is not
+                // selected, with no way to fix it but a full rebuild.
+                // `is_dir` matters: a Junction pointing at the right
+                // place whose target the user deleted also lands here,
+                // and there is nothing to relink it to. That case stays
+                // conflicting (see
+                // `a_junction_whose_target_was_deleted_is_not_healthy`).
+                Some(actual) if path_within(&actual, &library_path) && expected_target.is_dir() => {
+                    junction::remove(&link)?;
+                    volume::require_ntfs_pair(game_mods_dir, &expected_target)?;
+                    junction::create(&link, &expected_target)?;
+                    result.recreated.push(id);
+                }
+                // Outside the Mod's Library entirely — the user aimed it
+                // somewhere of their own. Surface, never clobber.
                 _ => {
                     result.conflicting.push(reconcile::ConflictingJunction {
                         mod_id: id,
@@ -1490,8 +1547,12 @@ impl Core {
             (false, true) => {
                 volume::require_ntfs_pair(game_mods_dir, &target)?;
                 junction::create(&link, &target)?;
+                self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_CREATE);
             }
-            (true, false) => junction::remove(&link)?,
+            (true, false) => {
+                junction::remove(&link)?;
+                self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_REMOVE);
+            }
             _ => {}
         }
 
@@ -1651,6 +1712,23 @@ fn same_path(a: &Path, b: &Path) -> bool {
         (Some(x), Some(y)) => x == y,
         _ => a == b,
     }
+}
+
+/// Is `path` inside `ancestor`?
+///
+/// Canonicalises both sides for the same reason [`same_path`] does: the
+/// Library path recorded in the DB and the target read back off a
+/// Junction need not be spelled identically even when they name the same
+/// directory. macOS resolves `/var` to `/private/var`; Windows has 8.3
+/// short names and drive-letter casing. A raw `starts_with` answers
+/// "no" for all of those, which would send a Junction GMM itself created
+/// down the "the user aimed this somewhere" path.
+///
+/// Falls back to a literal comparison when either side cannot be
+/// canonicalised (typically because it no longer exists).
+fn path_within(path: &Path, ancestor: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(path).starts_with(canon(ancestor))
 }
 
 /// Recursive directory copy. Standard library has no built-in equivalent.

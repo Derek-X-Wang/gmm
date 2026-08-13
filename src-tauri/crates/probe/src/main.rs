@@ -104,9 +104,22 @@ async fn run(args: &Args) -> Result<(), String> {
         wait_until(args.at);
     }
 
-    let core = Core::new(args.library.clone(), &args.db_url)
+    let mut core = Core::new(args.library.clone(), &args.db_url)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Failure injection (issue #59). `abort` rather than `exit`: no
+    // unwinding, no destructors, no buffered writes flushed — the point
+    // is to model a process that stopped existing, not one that shut
+    // down badly. sqlx has no chance to close the pool cleanly, which is
+    // exactly the situation the recovery path has to survive.
+    if let Some(point) = args.get("--crash-at").cloned() {
+        core = core.with_crash_hook(std::sync::Arc::new(move |reached: &str| {
+            if reached == point {
+                std::process::abort();
+            }
+        }));
+    }
 
     if !migrating {
         wait_until(args.at);
@@ -131,6 +144,29 @@ async fn run(args: &Args) -> Result<(), String> {
             core.set_enabled(&id, enabled, &mods_dir)
                 .await
                 .map_err(|e| e.to_string())
+        }
+
+        "set-active-variant" => {
+            let mod_id = args.req("--mod-id")?;
+            let variant_id = args.req("--variant-id")?;
+            let mods_dir = PathBuf::from(args.req("--mods-dir")?);
+            core.set_active_variant(&mod_id, &variant_id, &mods_dir)
+                .await
+                .map_err(|e| e.to_string())
+        }
+
+        "import-zip" => {
+            let zip = PathBuf::from(args.req("--zip")?);
+            let name = args.req("--name")?;
+            core.import_zip(
+                args.game()?,
+                &zip,
+                &name,
+                gmm_lib::core::ImportZipOptions::default(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         }
 
         "reconcile" => {
