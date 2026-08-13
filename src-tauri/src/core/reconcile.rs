@@ -37,7 +37,22 @@ pub struct ReconcileResult {
     /// Neither is auto-fixed: the first would clobber whatever the user
     /// intended, and the second has no surviving source to restore.
     pub conflicting: Vec<ConflictingJunction>,
-    /// Mod IDs we skipped (e.g. disabled mods don't need a junction).
+    /// Mod IDs whose junction we deleted because the Mod is disabled but
+    /// a junction for it was still projected into `<Game>/Mods/`.
+    ///
+    /// This is the inverse of [`Self::recreated`] and the more dangerous
+    /// of the two drifts: a missing junction means a Mod the user turned
+    /// on isn't loading, which is self-evident, whereas a stranded
+    /// junction means the Model Importer keeps loading a Mod that GMM's
+    /// UI says is off — silently, with nothing in the app to explain it.
+    ///
+    /// Only junctions that resolve to the Library path the row records
+    /// are removed. One pointing anywhere else is the user's and lands
+    /// in [`Self::conflicting`] instead. Removing a junction never
+    /// touches the Library copy (ADR 0003).
+    pub removed: Vec<String>,
+    /// Mod IDs we skipped: disabled Mods that had no junction to begin
+    /// with, i.e. the ones that were already in the state they should be.
     pub skipped: Vec<String>,
 }
 

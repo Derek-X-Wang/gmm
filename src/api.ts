@@ -110,6 +110,8 @@ export interface ReconcileResult {
   recreated: string[];
   healthy: string[];
   conflicting: ConflictingJunction[];
+  /** Mod IDs whose stranded junction was deleted because the Mod is disabled. */
+  removed: string[];
   skipped: string[];
 }
 
@@ -117,6 +119,7 @@ interface RawReconcile {
   recreated: string[];
   healthy: string[];
   conflicting: { mod_id: string; link: string; expected_target: string }[];
+  removed: string[];
   skipped: string[];
 }
 
@@ -128,6 +131,7 @@ const fromRawReconcile = (r: RawReconcile): ReconcileResult => ({
     link: c.link,
     expectedTarget: c.expected_target,
   })),
+  removed: r.removed,
   skipped: r.skipped,
 });
 
