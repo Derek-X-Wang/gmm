@@ -78,6 +78,9 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 base64 = "0.22"
+# The migration-corpus tests read `_sqlx_migrations` directly and seed
+# fixtures at old schema versions; both need raw SQL, not Core's API.
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 tempfile = "3"
 # `tauri::test::mock_app` — the launch-orchestration tests need a real
 # AppHandle to assert the session events the command emits.

@@ -1,0 +1,17 @@
+# Migration SQL is content-addressed: sqlx records a checksum of each
+# file's bytes in `_sqlx_migrations`, and refuses to open a database
+# whose recorded checksum disagrees with the file it compiled in
+# (`VersionMismatch`, which fails Core::new and so fails startup).
+#
+# Windows checkouts default to core.autocrlf=true, so without this the
+# same migration hashes differently depending on the host that built the
+# binary: a Linux-built GMM and a Windows-built GMM would each refuse to
+# open a database the other had migrated. Pinning LF makes the checksums
+# a property of the repository rather than of whoever ran the build.
+#
+# tests/fixtures/migrations/*.db carry those checksums too; see
+# docs/testing.md.
+*.sql text eol=lf
+
+# The corpus fixtures are SQLite files — never touch their bytes.
+*.db binary
