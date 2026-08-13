@@ -1,9 +1,17 @@
-//! Full-vertical end-to-end test on a **fake game install**.
+//! Core + Loader integration test against a **fake game install**.
 //!
-//! This is the automated stand-in for the manual Windows smoke a human
-//! would otherwise run: point GMM at a game, install the Model Importer,
-//! adopt a mod, toggle it on, launch the game, confirm the importer DLL
-//! is injected, then tear everything down.
+//! Point GMM at a game, install the Model Importer, adopt a mod, toggle
+//! it on, spawn the game, confirm the importer DLL is injected, then
+//! tear everything down.
+//!
+//! **What this deliberately does not cover.** It reconstructs the launch
+//! sequence out of `Core` + `gmm_loader` calls rather than going through
+//! `commands.rs::launch_game`, so the production orchestration —
+//! ChildGuard, session install, the watcher task, event emission — is
+//! *not* exercised here. Nor is Tauri IPC, capability enforcement, the
+//! WebView, packaging, or a real importer's initialisation. Calling this
+//! a "full vertical" would overstate it; `installer-smoke.ps1` covers
+//! the packaged app, and the launch command itself is still uncovered.
 //!
 //! The fixtures are the ones slices 4a/4b already paid for:
 //!
@@ -125,7 +133,7 @@ fn make_fake_mod(dir: &Path, hash: &str) {
     fs::write(dir.join("Body.buf"), b"\x00\x01\x02\x03").expect("mod buf");
 }
 
-/// The whole product, headless.
+/// The Core + Loader path, headless.
 ///
 /// 1. detection accepts the fake install
 /// 2. the Model Importer installs into it (d3dx.ini rewritten to gmm.exe)

@@ -93,11 +93,18 @@ async fn cjk_and_emoji_mod_names_round_trip_through_a_junction() {
 /// free, so the claim is finally executable.
 #[tokio::test]
 async fn junctions_span_volumes() {
-    // The workspace lives on D: in CI; %TEMP% is on C:. Fall back to
-    // skipping rather than failing on a single-volume machine.
+    // A silent skip here would let "cross-volume is tested" quietly
+    // decay into "cross-volume is never tested". CI is known to have
+    // both volumes (workspace on D:, %TEMP% on C:), so in CI a missing
+    // second volume is a failure, not a skip. Locally it stays a skip.
     let other_volume = PathBuf::from(r"D:\");
     if !other_volume.exists() {
-        eprintln!("skipping: no D: volume on this host");
+        assert!(
+            std::env::var("CI").is_err(),
+            "no D: volume on a CI runner — the cross-volume junction claim in \
+             ADR 0003 would go unverified. Fix the runner or the test, don't skip.",
+        );
+        eprintln!("skipping cross-volume test: no D: volume on this host");
         return;
     }
 

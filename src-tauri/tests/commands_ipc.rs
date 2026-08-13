@@ -13,6 +13,13 @@
 //!
 //! See `docs/testing.md` for the pattern + how to extend this file
 //! when a new command lands.
+//!
+//! **Scope caveat.** These tests round-trip the Args/return types
+//! through serde and call Core directly. They prove the *wire shapes*
+//! match what the frontend sends and expects — they do not exercise
+//! Tauri's IPC layer, command registration, or capability enforcement.
+//! `tests/ipc_contract.rs` covers registration; nothing covers ACL
+//! enforcement yet.
 
 use std::fs::{self, File};
 use std::io::Write;
