@@ -37,8 +37,23 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 #[cfg(windows)]
 const VICTIM_WINDOW_CLASS: &str = "GMM-LOADER-TEST-VICTIM";
+/// Self-destruct timer, so a leaked victim can never outlive the run.
+///
+/// Overridable via `GMM_VICTIM_TIMEOUT_SECS` because the harness's
+/// injection timeout must be comfortably shorter than this: if the
+/// victim exits first, `WaitForInjection` ends up polling a process
+/// that no longer exists and reports a timeout that says nothing about
+/// whether injection works.
 #[cfg(windows)]
-const VICTIM_TIMEOUT_SECS: u32 = 30;
+const VICTIM_TIMEOUT_SECS_DEFAULT: u32 = 30;
+
+#[cfg(windows)]
+fn victim_timeout_secs() -> u32 {
+    std::env::var("GMM_VICTIM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(VICTIM_TIMEOUT_SECS_DEFAULT)
+}
 #[cfg(windows)]
 const VICTIM_TIMER_ID: usize = 1;
 
@@ -136,7 +151,7 @@ fn main() -> std::process::ExitCode {
     }
 
     // SAFETY: hwnd is a freshly-created valid window handle.
-    let timer_id = unsafe { SetTimer(hwnd, VICTIM_TIMER_ID, VICTIM_TIMEOUT_SECS * 1000, None) };
+    let timer_id = unsafe { SetTimer(hwnd, VICTIM_TIMER_ID, victim_timeout_secs() * 1000, None) };
     if timer_id == 0 {
         eprintln!("victim: SetTimer failed");
         return std::process::ExitCode::FAILURE;

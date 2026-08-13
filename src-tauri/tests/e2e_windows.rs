@@ -212,8 +212,15 @@ async fn full_vertical_against_a_fake_game_install() {
     let loader = Loader::load(&vendor_loader_dll()).expect("load 3dmloader");
     let hook = loader.hook(&probe).expect("install CBT hook");
 
+    // Keep the victim alive comfortably longer than the injection wait,
+    // otherwise a timeout tells us nothing: WaitForInjection would just
+    // be polling a process that already exited on its own timer.
     let mut game = Command::new(game_dir.join(TARGET_PROCESS))
         .current_dir(&game_dir)
+        .env(
+            "GMM_VICTIM_TIMEOUT_SECS",
+            (WAIT_TIMEOUT_SECS + 30).to_string(),
+        )
         .spawn()
         .expect("spawn fake game");
 
@@ -225,8 +232,30 @@ async fn full_vertical_against_a_fake_game_install() {
     .await
     .expect("start session");
 
-    hook.wait_for_injection(TARGET_PROCESS, WAIT_TIMEOUT_SECS)
-        .expect("importer DLL must be injected into the running game");
+    if let Err(e) = hook.wait_for_injection(TARGET_PROCESS, WAIT_TIMEOUT_SECS) {
+        // A bare timeout says nothing about *why*. Dump the state that
+        // actually distinguishes the candidate causes before failing:
+        // did the victim die early, is it visible to a process
+        // snapshot, and which modules did it end up loading?
+        let alive = matches!(game.try_wait(), Ok(None));
+        let modules = diagnostics::modules_of(game.id());
+        let _ = game.kill();
+        panic!(
+            "injection never verified: {e}\n\
+             victim pid           = {}\n\
+             victim still running = {alive}\n\
+             probe dll           = {}\n\
+             modules loaded in victim ({}):\n{}",
+            game.id(),
+            probe.display(),
+            modules.len(),
+            modules
+                .iter()
+                .map(|m| format!("  {m}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
 
     // ---- 6. mutation lock while the session is live -------------------
     let locked = core
@@ -314,4 +343,53 @@ async fn importer_rollback_restores_a_populated_game_dir() {
         game_dir.join(TARGET_PROCESS).exists(),
         "rollback must not disturb the game's own files",
     );
+}
+
+/// Process-introspection helpers used only to explain a failure.
+///
+/// `WaitForInjection` returning a bare status code tells us nothing
+/// about which link in the chain broke. Enumerating the target's module
+/// list separates "the DLL never loaded" from "it loaded under a
+/// different path than the one we compared against" — the two failure
+/// modes look identical from the outside.
+mod diagnostics {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+        TH32CS_SNAPMODULE32,
+    };
+
+    /// Full paths of every module mapped into `pid`. Empty when the
+    /// process is gone or the snapshot fails — this is best-effort
+    /// diagnostic output, never an assertion source.
+    pub fn modules_of(pid: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        // SAFETY: the snapshot handle is checked against
+        // INVALID_HANDLE_VALUE and closed on every path out. The
+        // MODULEENTRY32W is zeroed with its dwSize set, as the API
+        // requires.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+            if snap == INVALID_HANDLE_VALUE {
+                return out;
+            }
+            let mut entry: MODULEENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+            if Module32FirstW(snap, &mut entry) != 0 {
+                loop {
+                    let len = entry
+                        .szExePath
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExePath.len());
+                    out.push(String::from_utf16_lossy(&entry.szExePath[..len]));
+                    if Module32NextW(snap, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            CloseHandle(snap);
+        }
+        out
+    }
 }
