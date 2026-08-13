@@ -11,8 +11,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use gmm_lib::core::diagnostics::{
-    build_bundle, build_writer, prune_old_logs, SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS,
-    DEFAULT_LOG_RETENTION_DAYS, LOG_FILE_PREFIX, LOG_FILE_SUFFIX,
+    build_bundle, build_writer, prune_old_logs, record_ipc_ready, SettingsSnapshot,
+    DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS, IPC_READY_COMMAND, IPC_READY_MARKER,
+    LOG_FILE_PREFIX, LOG_FILE_SUFFIX,
 };
 use tempfile::TempDir;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -164,5 +165,43 @@ fn bundle_includes_recent_logs_and_redacts_settings() {
         settings_contents.contains("D:/Games/Genshin")
             || settings_contents.contains(r"D:\\Games\\Genshin"),
         "game install paths are preserved for repro: {settings_contents}",
+    );
+}
+
+/// The installer smoke greps the app's own log for this marker to prove
+/// the WebView actually reached the Rust side (issue #54). The line has
+/// to survive the JSON layer intact, or the smoke silently stops
+/// checking anything.
+#[test]
+fn ipc_ready_marker_lands_in_the_log_file() {
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+
+    let (writer, guard) = build_writer(&log_dir).expect("writer");
+    let layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(writer);
+
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        record_ipc_ready();
+    });
+    drop(guard);
+
+    let mut body = String::new();
+    for entry in fs::read_dir(&log_dir).expect("read log_dir") {
+        let path = entry.expect("entry").path();
+        let mut f = fs::File::open(&path).expect("open log");
+        f.read_to_string(&mut body).expect("read log");
+    }
+    assert!(
+        body.contains(IPC_READY_MARKER),
+        "log must carry the IPC readiness marker {IPC_READY_MARKER}, got:\n{body}",
+    );
+    assert!(
+        body.contains(IPC_READY_COMMAND),
+        "the marker must name the command that produced it, got:\n{body}",
     );
 }

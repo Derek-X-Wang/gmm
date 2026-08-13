@@ -234,9 +234,33 @@ working state:
 2. the installed `GMM.exe` exists
 3. launching it creates `%APPDATA%\GMM\gmm.db` (migrations ran)
 4. it creates `%APPDATA%\GMM\logs\*.log` (tracing up)
-5. the process survives startup (no crash loop)
-6. the seeded DB contains all six game codes
-7. `msiexec /x` uninstalls cleanly
+5. that log carries the **IPC readiness marker**
+6. the process survives startup (no crash loop)
+7. the seeded DB contains all six game codes
+8. `msiexec /x` uninstalls cleanly
+
+### The IPC readiness marker
+
+Steps 3, 4, 6 and 7 all pass on a build whose UI is completely broken:
+the Rust side runs migrations and starts logging whether or not the
+WebView can reach it, so "denied by the ACL" and "not registered in
+`generate_handler![]`" both look like success. `tests/ipc_contract.rs`
+catches *name* mismatches statically but cannot see either of those.
+
+Step 5 closes that: `is_onboarding_complete` — the App router's own
+query, first invoke of every session on both the wizard and main-app
+branches — calls `diagnostics::record_ipc_ready()`, and the smoke waits
+for the resulting line. Reaching that call requires the WebView to boot,
+the IPC channel to come up, the command to be registered, and the ACL to
+allow it.
+
+Three drift guards keep it honest, all in `tests/ipc_contract.rs`: the
+marker command must still be registered and still invoked by the
+frontend, its body must still call `record_ipc_ready`, and the
+PowerShell must still grep the same literal as
+`diagnostics::IPC_READY_MARKER`.
+
+If you move the marker to a different command, move all four together.
 
 On failure it dumps the msiexec verbose log, GMM's own JSON logs, and
 recent Application event-log errors — so a Windows-less maintainer can

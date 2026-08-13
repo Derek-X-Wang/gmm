@@ -204,3 +204,55 @@ fn no_unreachable_commands() {
          Either wire them up, delete them, or add them to KNOWN_UNUSED with a reason.",
     );
 }
+
+/// The IPC readiness marker (issue #54) is only worth anything while
+/// three things stay true: the frontend still invokes the command that
+/// emits it, that command is still registered, and the installer smoke
+/// still looks for the same string. Each can drift independently, and
+/// every drift turns the smoke back into "the Rust side started",
+/// silently.
+mod ipc_readiness_marker {
+    use super::{invoked_commands, read, registered_handlers};
+    use gmm_lib::core::diagnostics::{IPC_READY_COMMAND, IPC_READY_MARKER};
+
+    #[test]
+    fn the_marker_command_is_registered_and_invoked_by_the_frontend() {
+        assert!(
+            registered_handlers().contains(IPC_READY_COMMAND),
+            "{IPC_READY_COMMAND} carries the IPC readiness marker but is not in \
+             generate_handler![] — the installer smoke would fail on every build",
+        );
+        assert!(
+            invoked_commands().contains(IPC_READY_COMMAND),
+            "{IPC_READY_COMMAND} carries the IPC readiness marker but the frontend \
+             never invokes it — nothing would ever emit the marker",
+        );
+    }
+
+    #[test]
+    fn the_marker_command_emits_the_marker() {
+        let commands = read("src-tauri/src/commands.rs");
+        let start = commands
+            .find(&format!("pub async fn {IPC_READY_COMMAND}("))
+            .or_else(|| commands.find(&format!("pub fn {IPC_READY_COMMAND}(")))
+            .unwrap_or_else(|| panic!("{IPC_READY_COMMAND} not found in commands.rs"));
+        // The body ends at the next `#[tauri::command]`, or EOF.
+        let rest = &commands[start..];
+        let body_end = rest.find("#[tauri::command]").unwrap_or(rest.len());
+        assert!(
+            rest[..body_end].contains("record_ipc_ready"),
+            "{IPC_READY_COMMAND} must call diagnostics::record_ipc_ready — that call \
+             is the only thing that writes the marker the installer smoke waits for",
+        );
+    }
+
+    #[test]
+    fn the_installer_smoke_waits_for_the_same_marker() {
+        let script = read(".github/scripts/installer-smoke.ps1");
+        assert!(
+            script.contains(IPC_READY_MARKER),
+            "installer-smoke.ps1 must grep for the marker literal '{IPC_READY_MARKER}' \
+             — otherwise renaming the constant quietly drops the check",
+        );
+    }
+}
