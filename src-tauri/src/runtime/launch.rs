@@ -168,6 +168,12 @@ pub async fn launch<R: Runtime>(
     opts: &LaunchOptions,
 ) -> Result<LaunchOutcome, String> {
     let result: Result<LaunchOutcome, String> = async {
+        // Deal with whatever the last session left in the live slot
+        // before consulting the DB — a dead watcher can leave a stale
+        // LiveSession behind, and the row it should have cleared with
+        // it.
+        reconcile_live_slot(core, runtime).await?;
+
         // Cheap pre-check; the atomic INSERT in start_session is the
         // real gate against double-launch races.
         if let Some(existing) = core.session_info().await.map_err(|e| e.to_string())? {
@@ -280,11 +286,26 @@ pub async fn launch<R: Runtime>(
 
         let child = child_guard.into_inner();
 
-        runtime.install(LiveSession {
+        if let Err(mut rejected) = runtime.install(LiveSession {
             info: info.clone(),
             child,
             _loader: loader,
-        });
+        }) {
+            // Someone installed a session between `reconcile_live_slot`
+            // and here. The game we just spawned is ours to clean up —
+            // the ChildGuard is already consumed, so kill it by hand and
+            // release the row we claimed a moment ago.
+            let _ = rejected.child.kill();
+            let _ = rejected.child.wait();
+            if let Err(e) = core.end_session().await {
+                tracing::warn!(error = %e, "end_session failed after a rejected session install");
+            }
+            return Err(
+                "Another game session was installed while this one was starting. \
+                 The game was closed again; try launching once it has settled."
+                    .to_string(),
+            );
+        }
 
         // Emit to the frontend so the banner appears immediately.
         let _ = app.emit(SESSION_STARTED_EVENT, &info);
@@ -301,6 +322,38 @@ pub async fn launch<R: Runtime>(
     result.map_err(av::wrap_launch_error)
 }
 
+/// Make the live-session slot safe to install into.
+///
+/// The exit watcher is the only thing that empties the slot in normal
+/// operation. If it dies (its `Mutex` guards `expect` on a poisoned
+/// lock) nobody clears the slot or the persisted row, and the app is
+/// stuck showing "game running" forever. So before every launch:
+///
+/// - slot empty → nothing to do;
+/// - slot occupied but the game has exited → the watcher is gone; take
+///   the stale session and clear the row it should have cleared;
+/// - slot occupied and the game is still running → refuse. Installing
+///   over it would drop the running game's handle on the floor.
+async fn reconcile_live_slot(core: &Core, runtime: &SessionRuntime) -> Result<(), String> {
+    if !runtime.has_session() {
+        return Ok(());
+    }
+    // `Err` means the child handle is unusable — treat it the same as
+    // an exited process; there is nothing left to watch either way.
+    if matches!(runtime.try_wait_child(), Ok(None)) {
+        let running = runtime
+            .info()
+            .map(|info| info.game.as_str().to_string())
+            .unwrap_or_else(|| "a game".to_string());
+        return Err(format!(
+            "{running} is still running. Close the game before launching again.",
+        ));
+    }
+    drop(runtime.take());
+    core.end_session().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// The exit watcher: the only place a healthy Game Session ends.
 fn spawn_exit_watcher<R: Runtime>(
     app: AppHandle<R>,
@@ -312,6 +365,13 @@ fn spawn_exit_watcher<R: Runtime>(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(poll).await;
+            // Somebody else emptied the slot (`clean_stale_session`, or
+            // the reconcile pass of a later launch). There is no child
+            // left to poll, so keeping this task alive would just spin
+            // one immortal watcher per launch.
+            if !runtime.has_session() {
+                break;
+            }
             match runtime.try_wait_child() {
                 Ok(Some(_status)) => break,
                 Ok(None) => continue,
