@@ -309,3 +309,76 @@ async fn reconcile_leaves_a_disabled_mods_junction_alone_when_it_points_elsewher
     );
     assert!(link.exists(), "the user's junction survives");
 }
+
+/// A Junction pointing at a *different Variant of the same Mod* is
+/// re-pointed, not reported.
+///
+/// `set_active_variant` writes the row before it moves the Junction, so
+/// a crash in between leaves the game loading a Variant the UI says is
+/// not selected (issue #59). Reporting that as `conflicting` was wrong
+/// twice over: the row is the source of truth for which Variant is
+/// active, and a Junction inside this Mod's own Library directory could
+/// only have been put there by GMM. There is no user intent to preserve.
+///
+/// The boundary is ownership, not similarity — see the two tests above
+/// for a target outside the Library (left alone) and a deleted target
+/// (nothing to relink to).
+#[tokio::test]
+async fn reconcile_repoints_a_junction_left_on_a_stale_variant() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, _, game_mods) = fresh_core(&tmp).await;
+
+    let src = tmp.path().join("fixture/Variants");
+    for variant in ["Blue", "Red"] {
+        let d = src.join(variant);
+        fs::create_dir_all(&d).expect("variant dir");
+        fs::write(d.join("merged.ini"), format!("; {variant}\n")).expect("ini");
+    }
+    let m = core
+        .adopt_folder(GameCode::Gimi, &src, "Variant Mod")
+        .await
+        .expect("adopt");
+    core.set_enabled(&m.id, true, &game_mods)
+        .await
+        .expect("enable");
+
+    let variants = core.list_variants(&m.id).await.expect("variants");
+    assert_eq!(variants.len(), 2, "fixture has two Variants");
+    let active = core
+        .active_variant_id(&m.id)
+        .await
+        .expect("active")
+        .expect("an active Variant");
+    let other = variants.iter().find(|v| v.id != active).expect("the other");
+
+    // Exactly the state a crash between the row write and the junction
+    // swap leaves: row says `other`, Junction still on the old Variant.
+    let link = game_mods.join("Variant Mod");
+    let stale_target = fs::canonicalize(&link).expect("resolve");
+    core.set_active_variant(&m.id, &other.id, &game_mods)
+        .await
+        .expect("switch variant");
+    gmm_lib::core::junction::remove(&link).expect("remove");
+    gmm_lib::core::junction::create(&link, &stale_target).expect("re-strand on the old variant");
+
+    let result = core
+        .reconcile_junctions(GameCode::Gimi, &game_mods)
+        .await
+        .expect("reconcile");
+
+    assert!(
+        result.conflicting.is_empty(),
+        "a stale Variant target is ours to fix, not a conflict to report: {result:?}",
+    );
+    assert_eq!(
+        result.recreated.as_slice(),
+        std::slice::from_ref(&m.id),
+        "the Junction should be reported as recreated, got {result:?}",
+    );
+    let resolved = fs::canonicalize(&link).expect("resolve after reconcile");
+    assert!(
+        resolved.ends_with(&other.name),
+        "the Junction must now resolve into {:?}, got {resolved:?}",
+        other.name,
+    );
+}
