@@ -43,6 +43,44 @@ Add a new test file per feature. Existing ones to use as templates:
 - `tests/gamebanana.rs` + `tests/mod_updates.rs` — slices 11 + 13c (network
   via [`mockito`](https://docs.rs/mockito); the production code accepts an
   `Endpoints` test seam so tests inject the mock server URL)
+- `tests/migrations.rs` — the migration corpus, below
+
+### The migration corpus
+
+Every other test starts from `Core::new` against an empty file, so the
+migrations only ever run against nothing. A migration that breaks on
+real rows — a `NOT NULL` column with no default, a `UNIQUE` index
+existing data violates — passes the whole suite and bricks the install
+on first launch. GMM self-updates, so it reaches users on its own.
+
+`tests/fixtures/migrations/NNN_<name>.db` holds a populated SQLite file
+with migrations `1..=NNN` applied: a Game with an install path, two Mods
+(one enabled, one not, one GameBanana and one local) with their Junction
+directory names, a Library root override, a Variant with an active
+selection, and update state. `tests/migrations.rs` opens each through
+the real startup path and asserts the data is all still there, that
+reopening is a no-op, and that an interrupted migration leaves a
+database the next startup can finish.
+
+The `.db` files are checked in as binaries deliberately. They carry the
+`_sqlx_migrations` rows — including sqlx's checksum of each migration's
+SQL — exactly as written at generation time, so **editing an
+already-shipped migration makes the tests fail with the same
+`VersionMismatch` a user's install would hit.**
+
+**Adding a migration means adding a fixture.** The generator is an
+ignored test in the same file, so the seed data and the assertions
+cannot drift apart:
+
+```bash
+cd src-tauri
+cargo test --test migrations -- --ignored --exact regenerate_the_migration_corpus
+git add tests/fixtures/migrations
+```
+
+It rewrites every fixture from the checked-in migration SQL, so run it
+only when the corpus is genuinely out of date — and check the diff:
+existing fixtures changing means a shipped migration changed.
 
 ## 2. Tauri command IPC contract (`src-tauri/tests/commands_ipc.rs`)
 

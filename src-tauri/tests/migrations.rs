@@ -1,0 +1,543 @@
+//! Migration corpus: open a populated database at every schema version
+//! GMM has ever had, and migrate it forward (issue #55).
+//!
+//! Every other test in the suite starts from `Core::new` against an
+//! empty file, so the migrations only ever run against nothing. A
+//! migration that breaks on real rows — a NOT NULL column with no
+//! default, a UNIQUE index that existing data violates, a rename that
+//! drops a column — passes the whole suite and bricks the install on
+//! first launch. GMM self-updates, so it would reach users on its own.
+//!
+//! ## The corpus
+//!
+//! `tests/fixtures/migrations/NNN_<name>.db` holds a SQLite file with
+//! migrations `1..=NNN` applied and representative rows in every table
+//! that existed at that point: a Game with an install path, two Mods
+//! (one enabled, one not) with their Junction directory names, a
+//! Library root override, a Variant, GameBanana provenance, update
+//! state.
+//!
+//! The files are checked in as binaries on purpose. They carry the
+//! `_sqlx_migrations` rows — including sqlx's checksum of each
+//! migration's SQL — exactly as they were written at generation time,
+//! so editing an already-shipped migration file makes these tests fail
+//! with a checksum mismatch. That is the same error a user's install
+//! would hit, which is the point.
+//!
+//! ## Regenerating
+//!
+//! Adding a migration means adding a fixture. The generator is an
+//! ignored test in this file so the seed data and the assertions can't
+//! drift apart:
+//!
+//! ```bash
+//! cd src-tauri
+//! cargo test --test migrations -- --ignored --exact regenerate_the_migration_corpus
+//! git add tests/fixtures/migrations
+//! ```
+//!
+//! It writes one fixture per migration and leaves the existing ones
+//! byte-identical unless their migration SQL changed — which, again, it
+//! must not.
+
+use std::path::{Path, PathBuf};
+
+use gmm_lib::core::settings::keys;
+use gmm_lib::core::{Core, GameCode, Source};
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::{Row, SqlitePool};
+use tempfile::TempDir;
+
+// ---- the seed -------------------------------------------------------
+//
+// Written by `regenerate_the_migration_corpus`, asserted by the tests
+// below. Keep the two in step: a value changed here needs the corpus
+// regenerated, and a stale corpus fails loudly rather than silently
+// asserting nothing.
+
+const SEEDED_INSTALL_PATH: &str = r"C:\Games\Genshin Impact\Genshin Impact Game";
+const SEEDED_LIBRARY_ROOT: &str = r"D:\gmm-library";
+const SEEDED_VARIANT_NAME: &str = "Hu Tao — Snow";
+const SEEDED_UPSTREAM_VERSION: &str = "2.1.0";
+
+/// Two Mods, deliberately including an enabled one: `enabled` and
+/// `junction_dir_name` together decide which Junctions the startup
+/// reconcile pass rebuilds, so losing either in a migration silently
+/// unlinks a user's whole Library.
+struct SeedMod {
+    id: &'static str,
+    name: &'static str,
+    junction_dir_name: &'static str,
+    enabled: bool,
+    /// Source drives update-check behaviour, so the corpus carries one
+    /// of each rather than two of a kind.
+    source: Source,
+}
+
+const SEED_MODS: &[SeedMod] = &[
+    SeedMod {
+        id: "01JCORPUS0000000000000001",
+        name: "Hu Tao Skin",
+        junction_dir_name: "Hu Tao Skin",
+        enabled: true,
+        source: Source::Gamebanana,
+    },
+    SeedMod {
+        id: "01JCORPUS0000000000000002",
+        name: "Raiden: Shogun?",
+        // The sanitised form — reserved characters stripped (ADR 0003).
+        junction_dir_name: "Raiden Shogun",
+        enabled: false,
+        source: Source::Local,
+    },
+];
+
+// ---- fixture plumbing ----------------------------------------------
+
+fn src_tauri_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn fixture_dir() -> PathBuf {
+    src_tauri_dir().join("tests/fixtures/migrations")
+}
+
+/// Every migration the app ships, in order.
+fn all_migrations() -> Vec<sqlx::migrate::Migration> {
+    sqlx::migrate!("./migrations").iter().cloned().collect()
+}
+
+fn db_url(path: &Path) -> String {
+    format!("sqlite://{}?mode=rwc", path.display())
+}
+
+/// The checked-in corpus, ordered by schema version. Each entry is
+/// `(version_number, path)` where the number is the 1-based migration
+/// index the fixture stops at.
+fn corpus() -> Vec<(usize, PathBuf)> {
+    let dir = fixture_dir();
+    let mut out: Vec<(usize, PathBuf)> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e} — regenerate the corpus", dir.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "db"))
+        .map(|p| {
+            let name = p
+                .file_name()
+                .expect("file name")
+                .to_string_lossy()
+                .to_string();
+            let n: usize = name
+                .split('_')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| panic!("fixture {name} must start with its version number"));
+            (n, p)
+        })
+        .collect();
+    out.sort_by_key(|(n, _)| *n);
+    assert_eq!(
+        out.len(),
+        all_migrations().len(),
+        "the corpus must hold one fixture per migration — regenerate it \
+         (see this file's docs) after adding a migration",
+    );
+    out
+}
+
+/// Copy a fixture somewhere writable. Tests must never migrate the
+/// checked-in file in place; that would rewrite the corpus on every run.
+fn stage(fixture: &Path, tmp: &TempDir) -> PathBuf {
+    let dest = tmp.path().join("gmm.db");
+    std::fs::copy(fixture, &dest).expect("stage fixture");
+    dest
+}
+
+async fn open_core(db: &Path, tmp: &TempDir) -> Core {
+    Core::new(tmp.path().join("library"), &db_url(db))
+        .await
+        .expect("Core::new must migrate the fixture forward")
+}
+
+async fn raw_pool(db: &Path) -> SqlitePool {
+    let opts: SqliteConnectOptions = db_url(db).parse::<SqliteConnectOptions>().expect("db url");
+    SqlitePool::connect_with(opts).await.expect("open sqlite")
+}
+
+// ---- the tests ------------------------------------------------------
+
+/// The headline property: every schema version GMM has ever written
+/// migrates forward, and the user's data is all still there afterwards.
+#[tokio::test]
+async fn every_schema_version_migrates_and_keeps_the_users_data() {
+    for (version, fixture) in corpus() {
+        let tmp = TempDir::new().expect("tmp");
+        let db = stage(&fixture, &tmp);
+        let core = open_core(&db, &tmp).await;
+        let label = fixture.file_name().unwrap().to_string_lossy().to_string();
+
+        // Every migration ran, and sqlx recorded each as successful.
+        let pool = raw_pool(&db).await;
+        let applied: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("count applied migrations");
+        assert_eq!(
+            applied as usize,
+            all_migrations().len(),
+            "{label}: every migration must be applied after startup",
+        );
+        pool.close().await;
+
+        // The Game's install path survives.
+        assert_eq!(
+            core.game_install_path(GameCode::Gimi)
+                .await
+                .expect("install path")
+                .map(|p| p.to_string_lossy().to_string()),
+            Some(SEEDED_INSTALL_PATH.to_string()),
+            "{label}: the Game install path must survive migration",
+        );
+
+        // Both Mods survive, with their enabled state and Junction
+        // directory names intact.
+        let mods = core.list_mods(GameCode::Gimi).await.expect("list mods");
+        assert_eq!(
+            mods.len(),
+            SEED_MODS.len(),
+            "{label}: Mod rows must survive"
+        );
+        for seed in SEED_MODS {
+            let found = mods
+                .iter()
+                .find(|m| m.id == seed.id)
+                .unwrap_or_else(|| panic!("{label}: Mod {} vanished", seed.id));
+            assert_eq!(found.name, seed.name, "{label}: Mod name must survive");
+            assert_eq!(
+                found.source, seed.source,
+                "{label}: Source must survive — it decides update-check behaviour",
+            );
+
+            assert_eq!(
+                found.enabled, seed.enabled,
+                "{label}: enabled state must survive — it decides which Junctions \
+                 the startup reconcile rebuilds",
+            );
+        }
+
+        // `junction_dir_name` has no place on the public `Mod` — it is
+        // reconcile's business — but losing it in a migration would
+        // orphan every Junction on disk, so check it at the source.
+        let pool = raw_pool(&db).await;
+        for seed in SEED_MODS {
+            let name: String =
+                sqlx::query_scalar("SELECT junction_dir_name FROM mods WHERE id = ?")
+                    .bind(seed.id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read junction_dir_name");
+            assert_eq!(
+                name, seed.junction_dir_name,
+                "{label}: the Junction directory name must survive migration",
+            );
+        }
+        pool.close().await;
+
+        // Settings arrived with migration 2.
+        if version >= 2 {
+            assert_eq!(
+                core.library_root_override()
+                    .await
+                    .expect("library root override")
+                    .map(|p| p.to_string_lossy().to_string()),
+                Some(SEEDED_LIBRARY_ROOT.to_string()),
+                "{label}: the Library root override must survive migration",
+            );
+        }
+
+        // Variants arrived with migration 3.
+        if version >= 3 {
+            let variants = core
+                .list_variants(SEED_MODS[0].id)
+                .await
+                .expect("list variants");
+            assert_eq!(variants.len(), 1, "{label}: the Variant must survive");
+            assert_eq!(variants[0].name, SEEDED_VARIANT_NAME);
+            assert_eq!(
+                core.active_variant_id(SEED_MODS[0].id)
+                    .await
+                    .expect("active variant"),
+                Some(variants[0].id.clone()),
+                "{label}: the active Variant selection must survive",
+            );
+        }
+
+        // Per-Mod update tracking arrived with migration 5.
+        if version >= 5 {
+            let rows = core
+                .list_mod_updates(GameCode::Gimi)
+                .await
+                .expect("list mod updates");
+            let row = rows
+                .iter()
+                .find(|r| r.mod_id == SEED_MODS[0].id)
+                .unwrap_or_else(|| panic!("{label}: update row for the seeded Mod vanished"));
+            assert_eq!(
+                row.upstream_version.as_deref(),
+                Some(SEEDED_UPSTREAM_VERSION),
+                "{label}: the last-seen upstream version must survive",
+            );
+        }
+    }
+}
+
+/// Startup runs the migrator every time, not just on upgrade. Opening
+/// an already-current database must change nothing.
+#[tokio::test]
+async fn reopening_an_already_migrated_database_changes_nothing() {
+    let (_, oldest) = corpus().into_iter().next().expect("a corpus fixture");
+    let tmp = TempDir::new().expect("tmp");
+    let db = stage(&oldest, &tmp);
+
+    let core = open_core(&db, &tmp).await;
+    let before = core.list_mods(GameCode::Gimi).await.expect("mods before");
+    drop(core);
+    let after_first = std::fs::read(&db).expect("read migrated db");
+
+    // Second startup against the same file.
+    let core = open_core(&db, &tmp).await;
+    let after = core.list_mods(GameCode::Gimi).await.expect("mods after");
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "a second startup must not duplicate or drop rows",
+    );
+    drop(core);
+
+    let pool = raw_pool(&db).await;
+    let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .expect("count migrations");
+    pool.close().await;
+    assert_eq!(
+        applied as usize,
+        all_migrations().len(),
+        "a second startup must not re-record migrations",
+    );
+
+    let after_second = std::fs::read(&db).expect("read reopened db");
+    assert_eq!(
+        after_first.len(),
+        after_second.len(),
+        "a no-op startup must not rewrite the database",
+    );
+}
+
+/// A migration interrupted partway — GMM killed, machine powered off —
+/// must leave a database the next startup can finish migrating.
+///
+/// sqlx runs each migration inside a transaction, so an interruption is
+/// exactly an uncommitted transaction: this stages one by applying a
+/// later migration's DDL and dropping the connection without a commit,
+/// then starts up normally. If a future migration is ever marked
+/// `no_tx`, this test is what notices that a crash can now strand a
+/// half-applied schema.
+#[tokio::test]
+async fn an_interrupted_migration_leaves_a_database_startup_can_finish() {
+    let (_, oldest) = corpus().into_iter().next().expect("a corpus fixture");
+    let tmp = TempDir::new().expect("tmp");
+    let db = stage(&oldest, &tmp);
+
+    {
+        let pool = raw_pool(&db).await;
+        let mut tx = pool.begin().await.expect("begin");
+        // The second migration's work, abandoned midway.
+        sqlx::query("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+            .execute(&mut *tx)
+            .await
+            .expect("partial DDL");
+        // No commit, no rollback — drop is the crash.
+        drop(tx);
+        pool.close().await;
+    }
+
+    let core = open_core(&db, &tmp).await;
+    let mods = core.list_mods(GameCode::Gimi).await.expect("list mods");
+    assert_eq!(
+        mods.len(),
+        SEED_MODS.len(),
+        "an interrupted migration must not cost the user their Mods",
+    );
+    // The abandoned migration's table is present and usable, not left
+    // half-built. A settings round-trip proves it; onboarding state is
+    // the cheapest one, since unlike the Library root it writes nothing
+    // to disk.
+    core.mark_onboarding_complete(true)
+        .await
+        .expect("settings table must work after the interrupted migration");
+    let status = core.onboarding_status().await.expect("onboarding status");
+    assert!(
+        status.complete && status.skipped,
+        "the abandoned migration must have been re-applied cleanly on startup",
+    );
+}
+
+// ---- the generator --------------------------------------------------
+
+/// Writes the corpus. Ignored — run it deliberately after adding a
+/// migration; see this file's module docs.
+#[tokio::test]
+#[ignore = "regenerates checked-in fixtures; run deliberately"]
+async fn regenerate_the_migration_corpus() {
+    let dir = fixture_dir();
+    std::fs::create_dir_all(&dir).expect("create fixture dir");
+    for entry in std::fs::read_dir(&dir).expect("read fixture dir") {
+        let p = entry.expect("entry").path();
+        if p.extension().is_some_and(|x| x == "db") {
+            std::fs::remove_file(&p).expect("remove stale fixture");
+        }
+    }
+
+    let all = all_migrations();
+    for (idx, migration) in all.iter().enumerate() {
+        let version = idx + 1;
+        // Spaces in the description would land in the filename, and a
+        // path with spaces has to be escaped in a sqlite:// URL.
+        let slug = migration.description.replace(' ', "_");
+        let path = dir.join(format!("{version:03}_{slug}.db"));
+
+        // Apply migrations 1..=version, and nothing after.
+        let partial = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(all[..version].to_vec()),
+            ignore_missing: false,
+            locking: true,
+            no_tx: false,
+        };
+        let pool = raw_pool(&path).await;
+        partial.run(&pool).await.expect("apply partial migrations");
+        seed(&pool, version).await;
+        // Compact, so the corpus stays small in git.
+        sqlx::query("VACUUM").execute(&pool).await.expect("vacuum");
+        pool.close().await;
+        eprintln!("wrote {}", path.display());
+    }
+}
+
+/// Insert the representative rows every table available at `version`
+/// can hold.
+async fn seed(pool: &SqlitePool, version: usize) {
+    sqlx::query("UPDATE games SET install_path = ? WHERE code = 'gimi'")
+        .bind(SEEDED_INSTALL_PATH)
+        .execute(pool)
+        .await
+        .expect("seed install path");
+
+    for m in SEED_MODS {
+        sqlx::query(
+            "INSERT INTO mods (id, game_code, name, source, library_path, junction_dir_name,
+                               enabled, created_at)
+             VALUES (?, 'gimi', ?, ?, ?, ?, ?, '2026-05-21T00:00:00Z')",
+        )
+        .bind(m.id)
+        .bind(m.name)
+        .bind(m.source.as_str())
+        .bind(format!(r"{SEEDED_LIBRARY_ROOT}\gimi\{}", m.id))
+        .bind(m.junction_dir_name)
+        .bind(i64::from(m.enabled))
+        .execute(pool)
+        .await
+        .expect("seed mod");
+    }
+
+    if version >= 2 {
+        for (key, value) in [
+            (keys::library_root(), SEEDED_LIBRARY_ROOT),
+            (keys::onboarding_complete(), "true"),
+        ] {
+            sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?)")
+                .bind(key)
+                .bind(value)
+                .execute(pool)
+                .await
+                .expect("seed setting");
+        }
+    }
+
+    if version >= 3 {
+        let variant_id = "01JCORPUSVARIANT000000001";
+        sqlx::query("INSERT INTO mod_variants (id, mod_id, name, subpath) VALUES (?, ?, ?, ?)")
+            .bind(variant_id)
+            .bind(SEED_MODS[0].id)
+            .bind(SEEDED_VARIANT_NAME)
+            .bind("Snow")
+            .execute(pool)
+            .await
+            .expect("seed variant");
+        sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
+            .bind(variant_id)
+            .bind(SEED_MODS[0].id)
+            .execute(pool)
+            .await
+            .expect("seed active variant");
+    }
+
+    if version >= 4 {
+        sqlx::query(
+            "UPDATE mods SET gamebanana_id = 12345, source_url = ?, author = ?, version = ?
+             WHERE id = ?",
+        )
+        .bind("https://gamebanana.com/mods/12345")
+        .bind("SomeAuthor")
+        .bind("2.0.0")
+        .bind(SEED_MODS[0].id)
+        .execute(pool)
+        .await
+        .expect("seed gamebanana metadata");
+    }
+
+    if version >= 5 {
+        sqlx::query("UPDATE mods SET upstream_version = ? WHERE id = ?")
+            .bind(SEEDED_UPSTREAM_VERSION)
+            .bind(SEED_MODS[0].id)
+            .execute(pool)
+            .await
+            .expect("seed upstream version");
+    }
+}
+
+/// Sanity check on the fixtures themselves: an old fixture must really
+/// be old. Without this, a corpus accidentally regenerated at the
+/// current schema would make every test above pass while proving
+/// nothing about migrating.
+#[tokio::test]
+async fn the_corpus_really_holds_old_schema_versions() {
+    for (version, fixture) in corpus() {
+        let tmp = TempDir::new().expect("tmp");
+        let db = stage(&fixture, &tmp);
+        let pool = raw_pool(&db).await;
+        let rows = sqlx::query("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .expect("read _sqlx_migrations");
+        pool.close().await;
+
+        let label = fixture.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            rows.len(),
+            version,
+            "{label}: fixture must carry exactly {version} applied migration(s), \
+             not the current schema — regenerate the corpus",
+        );
+        let recorded: Vec<i64> = rows
+            .iter()
+            .map(|r| r.try_get::<i64, _>("version").expect("version column"))
+            .collect();
+        let expected: Vec<i64> = all_migrations()
+            .iter()
+            .take(version)
+            .map(|m| m.version)
+            .collect();
+        assert_eq!(recorded, expected, "{label}: unexpected migration set");
+    }
+}
