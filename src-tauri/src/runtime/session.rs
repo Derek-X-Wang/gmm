@@ -56,17 +56,34 @@ impl SessionRuntime {
         self.inner.lock().expect("session lock poisoned").take()
     }
 
-    /// Install a new LiveSession. Panics if a session is already
-    /// installed — Core::ensure_no_active_session prevents this at the
-    /// public API surface so the assertion is a "should never happen"
-    /// safeguard, not a recoverable error.
-    pub fn install(&self, live: LiveSession) {
+    /// Install a new LiveSession, or hand it back untouched when the
+    /// slot is already occupied.
+    ///
+    /// The launch flow clears the slot up front (see
+    /// `runtime::launch::reconcile_live_slot`), so a rejection here
+    /// means something raced us. Returning the session rather than
+    /// panicking matters because the caller has already spawned the
+    /// game by this point: it needs the `Child` back to kill it. A
+    /// panic inside a Tauri command would leave the game running with
+    /// no handle to it.
+    pub fn install(&self, live: LiveSession) -> Result<(), LiveSession> {
         let mut guard = self.inner.lock().expect("session lock poisoned");
-        assert!(
-            guard.is_none(),
-            "tried to install a session while one was already active — Core::start_session contract violated",
-        );
+        if guard.is_some() {
+            return Err(live);
+        }
         *guard = Some(live);
+        Ok(())
+    }
+
+    /// The durable record of the installed session, if any. Lets the
+    /// launch flow name the game it is refusing to launch over without
+    /// taking the session out of the slot.
+    pub fn info(&self) -> Option<SessionInfo> {
+        self.inner
+            .lock()
+            .expect("session lock poisoned")
+            .as_ref()
+            .map(|live| live.info.clone())
     }
 
     /// True if a session is currently installed. Used by the watcher

@@ -22,8 +22,9 @@ use crate::core::reconcile::ReconcileResult;
 use crate::core::updates::UpdateStatus;
 use crate::core::variants::Variant;
 use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport, SessionInfo};
-use crate::runtime::{SessionRuntime, SESSION_ENDED_EVENT, SESSION_STARTED_EVENT};
-use tauri::{AppHandle, Emitter};
+use crate::runtime::launch::{self, LaunchOptions};
+use crate::runtime::SessionRuntime;
+use tauri::AppHandle;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -635,63 +636,6 @@ async fn refuse_during_session(core: &State<'_, Core>) -> Result<(), String> {
     Ok(())
 }
 
-/// Locate the bundled / vendored `3dmloader.dll`. Resolution order:
-/// 1. `GMM_LOADER_DLL` env var (override for smoke tests + dev)
-/// 2. `<exe-dir>/3dmloader.dll` (production bundle layout)
-/// 3. `<repo-root>/vendor/3dmloader/3dmloader.dll` (dev convenience)
-fn locate_loader_dll() -> Result<PathBuf, String> {
-    if let Ok(env_path) = std::env::var("GMM_LOADER_DLL") {
-        let p = PathBuf::from(env_path);
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    if let Some(dir) = exe.parent() {
-        let candidate = dir.join("3dmloader.dll");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        // Dev fallback: target/<profile>/gmm[.exe] → ../../../vendor/...
-        let mut walker = dir.to_path_buf();
-        for _ in 0..6 {
-            let candidate = walker.join("vendor/3dmloader/3dmloader.dll");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-            if !walker.pop() {
-                break;
-            }
-        }
-    }
-    Err("Couldn't find 3dmloader.dll. Set GMM_LOADER_DLL or reinstall.".to_string())
-}
-
-/// Pick the game executable to launch given a Game and its install
-/// directory. Looks at `GameProfile::executable_candidates` so each
-/// per-game port (slices #16–#20) just adds its exe list to the
-/// registry in `core::games`.
-fn resolve_game_exe(game: GameCode, install: &std::path::Path) -> Result<PathBuf, String> {
-    let profile = game.profile();
-    if profile.executable_candidates.is_empty() {
-        return Err(format!(
-            "Launching {} is not wired yet — see the per-game port issues.",
-            profile.display_name,
-        ));
-    }
-    for candidate in profile.executable_candidates {
-        let p = install.join(candidate);
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-    Err(format!(
-        "{} not found under {}.",
-        profile.executable_candidates.join(" / "),
-        install.display(),
-    ))
-}
-
 #[tauri::command]
 pub async fn current_session(core: State<'_, Core>) -> Result<Option<SessionInfo>, String> {
     core.session_info().await.map_err(|e| e.to_string())
@@ -702,37 +646,6 @@ pub async fn clean_stale_session(core: State<'_, Core>) -> Result<Option<Session
     core.clean_stale_session().await.map_err(|e| e.to_string())
 }
 
-/// RAII wrapper that kills + reaps the wrapped child on drop. Used
-/// during `launch_game` between `Command::spawn` and the moment the
-/// `Child` is moved into `LiveSession`; on every error-return path
-/// the guard's drop runs so we never leak a started game.
-struct ChildGuard {
-    child: Option<std::process::Child>,
-}
-
-impl ChildGuard {
-    fn new(child: std::process::Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    fn pid(&self) -> u32 {
-        self.child.as_ref().map(|c| c.id()).unwrap_or(0)
-    }
-
-    fn into_inner(mut self) -> std::process::Child {
-        self.child.take().expect("ChildGuard already consumed")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
 #[tauri::command]
 pub async fn launch_game(
     app: AppHandle,
@@ -740,170 +653,14 @@ pub async fn launch_game(
     runtime: State<'_, SessionRuntime>,
     game: GameCode,
 ) -> Result<SessionInfo, String> {
-    // Run the full launch flow in an inner async block so we can route
-    // every failure through `av::wrap_launch_error`. That helper
-    // prefixes the wire message with `AV-PATTERN: ` when the error
-    // text matches a known antivirus / SmartScreen signature (slice
-    // NEW-AV / #13); the React `LaunchGameButton` then swaps to the
-    // structured `<AvGuidance>` component instead of dumping a raw
-    // Win32 error onto the user.
-    let result: Result<SessionInfo, String> = async {
-        use crate::core::games::InjectMode;
-        use gmm_loader::Loader;
-
-        // Cheap pre-check; the atomic INSERT in start_session is the
-        // real gate against double-launch races.
-        if let Some(existing) = core.session_info().await.map_err(|e| e.to_string())? {
-            return Err(format!(
-                "{} is already running (since {}).",
-                existing.game.as_str(),
-                existing.started_at
-            ));
-        }
-
-        let install = core
-            .game_install_path(game)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Set the game install path in Settings before launching.".to_string())?;
-
-        let game_exe = resolve_game_exe(game, &install)?;
-        let dll_to_inject = install.join("d3d11.dll");
-        if !dll_to_inject.exists() {
-            return Err(format!(
-                "Model Importer DLL not found at {}. Install the importer for this game first.",
-                dll_to_inject.display()
-            ));
-        }
-        let loader_dll = locate_loader_dll()?;
-
-        // Loading the 3dmloader DLL is the most common AV-quarantine
-        // target (Defender frequently flags the vendored DLL on first
-        // run); errors from this step land in the AV classifier via
-        // the outer `wrap_launch_error`.
-        let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
-
-        let inject_mode = game.profile().inject_mode;
-        let child_guard = match inject_mode {
-            InjectMode::Hook => {
-                // CBT hook MUST be installed before spawning so it
-                // catches the window-creation event the game fires on
-                // startup.
-                let hook = loader
-                    .hook(&dll_to_inject)
-                    .map_err(|e| format!("install hook: {e}"))?;
-
-                let child = std::process::Command::new(&game_exe)
-                    .current_dir(&install)
-                    .spawn()
-                    .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
-                let child_guard = ChildGuard::new(child);
-
-                // Block until the importer DLL lands in a process
-                // whose image name matches the game exe, then DROP
-                // the hook session — holding the global CBT hook for
-                // the whole game session would inject the DLL into
-                // every unrelated process that creates a window.
-                let target_process = game_exe
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "GenshinImpact.exe".to_string());
-                hook.wait_for_injection(&target_process, 60)
-                    .map_err(|e| format!("wait_for_injection: {e}"))?;
-                // Explicitly drop so the unhook runs immediately
-                // rather than at end-of-scope. clippy::drop_non_drop
-                // fires on the non-Windows stub HookSession (no Drop
-                // impl); silence it — on Windows this is the
-                // load-bearing line that takes the CBT hook back
-                // down.
-                #[allow(clippy::drop_non_drop)]
-                drop(hook);
-
-                child_guard
-            }
-            InjectMode::Inject => {
-                // EFMI path (slice 10 / #20): spawn first, then call
-                // `Loader::inject` against the live PID. Upstream
-                // XXMI uses `custom_launch_inject_mode = 'Inject'`
-                // here; the CBT-hook path doesn't fire for EFMI's
-                // launch sequence.
-                let child = std::process::Command::new(&game_exe)
-                    .current_dir(&install)
-                    .spawn()
-                    .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
-                let child_guard = ChildGuard::new(child);
-
-                // Give the process a beat to start its main module
-                // before injecting; injecting into a process that has
-                // not finished creating its main thread is fragile.
-                // 1 s is what XXMI uses in practice; we match it.
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-                let pid = child_guard.pid();
-                loader
-                    .inject(pid, &dll_to_inject)
-                    .map_err(|e| format!("inject into pid {pid}: {e}"))?;
-
-                child_guard
-            }
-        };
-
-        let info = SessionInfo {
-            game,
-            pid: child_guard.pid(),
-            started_at: chrono::Utc::now(),
-        };
-
-        // Atomic claim: plain INSERT, no OR REPLACE. If anyone raced
-        // past the pre-check above, the singleton CHECK gives us a
-        // unique-constraint error and ChildGuard's drop kills our
-        // spawned game.
-        core.start_session(&info)
-            .await
-            .map_err(|e| format!("start_session: {e}"))?;
-
-        let child = child_guard.into_inner();
-
-        runtime
-            .inner()
-            .install(crate::runtime::session::LiveSession {
-                info: info.clone(),
-                child,
-                _loader: loader,
-            });
-
-        // Emit to the frontend so the banner appears immediately.
-        let _ = app.emit(SESSION_STARTED_EVENT, &info);
-
-        // Spawn the exit watcher. It polls every 500 ms; on child
-        // exit it drops the LiveSession (which unhooks via RAII),
-        // clears the DB row, and emits SESSION_ENDED_EVENT.
-        let app_for_watch = app.clone();
-        let runtime_for_watch = runtime.inner().inner_clone();
-        let core_for_watch = (*core).clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                match runtime_for_watch.try_wait_child() {
-                    Ok(Some(_status)) => break,
-                    Ok(None) => continue,
-                    Err(_) => break, // process gone / handle invalid
-                }
-            }
-            // Drop the LiveSession → unhook + close child handle.
-            let _ = runtime_for_watch.take();
-            // Best-effort: clear the persisted row.
-            if let Err(e) = core_for_watch.end_session().await {
-                tracing::warn!(error = %e, "end_session failed in watcher");
-            }
-            let _ = app_for_watch.emit(SESSION_ENDED_EVENT, ());
-        });
-
-        Ok(info)
-    }
-    .await;
-
-    result.map_err(av::wrap_launch_error)
+    // Thin shell: everything worth testing lives in
+    // `runtime::launch::launch`, which is generic over the Tauri runtime
+    // so `tests/launch_command*.rs` can drive it against a MockRuntime
+    // handle. The detached watcher handle is deliberately dropped — in
+    // production nothing joins it.
+    launch::launch(&app, &core, &runtime, game, &LaunchOptions::default())
+        .await
+        .map(|outcome| outcome.info)
 }
 
 /// Tauri command — return the structured AV / SmartScreen guidance the
