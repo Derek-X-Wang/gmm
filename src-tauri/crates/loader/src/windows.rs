@@ -341,32 +341,83 @@ fn to_wide_nul(s: &OsStr) -> Option<Vec<u16>> {
 /// back to the input rather than erroring — a wrong-but-present path is
 /// no worse than what we had before.
 fn to_long_path(path: &Path) -> PathBuf {
-    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    // Two normalisations, in this order:
+    //
+    //   1. GetFullPathNameW — rewrites `/` to `\`, collapses `.`/`..`,
+    //      and makes the path absolute. Windows APIs accept forward
+    //      slashes, but the module list always reports backslashes, so
+    //      a path built with `join("a/b")` fails the comparison even
+    //      when every component is already long-form.
+    //   2. GetLongPathNameW — expands 8.3 aliases (`RUNNER~1` ->
+    //      `runneradmin`). This *fails outright* on a mixed-separator
+    //      path, which is why it has to run second.
+    //
+    // Skipping step 1 was a real bug: the injected DLL was present in
+    // the target process the whole time and only the verification
+    // string-compare failed.
+    let normalised = to_full_path(path);
+    to_expanded_path(&normalised).unwrap_or(normalised)
+}
+
+/// `GetFullPathNameW` — separator + relative-component normalisation.
+fn to_full_path(path: &Path) -> PathBuf {
+    use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
 
     let Some(wide) = to_wide_nul(path.as_os_str()) else {
         return path.to_path_buf();
     };
 
-    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer alive for the
-    // call. Passing a null output buffer with length 0 is the
-    // documented way to ask for the required length.
-    let needed = unsafe { GetLongPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    // SAFETY: `wide` is NUL-terminated and alive for the call. A null
+    // output buffer with length 0 is the documented length probe.
+    let needed =
+        unsafe { GetFullPathNameW(wide.as_ptr(), 0, std::ptr::null_mut(), std::ptr::null_mut()) };
     if needed == 0 {
         return path.to_path_buf();
     }
 
     let mut buf = vec![0u16; needed as usize];
-    // SAFETY: `buf` has room for `needed` code units including the
-    // terminator, which is exactly what the probe above asked for.
-    let written = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), needed) };
-    // The probe counts the NUL terminator; this call does not. Anything
-    // else means the path changed underneath us — fall back to the input.
+    // SAFETY: `buf` holds `needed` code units, the size the probe asked
+    // for. The final out-param (lpFilePart) is optional and unused.
+    let written = unsafe {
+        GetFullPathNameW(
+            wide.as_ptr(),
+            needed,
+            buf.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
+    };
     if written == 0 || written >= needed {
         return path.to_path_buf();
     }
 
     buf.truncate(written as usize);
     PathBuf::from(OsString::from_wide(&buf))
+}
+
+/// `GetLongPathNameW` — 8.3 expansion. Returns `None` when the path
+/// can't be expanded (most often because it doesn't exist yet).
+fn to_expanded_path(path: &Path) -> Option<PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    let wide = to_wide_nul(path.as_os_str())?;
+
+    // SAFETY: as above — NUL-terminated input, documented length probe.
+    let needed = unsafe { GetLongPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u16; needed as usize];
+    // SAFETY: `buf` has room for `needed` code units including the
+    // terminator, which is exactly what the probe above asked for.
+    let written = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), needed) };
+    // The probe counts the NUL terminator; this call does not.
+    if written == 0 || written >= needed {
+        return None;
+    }
+
+    buf.truncate(written as usize);
+    Some(PathBuf::from(OsString::from_wide(&buf)))
 }
 
 #[cfg(test)]
@@ -425,5 +476,56 @@ mod tests {
     fn missing_paths_fall_back_to_the_input() {
         let missing = Path::new(r"C:\this\does\not\exist\anywhere\d3d11.dll");
         assert_eq!(to_long_path(missing), missing.to_path_buf());
+    }
+
+    /// Forward slashes are legal input to most Windows APIs, but the
+    /// module list always reports backslashes — so `WaitForInjection`'s
+    /// literal comparison fails unless we normalise first. This is the
+    /// exact shape that made injection *look* broken in CI while the
+    /// DLL was in fact loaded in the target process the whole time.
+    #[test]
+    fn forward_slashes_are_rewritten_to_backslashes() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let nested = tmp.path().join("game");
+        std::fs::create_dir_all(&nested).expect("dir");
+        let file = nested.join("probe.dll");
+        std::fs::write(&file, b"MZ").expect("write");
+
+        // Same path spelled with a forward slash inside one join, the
+        // way `join("game/Genshin Impact Game")` produces it.
+        let mixed = PathBuf::from(format!("{}/game/probe.dll", tmp.path().display()));
+
+        let normalised = to_long_path(&mixed);
+        assert!(
+            !normalised.to_string_lossy().contains('/'),
+            "forward slashes must be rewritten, got {normalised:?}",
+        );
+        assert_eq!(
+            normalised,
+            to_long_path(&file),
+            "both spellings of the same file must normalise identically",
+        );
+    }
+
+    /// The normalisation has to agree with what Windows itself reports
+    /// for a loaded module — that string equality *is* the contract
+    /// with WaitForInjection.
+    #[test]
+    fn normalised_path_matches_the_os_view_of_the_same_file() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let file = tmp.path().join("probe.dll");
+        std::fs::write(&file, b"MZ").expect("write");
+
+        let normalised = to_long_path(&file);
+        let canonical = std::fs::canonicalize(&file).expect("canonicalize");
+        // canonicalize returns a \\?\ verbatim path; the module list
+        // does not use that form, so strip the prefix before comparing.
+        let canonical = canonical.to_string_lossy().replace(r"\\?\", "");
+        assert!(
+            normalised
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&canonical),
+            "normalised {normalised:?} should match the OS view {canonical:?}",
+        );
     }
 }
