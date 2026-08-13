@@ -8,10 +8,11 @@
 //! sequence out of `Core` + `gmm_loader` calls rather than going through
 //! `commands.rs::launch_game`, so the production orchestration —
 //! ChildGuard, session install, the watcher task, event emission — is
-//! *not* exercised here. Nor is Tauri IPC, capability enforcement, the
-//! WebView, packaging, or a real importer's initialisation. Calling this
-//! a "full vertical" would overstate it; `installer-smoke.ps1` covers
-//! the packaged app, and the launch command itself is still uncovered.
+//! *not* exercised here; `tests/launch_command_windows.rs` drives that
+//! function directly. Nor is Tauri IPC, capability enforcement, the
+//! WebView, packaging, or a real importer's initialisation covered.
+//! Calling this a "full vertical" would overstate it;
+//! `installer-smoke.ps1` covers the packaged app.
 //!
 //! The fixtures are the ones slices 4a/4b already paid for:
 //!

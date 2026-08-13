@@ -87,6 +87,58 @@ as a `pub const` in `commands.rs` and assert against it in the test.
 That way the wire copy can't drift without a corresponding test
 update.
 
+### Commands with orchestration worth testing
+
+Wire shapes are enough for the commands that are one `await` over a
+Core method. `launch_game` is not one of those: it spawns a process,
+holds it in an RAII guard across several fallible steps, claims the
+Game Session, installs the live session, emits events, and spawns the
+exit watcher. None of that is reachable through serde.
+
+The pattern for a command like that is to move the orchestration into
+a plain function generic over the Tauri runtime and leave a shell
+behind:
+
+```rust
+#[tauri::command]
+pub async fn launch_game(
+    app: AppHandle,
+    core: State<'_, Core>,
+    runtime: State<'_, SessionRuntime>,
+    game: GameCode,
+) -> Result<SessionInfo, String> {
+    launch::launch(&app, &core, &runtime, game, &LaunchOptions::default())
+        .await
+        .map(|outcome| outcome.info)
+}
+```
+
+`runtime::launch::launch` is then callable from a test with a
+`tauri::test::mock_app()` handle, which is a real `Emitter` — so the
+emitted events are the production ones, asserted by name **and order**
+via `app.listen`. Two things make the flow testable without weakening
+it:
+
+- **`LaunchOptions`** carries the timings that would otherwise be
+  hard-coded (injection timeout, inject settle, watcher poll). Prod
+  passes `default()`; tests shrink them so a timeout path costs
+  seconds.
+- **`LaunchOutcome::watcher`** hands back the exit watcher's
+  `JoinHandle`. Prod drops it (the task is detached); tests `.await`
+  it and get deterministic teardown instead of sleeping.
+
+Coverage lands in two files:
+
+- `tests/launch_command.rs` — host-runnable. Everything that fails
+  *before* the first Windows-only call: double-launch refusal, unset
+  install path, missing game exe, missing Model Importer. Each asserts
+  the same three cleanup properties (nothing persisted, nothing live,
+  nothing emitted).
+- `tests/launch_command_windows.rs` — Windows CI. Spawn onwards: the
+  happy path plus watcher teardown, injection timeout, losing the
+  session-claim race, and the two states a dead watcher leaves in the
+  live-session slot.
+
 ## 3. Frontend component tests (`src/**/*.test.{ts,tsx}`)
 
 vitest + `@testing-library/react` under jsdom. The whole `./api` module
@@ -118,9 +170,13 @@ Files that open with `#![cfg(windows)]` compile away everywhere else and
 run only on the `windows-latest` CI matrix entry:
 
 - `tests/session_smoke.rs` — per-game session round-trips
-- `tests/e2e_windows.rs` — the **full vertical** against a fake game
-  install (detect → importer install → adopt → junction → launch →
-  inject → lock → teardown)
+- `tests/e2e_windows.rs` — Core + Loader against a fake game install
+  (detect → importer install → adopt → junction → hook → inject →
+  lock → teardown), assembled from `Core` calls rather than driven
+  through the command layer
+- `tests/launch_command_windows.rs` — the `launch_game` orchestration
+  itself: ChildGuard cleanup, the atomic session claim, event order,
+  the exit watcher
 - `tests/registry_windows.rs` — real `HKCU` uninstall entries driving
   `detect_from_registry`, cleaned up by a `Drop` guard
 
