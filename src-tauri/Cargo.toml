@@ -66,7 +66,18 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# Registry-backed detection tests write fake HKCU uninstall entries.
+winreg = "0.55"
+# e2e_windows dumps the target process's module list when injection
+# can't be verified, so a CI failure explains itself.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+
 [dev-dependencies]
+base64 = "0.22"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

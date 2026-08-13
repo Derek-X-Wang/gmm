@@ -25,8 +25,17 @@ pub struct ReconcileResult {
     pub recreated: Vec<String>,
     /// Mod IDs whose junction was already healthy.
     pub healthy: Vec<String>,
-    /// Junctions that exist but resolve to an unexpected target. We do
-    /// not auto-fix these — the UI prompts the user.
+    /// Junctions needing user attention rather than an automatic fix.
+    /// Two shapes land here:
+    ///
+    /// * the junction resolves somewhere other than the Library path
+    ///   the DB records (something else re-pointed it), and
+    /// * the junction resolves to the right path but that directory no
+    ///   longer exists — the Library copy was deleted or moved out from
+    ///   under us, so there is nothing to relink to.
+    ///
+    /// Neither is auto-fixed: the first would clobber whatever the user
+    /// intended, and the second has no surviving source to restore.
     pub conflicting: Vec<ConflictingJunction>,
     /// Mod IDs we skipped (e.g. disabled mods don't need a junction).
     pub skipped: Vec<String>,

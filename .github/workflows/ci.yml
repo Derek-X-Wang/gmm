@@ -56,6 +56,11 @@ jobs:
       - name: pnpm tsc --noEmit
         run: pnpm tsc --noEmit
 
+      # Frontend unit/component tests (vitest + testing-library, jsdom).
+      # Cheap enough to run on both matrix entries.
+      - name: pnpm test
+        run: pnpm test
+
       - name: pnpm build
         run: pnpm build
 
@@ -68,9 +73,9 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
 
-      # Build the whole workspace BEFORE running tests — session_smoke.rs
-      # (slice 4b, Windows-only) needs victim.exe + noop_dll.dll present
-      # in target/debug/ at test-launch time.
+      # Build the whole workspace BEFORE running tests — the Windows-only
+      # suites (session_smoke.rs, e2e_windows.rs) shell out to
+      # victim.exe / noop_dll.dll from target/debug/.
       - name: cargo build
         working-directory: src-tauri
         run: cargo build --workspace
@@ -80,23 +85,93 @@ jobs:
         run: cargo test --workspace
 
       # Windows-only: smoke-test the gmm-loader FFI binding against the
-      # vendored 3dmloader.dll. Builds victim.exe + noop_dll.dll first,
-      # then runs `cargo xtask test-loader` which loads the DLL, installs
-      # the CBT hook, spawns victim, waits for injection, and unhooks.
+      # vendored 3dmloader.dll — loads the DLL, installs the CBT hook,
+      # spawns victim, waits for injection, and unhooks.
       - name: cargo xtask test-loader
         if: runner.os == 'Windows'
         run: cargo xtask test-loader
 
+      - name: Upload GMM logs on failure
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmm-logs-${{ matrix.os }}
+          path: ${{ env.APPDATA }}\GMM\logs
+          if-no-files-found: ignore
+
+  # Builds the real MSI and exercises it the way a user would: silent
+  # install, launch, verify the app reached a working state, uninstall.
+  # Separate job so it runs in parallel with the matrix instead of
+  # serialising behind it.
+  installer:
+    name: installer smoke (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: installer
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # `tauri build` runs `pnpm build` itself via beforeBuildCommand.
+      # createUpdaterArtifacts is switched off here because signing the
+      # manifest needs TAURI_SIGNING_PRIVATE_KEY, a release-only secret
+      # that must not be exposed to PR builds.
+      #
+      # The override goes through a file rather than an inline `--config`
+      # string: pwsh strips the double quotes out of inline JSON, and
+      # tauri then rejects `{bundle:{...}}` as invalid.
+      - name: Write CI bundle config override
+        shell: pwsh
+        run: |
+          '{"bundle":{"createUpdaterArtifacts":false}}' |
+            Set-Content -Path ci-bundle.conf.json -Encoding utf8
+          Get-Content ci-bundle.conf.json
+
+      - name: Build the app bundle
+        run: pnpm tauri build --config ci-bundle.conf.json
+
+      - name: Install, launch, verify, uninstall
+        shell: pwsh
+        run: .github/scripts/installer-smoke.ps1
+
+      - name: Upload installer diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-smoke-diagnostics
+          path: ci-diagnostics
+          if-no-files-found: ignore
+
   # Aggregator: branch protection keys off this single name.
   check:
     name: check
-    needs: build
+    needs: [build, installer]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Verify matrix succeeded
+      - name: Verify all jobs succeeded
         run: |
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "matrix build did not all succeed (result=${{ needs.build.result }})"
+            exit 1
+          fi
+          if [ "${{ needs.installer.result }}" != "success" ]; then
+            echo "installer smoke did not succeed (result=${{ needs.installer.result }})"
             exit 1
           fi
