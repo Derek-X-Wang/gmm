@@ -86,13 +86,30 @@ pub enum InstanceLockError {
     },
 }
 
+/// How many times to re-try a contended lock file before believing the
+/// contention, and how long to wait between attempts.
+///
+/// On Windows the "someone else has this file" signal is
+/// `ERROR_SHARING_VIOLATION`, and a live GMM is not the only thing that
+/// produces it: an antivirus scanning the file it just watched us create
+/// holds a handle for a few milliseconds and yields exactly the same
+/// error. `core::av` exists because AV interference is a real, reported
+/// problem for this app, so treating the first violation as proof of a
+/// second instance would turn a transient scan into "GMM won't start".
+///
+/// A real second instance holds the lock for its entire lifetime, so it
+/// is still refused — just ~300 ms later. A scan is long gone by then.
+const ACQUIRE_ATTEMPTS: u32 = 4;
+const ACQUIRE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Try to become the single GMM instance for `data_dir`.
 ///
 /// Creates `data_dir` if it does not exist — startup calls this before
 /// anything else, so it cannot assume the directory is already there.
 ///
 /// Returns [`InstanceLockError::AlreadyRunning`] if another live process
-/// holds the lock. Never blocks.
+/// holds the lock. Blocks for at most
+/// `ACQUIRE_ATTEMPTS * ACQUIRE_RETRY_DELAY` before concluding that.
 pub fn acquire(data_dir: &Path) -> Result<InstanceLock, InstanceLockError> {
     std::fs::create_dir_all(data_dir).map_err(|source| InstanceLockError::Io {
         path: data_dir.to_path_buf(),
@@ -100,9 +117,21 @@ pub fn acquire(data_dir: &Path) -> Result<InstanceLock, InstanceLockError> {
     })?;
 
     let path = data_dir.join(LOCK_FILE_NAME);
-    let file = open_exclusive(&path)?;
 
-    Ok(InstanceLock { _file: file, path })
+    for attempt in 1..=ACQUIRE_ATTEMPTS {
+        match open_exclusive(&path) {
+            Ok(file) => return Ok(InstanceLock { _file: file, path }),
+            // Only contention is worth retrying. A genuine I/O failure
+            // (bad path, no permission, read-only volume) will not fix
+            // itself, and retrying it just delays startup.
+            Err(InstanceLockError::AlreadyRunning { .. }) if attempt < ACQUIRE_ATTEMPTS => {
+                std::thread::sleep(ACQUIRE_RETRY_DELAY);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(InstanceLockError::AlreadyRunning { path })
 }
 
 #[cfg(unix)]

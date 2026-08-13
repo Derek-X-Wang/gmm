@@ -72,3 +72,56 @@ fn a_leftover_lock_file_from_a_crashed_instance_does_not_wedge_startup() {
 
     let _lock = instance_lock::acquire(tmp.path()).expect("a stale lock file is not a held lock");
 }
+
+/// Contention is retried briefly before it is believed.
+///
+/// On Windows the "someone has this file" error is indistinguishable
+/// from an antivirus holding a handle for a few milliseconds while it
+/// scans, and `core::av` exists because AV interference is a real,
+/// reported problem for GMM. If a transient scan were taken as proof of
+/// a second instance, the symptom would be "GMM sometimes won't start"
+/// — the worst possible failure for a gate whose only job is to be
+/// invisible.
+///
+/// Asserted from the caller's side: a lock released partway through the
+/// retry window is still acquired, rather than the call having failed
+/// on the first attempt.
+#[test]
+fn a_lock_released_during_the_retry_window_is_still_acquired() {
+    let tmp = TempDir::new().expect("tmp");
+    let held = instance_lock::acquire(tmp.path()).expect("first holder");
+
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        drop(held);
+    });
+
+    // Overlaps the holder at call time; only succeeds if `acquire` waits.
+    let _second = instance_lock::acquire(tmp.path())
+        .expect("a lock freed inside the retry window should be acquired, not reported as taken");
+
+    releaser.join().expect("releaser thread");
+}
+
+/// ...but the retry window is bounded. A GMM that really is running
+/// holds its lock for its whole lifetime, so the second launch has to
+/// give up rather than hang on the splash screen.
+#[test]
+fn a_lock_held_throughout_is_refused_promptly() {
+    let tmp = TempDir::new().expect("tmp");
+    let _held = instance_lock::acquire(tmp.path()).expect("first holder");
+
+    let started = std::time::Instant::now();
+    let result = instance_lock::acquire(tmp.path());
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(result, Err(InstanceLockError::AlreadyRunning { .. })),
+        "a continuously held lock must still be refused, got {result:?}",
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "refusing took {elapsed:?} — the retry window must stay short enough \
+         that a user does not think the app hung",
+    );
+}
