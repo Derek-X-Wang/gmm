@@ -1231,7 +1231,15 @@ impl Core {
             }
 
             match resolve_link(&link) {
-                Some(actual) if same_path(&actual, &expected_target) => {
+                // Pointing at the right place is necessary but not
+                // sufficient: a junction whose target directory has been
+                // deleted still resolves to the expected path string.
+                // Reporting that as healthy would leave the UI showing
+                // an enabled mod the game cannot load, with nothing
+                // anywhere saying otherwise.
+                Some(actual)
+                    if same_path(&actual, &expected_target) && expected_target.exists() =>
+                {
                     result.healthy.push(id);
                 }
                 _ => {

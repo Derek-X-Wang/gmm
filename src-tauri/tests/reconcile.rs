@@ -167,3 +167,52 @@ async fn rebuild_skips_disabled_mods() {
     assert_eq!(result.skipped.as_slice(), &[disabled.id]);
     assert!(!game_mods.join("Disabled Mod").exists());
 }
+
+/// A junction that still points where the DB says, but whose target
+/// directory has been deleted, is **not** healthy.
+///
+/// Found by `tests/ntfs_windows.rs` on the Windows runner: reconcile
+/// compared the junction's recorded target against the DB and stopped
+/// there, so a Library copy deleted by the user (or moved by a sync
+/// tool, or on an unmounted drive) still reported healthy. The UI would
+/// show the mod enabled while the game loaded nothing, with no
+/// diagnostic anywhere.
+///
+/// Kept here as well as the Windows suite because the classification
+/// logic is platform-independent — this fails in seconds on Linux
+/// rather than minutes into the Windows matrix.
+#[tokio::test]
+async fn a_junction_whose_target_was_deleted_is_not_healthy() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, _, game_mods) = fresh_core(&tmp).await;
+
+    let fixture = tmp.path().join("fixture/Vanishing");
+    let m = adopt_and_enable(&core, &game_mods, &fixture, "Vanishing Mod").await;
+
+    // Precondition: a clean reconcile calls it healthy.
+    let before = core
+        .reconcile_junctions(GameCode::Gimi, &game_mods)
+        .await
+        .expect("reconcile before");
+    assert!(
+        before.healthy.contains(&m.id),
+        "precondition: mod should start healthy, got {before:?}",
+    );
+
+    // The user deletes the Library copy by hand.
+    fs::remove_dir_all(&m.library_path).expect("remove library copy");
+
+    let after = core
+        .reconcile_junctions(GameCode::Gimi, &game_mods)
+        .await
+        .expect("reconcile after");
+
+    assert!(
+        !after.healthy.contains(&m.id),
+        "a mod whose Library copy is gone must not be healthy, got {after:?}",
+    );
+    assert!(
+        after.conflicting.iter().any(|c| c.mod_id == m.id),
+        "it should be surfaced as conflicting so the UI can prompt, got {after:?}",
+    );
+}
