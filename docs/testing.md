@@ -1,7 +1,16 @@
 # Testing patterns
 
-GMM ships two layers of automated coverage. Both run on macOS dev
-hosts so the same workflow works locally + in CI (Linux runner).
+GMM ships five layers of automated coverage. Layers 1–2 run anywhere;
+layers 3–5 are Windows-specific and exist so nobody has to sit at a
+Windows box to know whether a change works.
+
+| Layer | Where it runs | What it proves |
+|---|---|---|
+| 1. Core integration | any host | business logic against a temp SQLite + Library |
+| 2. IPC contract | any host | Tauri command wire shapes (serde) |
+| 3. Frontend component | any host (jsdom) | React state machines + gating |
+| 4. Windows-gated Rust | Windows CI | junctions, registry, loader FFI, full vertical |
+| 5. Installer smoke | Windows CI | the MSI a user actually downloads |
 
 ## 1. Core integration tests (`src-tauri/tests/*.rs`)
 
@@ -78,23 +87,122 @@ as a `pub const` in `commands.rs` and assert against it in the test.
 That way the wire copy can't drift without a corresponding test
 update.
 
+## 3. Frontend component tests (`src/**/*.test.{ts,tsx}`)
+
+vitest + `@testing-library/react` under jsdom. The whole `./api` module
+is mocked per test file, so nothing reaches a real backend — a test that
+accidentally invokes for real hits the 5 s timeout instead of hanging.
+
+Use the shared harness so TanStack Query is wired with retries off
+(a rejected mutation surfaces immediately instead of backing off):
+
+```tsx
+import { renderWithQuery } from "./test/harness";
+
+vi.mock("./api", () => ({ markOnboardingComplete: (...a) => spy(...a) }));
+
+it("gates Continue on the AV acknowledgement", async () => {
+  renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+  expect(screen.getByRole("button", { name: /continue/i })).toBeDisabled();
+  await userEvent.click(await screen.findByRole("checkbox"));
+  expect(screen.getByRole("button", { name: /continue/i })).toBeEnabled();
+});
+```
+
+Anything rendered behind a query (`guidance.data ? … : "Loading…"`) needs
+`findBy*`, not `getBy*` — the element does not exist on first paint.
+
+## 4. Windows-gated Rust tests
+
+Files that open with `#![cfg(windows)]` compile away everywhere else and
+run only on the `windows-latest` CI matrix entry:
+
+- `tests/session_smoke.rs` — per-game session round-trips
+- `tests/e2e_windows.rs` — the **full vertical** against a fake game
+  install (detect → importer install → adopt → junction → launch →
+  inject → lock → teardown)
+- `tests/registry_windows.rs` — real `HKCU` uninstall entries driving
+  `detect_from_registry`, cleaned up by a `Drop` guard
+
+The fake-game fixture reuses the crates slices 4a/4b already built:
+`victim.exe` becomes `GenshinImpact.exe` (it creates a real window, so
+the CBT hook fires) and `noop_dll.dll` becomes `d3d11.dll` (it exports
+`CBTProc`, which is the symbol 3dmloader resolves). That is why an
+end-to-end injection test is possible without shipping a gacha game to
+a CI runner.
+
+**These need `cargo build --workspace` first** — they shell out to
+`target/debug/victim.exe` and `noop_dll.dll`. CI orders the steps
+accordingly.
+
+### Checking Windows code from a non-Windows host
+
+`cargo check` on macOS/Linux silently skips every `cfg(windows)` file,
+so a typo in one of them would only surface after an ~8 minute CI round
+trip. [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin) fixes
+that — it downloads the MSVC headers/libs and cross-compiles locally:
+
+```bash
+cargo install cargo-xwin
+rustup target add x86_64-pc-windows-msvc
+
+cd src-tauri
+cargo xwin clippy --workspace --all-targets \
+    --target x86_64-pc-windows-msvc -- -D warnings
+```
+
+This compiles the Windows-only test binaries and catches type errors,
+missing imports, and clippy lints that the host build never sees. It
+cannot *run* them — that still needs the Windows runner — but it turns
+"push and wait 8 minutes" into a ~30 second local loop.
+
+## 5. Installer smoke (`.github/scripts/installer-smoke.ps1`)
+
+Runs in its own `installer` CI job. Builds the real MSI, installs it
+silently, launches the installed exe, and asserts the app reached a
+working state:
+
+1. `msiexec /i /quiet` exits 0
+2. the installed `GMM.exe` exists
+3. launching it creates `%APPDATA%\GMM\gmm.db` (migrations ran)
+4. it creates `%APPDATA%\GMM\logs\*.log` (tracing up)
+5. the process survives startup (no crash loop)
+6. the seeded DB contains all six game codes
+7. `msiexec /x` uninstalls cleanly
+
+On failure it dumps the msiexec verbose log, GMM's own JSON logs, and
+recent Application event-log errors — so a Windows-less maintainer can
+still diagnose from the CI output. Artifacts are uploaded too.
+
+This is the layer that would have caught a broken bundle, a missing
+WebView2 dependency, or a migration that fails on a clean machine.
+
 ## Running the suite
 
 ```bash
 cd src-tauri
 cargo fmt --check
-cargo clippy --all-targets --no-deps -- -D warnings
-cargo test                # all integration tests
+cargo clippy --workspace --all-targets --no-deps -- -D warnings
+cargo build --workspace       # required before the Windows-gated tests
+cargo test --workspace
 cargo test --test conflicts   # one file at a time when iterating
 ```
 
-Frontend type-check + build:
+Frontend:
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm tsc --noEmit
+pnpm test                     # vitest
 pnpm build
 ```
 
-CI gates merge on all six commands above. The AFK runner runs them
-locally before pushing; you should too.
+Windows-only, from a Windows host:
+
+```bash
+cargo xtask test-loader       # 3dmloader FFI smoke
+```
+
+CI gates merge on all of the above plus the installer smoke. The AFK
+runner runs the host-runnable ones before pushing; you should too, and
+add `cargo xwin clippy` when you touch anything `cfg(windows)`.

@@ -66,7 +66,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# Registry-backed detection tests write fake HKCU uninstall entries.
+winreg = "0.55"
+
 [dev-dependencies]
+base64 = "0.22"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
