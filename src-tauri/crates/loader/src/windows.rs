@@ -62,9 +62,9 @@
 //! `PathBuf`) or borrowed `&Path` / `&str`. No raw pointers cross the
 //! public API boundary.
 
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 
@@ -165,9 +165,13 @@ impl Loader {
     /// until a specific target process has loaded the DLL, then drop the
     /// session to remove the hook.
     pub fn hook(&self, dll_to_inject: &Path) -> Result<HookSession<'_>, Error> {
+        // Expand to the long form up front. WaitForInjection compares
+        // this exact string against the module paths Windows reports,
+        // and Windows always reports long form — see `to_long_path`.
+        let dll_to_inject = to_long_path(dll_to_inject);
         let dll_wide =
             to_wide_nul(dll_to_inject.as_os_str()).ok_or_else(|| Error::InvalidPath {
-                path: dll_to_inject.to_path_buf(),
+                path: dll_to_inject.clone(),
             })?;
 
         let mut hook: HHOOK = ptr::null_mut();
@@ -188,7 +192,7 @@ impl Loader {
             loader: self.inner.clone(),
             hook,
             mutex,
-            dll_path: dll_to_inject.to_path_buf(),
+            dll_path: dll_to_inject,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -196,8 +200,11 @@ impl Loader {
     /// Inject `dll_path` directly into the process with `pid`, without
     /// installing a CBT hook. Used by harnesses that already have a PID.
     pub fn inject(&self, pid: u32, dll_path: &Path) -> Result<(), Error> {
+        // Same long-path normalisation as `hook` — callers may verify
+        // the result against the target's module list.
+        let dll_path = to_long_path(dll_path);
         let dll_wide = to_wide_nul(dll_path.as_os_str()).ok_or_else(|| Error::InvalidPath {
-            path: dll_path.to_path_buf(),
+            path: dll_path.clone(),
         })?;
 
         // SAFETY: `dll_wide` lives for the call.
@@ -314,4 +321,109 @@ fn to_wide_nul(s: &OsStr) -> Option<Vec<u16>> {
     }
     wide.push(0);
     Some(wide)
+}
+
+/// Expand a path to its **long** (non-8.3) form.
+///
+/// `WaitForInjection` verifies injection by walking the target
+/// process's module list and doing a literal `_wcsicmp` of each
+/// module's `szExePath` against the DLL path we handed to
+/// `HookLibrary` — no normalisation on either side. Windows reports
+/// module paths in long form, so passing a short path (`C:\PROGRA~1\…`,
+/// or any profile directory whose name exceeds 8 characters, e.g.
+/// `C:\Users\RUNNER~1\…`) makes that comparison fail forever. The
+/// injection itself succeeds; only the verification never fires, so the
+/// caller sits until the timeout and then reports a failure that did
+/// not happen.
+///
+/// Paths already in long form come back unchanged, so this is safe to
+/// apply unconditionally. If the expansion fails for any reason we fall
+/// back to the input rather than erroring — a wrong-but-present path is
+/// no worse than what we had before.
+fn to_long_path(path: &Path) -> PathBuf {
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    let Some(wide) = to_wide_nul(path.as_os_str()) else {
+        return path.to_path_buf();
+    };
+
+    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer alive for the
+    // call. Passing a null output buffer with length 0 is the
+    // documented way to ask for the required length.
+    let needed = unsafe { GetLongPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return path.to_path_buf();
+    }
+
+    let mut buf = vec![0u16; needed as usize];
+    // SAFETY: `buf` has room for `needed` code units including the
+    // terminator, which is exactly what the probe above asked for.
+    let written = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), needed) };
+    // The probe counts the NUL terminator; this call does not. Anything
+    // else means the path changed underneath us — fall back to the input.
+    if written == 0 || written >= needed {
+        return path.to_path_buf();
+    }
+
+    buf.truncate(written as usize);
+    PathBuf::from(OsString::from_wide(&buf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_long_path;
+    use std::path::{Path, PathBuf};
+
+    /// A path already in long form must survive unchanged — this runs on
+    /// every hook/inject call, so a mangling bug here would break
+    /// injection everywhere rather than only on 8.3 paths.
+    #[test]
+    fn long_paths_pass_through_unchanged() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let file = tmp.path().join("some-file.dll");
+        std::fs::write(&file, b"MZ").expect("write");
+
+        // Resolve the tempdir through the same API so the comparison is
+        // against the OS's own long form, not whatever TempDir handed us.
+        let expected = to_long_path(&file);
+        assert_eq!(
+            to_long_path(&expected),
+            expected,
+            "to_long_path must be idempotent",
+        );
+    }
+
+    /// The 8.3 short form of a path must expand back to the long form.
+    /// This is the case that silently broke WaitForInjection: Windows
+    /// reports module paths in long form, so a short path never matches.
+    #[test]
+    fn short_paths_expand_to_long_form() {
+        // "Program Files" is guaranteed to exist and to have an 8.3
+        // alias on every stock Windows install.
+        let long = PathBuf::from(r"C:\Program Files");
+        if !long.exists() {
+            return; // non-standard image; nothing to assert
+        }
+        let short = Path::new(r"C:\PROGRA~1");
+        if !short.exists() {
+            return; // 8.3 name creation disabled on this volume
+        }
+
+        let expanded = to_long_path(short);
+        assert!(
+            expanded
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&long.to_string_lossy()),
+            "expected {short:?} to expand to {long:?}, got {expanded:?}",
+        );
+    }
+
+    /// A path that doesn't exist can't be expanded; we must return it
+    /// unchanged rather than erroring, so the caller still gets a
+    /// sensible message from the loader instead of a path error.
+    #[test]
+    fn missing_paths_fall_back_to_the_input() {
+        let missing = Path::new(r"C:\this\does\not\exist\anywhere\d3d11.dll");
+        assert_eq!(to_long_path(missing), missing.to_path_buf());
+    }
 }

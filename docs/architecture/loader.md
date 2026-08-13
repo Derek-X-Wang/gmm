@@ -52,6 +52,34 @@ All four return `0` on success. The upstream library does not publish a stable e
 | 300    | DLL missing the entry point upstream expects |
 | 400    | failed to install the CBT hook |
 
+### Paths must be in long (non-8.3) form
+
+`WaitForInjection` confirms success by walking the target process's
+module list and doing a literal comparison against the DLL path handed
+to `HookLibrary`:
+
+```c
+if (!_wcsicmp(me.szExePath, module)) {
+```
+
+No normalisation on either side. Windows reports module paths in **long**
+form, so passing a short 8.3 path — `C:\PROGRA~1\…`, or any user profile
+whose name exceeds 8 characters (`C:\Users\RUNNER~1\…`) — makes that
+comparison fail forever. The injection itself still succeeds; only the
+verification never fires, so the caller blocks for the full timeout and
+then reports a failure that did not happen.
+
+`Loader::hook` and `Loader::inject` therefore run every DLL path through
+`to_long_path` (`GetLongPathNameW`) before it crosses the FFI boundary.
+Already-long paths pass through unchanged, and an expansion failure falls
+back to the input rather than erroring.
+
+This was found by `tests/e2e_windows.rs` — the fake game install lives
+under a `TempDir`, and GitHub's Windows runners have an 8.3-shortened
+profile directory.
+
+### `HookLibrary`'s first argument
+
 `HookLibrary`'s first argument is **the DLL to inject**, not a window class. 3dmloader watches all window creations in every process; when a window appears, it `LoadLibraryW`'s the configured DLL inside that process. `WaitForInjection` then blocks until the DLL has loaded into a process whose name matches `target_process_name` (substring match).
 
 ## Argument lifetimes
