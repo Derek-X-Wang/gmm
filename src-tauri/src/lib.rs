@@ -118,6 +118,7 @@ pub fn run() {
             commands::reconcile_junctions,
             commands::rebuild_junctions,
             commands::get_library_paths,
+            commands::audit_library,
             commands::set_library_root,
             commands::set_library_path_for_game,
             commands::fetch_latest_importer_release,

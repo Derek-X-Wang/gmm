@@ -15,6 +15,7 @@ pub mod games;
 pub mod importer;
 pub mod instance_lock;
 pub mod junction;
+pub mod library_audit;
 pub mod mod_updates;
 pub mod mods;
 pub mod network;
@@ -37,6 +38,7 @@ use ulid::Ulid;
 
 pub use error::{Error, Result};
 pub use games::GameCode;
+pub use library_audit::{LibraryAuditReport, UnreferencedLibraryDir};
 pub use mods::{Mod, Source};
 pub use session::SessionInfo;
 pub use zip_import::ImportZipOptions;
