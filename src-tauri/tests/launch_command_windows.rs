@@ -16,9 +16,8 @@
 //! 3dmloader resolves). Cargo runs these tests concurrently, so each one
 //! drives a different Game, and therefore a different executable name —
 //! the process-snapshot assertions would otherwise see another test's
-//! children. Every Game here is Hook mode, the mode all six ship except
-//! EFMI; `Loader::inject` refuses this fixture (status 500), so the
-//! Inject path stays uncovered.
+//! children. The suite covers both loader modes, including EFMI's direct
+//! `Inject` path against the same valid LoadLibraryW target.
 //!
 //! Windows-only: the Loader FFI, the CBT hook, and the PE fixtures all
 //! require it. The whole file compiles away elsewhere. The pre-spawn
@@ -284,6 +283,56 @@ async fn launches_a_session_then_the_watcher_tears_it_down_when_the_game_exits()
         !runtime.has_session(),
         "the watcher drops the live session (unhooking via RAII)",
     );
+}
+
+/// EFMI is the only shipped profile that injects directly by PID. Keep
+/// that production branch covered with the real pinned loader and PE
+/// fixtures, rather than assuming the Hook-mode happy path represents it.
+#[tokio::test(flavor = "multi_thread")]
+async fn launches_an_efmi_session_via_direct_injection() {
+    const EXE: &str = "Endfield-Win64-Shipping.exe";
+
+    let tmp = TempDir::new().expect("tmp");
+    let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
+    let core = fresh_core(tmp.path()).await;
+    core.set_game_install_path(GameCode::Efmi, &install)
+        .await
+        .expect("persist install path");
+
+    let app = mock_app();
+    let events = EventLog::attach(&app);
+    let runtime = SessionRuntime::new();
+
+    let outcome = launch::launch(
+        app.handle(),
+        &core,
+        &runtime,
+        GameCode::Efmi,
+        &fast_options(),
+    )
+    .await
+    .expect("launch against the fake Endfield install");
+
+    assert_eq!(outcome.info.game, GameCode::Efmi);
+    assert_ne!(outcome.info.pid, 0, "the session must carry a real pid");
+    assert_eq!(
+        core.session_info().await.expect("session info"),
+        Some(outcome.info.clone()),
+        "direct injection must claim the Game Session",
+    );
+    assert!(runtime.has_session(), "the live session must be installed");
+    assert_eq!(events.names(), vec![SESSION_STARTED_EVENT]);
+
+    kill_pid(outcome.info.pid);
+    outcome.watcher.await.expect("watcher must not panic");
+
+    assert_eq!(
+        events.names(),
+        vec![SESSION_STARTED_EVENT, SESSION_ENDED_EVENT],
+    );
+    assert_eq!(core.session_info().await.expect("session info"), None);
+    assert!(!runtime.has_session());
+    assert_no_process_named(EXE);
 }
 
 /// A game that dies during startup: the injection wait can never

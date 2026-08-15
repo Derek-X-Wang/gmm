@@ -79,11 +79,15 @@ mod test_loader {
 
     #[cfg(windows)]
     mod windows_impl {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
         use std::path::Path;
         use std::process::{Child, Command, Stdio};
         use std::time::{Duration, Instant};
 
         use gmm_loader::Loader;
+        use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
+        use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
         // 3dmloader does case-insensitive exact-filename match against
         // the running process's image name (per Injector.cpp's
@@ -91,6 +95,74 @@ mod test_loader {
         // .exe extension.
         const TARGET_PROCESS: &str = "victim.exe";
         const WAIT_TIMEOUT_SECS: i32 = 30;
+
+        type RawInject = unsafe extern "system" fn(u32, *const u16, i32) -> i32;
+
+        struct RawLoader(HMODULE);
+
+        impl Drop for RawLoader {
+            fn drop(&mut self) {
+                // SAFETY: the handle came from LoadLibraryW and this guard
+                // owns the matching FreeLibrary call.
+                unsafe {
+                    let _ = FreeLibrary(self.0);
+                }
+            }
+        }
+
+        fn wide_nul(value: &OsStr) -> Vec<u16> {
+            value.encode_wide().chain(std::iter::once(0)).collect()
+        }
+
+        /// Call the pinned DLL's export directly so the smoke test records
+        /// what timeout zero means empirically. This deliberately bypasses
+        /// the safe wrapper and is used only against a disposable victim.
+        fn raw_inject_status(
+            loader_dll: &Path,
+            pid: u32,
+            injected_dll: &Path,
+            timeout_secs: i32,
+        ) -> Result<i32, String> {
+            let loader_wide = wide_nul(loader_dll.as_os_str());
+            // SAFETY: loader_wide is NUL-terminated and remains alive for
+            // the call.
+            let handle = unsafe { LoadLibraryW(loader_wide.as_ptr()) };
+            if handle.is_null() {
+                return Err(format!(
+                    "load raw injector {}: {}",
+                    loader_dll.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let handle = RawLoader(handle);
+            // SAFETY: handle is a live DLL module and the byte string is
+            // NUL-terminated.
+            let symbol = unsafe { GetProcAddress(handle.0, c"Inject".as_ptr().cast()) }
+                .ok_or_else(|| "raw Inject export missing".to_string())?;
+            // SAFETY: the signature is the upstream Inject ABI. The vendored
+            // binary is pinned specifically so this smoke test catches drift.
+            let inject = unsafe {
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, RawInject>(symbol)
+            };
+            let dll_wide = wide_nul(injected_dll.as_os_str());
+            // SAFETY: dll_wide is live for the call, pid names a disposable
+            // victim, and timeout_secs is the upstream timeout in seconds.
+            Ok(unsafe { inject(pid, dll_wide.as_ptr(), timeout_secs) })
+        }
+
+        fn spawn_victim(victim_exe: &Path) -> Result<Child, String> {
+            Command::new(victim_exe)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("spawn victim: {e}"))
+        }
+
+        fn kill_and_reap(victim: &mut Child) {
+            let _ = victim.kill();
+            let _ = victim.wait();
+        }
 
         pub fn run(workspace: &Path, vendor_dll: &Path) -> Result<(), String> {
             let target_dir = workspace.join("target");
@@ -112,6 +184,28 @@ mod test_loader {
             // Load 3dmloader.dll
             let loader = Loader::load(vendor_dll).map_err(|e| format!("load loader: {e}"))?;
 
+            // Pin down the failure mode against the exact v0.8.8 binary we
+            // ship. A zero timeout returns before the remote LoadLibraryW
+            // thread completes and upstream reports status 500.
+            let mut zero_timeout_victim = spawn_victim(&victim_exe)?;
+            std::thread::sleep(Duration::from_millis(300));
+            let zero_status = raw_inject_status(vendor_dll, zero_timeout_victim.id(), &noop_dll, 0);
+            kill_and_reap(&mut zero_timeout_victim);
+            let zero_status = zero_status?;
+            if zero_status != 500 {
+                return Err(format!(
+                    "Inject(timeout_secs=0) returned {zero_status}, expected pinned v0.8.8 status 500"
+                ));
+            }
+
+            // The public wrapper must use a real timeout and complete the
+            // same injection successfully.
+            let mut direct_victim = spawn_victim(&victim_exe)?;
+            std::thread::sleep(Duration::from_millis(300));
+            let direct_result = loader.inject(direct_victim.id(), &noop_dll);
+            kill_and_reap(&mut direct_victim);
+            direct_result.map_err(|e| format!("direct inject: {e}"))?;
+
             // Install the hook before spawning victim — the CBT hook must
             // be in place when victim's window is created.
             let session = loader
@@ -119,12 +213,7 @@ mod test_loader {
                 .map_err(|e| format!("install hook: {e}"))?;
 
             // Spawn victim.
-            let mut victim: Child = Command::new(&victim_exe)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| format!("spawn victim: {e}"))?;
+            let mut victim = spawn_victim(&victim_exe)?;
 
             // Wait for injection.
             let inject_result = session.wait_for_injection(TARGET_PROCESS, WAIT_TIMEOUT_SECS);

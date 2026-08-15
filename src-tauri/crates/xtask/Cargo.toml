@@ -13,3 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 gmm-loader = { path = "../loader" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }
