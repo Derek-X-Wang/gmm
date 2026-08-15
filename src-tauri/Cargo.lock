@@ -6586,6 +6586,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "gmm-loader",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
