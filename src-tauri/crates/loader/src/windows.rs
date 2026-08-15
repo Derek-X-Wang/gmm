@@ -16,14 +16,13 @@
 //!
 //! int Inject(DWORD   target_pid,
 //!            LPCWSTR dll_path,
-//!            int     flags);
+//!            int     timeout_secs);
 //! ```
 //!
 //! `HookLibrary` installs a CBT hook that watches for windows being created
 //! in *any* process; when a window appears, 3dmloader calls
-//! `LoadLibraryW(dll_to_inject_path)` inside that process. The status
-//! integers we surface verbatim through [`Error::NonZeroStatus`]; XXMI's
-//! Python wrapper documents the meaningful ones:
+//! `LoadLibraryW(dll_to_inject_path)` inside that process. Its status codes
+//! are:
 //!
 //! | status | meaning |
 //! |-------:|---------|
@@ -32,6 +31,29 @@
 //! | 200    | failed to LoadLibraryW the supplied DLL |
 //! | 300    | DLL missing the entry point upstream expects |
 //! | 400    | failed to install the CBT hook |
+//!
+//! `Inject` starts a remote `LoadLibraryW` thread and waits up to the supplied
+//! timeout. Its status table is separate from `HookLibrary`'s:
+//!
+//! | status | meaning |
+//! |-------:|---------|
+//! | 0      | success |
+//! | 100    | process not found or could not be opened |
+//! | 110    | invalid DLL path |
+//! | 120    | failed to resolve kernel32 |
+//! | 130    | failed to resolve LoadLibraryW |
+//! | 200    | VirtualAllocEx failed |
+//! | 300    | WriteProcessMemory failed |
+//! | 400    | CreateRemoteThread failed |
+//! | 500    | injection thread timed out |
+//! | 510    | waiting for the injection thread failed |
+//! | 600    | LoadLibraryW returned NULL |
+//! | 700    | unknown failure |
+//!
+//! The upstream default is 15 seconds. Passing zero makes the wait time out
+//! immediately after the remote thread starts; upstream then frees the DLL
+//! path buffer while that thread may still be reading it. [`Loader::inject`]
+//! therefore always supplies the non-zero upstream default.
 //!
 //! `WaitForInjection` blocks until a process whose name contains
 //! `target_process_name` has loaded `dll_to_inject_path`, or until
@@ -84,6 +106,11 @@ type FnHookLibrary = unsafe extern "system" fn(LPCWSTR, *mut HHOOK, *mut HANDLE)
 type FnWaitForInjection = unsafe extern "system" fn(LPCWSTR, LPCWSTR, i32) -> i32;
 type FnUnhookLibrary = unsafe extern "system" fn(*mut HHOOK, *mut HANDLE) -> i32;
 type FnInject = unsafe extern "system" fn(DWORD, LPCWSTR, i32) -> i32;
+
+/// Match the default in XXMI-Libs-Package v0.8.8 and XXMI Launcher's
+/// `dll_injector.py`. Zero is unsafe: status 500 frees the remote path buffer
+/// before the live LoadLibraryW thread is guaranteed to have finished.
+const INJECT_TIMEOUT_SECS: i32 = 15;
 
 struct LoadedDll {
     handle: HMODULE,
@@ -207,8 +234,11 @@ impl Loader {
             path: dll_path.clone(),
         })?;
 
-        // SAFETY: `dll_wide` lives for the call.
-        let status = unsafe { (self.inner.inject)(pid as DWORD, dll_wide.as_ptr(), 0) };
+        // SAFETY: `dll_wide` lives for the call. INJECT_TIMEOUT_SECS is the
+        // timeout in seconds, not flags; it keeps the buffer alive while the
+        // remote LoadLibraryW thread runs.
+        let status =
+            unsafe { (self.inner.inject)(pid as DWORD, dll_wide.as_ptr(), INJECT_TIMEOUT_SECS) };
         if status != 0 {
             return Err(Error::NonZeroStatus {
                 symbol: "Inject",
