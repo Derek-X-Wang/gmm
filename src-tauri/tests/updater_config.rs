@@ -128,6 +128,27 @@ fn bundle_identifier_and_product_name_are_stable() {
 }
 
 #[test]
+fn msi_upgrade_code_is_pinned_to_the_shipped_identity() {
+    let conf = tauri_conf();
+    let upgrade_code = conf
+        .get("bundle")
+        .and_then(|bundle| bundle.get("windows"))
+        .and_then(|windows| windows.get("wix"))
+        .and_then(|wix| wix.get("upgradeCode"))
+        .and_then(Value::as_str);
+
+    // This is the UUID Tauri derived for the original "GMM" productName.
+    // Changing or removing it makes Windows treat an update as a separate
+    // product: users get two Add/Remove Programs entries and two install
+    // directories that still share one %APPDATA%\GMM data directory.
+    assert_eq!(
+        upgrade_code,
+        Some("dd0ec6e6-1c70-5cb0-8601-4edd35c6d33e"),
+        "bundle.windows.wix.upgradeCode is the MSI's stable upgrade identity",
+    );
+}
+
+#[test]
 fn updater_and_process_permissions_are_granted_to_the_main_window() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
     let raw = std::fs::read_to_string(&path).expect("read capabilities/default.json");
