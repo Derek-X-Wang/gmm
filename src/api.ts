@@ -164,6 +164,22 @@ export async function getLibraryPaths(): Promise<LibraryPaths> {
   return invoke<LibraryPaths>("get_library_paths");
 }
 
+export interface UnreferencedLibraryDir {
+  directoryName: string;
+  path: string;
+  sizeBytes: number | null;
+}
+
+export interface LibraryAuditReport {
+  game: GameCode;
+  unreferenced: UnreferencedLibraryDir[];
+  totalBytes: number;
+}
+
+export async function auditLibrary(game: GameCode): Promise<LibraryAuditReport> {
+  return invoke<LibraryAuditReport>("audit_library", { game });
+}
+
 export async function setLibraryRoot(path: string | null): Promise<MoveReport> {
   return invoke<MoveReport>("set_library_root", { path });
 }

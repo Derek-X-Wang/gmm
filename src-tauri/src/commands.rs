@@ -21,7 +21,9 @@ use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
 use crate::core::updates::UpdateStatus;
 use crate::core::variants::Variant;
-use crate::core::{Core, GameCode, ImportZipOptions, Mod, MoveReport, SessionInfo};
+use crate::core::{
+    Core, GameCode, ImportZipOptions, LibraryAuditReport, Mod, MoveReport, SessionInfo,
+};
 use crate::runtime::launch::{self, LaunchOptions};
 use crate::runtime::SessionRuntime;
 use tauri::AppHandle;
@@ -231,6 +233,15 @@ pub async fn get_library_paths(core: State<'_, Core>) -> Result<LibraryPaths, St
         per_game_overrides,
         per_game_effective,
     })
+}
+
+/// Read-only Library consistency report consumed by the Settings warning.
+#[tauri::command]
+pub async fn audit_library(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<LibraryAuditReport, String> {
+    core.audit_library(game).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

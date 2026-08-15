@@ -53,6 +53,7 @@ import {
 } from "./api";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
+import { LibraryAuditWarning } from "./LibraryAuditWarning";
 import { checkInteractively, type UpdateState } from "./updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
@@ -942,6 +943,7 @@ function Settings({
       ) : null}
       {setPath.isError ? <p className="error">{String(setPath.error)}</p> : null}
       {detect.isError ? <p className="error">{String(detect.error)}</p> : null}
+      <LibraryAuditWarning game={game} />
       <RebuildJunctions game={game} />
     </section>
   );

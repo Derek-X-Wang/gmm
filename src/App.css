@@ -143,6 +143,31 @@ code {
   font-size: 0.85rem;
 }
 
+.library-audit-warning {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #92400e;
+  background: #2b2118;
+  border-radius: 8px;
+  color: #fbbf24;
+}
+
+.library-audit-warning p,
+.library-audit-warning ul {
+  margin: 0;
+}
+
+.library-audit-warning ul {
+  display: grid;
+  gap: 0.3rem;
+  padding-left: 1.2rem;
+}
+
+.library-audit-warning code {
+  overflow-wrap: anywhere;
+}
+
 .dropzone {
   border: 1.5px dashed #3a3a44;
   border-radius: 10px;

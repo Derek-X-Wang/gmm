@@ -34,7 +34,9 @@ use gmm_lib::core::games::GAME_PROFILES;
 use gmm_lib::core::reconcile::ReconcileResult;
 use gmm_lib::core::updates::UpdateStatus;
 use gmm_lib::core::variants::Variant;
-use gmm_lib::core::{Core, GameCode, ImportZipOptions, Mod, Source};
+use gmm_lib::core::{
+    Core, GameCode, ImportZipOptions, LibraryAuditReport, Mod, Source, UnreferencedLibraryDir,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
@@ -214,6 +216,35 @@ fn library_paths_response_uses_camel_case() {
     assert!(obj.contains_key("effectiveRoot"));
     assert!(obj.contains_key("perGameOverrides"));
     assert!(obj.contains_key("perGameEffective"));
+}
+
+#[test]
+fn library_audit_response_uses_camel_case() {
+    let report = LibraryAuditReport {
+        game: GameCode::Gimi,
+        unreferenced: vec![UnreferencedLibraryDir {
+            directory_name: "01ORPHAN".into(),
+            path: "/library/gimi/01ORPHAN".into(),
+            size_bytes: Some(42),
+        }],
+        total_bytes: 42,
+    };
+
+    let value = to_json(&report);
+    let object = value.as_object().expect("report object");
+    assert_eq!(object.get("game").and_then(Value::as_str), Some("gimi"));
+    assert_eq!(object.get("totalBytes").and_then(Value::as_u64), Some(42));
+    let directory = object
+        .get("unreferenced")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.first())
+        .and_then(Value::as_object)
+        .expect("directory object");
+    assert_eq!(
+        directory.get("directoryName").and_then(Value::as_str),
+        Some("01ORPHAN")
+    );
+    assert_eq!(directory.get("sizeBytes").and_then(Value::as_u64), Some(42));
 }
 
 #[test]

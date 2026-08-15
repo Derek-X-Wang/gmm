@@ -30,20 +30,19 @@
 //! states reconcile can name, "torn on disk, then reconcile fixes it" is
 //! the real guarantee, and it is what these tests assert.
 //!
-//! # Known limitations, deliberately not fixed here
+//! # Crash outcomes and their recovery surface
 //!
 //! Two torn states are *not* enabled-state violations and are not
-//! repaired. Both are asserted below as the behaviour they actually
-//! have, so that a future change to either is visible:
+//! repaired automatically. Both are asserted below as the behaviour
+//! they actually have, so that a future change to either is visible:
 //!
 //! * **Orphaned Library directory.** A crash after `adopt_folder` or
 //!   `import_zip` copies files into the Library but before the row is
-//!   inserted leaves bytes on disk that nothing references. Reconcile
-//!   walks Mod rows, so it cannot see them. The fix is a Library-side
-//!   sweep, and it should *report* rather than delete: the directory
-//!   holds the user's only copy of whatever they just imported, and
-//!   deleting user data to reclaim disk space is not a trade GMM should
-//!   make silently. Worth its own issue.
+//!   inserted leaves bytes on disk that nothing references. The
+//!   read-only Library audit sees that folder and Settings reports it;
+//!   neither path deletes or repairs it because it may hold the user's
+//!   only copy of the interrupted import. Inspect/delete/recovery actions
+//!   are deliberately deferred to issue #72.
 //!
 //! * **Missing Variant rows.** A crash between the row insert and
 //!   `detect_and_record_variants` leaves a Mod whose Library subtree has
@@ -315,9 +314,9 @@ async fn disable_crashing_after_the_junction_is_removed_recovers() {
 /// The enabled-state invariant is untouched — there is no row, so there
 /// is nothing to be inconsistent with. What is left is an orphaned
 /// Library directory that nothing references. Asserted as the known
-/// limitation it is; see the module docs.
+/// read-only audit now reports it; see the module docs.
 #[tokio::test]
-async fn adopt_crashing_after_the_library_copy_leaves_only_an_orphan() {
+async fn adopt_crashing_after_the_library_copy_reports_the_intact_orphan() {
     let env = TestEnv::new();
     let src = env.tmp.path().join("to-adopt");
     std::fs::create_dir_all(&src).expect("src");
@@ -343,22 +342,23 @@ async fn adopt_crashing_after_the_library_copy_leaves_only_an_orphan() {
         "no Mod row should exist — the insert never ran",
     );
 
-    // Known limitation: the bytes are still there and nothing will
-    // reclaim them. Asserted so that adding a Library sweep later fails
-    // this test and forces the docs above to be updated with it.
-    let game_lib = env.library.join("gimi");
-    let orphans: Vec<_> = std::fs::read_dir(&game_lib)
-        .map(|d| d.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after adopt crash");
     assert_eq!(
-        orphans.len(),
+        report.unreferenced.len(),
         1,
-        "expected exactly one orphaned Library directory, found {orphans:?}",
+        "the audit must report exactly the crashed adopt: {report:?}",
+    );
+    let orphan = &report.unreferenced[0];
+    assert!(
+        orphan.path.join("merged.ini").exists(),
+        "auditing must leave the user's only copy of the import intact",
     );
     assert!(
-        orphans[0].join("merged.ini").exists(),
-        "the orphan holds the user's only copy of the import — which is \
-         why a future sweep must report it rather than delete it",
+        orphan.size_bytes.is_some(),
+        "the reported orphan includes its size"
     );
 }
 
@@ -431,7 +431,7 @@ fn build_mod_zip(zip_path: &Path) {
 /// that `adopt_folder` does not, and that branch runs only on a returned
 /// error, never on a crash.
 #[tokio::test]
-async fn import_zip_crashing_after_extract_leaves_only_an_orphan() {
+async fn import_zip_crashing_after_extract_reports_the_intact_orphan() {
     let env = TestEnv::new();
     let zip = env.tmp.path().join("mod.zip");
     build_mod_zip(&zip);
@@ -456,17 +456,18 @@ async fn import_zip_crashing_after_extract_leaves_only_an_orphan() {
         "no Mod row should exist — the insert never ran",
     );
 
-    // Known limitation, pinned: the extracted bytes survive with nothing
-    // referencing them. The error path would have removed them; the
-    // crash path cannot.
-    let game_lib = env.library.join("gimi");
-    let orphans: Vec<_> = std::fs::read_dir(&game_lib)
-        .map(|d| d.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after zip crash");
     assert_eq!(
-        orphans.len(),
+        report.unreferenced.len(),
         1,
-        "expected exactly one orphaned Library directory, found {orphans:?}",
+        "the audit must report exactly the crashed ZIP import: {report:?}",
+    );
+    assert!(
+        report.unreferenced[0].path.join("Red/merged.ini").exists(),
+        "auditing must leave extracted Variant files intact",
     );
 }
 
