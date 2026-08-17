@@ -8,10 +8,10 @@ which is itself a fork of [`bo3b/3Dmigoto`](https://github.com/bo3b/3Dmigoto).
 
 | Field | Value |
 |------:|-------|
-| Upstream tag | `v0.8.8` |
-| Upstream commit | (see [release page](https://github.com/SpectrumQT/XXMI-Libs-Package/releases/tag/v0.8.8)) |
-| Released | 2026-03-28 |
-| `3dmloader.dll` SHA-256 | `e3d59eb9647ef7c884e97792b2c58107b2bc4d42f9fc07047f81be7d4b81aef7` |
+| Upstream tag | `v0.9.2` |
+| Upstream commit | (see [release page](https://github.com/SpectrumQT/XXMI-Libs-Package/releases/tag/v0.9.2)) |
+| Released | 2026-06-23 |
+| `3dmloader.dll` SHA-256 | `4ca7425c18881e9ebbce13ae22e7a3ca3843e526b9aa901d14f97953ca87f38b` |
 | File size | 20 480 bytes |
 
 The upstream `Manifest.json` is included alongside the DLL so the vendored binary's signature can be verified against what the project author published.
@@ -51,7 +51,7 @@ Per the GPLv3 distribution requirements (LICENSE.GPL.txt § 6):
 
 1. Clone the upstream repo at the pinned tag:
    ```bash
-   git clone --depth 1 --branch v0.8.8 \
+   git clone --depth 1 --branch v0.9.2 \
        https://github.com/SpectrumQT/XXMI-Libs-Package.git
    ```
 2. Open `XXMI-Libs-Package.sln` in Visual Studio 2022 (the upstream project uses MSVC).

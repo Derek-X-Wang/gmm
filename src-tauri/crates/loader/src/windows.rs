@@ -107,7 +107,7 @@ type FnWaitForInjection = unsafe extern "system" fn(LPCWSTR, LPCWSTR, i32) -> i3
 type FnUnhookLibrary = unsafe extern "system" fn(*mut HHOOK, *mut HANDLE) -> i32;
 type FnInject = unsafe extern "system" fn(DWORD, LPCWSTR, i32) -> i32;
 
-/// Match the default in XXMI-Libs-Package v0.8.8 and XXMI Launcher's
+/// Match the default in XXMI-Libs-Package v0.9.2 and XXMI Launcher's
 /// `dll_injector.py`. Zero is unsafe: status 500 frees the remote path buffer
 /// before the live LoadLibraryW thread is guaranteed to have finished.
 const INJECT_TIMEOUT_SECS: i32 = 15;
@@ -170,7 +170,7 @@ impl Loader {
             inner: Arc::new(LoadedDll {
                 handle,
                 // SAFETY: the function pointers' ABIs match upstream's
-                // exports — checked against `XXMI-Libs-Package` v0.8.8 and
+                // exports — checked against `XXMI-Libs-Package` v0.9.2 and
                 // its `dll_injector.py` consumer.
                 hook_library: unsafe {
                     std::mem::transmute::<*const (), FnHookLibrary>(hook_library)
