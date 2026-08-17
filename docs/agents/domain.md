@@ -20,7 +20,8 @@ If any of these files don't exist, **proceed silently**. Don't flag their absenc
 │   ├── 0001-gplv3-and-embed-3dmloader.md
 │   ├── 0002-standalone-reimplementation-not-fork.md
 │   ├── 0003-junctions-over-symlinks-and-copy.md
-│   └── 0004-conservative-auto-update-defaults.md
+│   ├── 0004-conservative-auto-update-defaults.md
+│   └── 0005-importer-origin-conduit-not-maintainer.md
 └── src/
 ```
 

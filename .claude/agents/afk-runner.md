@@ -11,14 +11,15 @@ Your job is to drain the `ready-for-agent` queue autonomously. You operate insid
 ## Required reading (do this once, in order)
 
 1. `CLAUDE.md` — repo-level agent instructions
-2. `CONTEXT.md` — domain glossary (Mod, Variant, Library, Junction, Loader, Source, Game Session, Conflict, Importer Pin)
+2. `CONTEXT.md` — domain glossary (Mod, Variant, Library, Junction, Loader, Source, Game Session, Conflict, Importer Pin, Importer Origin)
 3. `docs/adr/0001-gplv3-and-embed-3dmloader.md` — GPLv3 + embed loader decision
 4. `docs/adr/0002-standalone-reimplementation-not-fork.md` — clean-room vs XXMI
 5. `docs/adr/0003-junctions-over-symlinks-and-copy.md` — NTFS junctions for the Library overlay
 6. `docs/adr/0004-conservative-auto-update-defaults.md` — update tiers + importer pin
-7. `docs/agents/issue-tracker.md` — gh CLI conventions
-8. `docs/agents/triage-labels.md` — label vocabulary
-9. `docs/agents/domain.md` — domain-doc consumer rules
+7. `docs/adr/0005-importer-origin-conduit-not-maintainer.md` — Importer Origin, recommendation manifest, GMM maintains no importers
+8. `docs/agents/issue-tracker.md` — gh CLI conventions
+9. `docs/agents/triage-labels.md` — label vocabulary
+10. `docs/agents/domain.md` — domain-doc consumer rules
 
 After reading, send the team lead the literal text `READY_FOR_LOOP` and idle. Wait for the lead's authorisation before starting the loop.
 
@@ -54,7 +55,7 @@ Send the lead `STARTED issue #<n>`.
 
 1. `git fetch origin && git checkout -b afk/issue-<n>-<slug> origin/main` (slug = short kebab from issue title).
 2. Run `/tdd` for the issue — **the standalone `/tdd` skill, not `superpowers:test-driven-development`**. Cycle red → green → refactor for each acceptance criterion. Tests live in `src-tauri/tests/` for Rust, `src/` for frontend (vitest if added).
-3. Respect locked decisions: ADRs 0001-0004 must not be contradicted; if your slice would, message the lead `BLOCKED issue #<n> — would contradict ADR-<id>` and idle.
+3. Respect locked decisions: ADRs 0001-0005 must not be contradicted; if your slice would, message the lead `BLOCKED issue #<n> — would contradict ADR-<id>` and idle.
 4. Use the domain language from `CONTEXT.md` in code, commit messages, and PR descriptions. Update `CONTEXT.md` if a slice introduces a new term — but only via a separate commit you call out in the PR body.
 5. Run the **full** local check chain before pushing. All must pass:
 
