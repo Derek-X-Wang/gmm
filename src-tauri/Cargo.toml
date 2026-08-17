@@ -61,6 +61,10 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sha2 = "0.10"
 hex = "0.4"
+# Release-asset selection is an anchored pattern per Importer Origin
+# (#79). Patterns also arrive from the recommended-importers manifest
+# (ADR 0005), so they are compiled at runtime rather than baked in.
+regex = "1"
 gmm-loader = { path = "crates/loader" }
 
 [target.'cfg(unix)'.dependencies]

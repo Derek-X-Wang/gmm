@@ -104,9 +104,15 @@ pub struct GameProfile {
     pub code: GameCode,
     /// Human-readable name for tabs and copy.
     pub display_name: &'static str,
-    /// `(repo, asset_filter)` tuple matching the upstream Model
-    /// Importer release on GitHub. `None` until the per-game port
-    /// lands.
+    /// `(repo, asset_pattern)` naming the upstream Model Importer
+    /// release on GitHub. `None` until the per-game port lands.
+    ///
+    /// `asset_pattern` is an **anchored regular expression** compiled
+    /// through [`crate::core::importer::AssetPattern`], not a substring
+    /// (#79). Exactly one asset in the release must match it; zero and
+    /// two-or-more are both errors. These compiled-in patterns are the
+    /// bottom layer of ADR 0005's precedence — a recommended-importers
+    /// entry or the user's own origin carries its own pattern and wins.
     pub importer_repo: Option<(&'static str, &'static str)>,
     /// Game executable file names tried in order under the install
     /// directory. Empty `&[]` until the per-game port lands.
@@ -146,7 +152,10 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Gimi,
         display_name: "Genshin Impact",
-        importer_repo: Some(("SilentNightSound/GIMI-Package", "GIMI")),
+        importer_repo: Some((
+            "SilentNightSound/GIMI-Package",
+            r"GIMI-PACKAGE-v\d+\.\d+\.\d+\.zip",
+        )),
         executable_candidates: &["GenshinImpact.exe", "YuanShen.exe"],
         detect: Some(detect::genshin::detect),
         inject_mode: InjectMode::Hook,
@@ -154,7 +163,16 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Srmi,
         display_name: "Honkai: Star Rail",
-        importer_repo: Some(("SpectrumQT/SRMI-Package", "SRMI")),
+        // `SpectrumQT/SRMI-Package`'s only asset today is
+        // `SRMI-TEST-PACKAGE-v2.4.2.zip`, so this pattern **refuses to
+        // install** rather than silently shipping a build upstream
+        // labelled TEST. That is the recorded decision on #79, not an
+        // oversight: if that test package genuinely is the right one for
+        // Star Rail, widen this pattern deliberately.
+        importer_repo: Some((
+            "SpectrumQT/SRMI-Package",
+            r"SRMI-PACKAGE-v\d+\.\d+\.\d+\.zip",
+        )),
         executable_candidates: &["StarRail.exe"],
         detect: Some(detect::star_rail::detect),
         inject_mode: InjectMode::Hook,
@@ -162,7 +180,10 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Zzmi,
         display_name: "Zenless Zone Zero",
-        importer_repo: Some(("leotorrez/ZZMI-Package", "ZZMI")),
+        importer_repo: Some((
+            "leotorrez/ZZMI-Package",
+            r"ZZMI-PACKAGE-v\d+\.\d+\.\d+\.zip",
+        )),
         executable_candidates: &["ZenlessZoneZero.exe"],
         detect: Some(detect::zenless::detect),
         inject_mode: InjectMode::Hook,
@@ -170,7 +191,10 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Wwmi,
         display_name: "Wuthering Waves",
-        importer_repo: Some(("SpectrumQT/WWMI-Package", "WWMI")),
+        importer_repo: Some((
+            "SpectrumQT/WWMI-Package",
+            r"WWMI-PACKAGE-v\d+\.\d+\.\d+\.zip",
+        )),
         executable_candidates: &["Client-Win64-Shipping.exe"],
         detect: Some(detect::wuthering::detect),
         inject_mode: InjectMode::Hook,
@@ -178,7 +202,10 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Himi,
         display_name: "Honkai Impact 3rd",
-        importer_repo: Some(("leotorrez/HIMI-Package", "HIMI")),
+        importer_repo: Some((
+            "leotorrez/HIMI-Package",
+            r"HIMI-PACKAGE-v\d+\.\d+\.\d+\.zip",
+        )),
         executable_candidates: &["BH3.exe", "Bh3.exe"],
         detect: Some(detect::honkai_impact::detect),
         inject_mode: InjectMode::Hook,
@@ -186,7 +213,10 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Efmi,
         display_name: "Endfield",
-        importer_repo: Some(("SpectrumQT/EFMI-Package", "EFMI")),
+        importer_repo: Some((
+            "SpectrumQT/EFMI-Package",
+            r"EFMI-PACKAGE-v\d+\.\d+\.\d+\.zip",
+        )),
         executable_candidates: &["Endfield-Win64-Shipping.exe", "Endfield.exe"],
         detect: Some(detect::endfield::detect),
         inject_mode: InjectMode::Inject,

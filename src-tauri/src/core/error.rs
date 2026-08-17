@@ -66,6 +66,50 @@ pub enum Error {
     #[error("could not read the upstream release: {0}")]
     ReleaseMetadata(String),
 
+    /// The origin's release-asset pattern is not a valid regular
+    /// expression. Compiled-in patterns are covered by a test, but
+    /// patterns also arrive from the recommended-importers manifest and
+    /// from a user's own origin (ADR 0005), so this is reachable at
+    /// runtime.
+    #[error(
+        "the release-asset pattern {pattern:?} is not a valid regular expression: {message}. \
+         Fix the pattern for this Importer Origin."
+    )]
+    InvalidAssetPattern { pattern: String, message: String },
+
+    /// No asset in the release matched the origin's pattern.
+    ///
+    /// Deliberately an error and never an empty result: `"Libs"` matched
+    /// nothing in every `XXMI-Libs-Package` release ever published, and
+    /// `.ok().flatten()` turned that into "up to date" for the entire
+    /// life of the Loader update check (#78).
+    #[error(
+        "no asset in release {release} matched the pattern {pattern:?}. \
+         That release publishes: {candidates}. Either upstream renamed its assets \
+         or this Importer Origin's pattern is wrong."
+    )]
+    ReleaseAssetNoMatch {
+        release: String,
+        pattern: String,
+        candidates: String,
+    },
+
+    /// More than one asset matched, so there is no single right answer.
+    ///
+    /// Never "first match wins": picking by release order is exactly how
+    /// `SRMI-TEST-PACKAGE-v2.4.2.zip` would have been chosen over a real
+    /// package had both existed (#79).
+    #[error(
+        "{count} assets in release {release} matched the pattern {pattern:?} ({matches}), \
+         but exactly one must match. Narrow the pattern for this Importer Origin."
+    )]
+    ReleaseAssetAmbiguous {
+        release: String,
+        pattern: String,
+        matches: String,
+        count: usize,
+    },
+
     #[error("network error: {0}")]
     Network(String),
 

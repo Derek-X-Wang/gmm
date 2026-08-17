@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::core::av;
 use crate::core::conflicts::ConflictReport;
 use crate::core::diagnostics;
-use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
+use crate::core::importer::{self, AssetPattern, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
@@ -338,8 +338,8 @@ pub async fn check_importer_update(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<UpdateStatus, String> {
-    let (repo, filter) = importer_repo_for(game)?;
-    core.check_importer_update(game, repo, filter)
+    let (repo, pattern) = importer_repo_for(game)?;
+    core.check_importer_update(game, repo, pattern)
         .await
         .map_err(|e| e.to_string())
 }
@@ -416,7 +416,8 @@ pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> Result<(
         .map_err(|e| e.to_string())
 }
 
-/// Resolve the GitHub repo + asset filter for a Game's importer.
+/// Resolve the GitHub repo + release-asset pattern for a Game's
+/// importer.
 ///
 /// Dispatch goes through `core::games::GameProfile` so a new per-game
 /// port (slices #16–#20) only needs to fill in the registry row in
@@ -431,14 +432,25 @@ fn importer_repo_for(game: GameCode) -> Result<(&'static str, &'static str), Str
     })
 }
 
+/// Compile the Game's release-asset pattern (#79). A pattern that does
+/// not compile is a build defect for the compiled-in origins — the
+/// `every_shipped_asset_pattern_compiles` test guards that — but ADR
+/// 0005 lets a pattern arrive from a manifest or the user, so the
+/// failure is surfaced rather than unwrapped.
+fn asset_pattern_for(game: GameCode) -> Result<(&'static str, AssetPattern), String> {
+    let (repo, pattern) = importer_repo_for(game)?;
+    let pattern = AssetPattern::new(pattern).map_err(|e| e.to_string())?;
+    Ok((repo, pattern))
+}
+
 #[tauri::command]
 pub async fn fetch_latest_importer_release(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<Option<LatestRelease>, String> {
-    let (repo, filter) = importer_repo_for(game)?;
+    let (repo, pattern) = asset_pattern_for(game)?;
     let client = core.http_client().await.map_err(|e| e.to_string())?;
-    importer::fetch_latest_release(&client, repo, filter, None)
+    importer::fetch_latest_release(&client, repo, &pattern, None)
         .await
         .map_err(|e| e.to_string())
 }
@@ -454,10 +466,10 @@ pub async fn install_importer(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Set the game install path in Settings before installing.".to_string())?;
-    let (repo, filter) = importer_repo_for(game)?;
+    let (repo, pattern) = asset_pattern_for(game)?;
 
     let client = core.http_client().await.map_err(|e| e.to_string())?;
-    let release = importer::fetch_latest_release(&client, repo, filter, None)
+    let release = importer::fetch_latest_release(&client, repo, &pattern, None)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no release returned for importer repo".to_string())?;

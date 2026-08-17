@@ -677,6 +677,11 @@ function ImporterPanel({
       {rollback.data ? (
         <p className="muted small">Restored from <code>{rollback.data}</code>.</p>
       ) : null}
+      {update.data?.checkError ? (
+        <p className="error">
+          Couldn't check for an importer update: {update.data.checkError}
+        </p>
+      ) : null}
       {install.isError ? <p className="error">{String(install.error)}</p> : null}
       {rollback.isError ? <p className="error">{String(rollback.error)}</p> : null}
     </section>

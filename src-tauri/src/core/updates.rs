@@ -30,16 +30,16 @@ pub const SHIPPED_LOADER_VERSION: &str = env!("GMM_LOADER_VERSION");
 /// Upstream repository that publishes the Loader.
 pub const LOADER_REPO: &str = "SpectrumQT/XXMI-Libs-Package";
 
-/// Substring that selects the Loader package asset out of a
-/// `LOADER_REPO` release. Assets there are named
-/// `XXMI-PACKAGE-v<version>.zip` alongside a `Manifest.json`; the
-/// filter GMM shipped until #78 was `"Libs"`, which matches neither.
+/// Anchored pattern that selects the Loader package asset out of a
+/// [`LOADER_REPO`] release. Releases there publish
+/// `XXMI-PACKAGE-v<version>.zip` alongside a `Manifest.json`; the filter
+/// GMM shipped until #78 was `"Libs"`, which matches neither.
 ///
-/// This is a plain substring match, the same rule
-/// [`crate::core::importer::parse_latest_release`] applies to importer
-/// packages — #78 deliberately adopts the existing rule rather than
-/// inventing a second one (see #79).
-pub const LOADER_ASSET_FILTER: &str = "XXMI-PACKAGE";
+/// The same rule [`crate::core::importer::parse_latest_release`] applies
+/// to Model Importer origins — #79 settled one matching rule rather than
+/// two. Anchoring is what makes `Manifest.json` a non-match instead of a
+/// coin toss: exactly one asset must match.
+pub const LOADER_ASSET_PATTERN: &str = r"XXMI-PACKAGE-v\d+\.\d+\.\d+\.zip";
 
 /// Settings keys for the update subsystem.
 pub mod keys {
@@ -79,16 +79,35 @@ pub struct UpdateStatus {
     /// **before** pin suppression. The UI uses it to show "An update
     /// is available but pinned" copy.
     pub upstream_ahead: bool,
+    /// User-facing reason the check could not complete — an unreachable
+    /// origin, or a release whose assets did not yield exactly one match
+    /// for the origin's pattern (#79).
+    ///
+    /// `Some` here means "we don't know", which is a different statement
+    /// from `available: false` ("we checked, nothing to apply"). Until
+    /// #79 the importer path ran `.ok().flatten()` and the two were
+    /// indistinguishable — the defect #78 fixed for the Loader and left
+    /// standing here.
+    pub check_error: Option<String>,
 }
 
-/// Pure decision: given the strings we read from settings + the
-/// upstream tag, produce the typed status. No I/O, no network — easy
-/// to drive from unit tests.
+/// Pure decision: given the tag we read from settings and the outcome of
+/// the upstream lookup, produce the typed status. No I/O, no network —
+/// easy to drive from unit tests.
+///
+/// `latest` is a `Result` rather than an `Option` on purpose: a caller
+/// cannot build an `UpdateStatus` without saying whether a missing
+/// latest version means "upstream is current" or "we could not find
+/// out". The error string is rendered verbatim in the UI.
 pub fn compute_status(
     installed_version: Option<String>,
-    latest_version: Option<String>,
+    latest: std::result::Result<String, String>,
     pinned: bool,
 ) -> UpdateStatus {
+    let (latest_version, check_error) = match latest {
+        Ok(tag) => (Some(tag), None),
+        Err(message) => (None, Some(message)),
+    };
     let upstream_ahead = match (installed_version.as_deref(), latest_version.as_deref()) {
         (Some(installed), Some(latest)) => installed != latest,
         // No installed_version: treat as "fresh install" — there's
@@ -102,6 +121,7 @@ pub fn compute_status(
         latest_version,
         pinned,
         upstream_ahead,
+        check_error,
     }
 }
 
