@@ -11,12 +11,32 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use gmm_lib::core::diagnostics::{
-    build_bundle, build_writer, prune_old_logs, record_ipc_ready, SettingsSnapshot,
-    DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS, IPC_READY_COMMAND, IPC_READY_MARKER,
-    LOG_FILE_PREFIX, LOG_FILE_SUFFIX,
+    build_bundle, build_writer, install_panic_hook, prune_old_logs, record_ipc_ready,
+    SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS, IPC_READY_COMMAND,
+    IPC_READY_MARKER, LOG_FILE_PREFIX, LOG_FILE_SUFFIX, PANIC_MARKER,
 };
 use tempfile::TempDir;
 use tracing_subscriber::layer::SubscriberExt as _;
+
+/// Concatenate every `gmm-*.log` in `log_dir`. Callers must drop the
+/// writer guard first or the non-blocking appender may not have flushed.
+fn read_all_logs(log_dir: &Path) -> String {
+    let mut out = String::new();
+    for entry in fs::read_dir(log_dir).expect("read log_dir") {
+        let entry = entry.expect("entry");
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(LOG_FILE_PREFIX) || !name.contains(LOG_FILE_SUFFIX) {
+            continue;
+        }
+        let mut contents = String::new();
+        fs::File::open(entry.path())
+            .expect("open log")
+            .read_to_string(&mut contents)
+            .expect("read log");
+        out.push_str(&contents);
+    }
+    out
+}
 
 fn set_mtime(path: &Path, age_days: i64) {
     let when = SystemTime::now()
@@ -203,5 +223,50 @@ fn ipc_ready_marker_lands_in_the_log_file() {
     assert!(
         body.contains(IPC_READY_COMMAND),
         "the marker must name the command that produced it, got:\n{body}",
+    );
+}
+
+/// A Rust panic must leave evidence in the log before the process dies.
+///
+/// GMM's tracing writer is non-blocking and a panicking thread never
+/// reaches a normal log statement, so without an explicit hook the whole
+/// failure is invisible — the log simply stops. Development happens on
+/// macOS while the app only runs on Windows, which makes "the process
+/// died and left nothing behind" the single most expensive failure mode
+/// to debug. See ADR 0005.
+#[test]
+fn panic_lands_in_the_log_with_message_and_location() {
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+
+    let (writer, guard) = build_writer(&log_dir).expect("writer");
+    let layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(writer);
+    let subscriber = tracing_subscriber::registry().with(layer);
+
+    install_panic_hook();
+
+    tracing::subscriber::with_default(subscriber, || {
+        // `catch_unwind` still runs the panic hook; it only stops the
+        // unwind from taking the test process with it.
+        let _ = std::panic::catch_unwind(|| panic!("boom-marker-9f3c"));
+    });
+    drop(guard);
+
+    let body = read_all_logs(&log_dir);
+    assert!(
+        body.contains(PANIC_MARKER),
+        "log must carry the panic marker {PANIC_MARKER}, got:\n{body}",
+    );
+    assert!(
+        body.contains("boom-marker-9f3c"),
+        "log must carry the panic payload, got:\n{body}",
+    );
+    assert!(
+        body.contains("diagnostics.rs"),
+        "log must carry the panic source location, got:\n{body}",
     );
 }

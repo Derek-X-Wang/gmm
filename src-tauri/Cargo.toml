@@ -104,3 +104,12 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 filetime = "0.2"
 mockito = "1"
 
+
+# Release builds keep line-table debug info. Without it a crash artefact
+# resolves to a bare module offset and cannot be read back to a source
+# line, which defeats the point of capturing one at all. `debug = 1` is
+# line tables only — enough to symbolize, cheap enough to ship. On MSVC
+# this lands in a side-by-side PDB, so the shipped executable does not
+# grow. See ADR 0005.
+[profile.release]
+debug = 1

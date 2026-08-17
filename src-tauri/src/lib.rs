@@ -17,6 +17,10 @@ pub fn run() {
     // older than the retention window. Failures here must not stop the
     // app from starting — diagnostics are nice-to-have, not blocking.
     let _log_guard = diagnostics::install_subscriber(&logs_dir).ok();
+    // Panics must leave a trace behind. Installed immediately after the
+    // subscriber so the hook has somewhere to write, and before anything
+    // that can panic. See ADR 0005.
+    diagnostics::install_panic_hook();
     if let Err(e) = diagnostics::prune_old_logs(&logs_dir, diagnostics::DEFAULT_LOG_RETENTION_DAYS)
     {
         tracing::warn!(error = %e, "prune_old_logs failed at startup");
