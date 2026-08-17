@@ -714,8 +714,9 @@ fn the_instance_lock_makes_the_migration_race_unreachable() {
     first.kill();
 }
 
-/// Build a minimal Model Importer package: the three things
-/// `install_from_local_zip` cares about.
+/// Build a minimal Model Importer package: the shape
+/// `install_from_local_zip` validates (#113) — `d3dx.ini` at the root,
+/// `Core/`, `ShaderFixes/`, and no compiled binaries.
 fn build_importer_zip(zip_path: &Path) {
     use std::io::Write as _;
     use zip::write::SimpleFileOptions;
@@ -729,8 +730,11 @@ fn build_importer_zip(zip_path: &Path) {
     zw.start_file("d3dx.ini", opts).expect("d3dx.ini");
     zw.write_all(b"; 3dmigoto importer\n[Loader]\nloader = XXMI Launcher.exe\n")
         .expect("write d3dx");
-    zw.start_file("d3d11.dll", opts).expect("d3d11.dll");
-    zw.write_all(b"MZ\x00\x00fake-dll").expect("write dll");
+    zw.add_directory("Core/", opts).expect("Core dir");
+    zw.start_file("Core/library.ini", opts).expect("core ini");
+    zw.write_all(b"; core library\n").expect("write core");
+    zw.add_directory("ShaderFixes/", opts)
+        .expect("ShaderFixes dir");
     zw.finish().expect("finish zip");
 }
 

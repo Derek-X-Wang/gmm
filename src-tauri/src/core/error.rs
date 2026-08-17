@@ -58,6 +58,34 @@ pub enum Error {
     #[error("importer install error: {0}")]
     Importer(String),
 
+    /// The archive does not have the shape of a Model Importer package.
+    ///
+    /// Its own variant rather than an IO or zip error, because "you
+    /// picked the wrong file" and "the download is corrupt" need
+    /// different actions from the user — hence `missing` naming exactly
+    /// what was not found.
+    #[error(
+        "this archive does not look like a Model Importer package: {missing}. \
+         A Model Importer ships {expected}. Nothing in the game directory was \
+         changed."
+    )]
+    NotAModelImporter {
+        missing: String,
+        expected: &'static str,
+    },
+
+    /// The archive carries a compiled binary. A Model Importer is
+    /// configuration and shaders; the DLLs it drives ship with the Loader
+    /// package (ADR 0001), so an executable image here means the archive
+    /// is something else — and one that would be dropped straight beside
+    /// the game executable.
+    #[error(
+        "this archive contains compiled binaries ({entries}), which a Model \
+         Importer never ships — the DLLs come with the Loader. Nothing in the \
+         game directory was changed."
+    )]
+    ImporterArchiveHasBinaries { entries: String },
+
     /// Reading upstream release metadata failed. Distinct from
     /// [`Error::Importer`] because the release check also serves the
     /// Loader, which installs nothing — reporting a Loader check

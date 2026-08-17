@@ -20,9 +20,11 @@
 //! <tmp>/game/
 //! ├── GenshinImpact.exe     ← target/debug/victim.exe, renamed
 //! ├── GenshinImpact_Data/   ← marker dir the detector requires
-//! ├── d3d11.dll             ← target/debug/noop_dll.dll, renamed
-//! │                           (exports CBTProc, which is what
-//! │                            3dmloader GetProcAddress's)
+//! ├── d3d11.dll             ← target/debug/noop_dll.dll, staged the way
+//! │                           the Loader ships it — a Model Importer
+//! │                           package never carries a DLL (ADR 0001).
+//! │                           Exports CBTProc, which is what
+//! │                           3dmloader GetProcAddress's.
 //! └── Mods/                 ← junctions land here
 //! ```
 //!
@@ -51,8 +53,8 @@ const WAIT_TIMEOUT_SECS: i32 = 30;
 
 /// The DLL the injection step actually hooks.
 ///
-/// The importer installs a real `d3d11.dll` and we assert on that — but
-/// we deliberately do **not** inject it here. `LoadLibraryW` resolves by
+/// [`stage_loader_dll`] puts a real `d3d11.dll` in the game directory —
+/// but we deliberately do **not** inject it here. `LoadLibraryW` resolves by
 /// module base name: if a DLL called `d3d11.dll` is already mapped into
 /// the target process (it usually is, from System32), Windows hands back
 /// the existing module instead of loading ours, and
@@ -99,9 +101,14 @@ fn make_fake_game(tmp: &Path) -> PathBuf {
 }
 
 /// Build a zip shaped like a `*MI-Package` release so the real importer
-/// install path (checksum, staging, swap, d3dx.ini rewrite) runs
-/// unmodified. `d3d11.dll` inside the zip is our noop DLL, so the
-/// installed importer is one 3dmloader can actually inject.
+/// install path (validation, checksum, staging, swap, d3dx.ini rewrite)
+/// runs unmodified.
+///
+/// It ships **no DLL**, because no Model Importer package does — the DLLs
+/// come with the Loader (ADR 0001), and #113 made that structural rule
+/// enforced rather than merely documented. The noop DLL the injection
+/// step needs is staged separately by [`stage_loader_dll`], which is where
+/// it comes from in production too.
 fn make_fake_importer_zip(dest: &Path) {
     use std::io::Write;
     use zip::write::SimpleFileOptions;
@@ -111,16 +118,27 @@ fn make_fake_importer_zip(dest: &Path) {
     let mut zw = ZipWriter::new(file);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let noop = fs::read(build_artifact("noop_dll.dll")).expect("read noop_dll");
-    zw.start_file("d3d11.dll", opts).expect("start d3d11");
-    zw.write_all(&noop).expect("write d3d11");
-
     // Minimal d3dx.ini carrying the loader line the installer rewrites.
     zw.start_file("d3dx.ini", opts).expect("start d3dx");
     zw.write_all(b"[Loader]\nloader = XXMI Launcher.exe\n\n[Rendering]\ntexture_hash = 0\n")
         .expect("write d3dx");
+    zw.add_directory("Core", opts).expect("Core dir");
+    zw.start_file("Core/GIMI/library.ini", opts)
+        .expect("start core ini");
+    zw.write_all(b"; importer configuration\n")
+        .expect("write core ini");
+    zw.add_directory("ShaderFixes", opts)
+        .expect("ShaderFixes dir");
 
     zw.finish().expect("finish zip");
+}
+
+/// Put the noop DLL where the Loader package would: `<game>/d3d11.dll`.
+/// 3dmloader injects whatever sits there; the Model Importer only
+/// configures it.
+fn stage_loader_dll(game_dir: &Path) {
+    let noop = fs::read(build_artifact("noop_dll.dll")).expect("read noop_dll");
+    fs::write(game_dir.join("d3d11.dll"), &noop).expect("stage d3d11.dll");
 }
 
 /// Build a directory shaped like an extracted GameBanana mod.
@@ -165,9 +183,11 @@ async fn full_vertical_against_a_fake_game_install() {
     let report = importer::install_from_local_zip(&zip_path, &game_dir, &backups, "gmm.exe")
         .expect("importer install");
     assert!(
-        game_dir.join("d3d11.dll").exists(),
-        "importer install must place d3d11.dll: {report:?}",
+        game_dir.join("Core/GIMI/library.ini").exists(),
+        "importer install must place the package's configuration: {report:?}",
     );
+    // The Loader's DLL, not the importer's — see `stage_loader_dll`.
+    stage_loader_dll(&game_dir);
     let d3dx = fs::read_to_string(game_dir.join("d3dx.ini")).expect("read d3dx.ini");
     assert!(
         d3dx.contains("gmm.exe"),
@@ -213,7 +233,7 @@ async fn full_vertical_against_a_fake_game_install() {
     );
 
     // ---- 5. launch: hook, spawn, inject -------------------------------
-    // Same bytes as the installed d3d11.dll, unique base name — see
+    // Same bytes as the staged d3d11.dll, unique base name — see
     // PROBE_DLL for why the installed one can't be injected here.
     let probe = game_dir.join(PROBE_DLL);
     fs::copy(game_dir.join("d3d11.dll"), &probe).expect("stage probe dll");
@@ -323,7 +343,8 @@ async fn importer_rollback_restores_a_populated_game_dir() {
 
     importer::install_from_local_zip(&zip_path, &game_dir, &backups, "gmm.exe")
         .expect("first install");
-    let first_dll = fs::read(game_dir.join("d3d11.dll")).expect("read installed dll");
+    let first_core =
+        fs::read(game_dir.join("Core/GIMI/library.ini")).expect("read installed core ini");
     let first_ini = fs::read_to_string(game_dir.join("d3dx.ini")).expect("read installed ini");
 
     // A second install backs up the first one.
@@ -335,13 +356,14 @@ async fn importer_rollback_restores_a_populated_game_dir() {
         .expect("second install must produce a backup of the first");
 
     // Corrupt the live install, then roll back.
-    fs::write(game_dir.join("d3d11.dll"), b"corrupted").expect("corrupt dll");
+    fs::write(game_dir.join("Core/GIMI/library.ini"), b"corrupted").expect("corrupt core ini");
     importer::rollback_to(backup_dir, &game_dir).expect("rollback");
 
     assert_eq!(
-        fs::read(game_dir.join("d3d11.dll")).expect("read restored dll"),
-        first_dll,
-        "rollback must restore the DLL byte-for-byte",
+        fs::read(game_dir.join("Core/GIMI/library.ini")).expect("read restored core ini"),
+        first_core,
+        "rollback must restore Core/ byte-for-byte — it was not even backed \
+         up until #113",
     );
     assert_eq!(
         fs::read_to_string(game_dir.join("d3dx.ini")).expect("read restored ini"),

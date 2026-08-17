@@ -120,6 +120,40 @@ pub fn extract(zip_path: &Path, target_dir: &Path, opts: ImportZipOptions) -> Re
     Ok(())
 }
 
+/// One entry as [`extract`] would write it: junk dropped, unsafe names
+/// already rejected, and any redundant single root directory collapsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryName {
+    /// Path relative to the extraction target.
+    pub path: PathBuf,
+    /// Whether the archive declares this entry a directory.
+    pub is_dir: bool,
+}
+
+/// The entry names [`extract`] would produce for `zip_path`, without
+/// writing anything.
+///
+/// A header-only walk, so callers can inspect an archive's shape *before*
+/// touching the filesystem — which is what lets the Model Importer check
+/// (#113) reject a wrong archive without a backup to roll back. It shares
+/// [`plan_extraction`] with `extract` on purpose: a validator that
+/// reimplemented single-root collapse or junk filtering would eventually
+/// disagree with what actually lands on disk.
+pub fn entry_names(zip_path: &Path, opts: ImportZipOptions) -> Result<Vec<EntryName>> {
+    let file = File::open(zip_path).map_err(|source| Error::Io {
+        path: zip_path.to_path_buf(),
+        source,
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(Error::from_zip_with_path(zip_path))?;
+    Ok(plan_extraction(&mut archive, opts)?
+        .into_iter()
+        .map(|entry| EntryName {
+            path: entry.relative_path,
+            is_dir: matches!(entry.kind, EntryKind::Dir),
+        })
+        .collect())
+}
+
 /// Result of walking the archive header without touching disk. We can
 /// reject zip-slip, oversize, and entry-count violations before any
 /// extraction starts.
