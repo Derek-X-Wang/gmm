@@ -184,7 +184,7 @@ mod test_loader {
             // Load 3dmloader.dll
             let loader = Loader::load(vendor_dll).map_err(|e| format!("load loader: {e}"))?;
 
-            // Pin down the failure mode against the exact v0.8.8 binary we
+            // Pin down the failure mode against the exact v0.9.2 binary we
             // ship. A zero timeout returns before the remote LoadLibraryW
             // thread completes and upstream reports status 500.
             let mut zero_timeout_victim = spawn_victim(&victim_exe)?;
@@ -194,7 +194,7 @@ mod test_loader {
             let zero_status = zero_status?;
             if zero_status != 500 {
                 return Err(format!(
-                    "Inject(timeout_secs=0) returned {zero_status}, expected pinned v0.8.8 status 500"
+                    "Inject(timeout_secs=0) returned {zero_status}, expected pinned v0.9.2 status 500"
                 ));
             }
 

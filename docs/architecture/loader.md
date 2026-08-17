@@ -110,7 +110,7 @@ We accept this on purpose: every Model Importer GMM is built to manage is GPLv3 
 
 When reviewing `crates/loader/src/windows.rs`, focus the `unsafe` audit on three regions:
 
-1. **`Loader::load`'s FFI symbol resolution.** Pre-condition: `dll_path` is a valid UTF-16 NUL-terminated buffer (validated in `to_wide_nul`). Post-condition: each of the four function pointers points at a real export in the loaded DLL or `Error::MissingSymbol` is returned. The `std::mem::transmute::<*const (), FnXxx>` calls assume upstream's ABI matches our typedef — verified manually against `dll_injector.py` and the pinned `XXMI-Libs-Package` v0.8.8 release.
+1. **`Loader::load`'s FFI symbol resolution.** Pre-condition: `dll_path` is a valid UTF-16 NUL-terminated buffer (validated in `to_wide_nul`). Post-condition: each of the four function pointers points at a real export in the loaded DLL or `Error::MissingSymbol` is returned. The `std::mem::transmute::<*const (), FnXxx>` calls assume upstream's ABI matches our typedef — verified manually against `dll_injector.py` and the pinned `XXMI-Libs-Package` v0.9.2 release.
 2. **`Loader::hook`'s call.** Pre-condition: `target_wide` is well-formed; `hook` and `mutex` are valid mutable references to a local stack frame. Post-condition: on success, `HookSession` is constructed with the returned handle values; on failure, no resources are leaked.
 3. **`Drop for LoadedDll`.** Calls `FreeLibrary(self.handle)`. Safety follows from the invariant that `self.handle` was returned by `LoadLibraryW` in `Loader::load` and has not been freed elsewhere — `HMODULE` lives inside an `Arc<LoadedDll>` so no other path can free it.
 

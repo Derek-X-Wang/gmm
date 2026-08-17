@@ -1,8 +1,8 @@
 {
-    "version": "0.8.8",
+    "version": "0.9.2",
     "signatures": {
-        "3dmloader.dll": "MGUCMQC2SUnlRMS6TgZtymeTdW6hE0DNHZcg80H+RGw2tRN+VaH6ZUBZ2c+N8tJ8QADLm7ACMDwqqGm2lKMHnL5x1yiayk4/fV817ScAYl6AWMjsn7gTYzKv9R9Yaa+0kQMa9KOAsQ==",
-        "d3d11.dll": "MGQCMAjLogDM6RHJuMitBZJUvy0BQURgYBlSgkkxGgHtf2tcDLScHb3M6gTiye90h8/rPAIwXEMWOACCNo9WcPlSrto7j76V/pcOfRI9oUCL9jFecP4DK1du1EmRJqo+bMis/6Jg",
-        "d3dcompiler_47.dll": "MGYCMQDevxd1n2AI1IbxXJRbopJuEVM1qjdrRHcmOsoJBsl0i7CWJKwk5ToXnsGLE0RhQz4CMQDIlfJtESBUlioOQG9ieCy8VLitA4Ekq0QquRbsr22J9dMlBo6D7Rd7JPN0GwcaZ4I="
+        "3dmloader.dll": "MGYCMQD/Pjt1mE7SbB3T+MPpeMRiIC5nNb0IkExnp/TQjFT6eVKW5XBTW5R3SfRwlb6QQroCMQDxUlyilQWeJpyEIUyt+N1PnwjXjrNmaTzn8wxV3bhbzpNeER/u70p9t9u9fNmM9X8=",
+        "d3d11.dll": "MGQCMAhLtRitRu9E8WQUh3iBpa054ReJRiajLRAL0CZTmCNK6djjnfX6DV8JewU7TuVrnAIwISUXD3XBSbpy8/j4ZXKlGAjg+fGczYPj/u3tAXQ1X/AyYloJwsm+BfAAIBtH1Dcc",
+        "d3dcompiler_47.dll": "MGUCMQDbXDeIdJ6gEIE2OF4yjazZv9ExyL6ITLcjrW9IRoHz2QIuLHU9+60CmR1e5Js/5lsCMHsWWLbCdpRK0iIGTKrzcmb3xV5eqBtBe8UIFxeS0dH6JRXJWd3ImFVrod9aqlU3tg=="
     }
 }
