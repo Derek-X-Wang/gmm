@@ -1,0 +1,38 @@
+[
+  {
+    "game": "gimi",
+    "repo": "SilentNightSound/GIMI-Package",
+    "tag": "v8.8.9",
+    "assets": ["GIMI-PACKAGE-v8.8.9.zip"]
+  },
+  {
+    "game": "srmi",
+    "repo": "SpectrumQT/SRMI-Package",
+    "tag": "v2.4.2",
+    "assets": ["SRMI-TEST-PACKAGE-v2.4.2.zip"]
+  },
+  {
+    "game": "zzmi",
+    "repo": "leotorrez/ZZMI-Package",
+    "tag": "v1.4.5",
+    "assets": ["ZZMI-PACKAGE-v1.4.5.zip"]
+  },
+  {
+    "game": "wwmi",
+    "repo": "SpectrumQT/WWMI-Package",
+    "tag": "v1.0.0",
+    "assets": ["WWMI-PACKAGE-v1.0.0.zip"]
+  },
+  {
+    "game": "himi",
+    "repo": "leotorrez/HIMI-Package",
+    "tag": "v1.0.2",
+    "assets": ["HIMI-PACKAGE-v1.0.2.zip"]
+  },
+  {
+    "game": "efmi",
+    "repo": "SpectrumQT/EFMI-Package",
+    "tag": "v1.3.0",
+    "assets": ["EFMI-PACKAGE-v1.3.0.zip"]
+  }
+]

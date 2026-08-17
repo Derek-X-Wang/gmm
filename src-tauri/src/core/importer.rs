@@ -1,7 +1,7 @@
 //! Model Importer install + rollback (slice 3).
 //!
 //! GMM downloads each game's official Model Importer release ZIP from
-//! GitHub (e.g. `SpectrumQT/GIMI-Package`), verifies it, lays it out
+//! GitHub (e.g. `SilentNightSound/GIMI-Package`), verifies it, lays it out
 //! into `<Game>/` itself (not GMM's own directory) and rewrites the
 //! `d3dx.ini`'s `loader:` line to point at GMM's own executable.
 //!
@@ -472,7 +472,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Network fetch of the latest release metadata for `owner/repo` (e.g.
-/// `SpectrumQT/GIMI-Package`). Picks the first asset matching
+/// `SilentNightSound/GIMI-Package`). Picks the first asset matching
 /// `asset_filter` (a substring match) — typically the `.zip` package.
 /// Returns `Ok(None)` on a 304 Not Modified when `etag` is supplied.
 ///

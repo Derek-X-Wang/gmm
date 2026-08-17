@@ -1,0 +1,44 @@
+name: upstream importers
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Upstream moves are rare, and the recorded fixture covers ordinary PRs.
+    # A weekly live check catches drift without making GitHub availability a
+    # dependency of every build matrix entry.
+    - cron: "23 9 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  live-release-contract:
+    name: live release contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: upstream-importers
+
+      - name: Verify every Model Importer source resolves
+        working-directory: src-tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          cargo test --test importer_sources --
+          --ignored --exact
+          every_importer_profile_resolves_to_a_live_release_with_a_matching_asset

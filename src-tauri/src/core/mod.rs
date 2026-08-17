@@ -782,7 +782,7 @@ impl Core {
     /// surfaced separately so the dialog can show "pinned to vX".
     ///
     /// `repo` and `asset_filter` are passed in so the caller can decide
-    /// which importer repo applies (e.g. `SpectrumQT/GIMI-Package` for
+    /// which importer repo applies (e.g. `SilentNightSound/GIMI-Package` for
     /// GIMI). Future per-game ports can call this with their own repo.
     pub async fn check_importer_update(
         &self,
