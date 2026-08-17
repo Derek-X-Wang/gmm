@@ -19,7 +19,7 @@ use crate::core::importer::{self, InstallReport, LatestRelease, DEFAULT_LOADER_E
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
-use crate::core::updates::UpdateStatus;
+use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
     Core, GameCode, ImportZipOptions, LibraryAuditReport, Mod, MoveReport, SessionInfo,
@@ -344,8 +344,11 @@ pub async fn check_importer_update(
         .map_err(|e| e.to_string())
 }
 
+/// Informational Loader version report. Returns the version GMM
+/// ships and the latest upstream release; a failed check surfaces in
+/// `checkError` rather than masquerading as "up to date" (#78).
 #[tauri::command]
-pub async fn check_loader_update(core: State<'_, Core>) -> Result<UpdateStatus, String> {
+pub async fn check_loader_update(core: State<'_, Core>) -> Result<LoaderVersionStatus, String> {
     core.check_loader_update().await.map_err(|e| e.to_string())
 }
 

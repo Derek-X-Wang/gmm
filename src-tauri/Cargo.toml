@@ -34,6 +34,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Reads the vendored 3dmloader Manifest.json to bake the shipped
+# Loader version into the binary (see build.rs).
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }

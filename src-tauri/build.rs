@@ -1,4 +1,6 @@
 fn main() {
+    emit_shipped_loader_version();
+
     let mut attributes = tauri_build::Attributes::new();
 
     // Windows: embed the application manifest ourselves instead of
@@ -28,6 +30,49 @@ fn main() {
     }
 
     tauri_build::try_build(attributes).expect("tauri-build failed");
+}
+
+/// Bake the version of the Loader this build ships into
+/// `GMM_LOADER_VERSION`, read from the upstream `Manifest.json` that
+/// is vendored alongside `3dmloader.dll`.
+///
+/// Before #78 the "installed" Loader version was read from a
+/// `loader.installed_version` settings row that no code path ever
+/// wrote, so it was permanently `None` and the update check had no
+/// left-hand side. The Loader is embedded, not installed (ADR 0001) —
+/// there is exactly one Loader per GMM build, and this is it.
+///
+/// `Manifest.json` is upstream's own signed statement about the DLL
+/// beside it, and `vendor/3dmloader/README.md` requires replacing both
+/// together when the pin moves. The `rerun-if-changed` lines below
+/// mean the constant is regenerated whenever either file changes, so
+/// it cannot go stale against the tree.
+fn emit_shipped_loader_version() {
+    let vendor = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"))
+        .join("../vendor/3dmloader");
+    let manifest = vendor.join("Manifest.json");
+    let dll = vendor.join("3dmloader.dll");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rerun-if-changed={}", dll.display());
+
+    let raw = std::fs::read_to_string(&manifest)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+    let json: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", manifest.display()));
+    let version = json
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("{} has no string `version`", manifest.display()));
+
+    // Upstream records a bare `0.8.8` in the manifest but tags its
+    // releases `v0.8.8`. Normalise to tag form so the comparison
+    // against a release `tag_name` is like-for-like.
+    let tag = if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    };
+    println!("cargo:rustc-env=GMM_LOADER_VERSION={tag}");
 }
 
 /// Embed `windows-app-manifest.xml` into every artifact this crate

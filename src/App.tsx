@@ -21,7 +21,6 @@ import {
   type SessionInfo,
   applyModUpdate,
   checkImporterUpdate,
-  checkLoaderUpdate,
   checkModUpdatesNow,
   detectConflicts,
   detectGameInstallPath,
@@ -54,6 +53,7 @@ import {
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { LibraryAuditWarning } from "./LibraryAuditWarning";
+import { LoaderVersionNote } from "./LoaderVersionNote";
 import { checkInteractively, type UpdateState } from "./updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
@@ -606,15 +606,9 @@ function ImporterPanel({
     queryFn: () => checkImporterUpdate(game),
     retry: false,
   });
-  const loaderUpdate = useQuery({
-    queryKey: ["loader", "update"],
-    queryFn: () => checkLoaderUpdate(),
-    retry: false,
-  });
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["importer", "update", game] });
-    qc.invalidateQueries({ queryKey: ["loader", "update"] });
   };
 
   const install = useMutation({
@@ -637,9 +631,6 @@ function ImporterPanel({
       <h2>
         Model Importer ({importerLabel})
         {update.data?.available ? <span className="update-badge"> · update</span> : null}
-        {loaderUpdate.data?.available ? (
-          <span className="update-badge"> · loader update</span>
-        ) : null}
       </h2>
       <p className="muted">
         Downloads the latest <code>{importerLabel}-Package</code> release for{" "}
@@ -677,13 +668,7 @@ function ImporterPanel({
           </button>
         ) : null}
       </div>
-      {loaderUpdate.data?.available && loaderUpdate.data?.latestVersion ? (
-        <p className="muted small">
-          Loader <code>3dmloader.dll</code> has an update available
-          (<code>{loaderUpdate.data.latestVersion}</code>). Loader updates apply globally
-          (re-run the importer install to pull the new Loader package).
-        </p>
-      ) : null}
+      <LoaderVersionNote />
       {install.data ? (
         <p className="muted small">
           Installed. SHA-256 <code>{install.data.sha256.slice(0, 12)}…</code>{install.data.backup_dir ? <> · Backed up to <code>{install.data.backup_dir}</code></> : null}.

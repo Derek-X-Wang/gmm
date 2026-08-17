@@ -17,6 +17,30 @@ use super::error::Result;
 use super::games::GameCode;
 use super::settings::{get as get_setting, put as put_setting};
 
+/// The Loader version this GMM build ships, in upstream tag form
+/// (e.g. `v0.8.8`).
+///
+/// Baked in by `build.rs` from the `Manifest.json` vendored beside
+/// `3dmloader.dll`. The Loader is embedded via FFI, not installed
+/// (ADR 0001), so "what is installed" is a property of the build, not
+/// of the user's machine — there is nothing for a settings row to
+/// record and nothing that could write one.
+pub const SHIPPED_LOADER_VERSION: &str = env!("GMM_LOADER_VERSION");
+
+/// Upstream repository that publishes the Loader.
+pub const LOADER_REPO: &str = "SpectrumQT/XXMI-Libs-Package";
+
+/// Substring that selects the Loader package asset out of a
+/// `LOADER_REPO` release. Assets there are named
+/// `XXMI-PACKAGE-v<version>.zip` alongside a `Manifest.json`; the
+/// filter GMM shipped until #78 was `"Libs"`, which matches neither.
+///
+/// This is a plain substring match, the same rule
+/// [`crate::core::importer::parse_latest_release`] applies to importer
+/// packages — #78 deliberately adopts the existing rule rather than
+/// inventing a second one (see #79).
+pub const LOADER_ASSET_FILTER: &str = "XXMI-PACKAGE";
+
 /// Settings keys for the update subsystem.
 pub mod keys {
     use super::GameCode;
@@ -29,9 +53,10 @@ pub mod keys {
         format!("importer.{}.pinned_version", game.as_str())
     }
 
-    pub fn loader_installed() -> &'static str {
-        "loader.installed_version"
-    }
+    // There is deliberately no `loader_installed` key. One existed
+    // until #78 and nothing ever wrote it, so the Loader check had no
+    // left-hand side. The shipped Loader version is a build-time
+    // constant ([`super::SHIPPED_LOADER_VERSION`]), not user state.
 }
 
 /// What [`compute_status`] decided. Travels through the Tauri command
@@ -112,12 +137,50 @@ pub async fn set_importer_pinned(
     put_setting(pool, &keys::importer_pinned(game), version).await
 }
 
-/// Read the installed Loader (`3dmloader.dll`) version.
-pub async fn loader_installed(pool: &sqlx::SqlitePool) -> Result<Option<String>> {
-    get_setting(pool, keys::loader_installed()).await
+/// What GMM knows about the Loader it ships versus what upstream has
+/// published. Purely informational: the Loader is embedded via FFI
+/// and ships inside the GMM binary (ADR 0001), so a newer upstream
+/// Loader reaches users through a GMM release, not through an action
+/// the user can take here.
+///
+/// Deliberately *not* an [`UpdateStatus`]: that type carries
+/// `available` and `pinned`, which promise an Apply button and a pin
+/// escape hatch. Neither exists for the Loader, and pretending
+/// otherwise is what the #78 UI did.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoaderVersionStatus {
+    /// Loader version baked into this build ([`SHIPPED_LOADER_VERSION`]).
+    pub shipped_version: String,
+    /// Latest upstream release tag. `None` when the check failed —
+    /// always read alongside `check_error`.
+    pub latest_version: Option<String>,
+    /// `true` only when the check succeeded *and* upstream differs
+    /// from what we ship.
+    pub upstream_ahead: bool,
+    /// User-facing reason the check could not complete. `Some` here
+    /// means "we don't know", which is a different statement from
+    /// `upstream_ahead: false` ("we checked, we're current").
+    pub check_error: Option<String>,
 }
 
-/// Persist the installed Loader version.
-pub async fn set_loader_installed(pool: &sqlx::SqlitePool, version: &str) -> Result<()> {
-    put_setting(pool, keys::loader_installed(), Some(version)).await
+/// Pure decision: fold the outcome of the upstream fetch into a
+/// [`LoaderVersionStatus`]. The caller renders the error to a
+/// user-facing string first, so this stays free of I/O and of the
+/// crate error type.
+pub fn loader_status(latest: std::result::Result<String, String>) -> LoaderVersionStatus {
+    match latest {
+        Ok(tag) => LoaderVersionStatus {
+            upstream_ahead: tag != SHIPPED_LOADER_VERSION,
+            shipped_version: SHIPPED_LOADER_VERSION.to_string(),
+            latest_version: Some(tag),
+            check_error: None,
+        },
+        Err(message) => LoaderVersionStatus {
+            shipped_version: SHIPPED_LOADER_VERSION.to_string(),
+            latest_version: None,
+            upstream_ahead: false,
+            check_error: Some(message),
+        },
+    }
 }

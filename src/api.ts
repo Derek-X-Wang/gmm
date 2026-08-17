@@ -305,8 +305,22 @@ export async function checkImporterUpdate(game: GameCode): Promise<UpdateStatus>
   return invoke<UpdateStatus>("check_importer_update", { game });
 }
 
-export async function checkLoaderUpdate(): Promise<UpdateStatus> {
-  return invoke<UpdateStatus>("check_loader_update");
+/**
+ * What GMM ships versus what upstream published. Purely
+ * informational — the Loader is embedded via FFI (ADR 0001), so there
+ * is no `available` flag and no Apply button. `checkError` being set
+ * means "we don't know", which is not the same as `upstreamAhead:
+ * false` ("we checked, we're current"). See #78.
+ */
+export interface LoaderVersionStatus {
+  shippedVersion: string;
+  latestVersion: string | null;
+  upstreamAhead: boolean;
+  checkError: string | null;
+}
+
+export async function checkLoaderUpdate(): Promise<LoaderVersionStatus> {
+  return invoke<LoaderVersionStatus>("check_loader_update");
 }
 
 export async function setImporterPinned(

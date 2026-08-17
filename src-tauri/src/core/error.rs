@@ -58,6 +58,14 @@ pub enum Error {
     #[error("importer install error: {0}")]
     Importer(String),
 
+    /// Reading upstream release metadata failed. Distinct from
+    /// [`Error::Importer`] because the release check also serves the
+    /// Loader, which installs nothing — reporting a Loader check
+    /// failure as an "importer install error" named the wrong
+    /// subsystem to the user (#78).
+    #[error("could not read the upstream release: {0}")]
+    ReleaseMetadata(String),
+
     #[error("network error: {0}")]
     Network(String),
 
