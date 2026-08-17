@@ -34,6 +34,9 @@ The origin of a Mod's files. Possible values v1: `gamebanana` (URL-paste or 1-cl
 ### Library Layout
 On-disk shape: `%AppData%\GMM\library\<game-code>\<mod-id>\<variant-or-root>\…`. Game codes match Model Importer slugs: `gimi`, `srmi`, `zzmi`, `wwmi`, `himi`, `efmi`. Mod IDs are local ULIDs, not GameBanana IDs (a Mod can be re-imported from a different Source). User can override the global Library root and each per-game subpath in Settings.
 
+### Importer Origin
+Where a Game's Model Importer comes from: either a GitHub release origin (an `owner`/`repo` pair plus a release-asset match) or a user-supplied local ZIP. Not to be confused with **Source**, which is about a Mod's files; Importer Origin is about the per-game importer package. Resolved through three layers — the user's per-game override, GMM's curated `recommended-importers.json` recommendation, then the compiled-in default — and recorded per install, where `unknown` is a valid value for importers installed outside GMM. Changing a Game's Importer Origin invalidates its install and clears its Importer Pin. See ADR 0005.
+
 ### Importer Pin
 A per-game `pinned_version` setting that suppresses Model Importer update prompts for that game. Used by users during ban-wave windows or when a new importer release breaks a mod they care about. See ADR 0004.
 
