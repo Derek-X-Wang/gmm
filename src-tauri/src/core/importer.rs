@@ -493,13 +493,13 @@ pub async fn fetch_latest_release(
     let res = req
         .send()
         .await
-        .map_err(|e| Error::Importer(format!("GET {url}: {e}")))?;
+        .map_err(|e| Error::ReleaseMetadata(format!("GET {url}: {e}")))?;
 
     if res.status().as_u16() == 304 {
         return Ok(None);
     }
     if !res.status().is_success() {
-        return Err(Error::Importer(format!(
+        return Err(Error::ReleaseMetadata(format!(
             "GitHub returned {} for {url}",
             res.status()
         )));
@@ -508,18 +508,31 @@ pub async fn fetch_latest_release(
     let json: serde_json::Value = res
         .json()
         .await
-        .map_err(|e| Error::Importer(format!("parse JSON from {url}: {e}")))?;
+        .map_err(|e| Error::ReleaseMetadata(format!("parse JSON from {url}: {e}")))?;
 
+    parse_latest_release(&json, asset_filter).map(Some)
+}
+
+/// Pure half of [`fetch_latest_release`]: turn a GitHub
+/// `releases/latest` payload into a [`LatestRelease`], picking the
+/// first asset whose name contains `asset_filter`.
+///
+/// Split out from the network call so the asset filter can be tested
+/// against a *recorded* copy of a real upstream response. Issue #78
+/// existed because nothing ever compared a filter to a real payload:
+/// `check_loader_update` shipped the filter `"Libs"`, which matches no
+/// asset any `XXMI-Libs-Package` release has ever published.
+pub fn parse_latest_release(json: &serde_json::Value, asset_filter: &str) -> Result<LatestRelease> {
     let tag_name = json
         .get("tag_name")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Importer("release JSON missing tag_name".to_string()))?
+        .ok_or_else(|| Error::ReleaseMetadata("release JSON missing tag_name".to_string()))?
         .to_string();
 
     let assets = json
         .get("assets")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| Error::Importer("release JSON missing assets".to_string()))?;
+        .ok_or_else(|| Error::ReleaseMetadata("release JSON missing assets".to_string()))?;
     let asset = assets
         .iter()
         .find(|a| {
@@ -529,7 +542,7 @@ pub async fn fetch_latest_release(
                 .unwrap_or(false)
         })
         .ok_or_else(|| {
-            Error::Importer(format!(
+            Error::ReleaseMetadata(format!(
                 "no release asset whose name contains {asset_filter}"
             ))
         })?;
@@ -537,7 +550,7 @@ pub async fn fetch_latest_release(
     let asset_url = asset
         .get("browser_download_url")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Importer("asset missing browser_download_url".to_string()))?
+        .ok_or_else(|| Error::ReleaseMetadata("asset missing browser_download_url".to_string()))?
         .to_string();
     let asset_name = asset
         .get("name")
@@ -554,12 +567,12 @@ pub async fn fetch_latest_release(
     // visually.
     let sha256_digest = None;
 
-    Ok(Some(LatestRelease {
+    Ok(LatestRelease {
         tag_name,
         asset_url,
         asset_name,
         sha256_digest,
-    }))
+    })
 }
 
 /// Stream a release asset to `dest`. Returns the byte count written so

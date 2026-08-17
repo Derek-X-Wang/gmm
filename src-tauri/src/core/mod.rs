@@ -801,20 +801,47 @@ impl Core {
         Ok(updates::compute_status(installed, latest, pinned))
     }
 
-    /// Check the shared Loader (`3dmloader.dll` from
-    /// `SpectrumQT/XXMI-Libs-Package`). Loader updates apply globally,
-    /// so there is no per-game pin here — slice 13b expands this if
-    /// needed.
-    pub async fn check_loader_update(&self) -> Result<updates::UpdateStatus> {
+    /// Report the Loader (`3dmloader.dll` from
+    /// [`updates::LOADER_REPO`]) this build ships against the latest
+    /// upstream release.
+    ///
+    /// Informational only. The Loader is embedded via FFI and ships
+    /// inside GMM (ADR 0001), so it is not separately installable and
+    /// a newer upstream Loader arrives through a GMM release — which
+    /// ADR 0004 already governs under the "GMM itself" tier. See #78
+    /// for why building a Loader install path was considered and
+    /// rejected.
+    ///
+    /// Fetch failures are returned in
+    /// [`updates::LoaderVersionStatus::check_error`] rather than
+    /// swallowed: until #78 this used `.ok().flatten()`, which made a
+    /// broken check look exactly like a healthy one.
+    pub async fn check_loader_update(&self) -> Result<updates::LoaderVersionStatus> {
+        self.check_loader_update_from(updates::LOADER_REPO, updates::LOADER_ASSET_FILTER)
+            .await
+    }
+
+    /// [`Core::check_loader_update`] against an explicit repo and
+    /// asset filter. Production always passes the
+    /// [`updates::LOADER_REPO`] constants; tests use it to drive the
+    /// failure path without depending on upstream being reachable.
+    pub async fn check_loader_update_from(
+        &self,
+        repo: &str,
+        asset_filter: &str,
+    ) -> Result<updates::LoaderVersionStatus> {
         let client = self.http_client().await?;
-        let latest =
-            importer::fetch_latest_release(&client, "SpectrumQT/XXMI-Libs-Package", "Libs", None)
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.tag_name);
-        let installed = updates::loader_installed(&self.pool).await?;
-        Ok(updates::compute_status(installed, latest, false))
+        let latest = importer::fetch_latest_release(&client, repo, asset_filter, None).await;
+
+        let latest = match latest {
+            // `None` means 304 Not Modified, which we can only get by
+            // sending an ETag — we never do, so it is unreachable
+            // here. Treat it as "nothing learned" rather than lying.
+            Ok(Some(release)) => Ok(release.tag_name),
+            Ok(None) => Err("upstream reported no change but GMM sent no ETag".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        Ok(updates::loader_status(latest))
     }
 
     /// Pin (or unpin) the per-game importer version. While pinned,
@@ -831,10 +858,9 @@ impl Core {
         updates::set_importer_installed(&self.pool, game, version).await
     }
 
-    /// Persist the installed Loader version.
-    pub async fn set_loader_installed(&self, version: &str) -> Result<()> {
-        updates::set_loader_installed(&self.pool, version).await
-    }
+    // `set_loader_installed` lived here until #78. It never had a
+    // caller — the Loader is embedded, not installed, so nothing
+    // could ever have had a version to record.
 
     /// Resolve a GameBanana submission (URL or bare ID), download its
     /// first `.zip` asset, ingest it through the slice-1b zip path, and
