@@ -293,12 +293,21 @@ export async function importGamebanana(
   return fromRaw(raw);
 }
 
+/**
+ * Importer update check. `checkError` being set means "we don't know" —
+ * the origin was unreachable, or its release did not yield exactly one
+ * asset matching the origin's anchored pattern (#79). That is a
+ * different statement from `available: false` ("we checked, nothing to
+ * apply"), and collapsing the two is the defect #78 fixed for the Loader
+ * and #79 fixed here.
+ */
 export interface UpdateStatus {
   available: boolean;
   installedVersion: string | null;
   latestVersion: string | null;
   pinned: boolean;
   upstreamAhead: boolean;
+  checkError: string | null;
 }
 
 export async function checkImporterUpdate(game: GameCode): Promise<UpdateStatus> {

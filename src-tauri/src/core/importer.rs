@@ -88,6 +88,60 @@ pub struct LatestRelease {
     pub sha256_digest: Option<String>,
 }
 
+/// The release-asset selector for one Importer Origin (ADR 0005): an
+/// **anchored** regular expression that must match exactly one asset in
+/// the release.
+///
+/// Anchoring is applied here rather than trusted to the pattern's
+/// author. A pattern is wrapped as `^(?:…)$` on construction, so
+/// `GIMI-PACKAGE-v\d+\.\d+\.\d+\.zip` cannot accidentally behave like
+/// the `str::contains` rule it replaces. That matters because patterns
+/// arrive from the recommended-importers manifest and from a user's own
+/// origin, not only from the compiled-in defaults — and an unanchored
+/// pattern there would silently reintroduce #79.
+///
+/// A bare substring is the rule this replaces: `"SRMI"` matched
+/// `SRMI-TEST-PACKAGE-v2.4.2.zip`, so GMM would have installed a build
+/// upstream explicitly labelled TEST. A denylist (`TEST`, `DEBUG`,
+/// `-rc`, …) was rejected because it only catches the failure modes
+/// already imagined; an anchored shape rejects everything that is not
+/// the expected form without enumerating anything.
+#[derive(Debug, Clone)]
+pub struct AssetPattern {
+    /// The pattern as written, for error messages. Reported without the
+    /// `^(?:…)$` wrapper so the user sees what they configured.
+    source: String,
+    anchored: regex::Regex,
+}
+
+impl AssetPattern {
+    /// Compile `pattern`, anchoring it to the whole asset name.
+    pub fn new(pattern: &str) -> Result<Self> {
+        let anchored = regex::Regex::new(&format!("^(?:{pattern})$")).map_err(|e| {
+            Error::InvalidAssetPattern {
+                pattern: pattern.to_string(),
+                message: e.to_string(),
+            }
+        })?;
+        Ok(Self {
+            source: pattern.to_string(),
+            anchored,
+        })
+    }
+
+    /// The pattern as configured, without the anchors added by
+    /// [`AssetPattern::new`].
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
+
+    /// Whether `asset_name` is the whole-string shape this origin
+    /// expects.
+    pub fn matches(&self, asset_name: &str) -> bool {
+        self.anchored.is_match(asset_name)
+    }
+}
+
 /// Compute the hex-encoded SHA-256 of the bytes in `path`.
 pub fn sha256_of_file(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path).map_err(|source| Error::Io {
@@ -471,10 +525,24 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Render a list of asset names for an error message. Empty lists get a
+/// sentence rather than an empty pair of brackets, because "this release
+/// has no assets at all" is a distinct diagnosis.
+fn describe(names: &[&str]) -> String {
+    if names.is_empty() {
+        return "no assets at all".to_string();
+    }
+    names
+        .iter()
+        .map(|n| format!("{n:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Network fetch of the latest release metadata for `owner/repo` (e.g.
-/// `SilentNightSound/GIMI-Package`). Picks the first asset matching
-/// `asset_filter` (a substring match) — typically the `.zip` package.
-/// Returns `Ok(None)` on a 304 Not Modified when `etag` is supplied.
+/// `SilentNightSound/GIMI-Package`), selecting the one asset matching
+/// this origin's [`AssetPattern`]. Returns `Ok(None)` on a 304 Not
+/// Modified when `etag` is supplied.
 ///
 /// The caller must build the `client` via
 /// [`crate::core::Core::http_client`] so the request honours any
@@ -482,7 +550,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 pub async fn fetch_latest_release(
     client: &reqwest::Client,
     owner_repo: &str,
-    asset_filter: &str,
+    pattern: &AssetPattern,
     etag: Option<&str>,
 ) -> Result<Option<LatestRelease>> {
     let url = format!("https://api.github.com/repos/{owner_repo}/releases/latest");
@@ -510,19 +578,32 @@ pub async fn fetch_latest_release(
         .await
         .map_err(|e| Error::ReleaseMetadata(format!("parse JSON from {url}: {e}")))?;
 
-    parse_latest_release(&json, asset_filter).map(Some)
+    parse_latest_release(&json, pattern).map(Some)
 }
 
 /// Pure half of [`fetch_latest_release`]: turn a GitHub
-/// `releases/latest` payload into a [`LatestRelease`], picking the
-/// first asset whose name contains `asset_filter`.
+/// `releases/latest` payload into a [`LatestRelease`], selecting the
+/// **one** asset whose name matches `pattern`.
 ///
-/// Split out from the network call so the asset filter can be tested
-/// against a *recorded* copy of a real upstream response. Issue #78
-/// existed because nothing ever compared a filter to a real payload:
+/// Split out from the network call so the pattern can be tested against
+/// *recorded* copies of real upstream responses. Issue #78 existed
+/// because nothing ever compared a filter to a real payload:
 /// `check_loader_update` shipped the filter `"Libs"`, which matches no
 /// asset any `XXMI-Libs-Package` release has ever published.
-pub fn parse_latest_release(json: &serde_json::Value, asset_filter: &str) -> Result<LatestRelease> {
+///
+/// Both failure modes are errors, and distinct ones (#79):
+///
+/// - zero matches → [`Error::ReleaseAssetNoMatch`]
+/// - two or more  → [`Error::ReleaseAssetAmbiguous`]
+///
+/// "First match wins" is deliberately not an option. Zero-match silence
+/// is the #78 defect; ambiguity means the pattern is wrong or upstream
+/// published something unexpected, and resolving it by release order is
+/// how a TEST package gets installed.
+pub fn parse_latest_release(
+    json: &serde_json::Value,
+    pattern: &AssetPattern,
+) -> Result<LatestRelease> {
     let tag_name = json
         .get("tag_name")
         .and_then(|v| v.as_str())
@@ -533,19 +614,40 @@ pub fn parse_latest_release(json: &serde_json::Value, asset_filter: &str) -> Res
         .get("assets")
         .and_then(|v| v.as_array())
         .ok_or_else(|| Error::ReleaseMetadata("release JSON missing assets".to_string()))?;
-    let asset = assets
+
+    // An asset with no `name` cannot be selected by name, but it is
+    // still worth listing when nothing matched — "that release publishes
+    // nothing at all" and "it publishes two things, neither shaped like
+    // this" are different problems for the user.
+    let named: Vec<(&serde_json::Value, &str)> = assets
         .iter()
-        .find(|a| {
-            a.get("name")
-                .and_then(|n| n.as_str())
-                .map(|n| n.contains(asset_filter))
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| {
-            Error::ReleaseMetadata(format!(
-                "no release asset whose name contains {asset_filter}"
-            ))
-        })?;
+        .map(|a| (a, a.get("name").and_then(|n| n.as_str()).unwrap_or("")))
+        .collect();
+    let matched: Vec<&(&serde_json::Value, &str)> = named
+        .iter()
+        .filter(|(_, name)| pattern.matches(name))
+        .collect();
+
+    let asset = match matched.as_slice() {
+        [(asset, _)] => *asset,
+        [] => {
+            let candidates: Vec<&str> = named.iter().map(|(_, name)| *name).collect();
+            return Err(Error::ReleaseAssetNoMatch {
+                release: tag_name,
+                pattern: pattern.as_str().to_string(),
+                candidates: describe(&candidates),
+            });
+        }
+        many => {
+            let matches: Vec<&str> = many.iter().map(|(_, name)| *name).collect();
+            return Err(Error::ReleaseAssetAmbiguous {
+                release: tag_name,
+                pattern: pattern.as_str().to_string(),
+                matches: describe(&matches),
+                count: many.len(),
+            });
+        }
+    };
 
     let asset_url = asset
         .get("browser_download_url")

@@ -31,6 +31,7 @@ use gmm_lib::commands::{
 use gmm_lib::core::av;
 use gmm_lib::core::conflicts::ConflictReport;
 use gmm_lib::core::games::GAME_PROFILES;
+use gmm_lib::core::importer::AssetPattern;
 use gmm_lib::core::reconcile::ReconcileResult;
 use gmm_lib::core::updates::UpdateStatus;
 use gmm_lib::core::variants::Variant;
@@ -266,6 +267,7 @@ fn update_status_uses_camel_case() {
         latest_version: None,
         pinned: false,
         upstream_ahead: false,
+        check_error: None,
     };
     let v = to_json(&s);
     let obj = v.as_object().expect("object");
@@ -274,6 +276,9 @@ fn update_status_uses_camel_case() {
     assert!(obj.contains_key("latestVersion"));
     assert!(obj.contains_key("pinned"));
     assert!(obj.contains_key("upstreamAhead"));
+    // #79: a failed asset selection travels to the UI as its own field
+    // rather than looking like "nothing to apply".
+    assert!(obj.contains_key("checkError"));
 }
 
 #[test]
@@ -374,9 +379,13 @@ fn srmi_profile_lists_star_rail_exe_and_spectrumqt_repo() {
     use gmm_lib::core::GameCode;
     let p = GameCode::Srmi.profile();
     assert_eq!(p.display_name, "Honkai: Star Rail");
-    let (repo, asset_filter) = p.importer_repo.expect("srmi importer repo wired");
+    let (repo, asset_pattern) = p.importer_repo.expect("srmi importer origin wired");
     assert_eq!(repo, "SpectrumQT/SRMI-Package");
-    assert_eq!(asset_filter, "SRMI");
+    let pattern = AssetPattern::new(asset_pattern).expect("srmi pattern compiles");
+    assert!(
+        pattern.matches("SRMI-PACKAGE-v2.4.1.zip"),
+        "SRMI's anchored pattern must accept a conventionally named package, got {asset_pattern:?}"
+    );
     assert!(
         p.executable_candidates.contains(&"StarRail.exe"),
         "SRMI exe candidates must include StarRail.exe, got {:?}",
@@ -391,9 +400,13 @@ fn zzmi_profile_lists_zzz_exe_and_canonical_repo() {
     use gmm_lib::core::GameCode;
     let p = GameCode::Zzmi.profile();
     assert_eq!(p.display_name, "Zenless Zone Zero");
-    let (repo, asset_filter) = p.importer_repo.expect("zzmi importer repo wired");
+    let (repo, asset_pattern) = p.importer_repo.expect("zzmi importer origin wired");
     assert_eq!(repo, "leotorrez/ZZMI-Package");
-    assert_eq!(asset_filter, "ZZMI");
+    let pattern = AssetPattern::new(asset_pattern).expect("zzmi pattern compiles");
+    assert!(
+        pattern.matches("ZZMI-PACKAGE-v1.4.5.zip"),
+        "ZZMI's anchored pattern must accept a conventionally named package, got {asset_pattern:?}"
+    );
     assert!(
         p.executable_candidates.contains(&"ZenlessZoneZero.exe"),
         "ZZMI exe candidates must include ZenlessZoneZero.exe, got {:?}",
@@ -408,9 +421,13 @@ fn wwmi_profile_lists_unreal_shipping_exe_and_spectrumqt_repo() {
     use gmm_lib::core::GameCode;
     let p = GameCode::Wwmi.profile();
     assert_eq!(p.display_name, "Wuthering Waves");
-    let (repo, asset_filter) = p.importer_repo.expect("wwmi importer repo wired");
+    let (repo, asset_pattern) = p.importer_repo.expect("wwmi importer origin wired");
     assert_eq!(repo, "SpectrumQT/WWMI-Package");
-    assert_eq!(asset_filter, "WWMI");
+    let pattern = AssetPattern::new(asset_pattern).expect("wwmi pattern compiles");
+    assert!(
+        pattern.matches("WWMI-PACKAGE-v1.0.0.zip"),
+        "WWMI's anchored pattern must accept a conventionally named package, got {asset_pattern:?}"
+    );
     assert!(
         p.executable_candidates
             .contains(&"Client-Win64-Shipping.exe"),
@@ -426,9 +443,13 @@ fn himi_profile_lists_bh3_exe_and_canonical_repo() {
     use gmm_lib::core::GameCode;
     let p = GameCode::Himi.profile();
     assert_eq!(p.display_name, "Honkai Impact 3rd");
-    let (repo, asset_filter) = p.importer_repo.expect("himi importer repo wired");
+    let (repo, asset_pattern) = p.importer_repo.expect("himi importer origin wired");
     assert_eq!(repo, "leotorrez/HIMI-Package");
-    assert_eq!(asset_filter, "HIMI");
+    let pattern = AssetPattern::new(asset_pattern).expect("himi pattern compiles");
+    assert!(
+        pattern.matches("HIMI-PACKAGE-v1.0.2.zip"),
+        "HIMI's anchored pattern must accept a conventionally named package, got {asset_pattern:?}"
+    );
     assert!(
         p.executable_candidates.contains(&"BH3.exe"),
         "HIMI exe candidates must include BH3.exe, got {:?}",
@@ -444,9 +465,13 @@ fn efmi_profile_uses_inject_mode_not_hook() {
     use gmm_lib::core::GameCode;
     let p = GameCode::Efmi.profile();
     assert_eq!(p.display_name, "Endfield");
-    let (repo, asset_filter) = p.importer_repo.expect("efmi importer repo wired");
+    let (repo, asset_pattern) = p.importer_repo.expect("efmi importer origin wired");
     assert_eq!(repo, "SpectrumQT/EFMI-Package");
-    assert_eq!(asset_filter, "EFMI");
+    let pattern = AssetPattern::new(asset_pattern).expect("efmi pattern compiles");
+    assert!(
+        pattern.matches("EFMI-PACKAGE-v1.3.0.zip"),
+        "EFMI's anchored pattern must accept a conventionally named package, got {asset_pattern:?}"
+    );
     assert!(
         p.executable_candidates
             .contains(&"Endfield-Win64-Shipping.exe"),

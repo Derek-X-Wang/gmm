@@ -12,8 +12,9 @@
 //! fixture would have been invented from the same wrong assumption as
 //! the filter, and would have agreed with the bug.
 
-use gmm_lib::core::importer;
-use gmm_lib::core::updates::{self, LOADER_ASSET_FILTER};
+use gmm_lib::core::error::Error;
+use gmm_lib::core::importer::{self, AssetPattern};
+use gmm_lib::core::updates::{self, LOADER_ASSET_PATTERN};
 use gmm_lib::core::Core;
 use tempfile::TempDir;
 
@@ -24,9 +25,10 @@ fn recorded_release() -> serde_json::Value {
 }
 
 #[test]
-fn shipped_asset_filter_matches_the_real_release_asset() {
-    let release = importer::parse_latest_release(&recorded_release(), LOADER_ASSET_FILTER)
-        .expect("the filter GMM ships must match a real upstream asset");
+fn shipped_asset_pattern_matches_the_real_release_asset() {
+    let pattern = AssetPattern::new(LOADER_ASSET_PATTERN).expect("the shipped pattern compiles");
+    let release = importer::parse_latest_release(&recorded_release(), &pattern)
+        .expect("the pattern GMM ships must select a real upstream asset");
 
     assert_eq!(release.tag_name, "v1.0.2");
     assert_eq!(release.asset_name, "XXMI-PACKAGE-v1.0.2.zip");
@@ -37,17 +39,25 @@ fn the_old_libs_filter_matched_nothing_and_that_is_why_78_happened() {
     // Regression guard. `"Libs"` appears in the *repository* name, not
     // in any asset name — the assets are `XXMI-PACKAGE-v<version>.zip`
     // and `Manifest.json`.
-    let err = importer::parse_latest_release(&recorded_release(), "Libs")
+    let libs = AssetPattern::new("Libs").expect("compiles as a pattern too");
+    let err = importer::parse_latest_release(&recorded_release(), &libs)
         .expect_err("`Libs` never matched an asset; that was the bug");
 
     assert!(
         err.to_string().contains("Libs"),
-        "the error must name the filter that missed, got: {err}"
+        "the error must name the pattern that missed, got: {err}"
+    );
+    // #79: a miss is its own error, never an empty result. Asserting the
+    // variant rather than the rendered string is what stops a future
+    // caller folding it back into "up to date".
+    assert!(
+        matches!(err, Error::ReleaseAssetNoMatch { .. }),
+        "expected a no-match error, got {err:?}"
     );
 }
 
 #[test]
-fn loader_repo_and_filter_are_the_ones_the_recording_came_from() {
+fn loader_repo_is_the_one_the_recording_came_from() {
     assert_eq!(updates::LOADER_REPO, "SpectrumQT/XXMI-Libs-Package");
 }
 
@@ -104,7 +114,7 @@ async fn core_surfaces_a_failing_fetch_instead_of_swallowing_it() {
     let core = fresh_core(&tmp).await;
 
     let status = core
-        .check_loader_update_from("Derek-X-Wang/does-not-exist", ".zip")
+        .check_loader_update_from("Derek-X-Wang/does-not-exist", r"x\.zip")
         .await
         .expect("the check itself returns Ok; the failure rides inside the status");
 

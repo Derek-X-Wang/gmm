@@ -781,21 +781,26 @@ impl Core {
     /// per-game pin suppresses the `available` flag but is still
     /// surfaced separately so the dialog can show "pinned to vX".
     ///
-    /// `repo` and `asset_filter` are passed in so the caller can decide
-    /// which importer repo applies (e.g. `SilentNightSound/GIMI-Package` for
-    /// GIMI). Future per-game ports can call this with their own repo.
+    /// `repo` and `asset_pattern` are passed in so the caller can decide
+    /// which importer origin applies (e.g. `SilentNightSound/GIMI-Package`
+    /// for GIMI). Future per-game ports can call this with their own
+    /// origin.
     pub async fn check_importer_update(
         &self,
         game: GameCode,
         repo: &str,
-        asset_filter: &str,
+        asset_pattern: &str,
     ) -> Result<updates::UpdateStatus> {
+        let pattern = importer::AssetPattern::new(asset_pattern)?;
         let client = self.http_client().await?;
-        let latest = importer::fetch_latest_release(&client, repo, asset_filter, None)
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.tag_name);
+        let latest = match importer::fetch_latest_release(&client, repo, &pattern, None).await {
+            Ok(Some(release)) => Ok(release.tag_name),
+            // `None` means 304 Not Modified, which needs an ETag we
+            // never send. Treat it as "nothing learned" rather than
+            // lying that upstream is current.
+            Ok(None) => Err("upstream reported no change but GMM sent no ETag".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
         let installed = updates::importer_installed(&self.pool, game).await?;
         let pinned = updates::importer_pinned(&self.pool, game).await?.is_some();
         Ok(updates::compute_status(installed, latest, pinned))
@@ -817,21 +822,22 @@ impl Core {
     /// swallowed: until #78 this used `.ok().flatten()`, which made a
     /// broken check look exactly like a healthy one.
     pub async fn check_loader_update(&self) -> Result<updates::LoaderVersionStatus> {
-        self.check_loader_update_from(updates::LOADER_REPO, updates::LOADER_ASSET_FILTER)
+        self.check_loader_update_from(updates::LOADER_REPO, updates::LOADER_ASSET_PATTERN)
             .await
     }
 
     /// [`Core::check_loader_update`] against an explicit repo and
-    /// asset filter. Production always passes the
+    /// asset pattern. Production always passes the
     /// [`updates::LOADER_REPO`] constants; tests use it to drive the
     /// failure path without depending on upstream being reachable.
     pub async fn check_loader_update_from(
         &self,
         repo: &str,
-        asset_filter: &str,
+        asset_pattern: &str,
     ) -> Result<updates::LoaderVersionStatus> {
+        let pattern = importer::AssetPattern::new(asset_pattern)?;
         let client = self.http_client().await?;
-        let latest = importer::fetch_latest_release(&client, repo, asset_filter, None).await;
+        let latest = importer::fetch_latest_release(&client, repo, &pattern, None).await;
 
         let latest = match latest {
             // `None` means 304 Not Modified, which we can only get by
