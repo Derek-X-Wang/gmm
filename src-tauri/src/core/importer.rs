@@ -45,7 +45,14 @@ pub const IMPORTER_ROOT_FILES: &[&str] = &["d3d11.dll", "d3dcompiler_46.dll", "d
 /// or deleting it during an install would silently strip every enabled
 /// mod out of the game while the DB still reported `enabled = 1`. See
 /// [`USER_OWNED_DIRS`].
-pub const IMPORTER_ROOT_DIRS: &[&str] = &["ShaderCache", "ShaderFixes"];
+///
+/// `Core` was missing here until #113. It is the largest thing every
+/// package ships, so `backup_existing` skipped it while `swap_in` deleted
+/// it — a reinstall discarded the previous `Core/` outright and
+/// `rollback_to` had nothing to restore. The omission came from the same
+/// wrong picture of a package the install path's test fixtures encoded:
+/// that an importer is `d3d11.dll` plus `ShaderFixes/`.
+pub const IMPORTER_ROOT_DIRS: &[&str] = &["Core", "ShaderCache", "ShaderFixes"];
 
 /// Directories inside the game folder that the importer subsystem must
 /// never move, replace, or delete.
@@ -163,6 +170,162 @@ pub fn sha256_of_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// The root file every Model Importer package ships. Also the one file
+/// the install path must rewrite, so its absence is fatal rather than
+/// skippable (#113).
+pub const IMPORTER_REQUIRED_FILE: &str = "d3dx.ini";
+
+/// Directories every Model Importer package ships at its root.
+///
+/// Derived by inspecting the live packages of all six games across their
+/// three maintainers, recorded in
+/// `tests/fixtures/importer_package_layouts.json`. Two findings shaped
+/// this list, and neither was guessable:
+///
+/// - **`Mods/` is not here.** `ZZMI-PACKAGE-v1.4.5.zip` ships no `Mods/`
+///   entry at all, so requiring it would reject the real ZZMI package.
+///   GMM creates the directory when a Mod is enabled anyway.
+/// - **These are checked as directories, not as directories with
+///   content.** `EFMI-PACKAGE-v1.3.0.zip` and `WWMI-PACKAGE-v1.0.0.zip`
+///   ship `ShaderFixes/` empty.
+pub const IMPORTER_REQUIRED_DIRS: &[&str] = &["Core", "ShaderFixes"];
+
+/// Human-readable summary of the required shape, for the rejection
+/// message.
+const IMPORTER_EXPECTED_SHAPE: &str =
+    "d3dx.ini at its root plus Core/ and ShaderFixes/ directories, and no compiled binaries";
+
+/// File extensions that name a Windows executable image. A Model
+/// Importer is configuration and HLSL (ADR 0001, ADR 0005), so one of
+/// these in the archive means it is not an importer.
+///
+/// Deliberately narrow rather than a general denylist of suspicious
+/// names: the positive requirements above do the real work, and this
+/// catches the specific case that matters — an archive that would drop an
+/// executable image into the game's own directory.
+const EXECUTABLE_IMAGE_EXTENSIONS: &[&str] = &["dll", "exe", "sys"];
+
+/// Reject `zip_path` unless it has the structural shape of a Model
+/// Importer package.
+///
+/// Runs against the entry names [`zip_import::extract`] *would* produce,
+/// which means a package zipped inside a wrapper folder validates the
+/// same way it extracts, and means the check needs no filesystem access
+/// at all. That is the point: a rejection has to be a no-op on the game
+/// directory rather than something [`rollback_to`] has to undo (#113).
+///
+/// This is a check of *shape*, not of authenticity. Verifying a
+/// downloaded asset against upstream's signed `Manifest.json` is a real
+/// gap and a different concern, tracked separately.
+pub fn validate_importer_archive(zip_path: &Path) -> Result<()> {
+    let entries = zip_import::entry_names(zip_path, zip_import::ImportZipOptions::default())?;
+
+    let mut missing: Vec<String> = Vec::new();
+
+    let has_required_file = entries.iter().any(|entry| {
+        !entry.is_dir
+            && entry
+                .path
+                .to_str()
+                .is_some_and(|p| p.eq_ignore_ascii_case(IMPORTER_REQUIRED_FILE))
+    });
+    if !has_required_file {
+        missing.push(format!("no {IMPORTER_REQUIRED_FILE} at the archive root"));
+    }
+
+    for dir in IMPORTER_REQUIRED_DIRS {
+        // Satisfied by an explicit directory entry *or* by anything
+        // living under it — plenty of zip writers omit directory
+        // entries, and an importer whose `Core/` arrives only as path
+        // prefixes is still an importer.
+        let present = entries.iter().any(|entry| {
+            let mut components = entry.path.components();
+            let Some(std::path::Component::Normal(first)) = components.next() else {
+                return false;
+            };
+            if !first.to_string_lossy().eq_ignore_ascii_case(dir) {
+                return false;
+            }
+            entry.is_dir || components.next().is_some()
+        });
+        if !present {
+            missing.push(format!("no {dir}/ directory"));
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(Error::NotAModelImporter {
+            missing: missing.join("; "),
+            expected: IMPORTER_EXPECTED_SHAPE,
+        });
+    }
+
+    let binaries: Vec<String> = entries
+        .iter()
+        .filter(|entry| !entry.is_dir)
+        .filter(|entry| {
+            entry
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    EXECUTABLE_IMAGE_EXTENSIONS
+                        .iter()
+                        .any(|bad| ext.eq_ignore_ascii_case(bad))
+                })
+        })
+        .map(|entry| entry.path.to_string_lossy().to_string())
+        .collect();
+    if !binaries.is_empty() {
+        return Err(Error::ImporterArchiveHasBinaries {
+            entries: binaries.join(", "),
+        });
+    }
+
+    Ok(())
+}
+
+/// Locate the installed `d3dx.ini` in `game_dir`, comparing the filename
+/// case-insensitively as NTFS does.
+///
+/// An error rather than an `Option`, because by the time this runs
+/// [`validate_importer_archive`] has already guaranteed the archive
+/// carried one: its absence is a contradiction, not a condition. The
+/// rewrite it feeds is the single most importer-specific action in the
+/// whole install, and it used to be guarded by `if d3dx.is_file()` — so
+/// the one step that proved the input was an importer was also the one
+/// that quietly did nothing when it wasn't (#113).
+///
+/// Matching case-insensitively also fixes a real gap: a package shipping
+/// `D3DX.INI` worked on Windows and skipped the rewrite on a
+/// case-sensitive filesystem, leaving an install that still pointed at
+/// XXMI's loader.
+pub fn find_d3dx_ini(game_dir: &Path) -> Result<PathBuf> {
+    let entries = fs::read_dir(game_dir).map_err(|source| Error::Io {
+        path: game_dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Io {
+            path: game_dir.to_path_buf(),
+            source,
+        })?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(IMPORTER_REQUIRED_FILE)
+            && entry.path().is_file()
+        {
+            return Ok(entry.path());
+        }
+    }
+    Err(Error::Importer(format!(
+        "the archive validated as a Model Importer but no {IMPORTER_REQUIRED_FILE} \
+         is present in {} after the swap; the install is incomplete",
+        game_dir.display()
+    )))
+}
+
 /// Install a Model Importer into `game_dir` from a local ZIP file.
 ///
 /// The orchestrator that the production path calls: stage in a temp
@@ -178,6 +341,14 @@ pub fn install_from_local_zip(
     backups_root: &Path,
     loader_exe: &str,
 ) -> Result<InstallReport> {
+    // 0. Refuse an archive that is not a Model Importer, before anything
+    //    in the game directory is touched — not before the swap, and not
+    //    before the backup, but before the first `create_dir_all`. A
+    //    rejection has to be a no-op, because the alternative is a
+    //    destroyed working setup that `rollback_to` can only repair if
+    //    the user realises what happened (#113).
+    validate_importer_archive(zip_path)?;
+
     let sha256 = sha256_of_file(zip_path)?;
 
     // 1. Stage extraction into a temp dir under the game directory.
@@ -213,17 +384,22 @@ pub fn install_from_local_zip(
         source,
     })?;
 
-    // 4. Rewrite d3dx.ini's loader line.
-    let d3dx = game_dir.join("d3dx.ini");
+    // 4. Rewrite d3dx.ini's loader line. Step 0 established that the
+    //    archive carries one, so a miss here is a failed install, never a
+    //    step to skip.
     let mut rewrote_files = Vec::new();
-    if d3dx.is_file() {
-        if let Err(e) = rewrite_d3dx_loader(&d3dx, loader_exe) {
+    let rewrite = find_d3dx_ini(game_dir).and_then(|d3dx| {
+        rewrite_d3dx_loader(&d3dx, loader_exe)?;
+        Ok(d3dx)
+    });
+    match rewrite {
+        Ok(d3dx) => rewrote_files.push(d3dx),
+        Err(e) => {
             if let Some(bdir) = backup_dir.as_ref() {
                 let _ = rollback_to(bdir, game_dir);
             }
             return Err(e);
         }
-        rewrote_files.push(d3dx);
     }
 
     Ok(InstallReport {

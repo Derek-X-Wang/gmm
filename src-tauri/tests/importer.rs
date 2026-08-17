@@ -16,6 +16,14 @@ use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
+/// A zip shaped like a real `*MI-Package` release: `d3dx.ini` at the
+/// root, `Core/`, `ShaderFixes/`, and **no compiled binaries** — the DLLs
+/// ship with the Loader (ADR 0001).
+///
+/// This fixture used to ship `d3d11.dll` and no `Core/`, which is not what
+/// any of the six live packages look like. #113 replaced it: an invented
+/// fixture that disagrees with every real package cannot tell you whether
+/// the install path works.
 fn build_importer_zip(zip_path: &Path) {
     let file = File::create(zip_path).expect("create zip");
     let mut zw = ZipWriter::new(file);
@@ -26,8 +34,9 @@ fn build_importer_zip(zip_path: &Path) {
     let d3dx_contents = b"; 3dmigoto importer\n[Loader]\nloader = XXMI Launcher.exe\n";
     zw.start_file("d3dx.ini", opts).expect("d3dx.ini");
     zw.write_all(d3dx_contents).expect("write d3dx");
-    zw.start_file("d3d11.dll", opts).expect("d3d11.dll");
-    zw.write_all(b"MZ\x00\x00fake-dll").expect("write dll");
+    zw.add_directory("Core/", opts).expect("Core dir");
+    zw.start_file("Core/library.ini", opts).expect("core ini");
+    zw.write_all(b"; core library\n").expect("write core");
     zw.add_directory("ShaderFixes/", opts).expect("dir");
     zw.start_file("ShaderFixes/sample.hlsl", opts)
         .expect("hlsl");
@@ -50,7 +59,7 @@ fn install_from_local_zip_places_files_and_rewrites_loader() {
     assert!(!report.sha256.is_empty());
     assert!(report.rewrote_files.iter().any(|p| p.ends_with("d3dx.ini")));
 
-    assert!(game_dir.join("d3d11.dll").is_file());
+    assert!(game_dir.join("Core/library.ini").is_file());
     assert!(game_dir.join("ShaderFixes/sample.hlsl").is_file());
 
     let d3dx = fs::read_to_string(game_dir.join("d3dx.ini")).expect("read d3dx");
@@ -142,8 +151,11 @@ fn build_importer_zip_with_mods(zip_path: &Path) {
     zw.start_file("d3dx.ini", opts).expect("d3dx.ini");
     zw.write_all(b"[Loader]\nloader = XXMI Launcher.exe\n")
         .expect("write d3dx");
-    zw.start_file("d3d11.dll", opts).expect("d3d11.dll");
-    zw.write_all(b"MZ\x00\x00fake-dll").expect("write dll");
+    zw.add_directory("Core/", opts).expect("Core dir");
+    zw.start_file("Core/library.ini", opts).expect("core ini");
+    zw.write_all(b"; core library\n").expect("write core");
+    zw.add_directory("ShaderFixes/", opts)
+        .expect("ShaderFixes dir");
     zw.add_directory("Mods/", opts).expect("Mods dir");
     zw.start_file("Mods/ExampleMod.ini", opts).expect("example");
     zw.write_all(b"; shipped example\n").expect("write example");
@@ -198,7 +210,7 @@ fn reinstall_leaves_mods_in_place_while_replacing_importer_files() {
         "reinstalling the importer must not orphan enabled mods",
     );
     assert!(
-        game.join("d3d11.dll").exists(),
+        game.join("Core/library.ini").exists(),
         "importer files should still be replaced normally",
     );
 }
@@ -356,8 +368,14 @@ fn merging_a_shipped_mods_dir_recurses_into_existing_subdirectories() {
         let mut zw = ZipWriter::new(file);
         let opts =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        zw.start_file("d3d11.dll", opts).expect("dll");
-        zw.write_all(b"MZ\x00\x00").expect("write dll");
+        zw.start_file("d3dx.ini", opts).expect("d3dx.ini");
+        zw.write_all(b"[Loader]\nloader = XXMI Launcher.exe\n")
+            .expect("write d3dx");
+        zw.add_directory("Core/", opts).expect("Core dir");
+        zw.start_file("Core/library.ini", opts).expect("core ini");
+        zw.write_all(b"; core library\n").expect("write core");
+        zw.add_directory("ShaderFixes/", opts)
+            .expect("ShaderFixes dir");
         zw.add_directory("Mods/", opts).expect("mods dir");
         zw.add_directory("Mods/Examples/", opts)
             .expect("examples dir");
