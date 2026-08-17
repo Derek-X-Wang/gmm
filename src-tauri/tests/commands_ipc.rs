@@ -387,12 +387,12 @@ fn srmi_profile_lists_star_rail_exe_and_spectrumqt_repo() {
 }
 
 #[test]
-fn zzmi_profile_lists_zzz_exe_and_spectrumqt_repo() {
+fn zzmi_profile_lists_zzz_exe_and_canonical_repo() {
     use gmm_lib::core::GameCode;
     let p = GameCode::Zzmi.profile();
     assert_eq!(p.display_name, "Zenless Zone Zero");
     let (repo, asset_filter) = p.importer_repo.expect("zzmi importer repo wired");
-    assert_eq!(repo, "SpectrumQT/ZZMI-Package");
+    assert_eq!(repo, "leotorrez/ZZMI-Package");
     assert_eq!(asset_filter, "ZZMI");
     assert!(
         p.executable_candidates.contains(&"ZenlessZoneZero.exe"),
@@ -422,12 +422,12 @@ fn wwmi_profile_lists_unreal_shipping_exe_and_spectrumqt_repo() {
 }
 
 #[test]
-fn himi_profile_lists_bh3_exe_and_spectrumqt_repo() {
+fn himi_profile_lists_bh3_exe_and_canonical_repo() {
     use gmm_lib::core::GameCode;
     let p = GameCode::Himi.profile();
     assert_eq!(p.display_name, "Honkai Impact 3rd");
     let (repo, asset_filter) = p.importer_repo.expect("himi importer repo wired");
-    assert_eq!(repo, "SpectrumQT/HIMI-Package");
+    assert_eq!(repo, "leotorrez/HIMI-Package");
     assert_eq!(asset_filter, "HIMI");
     assert!(
         p.executable_candidates.contains(&"BH3.exe"),

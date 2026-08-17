@@ -134,11 +134,19 @@ impl GameProfile {
 /// `GameCode::ported()` so the React tab strip renders games in the
 /// same sequence (Genshin / Star Rail / ZZZ / Wuthering Waves /
 /// Honkai Impact 3rd / Endfield).
+///
+/// Model Importer repository ownership follows XXMI Launcher's canonical
+/// package definitions:
+/// <https://github.com/SpectrumQT/XXMI-Launcher/tree/main/src/xxmi_launcher/core/packages/model_importers>.
+/// The owners are intentionally not uniform: GIMI is published by
+/// `SilentNightSound`, while ZZMI and HIMI are published by `leotorrez`.
+/// Do not normalize those entries back to `SpectrumQT`; those repos have
+/// never hosted the corresponding live releases.
 pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Gimi,
         display_name: "Genshin Impact",
-        importer_repo: Some(("SpectrumQT/GIMI-Package", "GIMI")),
+        importer_repo: Some(("SilentNightSound/GIMI-Package", "GIMI")),
         executable_candidates: &["GenshinImpact.exe", "YuanShen.exe"],
         detect: Some(detect::genshin::detect),
         inject_mode: InjectMode::Hook,
@@ -154,7 +162,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Zzmi,
         display_name: "Zenless Zone Zero",
-        importer_repo: Some(("SpectrumQT/ZZMI-Package", "ZZMI")),
+        importer_repo: Some(("leotorrez/ZZMI-Package", "ZZMI")),
         executable_candidates: &["ZenlessZoneZero.exe"],
         detect: Some(detect::zenless::detect),
         inject_mode: InjectMode::Hook,
@@ -170,7 +178,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Himi,
         display_name: "Honkai Impact 3rd",
-        importer_repo: Some(("SpectrumQT/HIMI-Package", "HIMI")),
+        importer_repo: Some(("leotorrez/HIMI-Package", "HIMI")),
         executable_candidates: &["BH3.exe", "Bh3.exe"],
         detect: Some(detect::honkai_impact::detect),
         inject_mode: InjectMode::Hook,
