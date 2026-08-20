@@ -1,0 +1,18 @@
+[package]
+name = "gmm-manifest-validator"
+version = "0.1.0"
+description = "Offline shape validator for manifest/recommended-importers.json. Lives outside the Tauri package so that package keeps exactly one binary — a second bin there makes the bundler ship the wrong executable."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "validate-manifest"
+path = "src/main.rs"
+
+[dependencies]
+gmm = { path = "../.." }
+
+[dev-dependencies]
+tempfile = "3"

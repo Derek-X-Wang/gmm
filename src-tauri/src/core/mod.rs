@@ -20,6 +20,7 @@ pub mod library_audit;
 pub mod mod_updates;
 pub mod mods;
 pub mod network;
+pub mod recommended_importers;
 pub mod reconcile;
 pub mod session;
 pub mod settings;
