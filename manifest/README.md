@@ -27,7 +27,13 @@ Before merging a change here, run:
 cd src-tauri && cargo run --bin validate-manifest
 ```
 
-It exits non-zero and names the offending game key or field.
+It exits non-zero and names the offending game key or field. Point it at
+another file with `-- <path>`.
+
+The validator lives in its own workspace crate,
+`src-tauri/crates/manifest-validator/`, rather than as a second binary
+inside the Tauri package — a `src/bin/` entry there makes the bundler
+ship the wrong executable.
 
 ## The rules
 

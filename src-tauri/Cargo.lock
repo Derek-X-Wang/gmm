@@ -1595,6 +1595,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gmm-manifest-validator"
+version = "0.1.0"
+dependencies = [
+ "gmm",
+ "tempfile",
+]
+
+[[package]]
 name = "gobject-sys"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

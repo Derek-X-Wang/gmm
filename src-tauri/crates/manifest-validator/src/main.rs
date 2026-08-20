@@ -21,6 +21,11 @@
 //! cargo run --bin validate-manifest -- <path>    # any file
 //! ```
 //!
+//! It lives in its own workspace crate rather than as a second binary
+//! inside the Tauri package. A `src/bin/` entry there makes the bundler
+//! ship the wrong executable — the MSI came out at 1.5 MB with no
+//! `GMM.exe` in it. The Tauri package keeps exactly one binary.
+//!
 //! Exit status is 0 on success and 1 on any failure.
 
 use std::path::PathBuf;
@@ -31,12 +36,10 @@ use gmm_lib::core::recommended_importers::{self, MANIFEST_PATH};
 fn main() -> ExitCode {
     let path = match std::env::args().nth(1) {
         Some(arg) => PathBuf::from(arg),
-        // Default to the committed manifest, resolved from this
-        // crate's location so the command works from any directory.
-        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("repo root")
-            .join(MANIFEST_PATH),
+        // Default to the committed manifest, resolved by walking up
+        // from this crate's location so the command works from any
+        // directory and does not encode how deep the crate sits.
+        None => default_manifest_path(),
     };
 
     let raw = match std::fs::read_to_string(&path) {
@@ -64,4 +67,22 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Locate the committed manifest by walking up from this crate.
+///
+/// Walking beats a fixed `../../..` because it does not encode how deep
+/// this crate happens to sit in the workspace; moving the crate would
+/// otherwise silently point the default at nothing.
+fn default_manifest_path() -> PathBuf {
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in here.ancestors() {
+        let candidate = ancestor.join(MANIFEST_PATH);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    // Nothing found — hand back the most plausible path so the read
+    // error names something a human can act on.
+    here.join(MANIFEST_PATH)
 }
