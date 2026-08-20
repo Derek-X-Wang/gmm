@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "games": {
+    "gimi": {
+      "status": "recommended",
+      "owner": "SilentNightSound",
+      "repo": "GIMI-Package",
+      "assetPattern": "GIMI-PACKAGE-v\\d+\\.\\d+\\.\\d+\\.zip"
+    },
+    "srmi": {
+      "status": "recommended",
+      "owner": "SpectrumQT",
+      "repo": "SRMI-Package",
+      "assetPattern": "SRMI(-TEST)?-PACKAGE-v\\d+\\.\\d+\\.\\d+\\.zip",
+      "reason": "Upstream publishes this package under a TEST name; it is the only SRMI package that exists."
+    },
+    "zzmi": {
+      "status": "recommended",
+      "owner": "leotorrez",
+      "repo": "ZZMI-Package",
+      "assetPattern": "ZZMI-PACKAGE-v\\d+\\.\\d+\\.\\d+\\.zip"
+    },
+    "wwmi": {
+      "status": "recommended",
+      "owner": "SpectrumQT",
+      "repo": "WWMI-Package",
+      "assetPattern": "WWMI-PACKAGE-v\\d+\\.\\d+\\.\\d+\\.zip"
+    },
+    "himi": {
+      "status": "none",
+      "reason": "No maintained Honkai Impact 3rd package is known right now — the upstream package last released 2025-07-24 and carries no licence. Supply your own Importer Origin in Settings."
+    },
+    "efmi": {
+      "status": "recommended",
+      "owner": "SpectrumQT",
+      "repo": "EFMI-Package",
+      "assetPattern": "EFMI-PACKAGE-v\\d+\\.\\d+\\.\\d+\\.zip"
+    }
+  }
+}
