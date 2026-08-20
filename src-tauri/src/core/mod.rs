@@ -13,6 +13,7 @@ pub mod error;
 pub mod gamebanana;
 pub mod games;
 pub mod importer;
+pub mod importer_origin;
 pub mod instance_lock;
 pub mod junction;
 pub mod library_audit;
@@ -806,6 +807,71 @@ impl Core {
         Ok(updates::compute_status(installed, latest, pinned))
     }
 
+    /// [`Core::check_importer_update`] against the game's **resolved**
+    /// Importer Origin (ADR 0005) rather than compiled-in constants.
+    ///
+    /// This is what the Tauri command calls, so a user override changes
+    /// which repository the badge is computed from.
+    pub async fn check_importer_update_for(&self, game: GameCode) -> Result<updates::UpdateStatus> {
+        let resolution = self.resolve_importer_origin(game).await?;
+        self.check_importer_update_with(game, &resolution).await
+    }
+
+    /// [`Core::check_importer_update_for`] against an explicit
+    /// resolution. Production resolves first; tests use this to drive
+    /// the no-origin-in-effect path without waiting on #108 to make
+    /// retraction reachable, the same seam
+    /// [`Core::check_loader_update_from`] provides for the Loader.
+    ///
+    /// When **no origin is in effect** GMM warns and does not block
+    /// (#97): the status carries an explanatory `check_error` and
+    /// claims nothing about upstream. It must never come back looking
+    /// like "up to date" — that collapse is the defect #78 fixed, and
+    /// #79 removed from the importer path.
+    pub async fn check_importer_update_with(
+        &self,
+        game: GameCode,
+        resolution: &importer_origin::OriginResolution,
+    ) -> Result<updates::UpdateStatus> {
+        let installed = updates::importer_installed(&self.pool, game).await?;
+        let pinned = updates::importer_pinned(&self.pool, game).await?.is_some();
+
+        let origin = match resolution {
+            importer_origin::OriginResolution::InEffect { origin, .. } => origin,
+            importer_origin::OriginResolution::NoneInEffect { reason } => {
+                let mut message = format!(
+                    "No Model Importer origin is in effect for {}. \
+                     Choose one in Settings to install or update it.",
+                    game.profile().display_name,
+                );
+                if let Some(reason) = reason {
+                    message.push(' ');
+                    message.push_str(reason);
+                }
+                return Ok(updates::compute_status(installed, Err(message), pinned));
+            }
+        };
+
+        let pattern = importer::AssetPattern::new(origin.asset_pattern())?;
+        let client = self.http_client().await?;
+        let latest = match importer::fetch_latest_release(
+            &client,
+            &origin.repo_slug(),
+            &pattern,
+            None,
+        )
+        .await
+        {
+            Ok(Some(release)) => Ok(release.tag_name),
+            // `None` means 304 Not Modified, which needs an ETag we
+            // never send. Treat it as "nothing learned" rather than
+            // lying that upstream is current.
+            Ok(None) => Err("upstream reported no change but GMM sent no ETag".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        Ok(updates::compute_status(installed, latest, pinned))
+    }
+
     /// Report the Loader (`3dmloader.dll` from
     /// [`updates::LOADER_REPO`]) this build ships against the latest
     /// upstream release.
@@ -861,6 +927,128 @@ impl Core {
     /// this from inside `install_importer` after a successful apply;
     /// integration tests can call it directly to seed state.
     pub async fn set_importer_installed(&self, game: GameCode, version: &str) -> Result<()> {
+        updates::set_importer_installed(&self.pool, game, version).await
+    }
+
+    /// The per-game installed importer tag, if one was ever recorded.
+    ///
+    /// `None` means no install GMM performed — which is *not* the same
+    /// as "no importer on disk". A hand-installed importer leaves this
+    /// empty (#99), and that is exactly the unknown-origin case
+    /// [`Core::installed_importer_origin`] reports.
+    pub async fn installed_importer_version(&self, game: GameCode) -> Result<Option<String>> {
+        updates::importer_installed(&self.pool, game).await
+    }
+
+    // ---- Importer Origin (ADR 0005 / #107) ----
+
+    /// The user's per-game Importer Origin override (layer 1), if they
+    /// have set one.
+    ///
+    /// `None` means **no override set**, which is an input to
+    /// [`Core::resolve_importer_origin`] and must never be confused
+    /// with [`OriginResolution::NoneInEffect`] ("no origin is in
+    /// effect") or with [`InstalledOrigin::Unknown`].
+    ///
+    /// A stored value that no longer parses is treated as no override
+    /// rather than as an error: the layer drops out and the game falls
+    /// back, which is the same warn-never-block posture the rest of ADR
+    /// 0005 takes. Failing here would make a game uninstallable because
+    /// of a settings row.
+    pub async fn importer_origin_override(
+        &self,
+        game: GameCode,
+    ) -> Result<Option<importer_origin::ImporterOrigin>> {
+        let raw = get_setting(&self.pool, &importer_origin::keys::origin_override(game)).await?;
+        Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
+    }
+
+    /// Set or clear the user's per-game Importer Origin override.
+    ///
+    /// `None` clears it, returning the game to following layers 2 and 3
+    /// — the same `Option` idiom as `set_library_path_for_game` and
+    /// `set_importer_pinned`.
+    pub async fn set_importer_origin_override(
+        &self,
+        game: GameCode,
+        origin: Option<&importer_origin::ImporterOrigin>,
+    ) -> Result<()> {
+        let encoded =
+            match origin {
+                Some(o) => Some(serde_json::to_string(o).map_err(|e| {
+                    Error::Importer(format!("could not encode Importer Origin: {e}"))
+                })?),
+                None => None,
+            };
+        put_setting(
+            &self.pool,
+            &importer_origin::keys::origin_override(game),
+            encoded.as_deref(),
+        )
+        .await
+    }
+
+    /// Resolve a game's effective Importer Origin through ADR 0005's
+    /// three layers.
+    ///
+    /// Layer 2 (the recommended manifest) is not wired yet — #108 lands
+    /// the fetch and cache. Until then it is passed as absent, which
+    /// falls through to the compiled-in default and leaves today's
+    /// install behaviour unchanged. Absent is deliberately *not*
+    /// retraction (#93).
+    pub async fn resolve_importer_origin(
+        &self,
+        game: GameCode,
+    ) -> Result<importer_origin::OriginResolution> {
+        let user_override = self.importer_origin_override(game).await?;
+        let compiled = importer_origin::compiled_in_default(game);
+        Ok(importer_origin::resolve(
+            user_override.as_ref(),
+            // Layer 2 input, absent until #108.
+            None,
+            compiled.as_ref(),
+        ))
+    }
+
+    /// The Importer Origin the current install was performed from.
+    ///
+    /// Absent reads back as [`InstalledOrigin::Unknown`] — a real,
+    /// first-class state (#99), never backfilled to the compiled-in
+    /// default and never treated as "not installed".
+    pub async fn installed_importer_origin(
+        &self,
+        game: GameCode,
+    ) -> Result<importer_origin::InstalledOrigin> {
+        let raw = get_setting(&self.pool, &importer_origin::keys::installed_origin(game)).await?;
+        Ok(
+            match raw.as_deref().and_then(|j| serde_json::from_str(j).ok()) {
+                Some(origin) => importer_origin::InstalledOrigin::Known(origin),
+                None => importer_origin::InstalledOrigin::Unknown,
+            },
+        )
+    }
+
+    /// Record a completed importer install: the version *and* the
+    /// origin it came from.
+    ///
+    /// This is the only way an unknown origin becomes known (#99).
+    /// Recording an origin without an actual install was explicitly
+    /// rejected — it would assert both an origin and a version for
+    /// files GMM has never seen.
+    pub async fn record_importer_install(
+        &self,
+        game: GameCode,
+        version: &str,
+        origin: &importer_origin::ImporterOrigin,
+    ) -> Result<()> {
+        let encoded = serde_json::to_string(origin)
+            .map_err(|e| Error::Importer(format!("could not encode Importer Origin: {e}")))?;
+        put_setting(
+            &self.pool,
+            &importer_origin::keys::installed_origin(game),
+            Some(&encoded),
+        )
+        .await?;
         updates::set_importer_installed(&self.pool, game, version).await
     }
 
