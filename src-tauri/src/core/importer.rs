@@ -113,6 +113,13 @@ pub struct LatestRelease {
 /// `-rc`, …) was rejected because it only catches the failure modes
 /// already imagined; an anchored shape rejects everything that is not
 /// the expected form without enumerating anything.
+///
+/// SRMI's compiled-in pattern was later widened to accept that TEST
+/// name explicitly (#116), because it is the only package upstream
+/// publishes and Star Rail could otherwise not be installed at all.
+/// That is one origin naming one extra shape it accepts — the rule
+/// here is unchanged: still anchored, still exactly-one-match, still
+/// distinct errors for zero and for ambiguity.
 #[derive(Debug, Clone)]
 pub struct AssetPattern {
     /// The pattern as written, for error messages. Reported without the
