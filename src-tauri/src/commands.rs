@@ -16,6 +16,7 @@ use crate::core::av;
 use crate::core::conflicts::ConflictReport;
 use crate::core::diagnostics;
 use crate::core::importer::{self, AssetPattern, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
+use crate::core::importer_origin::{ImporterOrigin, OriginResolution};
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
@@ -338,8 +339,7 @@ pub async fn check_importer_update(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<UpdateStatus, String> {
-    let (repo, pattern) = importer_repo_for(game)?;
-    core.check_importer_update(game, repo, pattern)
+    core.check_importer_update_for(game)
         .await
         .map_err(|e| e.to_string())
 }
@@ -416,31 +416,50 @@ pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> Result<(
         .map_err(|e| e.to_string())
 }
 
-/// Resolve the GitHub repo + release-asset pattern for a Game's
-/// importer.
+/// Resolve the Game's effective Importer Origin (ADR 0005) and compile
+/// its release-asset pattern (#79).
 ///
-/// Dispatch goes through `core::games::GameProfile` so a new per-game
-/// port (slices #16–#20) only needs to fill in the registry row in
-/// `core::games`, not touch this function. Unported games surface a
-/// uniform user-facing error.
-fn importer_repo_for(game: GameCode) -> Result<(&'static str, &'static str), String> {
-    game.profile().importer_repo.ok_or_else(|| {
-        format!(
-            "Importer auto-install for {} is not wired in this build.",
-            game.profile().display_name,
-        )
-    })
-}
+/// Replaces the compiled-in lookup this used to do: the user's per-game
+/// override now wins, and once #108 lands the recommended manifest sits
+/// between the two. The compiled-in profile row is the bottom layer,
+/// not the only one.
+///
+/// A pattern that does not compile is a build defect for the
+/// compiled-in origins — the `every_shipped_asset_pattern_compiles`
+/// test guards that — but a pattern can arrive from a manifest or from
+/// the user, so the failure is surfaced rather than unwrapped.
+///
+/// When **no origin is in effect** the user is told what to do rather
+/// than shown a generic failure. That is the warn-never-block posture
+/// of #97: there is genuinely nothing to install *from*, and the way
+/// forward is to supply an origin.
+async fn resolved_origin_for(
+    core: &Core,
+    game: GameCode,
+) -> Result<(ImporterOrigin, AssetPattern), String> {
+    let resolution = core
+        .resolve_importer_origin(game)
+        .await
+        .map_err(|e| e.to_string())?;
 
-/// Compile the Game's release-asset pattern (#79). A pattern that does
-/// not compile is a build defect for the compiled-in origins — the
-/// `every_shipped_asset_pattern_compiles` test guards that — but ADR
-/// 0005 lets a pattern arrive from a manifest or the user, so the
-/// failure is surfaced rather than unwrapped.
-fn asset_pattern_for(game: GameCode) -> Result<(&'static str, AssetPattern), String> {
-    let (repo, pattern) = importer_repo_for(game)?;
-    let pattern = AssetPattern::new(pattern).map_err(|e| e.to_string())?;
-    Ok((repo, pattern))
+    let origin = match resolution {
+        OriginResolution::InEffect { origin, .. } => origin,
+        OriginResolution::NoneInEffect { reason } => {
+            let mut message = format!(
+                "No Model Importer origin is in effect for {}. \
+                 Choose one in Settings to install it.",
+                game.profile().display_name,
+            );
+            if let Some(reason) = reason.as_deref() {
+                message.push(' ');
+                message.push_str(reason);
+            }
+            return Err(message);
+        }
+    };
+
+    let pattern = AssetPattern::new(origin.asset_pattern()).map_err(|e| e.to_string())?;
+    Ok((origin, pattern))
 }
 
 #[tauri::command]
@@ -448,9 +467,9 @@ pub async fn fetch_latest_importer_release(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<Option<LatestRelease>, String> {
-    let (repo, pattern) = asset_pattern_for(game)?;
+    let (origin, pattern) = resolved_origin_for(&core, game).await?;
     let client = core.http_client().await.map_err(|e| e.to_string())?;
-    importer::fetch_latest_release(&client, repo, &pattern, None)
+    importer::fetch_latest_release(&client, &origin.repo_slug(), &pattern, None)
         .await
         .map_err(|e| e.to_string())
 }
@@ -466,10 +485,10 @@ pub async fn install_importer(
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Set the game install path in Settings before installing.".to_string())?;
-    let (repo, pattern) = asset_pattern_for(game)?;
+    let (origin, pattern) = resolved_origin_for(&core, game).await?;
 
     let client = core.http_client().await.map_err(|e| e.to_string())?;
-    let release = importer::fetch_latest_release(&client, repo, &pattern, None)
+    let release = importer::fetch_latest_release(&client, &origin.repo_slug(), &pattern, None)
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no release returned for importer repo".to_string())?;
@@ -489,10 +508,13 @@ pub async fn install_importer(
     .map_err(|e| format!("install task join error: {e}"))?
     .map_err(|e| e.to_string())?;
 
-    // Record the installed tag so the update-check pass can compare
-    // against it next launch. Best-effort; never fails the install.
+    // Record the installed tag *and* the Importer Origin it came from,
+    // so the update check can compare against it next launch and so
+    // origin changes are detectable (ADR 0005). This is the only way an
+    // unknown origin becomes known (#99). Best-effort; never fails the
+    // install, because the files are already on disk by this point.
     let _ = core
-        .set_importer_installed(game, &release.tag_name)
+        .record_importer_install(game, &release.tag_name, &origin)
         .await
         .map_err(|e| e.to_string());
 
