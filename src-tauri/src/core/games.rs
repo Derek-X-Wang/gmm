@@ -163,15 +163,22 @@ pub const GAME_PROFILES: &[GameProfile] = &[
     GameProfile {
         code: GameCode::Srmi,
         display_name: "Honkai: Star Rail",
-        // `SpectrumQT/SRMI-Package`'s only asset today is
-        // `SRMI-TEST-PACKAGE-v2.4.2.zip`, so this pattern **refuses to
-        // install** rather than silently shipping a build upstream
-        // labelled TEST. That is the recorded decision on #79, not an
-        // oversight: if that test package genuinely is the right one for
-        // Star Rail, widen this pattern deliberately.
+        // The `(-TEST)?` alternation is deliberate — do not "clean it
+        // up". `SpectrumQT/SRMI-Package` publishes its only asset as
+        // `SRMI-TEST-PACKAGE-v2.4.2.zip`, and the maintainer has
+        // confirmed it is the only SRMI package that exists. #79 made
+        // this pattern refuse the TEST name, which was the correct
+        // default but left Star Rail unable to install at all; #116
+        // widens it for this one origin so the game works, without
+        // touching any other game or the matching rule itself.
+        //
+        // Both names are accepted so upstream renaming back to the
+        // conventional form needs no GMM release. A release publishing
+        // *both* is an ambiguity error rather than a silent pick — the
+        // accepted cost, pinned by a test.
         importer_repo: Some((
             "SpectrumQT/SRMI-Package",
-            r"SRMI-PACKAGE-v\d+\.\d+\.\d+\.zip",
+            r"SRMI(-TEST)?-PACKAGE-v\d+\.\d+\.\d+\.zip",
         )),
         executable_candidates: &["StarRail.exe"],
         detect: Some(detect::star_rail::detect),

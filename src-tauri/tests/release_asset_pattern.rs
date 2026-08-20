@@ -103,56 +103,127 @@ fn every_conventionally_named_importer_origin_still_resolves() {
 }
 
 #[test]
-fn srmi_refuses_the_test_package_rather_than_installing_it() {
-    // `SpectrumQT/SRMI-Package`'s only asset today is
-    // `SRMI-TEST-PACKAGE-v2.4.2.zip`. The bare substring `"SRMI"`
-    // matched it, so GMM would have installed a build upstream
-    // explicitly labelled TEST and presented it as the current importer
-    // for Honkai: Star Rail. Refusing is the recorded decision on #79 —
-    // this test exists so nobody "fixes" SRMI by widening the pattern
-    // without making that call deliberately.
+fn srmi_selects_the_test_named_package_upstream_actually_publishes() {
+    // #79 made SRMI refuse `SRMI-TEST-PACKAGE-v2.4.2.zip` rather than
+    // silently install a build upstream labelled TEST. Refusing was the
+    // right default, but it left Star Rail unable to install at all —
+    // one of six supported games a dead end (#116). The maintainer has
+    // confirmed this is the only SRMI package that exists, so GMM now
+    // accepts it deliberately. Asserted against the recorded real
+    // release, not a hand-written name.
     let (repo, pattern) = shipped("srmi");
     assert_eq!(repo, "SpectrumQT/SRMI-Package");
 
-    let error = importer::parse_latest_release(&recorded("srmi"), &pattern)
-        .expect_err("a TEST package must not be selected");
+    let release = importer::parse_latest_release(&recorded("srmi"), &pattern)
+        .expect("Star Rail must be installable from the package upstream publishes");
 
-    match error {
-        Error::ReleaseAssetNoMatch {
+    assert_eq!(release.tag_name, "v2.4.2");
+    assert_eq!(release.asset_name, "SRMI-TEST-PACKAGE-v2.4.2.zip");
+    assert!(
+        release.asset_url.contains("SRMI-TEST-PACKAGE-v2.4.2.zip"),
+        "the download URL must point at the selected asset, got {:?}",
+        release.asset_url
+    );
+}
+
+#[test]
+fn srmi_still_accepts_a_conventionally_named_package_if_upstream_renames_back() {
+    // The `(-TEST)?` alternation is a widening, not a replacement: the
+    // day `SpectrumQT/SRMI-Package` publishes a conventionally named
+    // asset, GMM must pick it up without another release of GMM itself.
+    let (_, pattern) = shipped("srmi");
+    assert!(pattern.matches("SRMI-PACKAGE-v2.4.3.zip"));
+    assert!(pattern.matches("SRMI-TEST-PACKAGE-v2.4.2.zip"));
+}
+
+#[test]
+fn srmi_treats_a_release_carrying_both_names_as_ambiguous() {
+    // The accepted cost of the `(-TEST)?` alternation: a release that
+    // publishes both names matches twice and must error rather than
+    // pick one. Pinned so nobody later "fixes" this with
+    // first-match-wins, which is exactly how a TEST build gets chosen
+    // over a real one.
+    let (_, pattern) = shipped("srmi");
+    let json = serde_json::json!({
+        "tag_name": "v2.4.3",
+        "assets": [
+            {"name": "SRMI-PACKAGE-v2.4.3.zip",
+             "browser_download_url": "https://example.invalid/a.zip"},
+            {"name": "SRMI-TEST-PACKAGE-v2.4.3.zip",
+             "browser_download_url": "https://example.invalid/b.zip"},
+        ]
+    });
+
+    match importer::parse_latest_release(&json, &pattern).expect_err("two matches is an error") {
+        Error::ReleaseAssetAmbiguous {
             release,
-            pattern,
-            candidates,
+            count,
+            matches,
+            ..
         } => {
-            assert_eq!(release, "v2.4.2");
-            assert!(
-                pattern.contains("SRMI-PACKAGE"),
-                "the error must name the pattern that missed, got {pattern:?}"
-            );
-            assert!(
-                candidates.contains("SRMI-TEST-PACKAGE-v2.4.2.zip"),
-                "the error must name what upstream published so the user can \
-                 tell a rename from a wrong pattern, got {candidates:?}"
-            );
+            assert_eq!(release, "v2.4.3");
+            assert_eq!(count, 2);
+            assert!(matches.contains("SRMI-PACKAGE-v2.4.3.zip"));
+            assert!(matches.contains("SRMI-TEST-PACKAGE-v2.4.3.zip"));
         }
-        other => panic!("expected a no-match error naming the pattern, got {other:?}"),
+        other => panic!("expected an ambiguity error, got {other:?}"),
     }
 }
 
 #[test]
-fn the_old_substring_filter_would_have_installed_srmis_test_package() {
-    // The bug, pinned. `"SRMI"` is a substring of
-    // `SRMI-TEST-PACKAGE-v2.4.2.zip`; the anchored pattern is not.
+fn srmi_is_widened_by_one_named_alternation_not_by_a_substring() {
+    // #116 accepts SRMI's TEST-named asset, but *not* by going back to
+    // the substring rule #79 removed. `"SRMI"` was a substring of the
+    // TEST package — that is the bug that started all of this. The
+    // pattern still names exactly the two shapes it accepts, still
+    // anchors, and still rejects everything else.
     assert!(
         "SRMI-TEST-PACKAGE-v2.4.2.zip".contains("SRMI"),
-        "this is what the shipped filter did"
+        "this is what the old shipped filter did"
     );
     let (_, pattern) = shipped("srmi");
-    assert!(!pattern.matches("SRMI-TEST-PACKAGE-v2.4.2.zip"));
-    assert!(
-        pattern.matches("SRMI-PACKAGE-v2.4.1.zip"),
-        "a conventionally named SRMI package must still be accepted the day \
-         upstream publishes one"
-    );
+    assert!(pattern.matches("SRMI-TEST-PACKAGE-v2.4.2.zip"));
+    assert!(!pattern.matches("SRMI-BETA-PACKAGE-v2.4.2.zip"));
+    assert!(!pattern.matches("prefix-SRMI-TEST-PACKAGE-v2.4.2.zip"));
+    assert!(!pattern.matches("SRMI-TEST-PACKAGE-v2.4.2.zip.sig"));
+    assert!(!pattern.matches("SRMI-TEST-PACKAGE.zip"));
+}
+
+#[test]
+fn widening_srmi_left_every_other_game_pattern_untouched() {
+    // #116 is a data change to exactly one game. If a future edit
+    // widens another game the same way, it has to come here and say so.
+    let expected = [
+        ("gimi", r"GIMI-PACKAGE-v\d+\.\d+\.\d+\.zip"),
+        ("srmi", r"SRMI(-TEST)?-PACKAGE-v\d+\.\d+\.\d+\.zip"),
+        ("zzmi", r"ZZMI-PACKAGE-v\d+\.\d+\.\d+\.zip"),
+        ("wwmi", r"WWMI-PACKAGE-v\d+\.\d+\.\d+\.zip"),
+        ("himi", r"HIMI-PACKAGE-v\d+\.\d+\.\d+\.zip"),
+        ("efmi", r"EFMI-PACKAGE-v\d+\.\d+\.\d+\.zip"),
+    ];
+
+    for (game, want) in expected {
+        let profile = GAME_PROFILES
+            .iter()
+            .find(|p| p.code.as_str() == game)
+            .unwrap_or_else(|| panic!("no profile for {game}"));
+        let (_, shipped) = profile
+            .importer_repo
+            .unwrap_or_else(|| panic!("{game} has no Importer Origin"));
+        assert_eq!(shipped, want, "{game} asset pattern changed");
+    }
+
+    // And the TEST alternation is SRMI's alone.
+    for profile in GAME_PROFILES {
+        let (_, pattern) = profile.importer_repo.expect("every shipped game is ported");
+        if profile.code.as_str() != "srmi" {
+            assert!(
+                !pattern.contains("TEST"),
+                "{} must not accept a TEST-named asset",
+                profile.code.as_str()
+            );
+        }
+    }
 }
 
 #[test]

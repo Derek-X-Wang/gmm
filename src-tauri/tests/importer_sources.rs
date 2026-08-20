@@ -10,8 +10,7 @@
 //! The verdict each origin is expected to reach — selects an asset, or
 //! refuses — is **derived from the recording** rather than listed here,
 //! so the live test flags drift in either direction: an origin that
-//! stops resolving, and SRMI the day upstream finally publishes a
-//! conventionally named package (#79).
+//! stops resolving, and an origin that starts resolving differently.
 
 use gmm_lib::core::games::{GameProfile, GAME_PROFILES};
 use gmm_lib::core::importer::{self, AssetPattern};
@@ -62,9 +61,12 @@ fn every_importer_profile_points_at_the_repo_its_recording_came_from() {
 
 #[test]
 fn selection_against_the_recordings_matches_the_recorded_verdict() {
-    // Five of the six origins select exactly one asset. SRMI refuses,
-    // because its only published asset is a TEST build — the recorded
-    // decision on #79, asserted in detail in tests/release_asset_pattern.rs.
+    // All six origins select exactly one asset. SRMI was the lone
+    // refusal under #79 — its only published asset is named
+    // `SRMI-TEST-PACKAGE-…` — which left Star Rail uninstallable;
+    // #116 widened that one origin's pattern to accept it. Every
+    // supported game must now resolve, and this is the test that fails
+    // if any of them stops.
     let mut selected = Vec::new();
     let mut refused = Vec::new();
     for profile in GAME_PROFILES {
@@ -72,16 +74,21 @@ fn selection_against_the_recordings_matches_the_recorded_verdict() {
         let (_, pattern) = origin_of(profile);
         match importer::parse_latest_release(&recorded(game), &pattern) {
             Ok(release) => selected.push((game, release.asset_name)),
-            Err(_) => refused.push(game),
+            Err(e) => refused.push((game, e)),
         }
     }
 
-    assert_eq!(
-        refused,
-        vec!["srmi"],
-        "only SRMI is expected to refuse its upstream release; selected: {selected:?}",
+    assert!(
+        refused.is_empty(),
+        "every supported game must be installable from its recorded \
+         upstream release, but these refused: {refused:?}",
     );
-    assert_eq!(selected.len(), GAME_PROFILES.len() - 1);
+    assert_eq!(selected.len(), GAME_PROFILES.len());
+    assert!(
+        selected.contains(&("srmi", "SRMI-TEST-PACKAGE-v2.4.2.zip".to_string())),
+        "Star Rail must select the package upstream actually publishes, \
+         got {selected:?}",
+    );
 }
 
 fn github_client() -> reqwest::Client {
@@ -143,9 +150,8 @@ async fn every_importer_origin_reaches_the_verdict_its_recording_predicts() {
             }
             (Err(recorded_error), Ok(live_release)) => panic!(
                 "{game}: {repo} refused when recorded ({recorded_error}) but now \
-                 resolves to {live_release:?}. If upstream started publishing a \
-                 conventionally named package, revisit the #79 decision for this \
-                 origin deliberately."
+                 resolves to {live_release:?}. Re-record the fixture and revisit \
+                 this origin's pattern deliberately."
             ),
         }
     }
