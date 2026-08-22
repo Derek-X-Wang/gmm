@@ -18,7 +18,9 @@
          which stays a repository secret and is not read here
       2. build version OLD and version NEW with that key, both pointed at
          a local update endpoint
-      3. assert NEW produced `*.msi.zip` + `*.msi.zip.sig`
+      3. assert NEW produced a signed updater artifact (the bundler's
+         `*.sig` plus the file it signs — a raw `.msi` on the Tauri
+         version this repo pins, a `.msi.zip` on older ones)
       4. serve NEW's `latest.json` + artifact over 127.0.0.1
       5. fetch both back through that endpoint and verify the signature
          the way tauri-plugin-updater does; assert a tampered artifact is
@@ -180,14 +182,34 @@ Build-Version $NewVersion $NewDir
 # ---------------------------------------------------------------------
 Write-Section "Updater artifacts exist"
 
-$zip = Get-ChildItem $NewDir -Filter *.msi.zip | Select-Object -First 1
-$sig = Get-ChildItem $NewDir -Filter *.msi.zip.sig | Select-Object -First 1
-if (-not $zip) {
-    throw "no .msi.zip in $NewDir — createUpdaterArtifacts produced nothing, " +
-          "which is exactly how the first release shipped with no update path"
+# What "the updater artifact" *is* has changed shape across Tauri
+# versions: v1 and early v2 signed a zipped installer (`.msi.zip`), the
+# 2.11 line this repo pins signs the raw `.msi`. This script was written
+# against the old shape and asserted `.msi.zip`, so it would have failed
+# on every correct build — the first execution of it said
+# "createUpdaterArtifacts produced nothing" about a build that had just
+# printed "Finished 2 updater signatures at: ...msi.sig".
+#
+# So derive the artifact from the signature rather than hardcoding
+# either container. What matters is that *something* got signed and that
+# the signature verifies over exactly those bytes; the extension is
+# Tauri's business and is allowed to change again.
+$sig = Get-ChildItem $NewDir -File |
+    Where-Object { $_.Name.EndsWith(".sig") } |
+    Select-Object -First 1
+if (-not $sig) {
+    $present = (Get-ChildItem $NewDir -File | ForEach-Object Name) -join ", "
+    throw "no updater signature (*.sig) in $NewDir — createUpdaterArtifacts " +
+          "produced nothing, which is exactly how the first release shipped " +
+          "with no update path. Bundle contained: $present"
 }
-if (-not $sig) { throw "no .msi.zip.sig next to $($zip.Name) — the update would be unsigned" }
-Write-Host "updater artifacts: $($zip.Name) + $($sig.Name)"
+$artifactPath = $sig.FullName -replace '\.sig$', ''
+if (-not (Test-Path $artifactPath)) {
+    throw "signature $($sig.Name) has no artifact beside it at $artifactPath — " +
+          "the update would have a signature over a file nobody ships"
+}
+$artifact = Get-Item $artifactPath
+Write-Host "updater artifacts: $($artifact.Name) + $($sig.Name)"
 
 $oldMsi = (Get-ChildItem $OldDir -Filter *.msi | Select-Object -First 1).FullName
 $newMsi = (Get-ChildItem $NewDir -Filter *.msi | Select-Object -First 1).FullName
@@ -198,7 +220,7 @@ Write-Section "Serve the update over 127.0.0.1"
 
 $Serve = Join-Path $Work "serve"
 New-Item -ItemType Directory -Force -Path $Serve | Out-Null
-Copy-Item $zip.FullName $Serve -Force
+Copy-Item $artifact.FullName $Serve -Force
 Copy-Item $sig.FullName $Serve -Force
 
 $latest = [ordered]@{
@@ -208,7 +230,7 @@ $latest = [ordered]@{
     platforms = [ordered]@{
         "windows-x86_64" = [ordered]@{
             signature = (Get-Content $sig.FullName -Raw).Trim()
-            url       = "http://127.0.0.1:$Port/$($zip.Name)"
+            url       = "http://127.0.0.1:$Port/$($artifact.Name)"
         }
     }
 }
@@ -223,7 +245,7 @@ try {
     if ($manifest.version -ne $NewVersion) {
         throw "served manifest advertises $($manifest.version), expected $NewVersion"
     }
-    $downloaded = Join-Path $Work "downloaded.msi.zip"
+    $downloaded = Join-Path $Work ("downloaded" + [System.IO.Path]::GetExtension($artifact.Name))
     Invoke-WebRequest $manifest.platforms."windows-x86_64".url -OutFile $downloaded
     Write-Host "fetched $((Get-Item $downloaded).Length) bytes through the endpoint"
 
