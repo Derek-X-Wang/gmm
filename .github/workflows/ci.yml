@@ -189,10 +189,59 @@ jobs:
           path: ci-diagnostics
           if-no-files-found: ignore
 
+  # The signed-update round trip, against a keypair generated for the
+  # length of this job and thrown away with it. The release signing key
+  # is a repository secret and is deliberately **not** available here —
+  # nothing in this job reads it, and a PR from a fork could not use it
+  # if it did.
+  #
+  # Its own job because it builds the bundle twice (version N and N+1),
+  # which is the expensive part and would otherwise serialise behind the
+  # matrix.
+  #
+  # `python -m http.server` serves the update endpoint on 127.0.0.1; it
+  # is present on the windows-latest image.
+  updater:
+    name: updater e2e (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: updater
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build, sign, serve, update
+        shell: pwsh
+        run: .github/scripts/updater-e2e.ps1
+
+      - name: Upload updater diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-e2e-diagnostics
+          path: ci-diagnostics
+          if-no-files-found: ignore
+
   # Aggregator: branch protection keys off this single name.
   check:
     name: check
-    needs: [build, installer]
+    needs: [build, installer, updater]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -204,5 +253,9 @@ jobs:
           fi
           if [ "${{ needs.installer.result }}" != "success" ]; then
             echo "installer smoke did not succeed (result=${{ needs.installer.result }})"
+            exit 1
+          fi
+          if [ "${{ needs.updater.result }}" != "success" ]; then
+            echo "updater e2e did not succeed (result=${{ needs.updater.result }})"
             exit 1
           fi
