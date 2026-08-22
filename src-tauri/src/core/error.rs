@@ -142,9 +142,17 @@ pub enum Error {
     /// nothing to install or check (ADR 0005 / #97). Either the
     /// recommended manifest retracted the compiled-in default, or the
     /// game never had one.
+    ///
+    /// The message deliberately does **not** tell the user to choose an
+    /// origin in Settings (#127). No origin command is registered and
+    /// nothing in the frontend exposes one; the surface that will is
+    /// #109. Sending a user to a control that does not exist is worse
+    /// than telling them plainly that GMM cannot proceed — and it is
+    /// wrong for every retracted game, not just the one that reaches
+    /// this state today.
     #[error(
-        "no Model Importer origin is in effect for {game}. \
-         Choose one in Settings to install it.{reason}"
+        "GMM has no Model Importer origin for {game}, so there is nothing to \
+         install from.{reason}"
     )]
     NoImporterOriginInEffect { game: String, reason: String },
 

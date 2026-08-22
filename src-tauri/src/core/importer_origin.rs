@@ -284,8 +284,8 @@ pub fn resolve(
         StoredOverride::Unreadable { .. } => {
             return OriginResolution::NoneInEffect {
                 reason: Some(
-                    "GMM could not read the Importer Origin saved for this game. \
-                     Set it again to put it back in effect."
+                    "GMM could not read the Importer Origin saved for this game, \
+                     so none is in effect."
                         .to_string(),
                 ),
             };
