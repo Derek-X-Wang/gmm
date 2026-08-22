@@ -247,12 +247,51 @@ mod ipc_readiness_marker {
     }
 
     #[test]
-    fn the_installer_smoke_waits_for_the_same_marker() {
-        let script = read(".github/scripts/installer-smoke.ps1");
-        assert!(
-            script.contains(IPC_READY_MARKER),
-            "installer-smoke.ps1 must grep for the marker literal '{IPC_READY_MARKER}' \
-             — otherwise renaming the constant quietly drops the check",
-        );
+    fn every_windows_script_waits_for_the_same_marker() {
+        // Three scripts now gate on this literal, not one. Each is the
+        // only place its own layer proves the WebView actually reached
+        // the backend, and none of them can be checked from a
+        // non-Windows host — so a renamed constant would drop the check
+        // silently and nothing would notice until a broken bundle
+        // shipped.
+        for script_path in [
+            ".github/scripts/installer-smoke.ps1",
+            ".github/scripts/updater-e2e.ps1",
+            ".github/scripts/installer-lifecycle.ps1",
+        ] {
+            let script = read(script_path);
+            assert!(
+                script.contains(IPC_READY_MARKER),
+                "{script_path} must grep for the marker literal \
+                 '{IPC_READY_MARKER}' — otherwise renaming the constant \
+                 quietly drops the check",
+            );
+        }
+    }
+
+    #[test]
+    fn the_startup_checks_require_a_marker_from_this_launch() {
+        // The subtle version of the same failure. GMM's logs are not
+        // cleared between launches, so "does the marker appear anywhere
+        // in the logs" is satisfied instantly by the *previous*
+        // launch's line — an app that crashed on startup would pass.
+        //
+        // Both multi-launch scripts must therefore compare a count
+        // taken before starting the process against one taken after,
+        // rather than testing for mere presence. `installer-smoke.ps1`
+        // is exempt: it launches exactly once, from a data directory it
+        // has just deleted.
+        for script_path in [
+            ".github/scripts/updater-e2e.ps1",
+            ".github/scripts/installer-lifecycle.ps1",
+        ] {
+            let script = read(script_path);
+            assert!(
+                script.contains("Get-IpcMarkerCount"),
+                "{script_path} launches the app more than once, so it must \
+                 require a *new* marker rather than any marker — see \
+                 Get-IpcMarkerCount",
+            );
+        }
     }
 }

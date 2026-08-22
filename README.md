@@ -130,6 +130,41 @@ existing GMM install becomes unable to install future updates and must
 be reinstalled manually from a fresh GitHub Release. There is no
 key-rotation flow in v1.
 
+## Uninstalling
+
+GMM's uninstaller removes **only what it installed**. Stated as a policy,
+because the parts it deliberately leaves behind are the parts that matter:
+
+| What | Uninstall does | Why |
+|---|---|---|
+| The install directory (`GMM.exe` and friends) | **removed** | Program files. |
+| `%APPDATA%\GMM\gmm.db` — settings, Mod records, Importer Pins | **kept** | User data. Reinstalling picks up exactly where you left off. |
+| `%APPDATA%\GMM\library\` — your Library | **kept** | Per [ADR 0003](docs/adr/0003-junctions-over-symlinks-and-copy.md) the Library is your source of truth, and it is portable. It can also be moved anywhere you like, so the installer often does not know where it is. |
+| `%APPDATA%\GMM\logs\` | **kept** | Small, and useful when diagnosing whatever made you uninstall. |
+| Junctions inside `<Game>\Mods\` | **kept** | See the warning below. |
+| Startup / logon entries | none exist | GMM never registers one. |
+
+Nothing above is removed for you, so uninstalling GMM never costs you a
+mod. Delete `%APPDATA%\GMM` by hand if you want it gone.
+
+### Disable your Mods before you uninstall
+
+This is the one that can bite. An enabled Mod is a **Junction** inside
+your game's `Mods\` folder pointing at your Library, and uninstalling
+GMM does not remove it. The game keeps loading those Mods afterwards,
+and GMM is no longer there to switch them off.
+
+Leaving them is deliberate — the alternative is an uninstaller reaching
+into your game directories — but it means the tidy order is:
+
+1. In GMM, disable the Mods you don't want loading (or use *Disable all*).
+2. Then uninstall.
+
+If you have already uninstalled, delete the leftover folders inside
+`<Game>\Mods\` — removing a Junction removes only the link, not the
+Library it points at. If you would rather not take chances, reinstall
+GMM, disable the Mods through the UI, and uninstall again.
+
 ## Recommended IDE Setup
 
 - [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)

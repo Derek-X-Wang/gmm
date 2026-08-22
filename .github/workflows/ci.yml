@@ -202,7 +202,7 @@ jobs:
   # `python -m http.server` serves the update endpoint on 127.0.0.1; it
   # is present on the windows-latest image.
   updater:
-    name: updater e2e (windows)
+    name: installer lifecycle + updater e2e (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -230,11 +230,27 @@ jobs:
         shell: pwsh
         run: .github/scripts/updater-e2e.ps1
 
+      # Reuses the two MSIs the round trip just built. A sibling job
+      # would have to run `tauri build --release` twice more for
+      # overlapping coverage, roughly doubling the Windows CI bill —
+      # #57's triage called that out and this is the alternative.
+      #
+      # Release profile: `tauri build` has already compiled this
+      # dependency graph, so the fixture costs seconds rather than a
+      # from-scratch debug build of everything.
+      - name: Build the lifecycle fixture
+        run: cargo build --release -p gmm-lifecycle-fixture
+        working-directory: src-tauri
+
+      - name: Upgrade, repair, uninstall
+        shell: pwsh
+        run: .github/scripts/installer-lifecycle.ps1
+
       - name: Upload updater diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: updater-e2e-diagnostics
+          name: installer-lifecycle-diagnostics
           path: ci-diagnostics
           if-no-files-found: ignore
 

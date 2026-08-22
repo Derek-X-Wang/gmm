@@ -292,11 +292,19 @@ for the resulting line. Reaching that call requires the WebView to boot,
 the IPC channel to come up, the command to be registered, and the ACL to
 allow it.
 
-Three drift guards keep it honest, all in `tests/ipc_contract.rs`: the
-marker command must still be registered and still invoked by the
-frontend, its body must still call `record_ipc_ready`, and the
-PowerShell must still grep the same literal as
-`diagnostics::IPC_READY_MARKER`.
+Drift guards keep it honest, all in `tests/ipc_contract.rs`: the marker
+command must still be registered and still invoked by the frontend, its
+body must still call `record_ipc_ready`, **all three** PowerShell scripts
+must still grep the same literal as `diagnostics::IPC_READY_MARKER`, and
+the two scripts that launch the app more than once must require a *new*
+marker rather than any marker.
+
+That last one is not hypothetical. GMM's logs are not cleared between
+launches, so "does the marker appear anywhere" is satisfied instantly by
+the previous launch's line — which would make every startup check after
+the first one pass without the process under test having done anything,
+including when it crashed. `Get-IpcMarkerCount` compares a count taken
+before starting the app with one taken after.
 
 If you move the marker to a different command, move all four together.
 
@@ -333,6 +341,21 @@ Two layers cover the rest:
   moved, the app still starts (via the IPC readiness marker), and
   `%APPDATA%\GMM` survived.
 
+Runs in its own `updater` CI job on every pull request, alongside
+`installer`, and its result gates `check`. You can also run it by hand
+from a Windows checkout with `pwsh .github/scripts/updater-e2e.ps1`.
+
+It is a separate job because it builds the bundle twice — version N and
+version N+1 — which is the expensive part; behind the matrix it would
+add that time to every PR's critical path instead of running alongside
+it. On failure the job uploads `ci-diagnostics/` (the msiexec verbose
+logs and GMM's own JSON logs) as an artifact.
+
+**No release secret is involved.** The script generates its own minisign
+keypair with `tauri signer generate` for the length of the job and never
+reads `TAURI_SIGNING_PRIVATE_KEY`, which stays release-only. That is
+what lets this run on a fork's pull request.
+
 Two things about that script are worth knowing before you edit it.
 
 **The updater artifact is found via its `.sig`, not by extension.** What
@@ -351,20 +374,53 @@ keeps HTTPS-only endpoints, and `updater_config.rs` asserts it. Transport
 security is not what this test covers — the signature is, and that is
 unaffected by how the bytes arrived.
 
-Runs in its own `updater` CI job on every pull request, alongside
-`installer`, and its result gates `check`. You can also run it by hand
-from a Windows checkout with `pwsh .github/scripts/updater-e2e.ps1`.
+## 7. Installer lifecycle (`.github/scripts/installer-lifecycle.ps1`)
 
-It is a separate job because it builds the bundle twice — version N and
-version N+1 — which is the expensive part; behind the matrix it would
-add that time to every PR's critical path instead of running alongside
-it. On failure the job uploads `ci-diagnostics/` (the msiexec verbose
-logs and GMM's own JSON logs) as an artifact.
+`installer-smoke.ps1` covers a clean machine. This covers the path every
+*existing* user takes: upgrade, repair, uninstall (#57).
 
-**No release secret is involved.** The script generates its own minisign
-keypair with `tauri signer generate` for the length of the job and never
-reads `TAURI_SIGNING_PRIVATE_KEY`, which stays release-only. That is
-what lets this run on a fork's pull request.
+Runs as a second step in the same `updater` job and **reuses the two MSIs
+`updater-e2e.ps1` already built**. A sibling job would have to run
+`tauri build --release` twice more for coverage that overlaps, which
+roughly doubles the Windows CI bill.
+
+1. install 9.9.0, launch it, seed realistic state
+2. assert exactly one Add/Remove Programs entry and **zero** startup
+   registrations
+3. upgrade to 9.9.1; assert one entry, one install directory, and that
+   `GMM.exe`'s bytes actually changed
+4. assert every seeded invariant survived
+5. delete `GMM.exe`, run `msiexec /f`, assert it comes back
+   byte-identical and user data is untouched
+6. uninstall; assert the documented policy — install directory gone,
+   `%APPDATA%\GMM` and Junctions kept
+
+### Why there is a fixture binary
+
+The hard part of testing an upgrade is not running `msiexec` twice, it is
+having something real to preserve. A canary text file proves almost
+nothing: it is not written through GMM's code, not in the database, and
+not a Junction.
+
+`src-tauri/crates/lifecycle-fixture/` seeds the four things that matter
+through `Core`'s own API — a Library entry, an enabled Mod, a live
+Junction into a game directory, and an **Importer Pin** — then re-checks
+them. The pin gets its own assertion rather than riding on a generic "app
+data preserved" check because ADR 0004 makes it the escape hatch during a
+ban-wave window: losing it silently is an account-safety regression.
+
+The Junction is checked by **reading through it**, not by `exists()`. A
+directory that is still there but no longer points at the Library passes
+an existence check and loads nothing, which is exactly the failure an
+upgrade could introduce.
+
+`verify` reports every failure rather than stopping at the first, because
+a Windows-less maintainer reads that CI log once.
+
+It is test-only and never shipped — `tauri build` bundles only the `gmm`
+binary, and `updater_config.rs` asserts the app package declares exactly
+one. Helper binaries live in their own crate under `crates/` for that
+reason.
 
 ## Running the suite
 
