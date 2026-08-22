@@ -342,10 +342,17 @@ mod manifest_refresh_started_marker {
     #[test]
     fn startup_refresh_emits_the_marker_at_the_kickoff_site() {
         let lib = read("src-tauri/src/lib.rs");
+        let marker_call = "diagnostics::record_manifest_refresh_started();";
+        let marker_end = lib
+            .find(marker_call)
+            .map(|start| start + marker_call.len())
+            .expect("startup refresh marker call not found in lib.rs");
+        let refresh_start = lib[marker_end..]
+            .find("let refresh = match")
+            .map(|offset| marker_end + offset)
+            .expect("startup refresh selection not found after its marker call");
         assert!(
-            lib.contains(
-                "diagnostics::record_manifest_refresh_started();\n                let refresh = match"
-            ),
+            lib[marker_end..refresh_start].trim().is_empty(),
             "the startup refresh must emit its diagnostic marker immediately \
              before choosing and polling the refresh future",
         );
