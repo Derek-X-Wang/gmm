@@ -821,9 +821,30 @@ impl Core {
     ///
     /// This is what the Tauri command calls, so a user override changes
     /// which repository the badge is computed from.
+    /// The origin asked is the one the install **came from**, not the
+    /// one that resolves (#109). Comparing a version taken against
+    /// origin Y with the latest release of origin X produces a
+    /// meaningless `upstream_ahead`; under "a recommendation never
+    /// switches an existing install" that comparison cannot arise,
+    /// because the update path only ever looks at the origin the install
+    /// actually came from.
     pub async fn check_importer_update_for(&self, game: GameCode) -> Result<updates::UpdateStatus> {
-        let resolution = self.resolve_importer_origin(game).await?;
-        self.check_importer_update_with(game, &resolution).await
+        self.check_importer_update_with_endpoints(game, &importer::Endpoints::default())
+            .await
+    }
+
+    /// Test seam for [`Core::check_importer_update_for`] — production
+    /// uses the `Endpoints::default()` overload. It exists so a test can
+    /// assert *which repository was asked*, which is the whole content
+    /// of the #109 rule and is otherwise unobservable.
+    pub async fn check_importer_update_with_endpoints(
+        &self,
+        game: GameCode,
+        endpoints: &importer::Endpoints,
+    ) -> Result<updates::UpdateStatus> {
+        let target = self.importer_origin_for_install(game).await?;
+        self.check_importer_update_against(game, &target, endpoints)
+            .await
     }
 
     /// [`Core::check_importer_update_for`] against an explicit
@@ -842,16 +863,34 @@ impl Core {
         game: GameCode,
         resolution: &importer_origin::OriginResolution,
     ) -> Result<updates::UpdateStatus> {
+        let installed = self.installed_importer_origin(game).await?;
+        let target = importer_origin::origin_for_install(&installed, resolution);
+        self.check_importer_update_against(game, &target, &importer::Endpoints::default())
+            .await
+    }
+
+    /// The update check against an already-decided
+    /// [`importer_origin::InstallOrigin`].
+    ///
+    /// Every arm that cannot name a repository returns a
+    /// `check_error` — never `available: false`, which reads as "we
+    /// checked, nothing to apply". That collapse is the defect #78 fixed
+    /// for the Loader and #79 removed from this path, and this function
+    /// adds one more arm that must not fall into it: an install whose
+    /// recorded origin cannot be read.
+    async fn check_importer_update_against(
+        &self,
+        game: GameCode,
+        target: &importer_origin::InstallOrigin,
+        endpoints: &importer::Endpoints,
+    ) -> Result<updates::UpdateStatus> {
         let installed = updates::importer_installed(&self.pool, game).await?;
         let pinned = updates::importer_pinned(&self.pool, game).await?.is_some();
 
-        let origin = match resolution {
-            importer_origin::OriginResolution::InEffect { origin, .. } => origin,
-            importer_origin::OriginResolution::NoneInEffect { reason } => {
-                // Names no control, for the reason
-                // `Error::NoImporterOriginInEffect` spells out (#127):
-                // the Settings surface that would let the user fix this
-                // is #109 and does not exist yet.
+        let origin = match target {
+            importer_origin::InstallOrigin::Installed(origin) => origin,
+            importer_origin::InstallOrigin::Resolved { origin, .. } => origin,
+            importer_origin::InstallOrigin::NoneInEffect { reason } => {
                 let mut message = format!(
                     "GMM has no Model Importer origin for {}, so there is nothing to \
                      check for updates.",
@@ -861,7 +900,22 @@ impl Core {
                     message.push(' ');
                     message.push_str(reason);
                 }
+                message.push(' ');
+                message.push_str(error::SET_AN_ORIGIN_HINT);
                 return Ok(updates::compute_status(installed, Err(message), pinned));
+            }
+            importer_origin::InstallOrigin::InstalledUnreadable { error, .. } => {
+                return Ok(updates::compute_status(
+                    installed,
+                    Err(format!(
+                        "GMM recorded a Model Importer install for {} but can no longer \
+                         read which Importer Origin it came from ({error}), so it cannot \
+                         say whether an update exists. {}",
+                        game.profile().display_name,
+                        error::SET_AN_ORIGIN_HINT,
+                    )),
+                    pinned,
+                ));
             }
         };
 
@@ -869,7 +923,7 @@ impl Core {
         let client = self.http_client().await?;
         let latest = match importer::fetch_latest_release(
             &client,
-            &importer::Endpoints::default(),
+            endpoints,
             &origin.repo_slug(),
             &pattern,
             None,
@@ -1164,6 +1218,227 @@ impl Core {
         .cloned())
     }
 
+    // ---- The recommendation surface (ADR 0005 / #109) ----
+
+    /// Everything one game's Importer Origin surface needs, in one read.
+    ///
+    /// The reads are ordered so the aggregate is internally consistent:
+    /// the proposal is computed from the same resolution and the same
+    /// dismissal state that are reported alongside it, rather than from
+    /// a second look at the database that could disagree with the first.
+    pub async fn importer_origin_status(
+        &self,
+        game: GameCode,
+    ) -> Result<importer_origin::OriginStatus> {
+        let enabled = self.importer_recommendations_enabled().await?;
+        let resolution = self.resolve_importer_origin(game).await?;
+        let installed = self.installed_importer_origin(game).await?;
+        let user_override = self.importer_origin_override(game).await?;
+        let declines = self.importer_origin_dismissals(game).await?;
+        let compiled_default = importer_origin::compiled_in_default(game);
+        let install_target = importer_origin::origin_for_install(&installed, &resolution);
+
+        let proposal = self
+            .compute_importer_origin_proposal(game, &resolution, &installed, &declines, enabled)
+            .await?;
+
+        Ok(importer_origin::OriginStatus {
+            game,
+            display_name: game.profile().display_name.to_string(),
+            install_target: (&install_target).into(),
+            resolved: resolution,
+            installed,
+            user_override: (&user_override).into(),
+            compiled_default,
+            proposal,
+            // While the layer is off there is no dismissed-recommendation
+            // affordance either (#95). Offering to un-dismiss a proposal
+            // that cannot be made would be a control with no effect.
+            dismissed: if enabled {
+                declines.origins().to_vec()
+            } else {
+                Vec::new()
+            },
+            dismissals_error: if enabled { declines.error() } else { None },
+            recommendations_enabled: enabled,
+            recommendations_unusable_reason: self.recommended_importers_unusable_reason().await?,
+        })
+    }
+
+    /// The Importer Origin change GMM is currently offering for `game`,
+    /// or `None`.
+    pub async fn importer_origin_proposal(
+        &self,
+        game: GameCode,
+    ) -> Result<Option<importer_origin::OriginProposal>> {
+        let enabled = self.importer_recommendations_enabled().await?;
+        let resolution = self.resolve_importer_origin(game).await?;
+        let installed = self.installed_importer_origin(game).await?;
+        let declines = self.importer_origin_dismissals(game).await?;
+        self.compute_importer_origin_proposal(game, &resolution, &installed, &declines, enabled)
+            .await
+    }
+
+    async fn compute_importer_origin_proposal(
+        &self,
+        game: GameCode,
+        resolution: &importer_origin::OriginResolution,
+        installed: &importer_origin::InstalledOrigin,
+        declines: &importer_origin::StoredDeclines,
+        enabled: bool,
+    ) -> Result<Option<importer_origin::OriginProposal>> {
+        // Off means no prompts at all (#95). Resolution has already
+        // dropped the manifest layer, but a corrected compiled-in default
+        // could still read as a change, and a user who has taken over
+        // managing this themselves asked not to be told — ADR 0005
+        // records that consequence and accepts it.
+        if !enabled {
+            return Ok(None);
+        }
+        let Some(origin) = importer_origin::pending_change(
+            resolution,
+            installed,
+            importer_origin::compiled_in_default(game).as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        if declines.suppresses(origin) {
+            return Ok(None);
+        }
+
+        // The reason belongs to the manifest entry, and only when that
+        // entry is what is being proposed: a proposal that comes from a
+        // corrected compiled-in default has no reason to offer, and
+        // borrowing the manifest's would attribute an explanation to the
+        // wrong decision.
+        let reason = match self
+            .cached_recommended_manifest()
+            .await?
+            .and_then(|m| m.recommendation_for(game))
+        {
+            Some(importer_origin::Recommendation::Recommended {
+                origin: recommended,
+                reason,
+            }) if &recommended == origin => reason,
+            _ => None,
+        };
+
+        Ok(Some(importer_origin::OriginProposal {
+            origin: origin.clone(),
+            reason,
+            replaces: installed.clone(),
+        }))
+    }
+
+    /// The Importer Origins the user has declined for `game`.
+    ///
+    /// A stored list that cannot be read comes back as
+    /// [`importer_origin::StoredDeclines::Unreadable`], never as an
+    /// empty list — see that type for why the prompt is still shown.
+    pub async fn importer_origin_dismissals(
+        &self,
+        game: GameCode,
+    ) -> Result<importer_origin::StoredDeclines> {
+        let raw = get_setting(&self.pool, &importer_origin::keys::declined_origins(game)).await?;
+        let declines = importer_origin::StoredDeclines::decode(raw);
+        if let importer_origin::StoredDeclines::Unreadable { raw, error } = &declines {
+            tracing::warn!(
+                target: "gmm::importer_origin",
+                game = game.as_str(),
+                error = %error,
+                raw = %raw,
+                "declined Importer Origins could not be read; proposals are shown \
+                 again rather than silently suppressed",
+            );
+        }
+        Ok(declines)
+    }
+
+    /// Decline an Importer Origin for `game`: remember it and stop
+    /// proposing it.
+    ///
+    /// Scoped to the origin, so a later recommendation proposing a
+    /// *different* one still reaches this user (#95). Nothing else
+    /// changes — declining is a judgement about one proposal and must
+    /// never escalate into the standing preference the off switch
+    /// expresses.
+    pub async fn dismiss_importer_origin(
+        &self,
+        game: GameCode,
+        origin: &importer_origin::ImporterOrigin,
+    ) -> Result<()> {
+        let next = self.importer_origin_dismissals(game).await?.with(origin);
+        self.put_importer_origin_dismissals(game, &next).await
+    }
+
+    /// Undo a dismissal, from the affected game's own surface.
+    ///
+    /// Dismissing is a one-click reflex; a dismissal that could not be
+    /// undone and was never shown would let a user permanently silence
+    /// the fix for their broken game with no trace (#95).
+    pub async fn restore_importer_origin(
+        &self,
+        game: GameCode,
+        origin: &importer_origin::ImporterOrigin,
+    ) -> Result<()> {
+        let next = self.importer_origin_dismissals(game).await?.without(origin);
+        self.put_importer_origin_dismissals(game, &next).await
+    }
+
+    async fn put_importer_origin_dismissals(
+        &self,
+        game: GameCode,
+        origins: &[importer_origin::ImporterOrigin],
+    ) -> Result<()> {
+        let encoded = serde_json::to_string(origins).map_err(|e| {
+            Error::Importer(format!("could not encode declined Importer Origins: {e}"))
+        })?;
+        put_setting(
+            &self.pool,
+            &importer_origin::keys::declined_origins(game),
+            Some(&encoded),
+        )
+        .await
+    }
+
+    /// Accept the Importer Origin change GMM is offering for `game`:
+    /// install from the proposed origin.
+    ///
+    /// This is the **only** way an existing install's origin changes
+    /// (#109), and — through the install it performs — the only way an
+    /// unknown origin becomes known (#99). Recording an origin *without*
+    /// installing was explicitly rejected: it books an origin and a
+    /// version for files GMM has never seen, and every later decision
+    /// then trusts the fiction. A user who wants their existing files
+    /// left alone declines.
+    ///
+    /// It goes through the ordinary install path, so the game directory
+    /// is backed up and the move is rollbackable like any other importer
+    /// install.
+    pub async fn accept_importer_origin_proposal(
+        &self,
+        game: GameCode,
+    ) -> Result<importer::InstallReport> {
+        self.accept_importer_origin_proposal_with_endpoints(game, &importer::Endpoints::default())
+            .await
+    }
+
+    /// Test seam for [`Core::accept_importer_origin_proposal`].
+    pub async fn accept_importer_origin_proposal_with_endpoints(
+        &self,
+        game: GameCode,
+        endpoints: &importer::Endpoints,
+    ) -> Result<importer::InstallReport> {
+        let proposal = self.importer_origin_proposal(game).await?.ok_or_else(|| {
+            Error::Importer(format!(
+                "GMM has no Importer Origin change to apply for {}.",
+                game.profile().display_name,
+            ))
+        })?;
+        self.install_importer_from(game, &proposal.origin, endpoints)
+            .await
+    }
+
     // ---- The recommended-importers manifest (ADR 0005 / #108) ----
 
     /// The cached manifest, or `None` when GMM holds none it can read.
@@ -1181,18 +1456,40 @@ impl Core {
     pub async fn cached_recommended_manifest(
         &self,
     ) -> Result<Option<recommended_importers::Manifest>> {
-        Self::cached_recommended_manifest_in(&self.pool).await
+        let mut conn = self.pool.acquire().await?;
+        Self::cached_recommended_manifest_in(&mut conn).await
     }
 
-    /// [`Self::cached_recommended_manifest`] against an arbitrary
-    /// executor (#122).
-    async fn cached_recommended_manifest_in<'e, E>(
-        executor: E,
-    ) -> Result<Option<recommended_importers::Manifest>>
-    where
-        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-    {
-        let Some(raw) = get_setting(executor, recommended_importers::cache_keys::DOCUMENT).await?
+    /// [`Self::cached_recommended_manifest`] against a specific
+    /// connection, so a transaction reads the layer as it will be after
+    /// its own uncommitted writes (#122).
+    ///
+    /// A connection rather than a generic executor because it makes two
+    /// reads — the off switch and the cached document — and both have to
+    /// come from the same place, in that order.
+    async fn cached_recommended_manifest_in(
+        conn: &mut sqlx::SqliteConnection,
+    ) -> Result<Option<recommended_importers::Manifest>> {
+        // The second half of the off switch, and the half that is easy
+        // to leave out (#95). Gating only the fetch looks correct on a
+        // machine that has never launched online and does nothing at all
+        // on every machine that has, because the cache is written on the
+        // first successful launch and stays authoritative afterwards.
+        // A retraction that outlived being switched off would go on
+        // clearing the user's compiled-in default with no visible cause
+        // — the exact "invisible behaviour change" the switch exists to
+        // prevent.
+        //
+        // It belongs *here* rather than at each call site because this
+        // is the single door onto layer 2: anything that reads the
+        // manifest reads it through this function, so the precondition
+        // is structural rather than a rule every future caller has to
+        // remember.
+        if !Self::importer_recommendations_enabled_in(&mut *conn).await? {
+            return Ok(None);
+        }
+        let Some(raw) =
+            get_setting(&mut *conn, recommended_importers::cache_keys::DOCUMENT).await?
         else {
             return Ok(None);
         };
@@ -1218,10 +1515,62 @@ impl Core {
     /// unusable document is to fall through — which on its own is
     /// indistinguishable from having no manifest at all, and that
     /// silence is precisely the #78 defect.
+    ///
+    /// Gated by the off switch like the rest of the layer: a user who
+    /// has switched recommendations off is not shown a complaint about a
+    /// file GMM is no longer allowed to read.
     pub async fn recommended_importers_unusable_reason(&self) -> Result<Option<String>> {
+        if !self.importer_recommendations_enabled().await? {
+            return Ok(None);
+        }
         get_setting(
             &self.pool,
             recommended_importers::cache_keys::UNUSABLE_REASON,
+        )
+        .await
+    }
+
+    /// Whether GMM's curated recommendations apply at all (#95).
+    ///
+    /// **On** for a user who has never touched it: this is an opt-out,
+    /// and the users layer 2 exists to rescue — stranded on a dead
+    /// importer — are exactly the ones who will never go looking for a
+    /// switch.
+    pub async fn importer_recommendations_enabled(&self) -> Result<bool> {
+        Self::importer_recommendations_enabled_in(&self.pool).await
+    }
+
+    async fn importer_recommendations_enabled_in<'e, E>(executor: E) -> Result<bool>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        Ok(
+            get_setting(executor, recommended_importers::cache_keys::ENABLED)
+                .await?
+                .map(|v| v != "false")
+                .unwrap_or(true),
+        )
+    }
+
+    /// Switch GMM's curated recommendations on or off.
+    ///
+    /// Off removes the **whole layer** — no fetch, no cache read, no
+    /// retraction, no prompts. It deliberately does **not** delete the
+    /// cached document: the switch is a standing preference, not a
+    /// destructive act, and a user who switches it back on should get
+    /// the layer they already have rather than waiting for a fetch that,
+    /// for the offline user this mechanism exists to rescue, may never
+    /// land.
+    ///
+    /// It also does not touch dismissals. Turning the layer off and back
+    /// on must not resurrect previously declined proposals as fresh
+    /// prompts, or toggling the switch twice becomes a way to spam
+    /// yourself (#95).
+    pub async fn set_importer_recommendations_enabled(&self, enabled: bool) -> Result<()> {
+        put_setting(
+            &self.pool,
+            recommended_importers::cache_keys::ENABLED,
+            Some(if enabled { "true" } else { "false" }),
         )
         .await
     }
@@ -1251,6 +1600,14 @@ impl Core {
         &self,
         url: &str,
     ) -> Result<recommended_importers::Refreshed> {
+        // A **precondition on the fetch**, not a filter on its result
+        // (#95). A user running their own importer gets no startup
+        // network call about importers at all — and returning before the
+        // client is even built is what makes that testable as "zero
+        // requests" rather than as "we ignored the answer".
+        if !self.importer_recommendations_enabled().await? {
+            return Ok(recommended_importers::Refreshed::Disabled);
+        }
         let client = self
             .http_client_builder()
             .await?
@@ -1423,21 +1780,47 @@ impl Core {
         Ok(())
     }
 
-    /// The Importer Origin in effect for `game` and its compiled asset
-    /// pattern, or an error when no origin is in effect.
+    /// Which Importer Origin an ordinary Install / Update acts on for
+    /// `game` (#109).
+    ///
+    /// See [`importer_origin::origin_for_install`] for the rule. In
+    /// short: a recommendation decides an install that does not exist
+    /// yet, and never switches one that does.
+    pub async fn importer_origin_for_install(
+        &self,
+        game: GameCode,
+    ) -> Result<importer_origin::InstallOrigin> {
+        let resolution = self.resolve_importer_origin(game).await?;
+        let installed = self.installed_importer_origin(game).await?;
+        Ok(importer_origin::origin_for_install(&installed, &resolution))
+    }
+
+    /// The Importer Origin an ordinary Install / Update acts on for
+    /// `game`, plus its compiled asset pattern — or an error when there
+    /// is none to act on.
     ///
     /// Lives here rather than in the Tauri command layer so the install
-    /// path is one testable unit (#122).
+    /// path is one testable unit (#122). Both error arms are real
+    /// errors: neither "nothing is in effect" nor "GMM cannot read what
+    /// this install came from" may be answered by quietly installing
+    /// something else.
     pub async fn resolved_importer_origin(
         &self,
         game: GameCode,
     ) -> Result<(importer_origin::ImporterOrigin, importer::AssetPattern)> {
-        let origin = match self.resolve_importer_origin(game).await? {
-            importer_origin::OriginResolution::InEffect { origin, .. } => origin,
-            importer_origin::OriginResolution::NoneInEffect { reason } => {
+        let origin = match self.importer_origin_for_install(game).await? {
+            importer_origin::InstallOrigin::Installed(origin) => origin,
+            importer_origin::InstallOrigin::Resolved { origin, .. } => origin,
+            importer_origin::InstallOrigin::NoneInEffect { reason } => {
                 return Err(Error::NoImporterOriginInEffect {
                     game: game.profile().display_name.to_string(),
                     reason: reason.map(|r| format!(" {r}")).unwrap_or_default(),
+                })
+            }
+            importer_origin::InstallOrigin::InstalledUnreadable { error, .. } => {
+                return Err(Error::InstalledImporterOriginUnreadable {
+                    game: game.profile().display_name.to_string(),
+                    message: error,
                 })
             }
         };
@@ -1484,6 +1867,28 @@ impl Core {
         game: GameCode,
         endpoints: &importer::Endpoints,
     ) -> Result<importer::InstallReport> {
+        let (origin, _) = self.resolved_importer_origin(game).await?;
+        self.install_importer_from(game, &origin, endpoints).await
+    }
+
+    /// Install `game`'s Model Importer from an **explicitly chosen**
+    /// Importer Origin.
+    ///
+    /// The origin is a parameter rather than something this function
+    /// resolves, because the two callers choose it by different rules
+    /// and that difference is the whole of #109. The ordinary Install /
+    /// Update action passes what
+    /// [`Core::importer_origin_for_install`] decided — the origin the
+    /// install came from, never a substitute. Accepting a proposal
+    /// passes the proposed origin, which is the one act that is allowed
+    /// to move an existing install.
+    async fn install_importer_from(
+        &self,
+        game: GameCode,
+        origin: &importer_origin::ImporterOrigin,
+        endpoints: &importer::Endpoints,
+    ) -> Result<importer::InstallReport> {
+        let origin = origin.clone();
         self.ensure_no_active_session().await?;
         let install = self.game_install_path(game).await?.ok_or_else(|| {
             Error::Importer(format!(
@@ -1491,7 +1896,7 @@ impl Core {
                 game.profile().display_name,
             ))
         })?;
-        let (origin, pattern) = self.resolved_importer_origin(game).await?;
+        let pattern = importer::AssetPattern::new(origin.asset_pattern())?;
 
         let client = self.http_client().await?;
         let release =

@@ -272,25 +272,38 @@ fn parse_entry(game: &str, entry: &serde_json::Value) -> Result<Recommendation, 
                     message: e.to_string(),
                 }
             })?;
-            Ok(Recommendation::Recommended(ImporterOrigin::github(
-                owner,
-                repo,
-                asset_pattern,
-            )))
+            Ok(Recommendation::Recommended {
+                origin: ImporterOrigin::github(owner, repo, asset_pattern),
+                // Optional, and documented as optional in
+                // `manifest/README.md` since the file was written. It was
+                // read only for a `none` entry until #109, so a
+                // maintainer could write one on a recommendation and
+                // nothing would ever show it.
+                reason: optional_str(entry, "reason"),
+            })
         }
         "none" => Ok(Recommendation::NoRecommendation {
             // Optional by design: it earns its place when the state
             // would otherwise be surprising.
-            reason: entry
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            reason: optional_str(entry, "reason"),
         }),
         other => Err(ManifestError::UnknownStatus {
             game: game.to_string(),
             status: other.to_string(),
         }),
     }
+}
+
+/// An optional free-text field. Absent, non-string and blank all read
+/// as "not written down" — a `reason` of `""` explains nothing, and
+/// rendering an empty line in the prompt is worse than rendering none.
+fn optional_str(entry: &serde_json::Value, field: &str) -> Option<String> {
+    entry
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn required_str<'a>(
@@ -346,6 +359,17 @@ pub mod cache_keys {
     /// The `ETag` that came with [`DOCUMENT`], so a refresh usually
     /// costs a 304 rather than a download.
     pub const ETAG: &str = "importer.recommendations.etag";
+
+    /// The global recommendations switch (#95 / #109). `"false"`
+    /// removes the whole layer; absent means **on**, because this is an
+    /// opt-out rather than an opt-in and the users the layer exists to
+    /// rescue are exactly the ones who will never find a switch.
+    ///
+    /// It sits beside the cache rather than in a per-game key because
+    /// it is a standing preference about GMM's curation as a whole, and
+    /// deliberately distinct from a decline, which is a judgement about
+    /// one proposal.
+    pub const ENABLED: &str = "importer.recommendations.enabled";
 
     /// Why the **last** fetch produced a document this build cannot
     /// read, or absent when it did not.
@@ -431,9 +455,17 @@ pub async fn fetch(client: &reqwest::Client, url: &str, etag: Option<&str>) -> F
     }
 }
 
-/// What one refresh did to the cache. Four conditions, four values.
+/// What one refresh did to the cache. Five conditions, five values.
 #[derive(Debug)]
 pub enum Refreshed {
+    /// The user has switched recommendations off, so no request was
+    /// made (#95). Its own variant because "we did not ask" is not a
+    /// network outcome: reporting it as [`Self::Unreachable`] would put
+    /// a fabricated transport failure in the log for a decision the
+    /// user made deliberately, and reporting it as
+    /// [`Self::NotModified`] would claim a cache is current that GMM
+    /// was told not to consult.
+    Disabled,
     /// A readable manifest arrived and is now the cache.
     Replaced(Manifest),
     /// Upstream confirmed the cached document is still current.

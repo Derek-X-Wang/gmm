@@ -2,6 +2,20 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+/// The one sentence that points a stuck user at the Importer Origin
+/// control, written down once.
+///
+/// #127 removed "choose one in Settings" from these messages because no
+/// such control existed — a message that sends a user somewhere they
+/// cannot go is worse than one that admits GMM cannot proceed. #109
+/// built the control, so the copy can name it again; keeping it in a
+/// single constant is what stops the two halves drifting apart a second
+/// time, and gives the test that guards this something concrete to
+/// assert against.
+pub const SET_AN_ORIGIN_HINT: &str =
+    "Set one under Model Importer → Importer Origin, or switch the game to a \
+     package you choose yourself.";
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("database error: {0}")]
@@ -143,18 +157,36 @@ pub enum Error {
     /// recommended manifest retracted the compiled-in default, or the
     /// game never had one.
     ///
-    /// The message deliberately does **not** tell the user to choose an
-    /// origin in Settings (#127). No origin command is registered and
-    /// nothing in the frontend exposes one; the surface that will is
-    /// #109. Sending a user to a control that does not exist is worse
-    /// than telling them plainly that GMM cannot proceed — and it is
-    /// wrong for every retracted game, not just the one that reaches
-    /// this state today.
+    /// The message now names a control, which #127 forbade *because the
+    /// control did not exist*: no origin command was registered and
+    /// nothing in the frontend exposed one, so the copy sent users
+    /// somewhere they could not go. #109 built it. The rule #127 was
+    /// really about — never point at a control that does not exist —
+    /// holds either way, and `SET_AN_ORIGIN_HINT` is the single place
+    /// that names it so the copy cannot drift out of step again.
     #[error(
         "GMM has no Model Importer origin for {game}, so there is nothing to \
-         install from.{reason}"
+         install from.{reason} {}",
+        SET_AN_ORIGIN_HINT
     )]
     NoImporterOriginInEffect { game: String, reason: String },
+
+    /// GMM recorded a Model Importer install and can no longer read the
+    /// Importer Origin it came from (#124).
+    ///
+    /// Surfaced rather than worked around. Installing from whatever
+    /// resolves would be exactly the silent origin switch #109 forbids,
+    /// performed on the one install GMM understands least — and it is
+    /// the project's recurring defect in its purest form: a read failure
+    /// rendered as a perfectly ordinary install. The user's route out is
+    /// the origin control, which also clears the unreadable record.
+    #[error(
+        "GMM recorded a Model Importer install for {game} but can no longer read \
+         which Importer Origin it came from ({message}), so it will not install \
+         over it from a different one. {}",
+        SET_AN_ORIGIN_HINT
+    )]
+    InstalledImporterOriginUnreadable { game: String, message: String },
 
     /// The Model Importer files were installed, but GMM could not
     /// record what it installed.

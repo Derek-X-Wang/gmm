@@ -104,7 +104,10 @@ fn with_no_override_and_no_manifest_a_game_resolves_to_its_compiled_in_default()
 
 #[test]
 fn a_user_override_outranks_both_the_manifest_and_the_default() {
-    let recommended = Recommendation::Recommended(a_recommended_origin());
+    let recommended = Recommendation::Recommended {
+        origin: a_recommended_origin(),
+        reason: None,
+    };
     let resolved = resolve(
         &StoredOverride::Set(a_users_own_origin()),
         Some(&recommended),
@@ -122,7 +125,10 @@ fn a_user_override_outranks_both_the_manifest_and_the_default() {
 
 #[test]
 fn a_recommendation_outranks_the_compiled_in_default() {
-    let recommended = Recommendation::Recommended(a_recommended_origin());
+    let recommended = Recommendation::Recommended {
+        origin: a_recommended_origin(),
+        reason: None,
+    };
     let resolved = resolve(
         &StoredOverride::NotSet,
         Some(&recommended),
