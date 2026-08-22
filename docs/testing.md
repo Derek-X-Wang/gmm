@@ -319,7 +319,8 @@ WebView2 dependency, or a migration that fails on a clean machine.
 
 `tests/updater_config.rs` checks that `tauri.conf.json` *says* the right
 things — a well-formed pubkey, HTTPS endpoints,
-`createUpdaterArtifacts: true`. That is shape only, and the flag was
+`createUpdaterArtifacts: true`, and the MSI-only bundle target. That is shape
+only, and the updater-artifact flag was
 missing from the very first release tag, so installers shipped with no
 update path at all.
 
@@ -334,12 +335,22 @@ Two layers cover the rest:
   are all refused. The real signing key is a release secret and is never
   read.
 - **`.github/scripts/updater-e2e.ps1`** (Windows). Builds two versions
-  with the throwaway key, serves the newer one's `latest.json` over
-  `127.0.0.1`, downloads it back, verifies it via the ignored
-  `the_bundled_artifact_verifies_against_the_key_that_signed_it` test,
-  then installs the update over the older build and asserts the version
-  moved, the app still starts (via the IPC readiness marker), and
-  `%APPDATA%\GMM` survived.
+  with the throwaway key, enumerates signatures across the entire bundle,
+  and requires exactly one signed artifact. It constructs a test-only
+  `latest.json` for that sole artifact, serves it over `127.0.0.1`, logs the
+  local URL's artifact name as diagnostics, downloads it back, and verifies it
+  via the ignored
+  `the_bundled_artifact_verifies_against_the_key_that_signed_it` test. It then
+  installs the update over the older build and asserts the version moved, the
+  app still starts (via the IPC readiness marker), and `%APPDATA%\GMM` survived.
+
+The local `latest.json` is not production's manifest oracle: this script writes
+it from the artifact it already selected. Production manifest generation
+belongs to `tauri-apps/tauri-action`. The statement that alpha2 advertised MSI
+comes from manual inspection of that published release's real `latest.json`,
+not from this round trip. The automated protection here is the independent
+count of signatures emitted from the shipped config: anything other than one
+fails before the local manifest is constructed.
 
 Runs in its own `updater` CI job on every pull request, alongside
 `installer`, and its result gates `check`. You can also run it by hand
@@ -357,6 +368,18 @@ reads `TAURI_SIGNING_PRIVATE_KEY`, which stays release-only. That is
 what lets this run on a fork's pull request.
 
 Two things about that script are worth knowing before you edit it.
+
+**GMM ships only the MSI installer.** The installer smoke and lifecycle jobs
+exercise MSI installation, upgrade, repair, downgrade refusal, and uninstall,
+so `bundle.targets` is deliberately `["msi"]` and users auto-update through
+that MSI artifact. The updater test searches the whole bundle root and requires
+exactly one signature; adding another installer target without extending the
+product's lifecycle contract fails the job rather than silently leaving a
+shipped updater artifact unverified. The
+`v0.1.0-alpha.2` release exposed this gap by emitting both MSI and NSIS.
+The target is Windows-specific, so release bundles must be built on Windows;
+a macOS development host should not treat bare `pnpm tauri build` as installer
+verification.
 
 **The updater artifact is found via its `.sig`, not by extension.** What
 the bundler signs has changed shape across Tauri versions — v1 and early
@@ -377,7 +400,8 @@ unaffected by how the bytes arrived.
 ## 7. Installer lifecycle (`.github/scripts/installer-lifecycle.ps1`)
 
 `installer-smoke.ps1` covers a clean machine. This covers the path every
-*existing* user takes: upgrade, repair, uninstall (#57).
+*existing* user takes: upgrade, downgrade refusal, repair, uninstall (#57,
+#141).
 
 Runs as a second step in the same `updater` job and **reuses the two MSIs
 `updater-e2e.ps1` already built**. A sibling job would have to run
@@ -390,10 +414,19 @@ roughly doubles the Windows CI bill.
 3. upgrade to 9.9.1; assert one entry, one install directory, and that
    `GMM.exe`'s bytes actually changed
 4. assert every seeded invariant survived
-5. delete `GMM.exe`, run `msiexec /f`, assert it comes back
+5. run the 9.9.0 MSI over 9.9.1; require Windows Installer exit code 1603
+   and the `A newer version of GMM is already installed.` launch-condition
+   message, then recheck version 9.9.1, the one Add/Remove Programs entry,
+   the executable bytes, a working launch, and every seeded invariant
+6. delete `GMM.exe`, run `msiexec /f`, assert it comes back
    byte-identical and user data is untouched
-6. uninstall; assert the documented policy — install directory gone,
+7. uninstall; assert the documented policy — install directory gone,
    `%APPDATA%\GMM` and Junctions kept
+
+The refused-downgrade verbose log is retained in `ci-diagnostics/`. The exit
+code is deliberately pinned rather than checked only for non-zero: a missing
+MSI, malformed command line, or locked file must not impersonate the downgrade
+guarantee.
 
 ### Why there is a fixture binary
 

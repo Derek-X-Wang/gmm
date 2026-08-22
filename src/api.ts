@@ -180,6 +180,44 @@ export async function auditLibrary(game: GameCode): Promise<LibraryAuditReport> 
   return invoke<LibraryAuditReport>("audit_library", { game });
 }
 
+export interface DeletedLibraryDir {
+  directoryName: string;
+  path: string;
+  sizeBytes: number | null;
+}
+
+/** Open the file manager on an unreferenced Library folder. */
+export async function revealUnreferencedLibraryDir(
+  game: GameCode,
+  path: string,
+): Promise<void> {
+  return invoke<void>("reveal_unreferenced_library_dir", { game, path });
+}
+
+/**
+ * Adopt an unreferenced Library folder as a Mod. The name is the user's —
+ * nothing on disk records what the interrupted import was called. Copies
+ * nothing: the bytes are already in the Library.
+ */
+export async function recoverUnreferencedLibraryDir(
+  game: GameCode,
+  path: string,
+  name: string,
+): Promise<Mod> {
+  const raw = await invoke<RawMod>("recover_unreferenced_library_dir", {
+    args: { game, path, name },
+  });
+  return fromRaw(raw);
+}
+
+/** Permanently delete one confirmed unreferenced Library folder. */
+export async function deleteUnreferencedLibraryDir(
+  game: GameCode,
+  path: string,
+): Promise<DeletedLibraryDir> {
+  return invoke<DeletedLibraryDir>("delete_unreferenced_library_dir", { game, path });
+}
+
 export async function setLibraryRoot(path: string | null): Promise<MoveReport> {
   return invoke<MoveReport>("set_library_root", { path });
 }
