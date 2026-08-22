@@ -183,10 +183,10 @@ jobs:
             exit 0
           fi
           echo "comparing against run $previous"
-          mkdir -p previous
-          gh run download "$previous" --repo "$GITHUB_REPOSITORY" \
-            --name origin-report --dir previous \
-            || echo "run $previous published no origin-report artifact"
+          .github/scripts/download-previous-origin-report.sh \
+            --run "$previous" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir previous
 
       - name: Open an issue for anything dead two runs running
         env:

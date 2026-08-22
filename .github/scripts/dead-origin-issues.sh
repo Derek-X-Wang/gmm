@@ -53,18 +53,64 @@ if [ -z "$CURRENT" ] || [ ! -f "$CURRENT" ]; then
   exit 1
 fi
 
-# jq that yields one "<game>\t<origin>\t<detail>" line per failing origin.
-failing() {
-  local file="$1"
+# Validate a report before deriving failures from it. Do this before entering a
+# process substitution: bash does not propagate a producer's status from
+# `while ... done < <(...)`, which is how an unreadable report used to become
+# an empty (healthy-looking) failure set.
+read_failures() {
+  local role="$1"
+  local file="$2"
+  local output="$3"
+  local error_file="${PARSE_DIR}/${role}.error"
+
   if [ -z "$file" ] || [ ! -f "$file" ]; then
-    return 0
+    if [ "$role" = "previous" ]; then
+      if [ -n "$file" ]; then
+        echo "no previous report at '$file'; treating this as the first run"
+      else
+        echo "no previous report supplied; treating this as the first run"
+      fi
+      : >"$output"
+      return 0
+    fi
+    echo "no current report at '$file' — cannot decide anything" >&2
+    return 1
   fi
-  jq -r '.origins[]? | select(.ok == false)
-         | [.game, .origin, (.detail // "")] | @tsv' "$file"
+
+  if ! jq empty "$file" 2>"$error_file"; then
+    echo "could not read ${role} report '$file': $(tr '\n' ' ' < "$error_file")" >&2
+    return 1
+  fi
+
+  if ! jq -e 'type == "object" and (.origins | type == "array")' \
+    "$file" >/dev/null 2>"$error_file"; then
+    echo "could not read ${role} report '$file': expected an .origins array" >&2
+    return 1
+  fi
+
+  if [ "$(jq '.origins | length' "$file")" -eq 0 ]; then
+    echo "could not read ${role} report '$file': report contains no origins" >&2
+    return 1
+  fi
+
+  if ! jq -r '.origins[] | select(.ok == false)
+         | [.game, .origin, (.detail // "")] | @tsv' \
+    "$file" >"$output" 2>"$error_file"; then
+    echo "could not read ${role} report '$file': $(tr '\n' ' ' < "$error_file")" >&2
+    return 1
+  fi
 }
 
+PARSE_DIR="$(mktemp -d)"
+trap 'rm -rf "$PARSE_DIR"' EXIT
+CURRENT_FAILURES="${PARSE_DIR}/current.tsv"
+PREVIOUS_FAILURES="${PARSE_DIR}/previous.tsv"
+
+read_failures current "$CURRENT" "$CURRENT_FAILURES"
+read_failures previous "$PREVIOUS" "$PREVIOUS_FAILURES"
+
 # The keys (game + origin) that failed last time, as a lookup.
-PREV_KEYS="$(failing "$PREVIOUS" | cut -f1,2 || true)"
+PREV_KEYS="$(cut -f1,2 "$PREVIOUS_FAILURES")"
 
 ALERTS=""
 while IFS=$'\t' read -r game origin detail; do
@@ -74,7 +120,7 @@ while IFS=$'\t' read -r game origin detail; do
   else
     echo "first failure for ${game} (${origin}) — not alerting yet"
   fi
-done < <(failing "$CURRENT")
+done <"$CURRENT_FAILURES"
 
 if [ -z "${ALERTS//[$'\n\t ']/}" ]; then
   echo "no origin has failed twice in a row; nothing to open"
@@ -106,7 +152,12 @@ while IFS=$'\t' read -r game origin detail; do
     echo "already tracked: ${title}"
     continue
   fi
-  body="$(cat <<EOF
+  # `read` avoids nesting the heredoc inside a command substitution. Bash
+  # otherwise parses Markdown's escaped backticks as an unterminated legacy
+  # command substitution in this branch; dry-run exits before reaching it and
+  # hid the defect.
+  body=""
+  IFS= read -r -d '' body <<EOF || true
 > *Opened automatically by the scheduled \`upstream importers\` workflow.*
 
 The Importer Origin GMM recommends for **${game}** has failed to resolve on
@@ -139,7 +190,6 @@ Validate before merging: \`cd src-tauri && cargo run --bin validate-manifest\`.
 This issue is not reopened or duplicated while it stays open. Close it once
 the manifest is fixed; the next scheduled run will re-open one if it is not.
 EOF
-)"
   echo "opening: ${title}"
   gh issue create --repo "$REPO" \
     --title "$title" \
