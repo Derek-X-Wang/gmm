@@ -67,7 +67,7 @@ pub fn run() {
     // out from under a running game corrupts it.
     {
         let core_for_pass = core.clone();
-        std::thread::spawn(move || {
+        {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -94,7 +94,7 @@ pub fn run() {
                     tracing::warn!(error = %e, "startup reconcile pass errored");
                 }
             });
-        });
+        }
     }
 
     // Refresh GMM's curated `recommended-importers.json` once per launch
@@ -106,7 +106,9 @@ pub fn run() {
     {
         let core_for_manifest = core.clone();
         let manifest_url_override =
-            std::env::var(crate::core::recommended_importers::MANIFEST_URL_OVERRIDE_ENV).ok();
+            crate::core::recommended_importers::loopback_manifest_url_override(
+                std::env::var(crate::core::recommended_importers::MANIFEST_URL_OVERRIDE_ENV).ok(),
+            );
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
