@@ -80,17 +80,29 @@ function Install-Msi($msi) {
 
 # Launch the installed app and wait until it proves the frontend reached
 # the backend (issue #54's marker). Returns once it has, kills the app.
+# How many times the IPC readiness marker appears across every log file.
+#
+# Counted rather than merely searched for, because the logs are NOT
+# cleared between launches. A plain "does the marker appear anywhere"
+# check is satisfied instantly by the *previous* launch's line, so it
+# would return before the process under test had done anything — and an
+# app that crashed on startup would pass. Requiring the count to go up
+# is what makes "the app started" an assertion about this launch.
+function Get-IpcMarkerCount {
+    $logs = Join-Path $AppData "logs"
+    if (-not (Test-Path $logs)) { return 0 }
+    @(Get-ChildItem $logs -Filter *.log -ErrorAction SilentlyContinue |
+        Select-String -SimpleMatch $IpcReadyMarker).Count
+}
+
 function Assert-AppStarts($exe) {
+    $before = Get-IpcMarkerCount
     $proc = Start-Process $exe -PassThru
     try {
-        $logs = Join-Path $AppData "logs"
         $deadline = (Get-Date).AddSeconds(90)
         while ((Get-Date) -lt $deadline) {
-            if ((Test-Path $logs) -and
-                (Get-ChildItem $logs -Filter *.log -ErrorAction SilentlyContinue |
-                    ForEach-Object { Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue } |
-                    Select-String -SimpleMatch $IpcReadyMarker -Quiet)) {
-                Write-Host "app reached a working state (IPC marker seen)"
+            if ((Get-IpcMarkerCount) -gt $before) {
+                Write-Host "app reached a working state (new IPC marker seen)"
                 return
             }
             if ($proc.HasExited) {

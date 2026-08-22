@@ -292,11 +292,19 @@ for the resulting line. Reaching that call requires the WebView to boot,
 the IPC channel to come up, the command to be registered, and the ACL to
 allow it.
 
-Three drift guards keep it honest, all in `tests/ipc_contract.rs`: the
-marker command must still be registered and still invoked by the
-frontend, its body must still call `record_ipc_ready`, and the
-PowerShell must still grep the same literal as
-`diagnostics::IPC_READY_MARKER`.
+Drift guards keep it honest, all in `tests/ipc_contract.rs`: the marker
+command must still be registered and still invoked by the frontend, its
+body must still call `record_ipc_ready`, **all three** PowerShell scripts
+must still grep the same literal as `diagnostics::IPC_READY_MARKER`, and
+the two scripts that launch the app more than once must require a *new*
+marker rather than any marker.
+
+That last one is not hypothetical. GMM's logs are not cleared between
+launches, so "does the marker appear anywhere" is satisfied instantly by
+the previous launch's line — which would make every startup check after
+the first one pass without the process under test having done anything,
+including when it crashed. `Get-IpcMarkerCount` compares a count taken
+before starting the app with one taken after.
 
 If you move the marker to a different command, move all four together.
 
