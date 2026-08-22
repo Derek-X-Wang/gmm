@@ -138,7 +138,7 @@ async fn check_now_writes_upstream_version_and_flags_when_ahead() {
     let mut poll_server = mockito::Server::new_async().await;
     let id = 4242_u64;
     let api_path = format!("/apiv11/Mod/{id}");
-    let _api = poll_server
+    let api = poll_server
         .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
         .with_status(200)
         .with_header("content-type", "application/json")
@@ -154,6 +154,7 @@ async fn check_now_writes_upstream_version_and_flags_when_ahead() {
             }}"#,
             base = poll_server.url(),
         ))
+        .expect(1)
         .create_async()
         .await;
 
@@ -168,6 +169,7 @@ async fn check_now_writes_upstream_version_and_flags_when_ahead() {
     assert_eq!(rows[0].mod_id, imported.id);
     assert_eq!(rows[0].upstream_version.as_deref(), Some("0.2.0"));
     assert!(rows[0].upstream_ahead, "v0.1.0 != v0.2.0 → ahead");
+    api.assert_async().await;
 }
 
 #[tokio::test]
@@ -177,9 +179,9 @@ async fn global_toggle_off_skips_network_but_still_lists_rows() {
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root, &db_url).await.expect("init");
 
-    let mut server = mockito::Server::new_async().await;
+    let mut ingest_server = mockito::Server::new_async().await;
     let _imported = ingest(
-        &mut server,
+        &mut ingest_server,
         &core,
         7777,
         "GB Mod",
@@ -192,21 +194,118 @@ async fn global_toggle_off_skips_network_but_still_lists_rows() {
     core.set_mod_updates_globally_enabled(false)
         .await
         .expect("toggle");
-    // No mock registered for this server URL → if the check were to
-    // hit the network, the test would fail. The toggle must short-
-    // circuit.
-    let dummy = Endpoints {
-        api_base: "http://localhost:1".to_string(),
+    let mut poll_server = mockito::Server::new_async().await;
+    let no_fetch = poll_server
+        .mock("GET", mockito::Matcher::Regex("/apiv11/Mod/7777.*".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+                "_idRow": 7777,
+                "_sName": "GB Mod",
+                "_sProfileUrl": "https://gamebanana.com/mods/7777",
+                "_sVersion": "0.2.0",
+                "_aSubmitter": { "_sName": "Author" },
+                "_aPreviewMedia": { "_aImages": [] },
+                "_aFiles": [{
+                    "_sFile": "mod.zip",
+                    "_sDownloadUrl": "https://example.test/mod.zip"
+                }]
+            }"#,
+        )
+        .expect(0)
+        .create_async()
+        .await;
+    let endpoints = Endpoints {
+        api_base: poll_server.url(),
     };
     let rows = core
-        .check_mod_updates_now_with_endpoints(GameCode::Gimi, &dummy)
+        .check_mod_updates_now_with_endpoints(GameCode::Gimi, &endpoints)
         .await
         .expect("check");
     assert_eq!(rows.len(), 1, "rows still listed");
+    no_fetch.assert_async().await;
+}
+
+#[tokio::test]
+async fn global_toggle_off_does_not_consult_cached_update_state() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_root = tmp.path().join("library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_root, &db_url).await.expect("init");
+
+    let mut ingest_server = mockito::Server::new_async().await;
+    let _imported = ingest(
+        &mut ingest_server,
+        &core,
+        7777,
+        "GB Mod",
+        "0.1.0",
+        b"hash=1\n",
+        &tmp.path().join("a.zip"),
+    )
+    .await;
+
+    let mut poll_server = mockito::Server::new_async().await;
+    let api = poll_server
+        .mock("GET", mockito::Matcher::Regex("/apiv11/Mod/7777.*".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+                "_idRow": 7777,
+                "_sName": "GB Mod",
+                "_sProfileUrl": "https://gamebanana.com/mods/7777",
+                "_sVersion": "0.2.0",
+                "_aSubmitter": { "_sName": "Author" },
+                "_aPreviewMedia": { "_aImages": [] },
+                "_aFiles": [{
+                    "_sFile": "mod.zip",
+                    "_sDownloadUrl": "https://example.test/mod.zip"
+                }]
+            }"#,
+        )
+        .expect(1)
+        .create_async()
+        .await;
+    let endpoints = Endpoints {
+        api_base: poll_server.url(),
+    };
+    let on_rows = core
+        .check_mod_updates_now_with_endpoints(GameCode::Gimi, &endpoints)
+        .await
+        .expect("seed cached update state");
+    api.assert_async().await;
+    assert_eq!(on_rows[0].upstream_version.as_deref(), Some("0.2.0"));
+    assert!(on_rows[0].upstream_ahead);
+
+    core.set_mod_updates_globally_enabled(false)
+        .await
+        .expect("off");
+    let off_rows = core
+        .list_mod_updates(GameCode::Gimi)
+        .await
+        .expect("list off");
+    assert_eq!(off_rows.len(), 1, "rows still listed while off");
     assert_eq!(
-        rows[0].upstream_version, None,
-        "no network = no upstream_version write"
+        off_rows[0].upstream_version, None,
+        "off removes the cached update layer"
     );
+    assert!(!off_rows[0].upstream_ahead, "off hides the cached badge");
+
+    core.set_mod_updates_globally_enabled(true)
+        .await
+        .expect("on");
+    let restored = core
+        .list_mod_updates(GameCode::Gimi)
+        .await
+        .expect("list on");
+    assert_eq!(
+        restored[0].upstream_version.as_deref(),
+        Some("0.2.0"),
+        "off does not destructively delete cached update state"
+    );
+    assert!(restored[0].upstream_ahead);
 }
 
 #[tokio::test]
