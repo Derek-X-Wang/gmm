@@ -341,6 +341,21 @@ Two layers cover the rest:
   moved, the app still starts (via the IPC readiness marker), and
   `%APPDATA%\GMM` survived.
 
+Runs in its own `updater` CI job on every pull request, alongside
+`installer`, and its result gates `check`. You can also run it by hand
+from a Windows checkout with `pwsh .github/scripts/updater-e2e.ps1`.
+
+It is a separate job because it builds the bundle twice — version N and
+version N+1 — which is the expensive part; behind the matrix it would
+add that time to every PR's critical path instead of running alongside
+it. On failure the job uploads `ci-diagnostics/` (the msiexec verbose
+logs and GMM's own JSON logs) as an artifact.
+
+**No release secret is involved.** The script generates its own minisign
+keypair with `tauri signer generate` for the length of the job and never
+reads `TAURI_SIGNING_PRIVATE_KEY`, which stays release-only. That is
+what lets this run on a fork's pull request.
+
 Two things about that script are worth knowing before you edit it.
 
 **The updater artifact is found via its `.sig`, not by extension.** What
@@ -358,21 +373,6 @@ per-build override the script writes; the shipped `tauri.conf.json`
 keeps HTTPS-only endpoints, and `updater_config.rs` asserts it. Transport
 security is not what this test covers — the signature is, and that is
 unaffected by how the bytes arrived.
-
-Runs in its own `updater` CI job on every pull request, alongside
-`installer`, and its result gates `check`. You can also run it by hand
-from a Windows checkout with `pwsh .github/scripts/updater-e2e.ps1`.
-
-It is a separate job because it builds the bundle twice — version N and
-version N+1 — which is the expensive part; behind the matrix it would
-add that time to every PR's critical path instead of running alongside
-it. On failure the job uploads `ci-diagnostics/` (the msiexec verbose
-logs and GMM's own JSON logs) as an artifact.
-
-**No release secret is involved.** The script generates its own minisign
-keypair with `tauri signer generate` for the length of the job and never
-reads `TAURI_SIGNING_PRIVATE_KEY`, which stays release-only. That is
-what lets this run on a fork's pull request.
 
 ## 7. Installer lifecycle (`.github/scripts/installer-lifecycle.ps1`)
 
