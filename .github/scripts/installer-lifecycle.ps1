@@ -132,6 +132,13 @@ function Assert-AppStarts($exe) {
     }
 }
 
+# NOTE: every caller of these two wraps the result in @( ) again, and
+# that is not redundant. A PowerShell function returning a zero- or
+# one-element array has it unrolled on the way out — the caller gets
+# $null or a bare object, and `.Count` on either is a hard error under
+# `Set-StrictMode -Version Latest`. Wrapping inside the function is not
+# enough; it has to happen at the call site.
+
 # Every Add/Remove Programs entry whose DisplayName is exactly GMM.
 # Both hives and the WOW node, because which one the MSI writes to
 # depends on install scope and that is not what this asserts.
@@ -214,7 +221,7 @@ if (Test-Path $AppData) { Remove-Item $AppData -Recurse -Force }
 if (Test-Path $GameDir) { Remove-Item $GameDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path (Join-Path $GameDir "Mods") | Out-Null
 
-$before = Get-UninstallEntries
+$before = @(Get-UninstallEntries)
 if ($before.Count -ne 0) {
     throw "expected no GMM install to begin with, found $($before.Count) entries"
 }
@@ -236,7 +243,7 @@ Invoke-Fixture "seed"
 # ---------------------------------------------------------------------
 Write-Section "Exactly one install, and nothing at startup"
 
-$entries = Get-UninstallEntries
+$entries = @(Get-UninstallEntries)
 if ($entries.Count -ne 1) {
     $entries | ForEach-Object { Write-Host "  $($_.DisplayName) $($_.DisplayVersion) $($_.PSPath)" }
     throw "expected exactly 1 Add/Remove Programs entry after a fresh install, found $($entries.Count)"
@@ -246,7 +253,7 @@ Write-Host "one entry: $($entries[0].DisplayName) $($entries[0].DisplayVersion)"
 # Restated from #57's "no duplicate startup registrations". The Tauri WiX
 # template writes none at all, so the honest assertion is zero rather
 # than "no duplicates" — which would pass vacuously forever.
-$startup = Get-StartupRegistrations
+$startup = @(Get-StartupRegistrations)
 if ($startup.Count -ne 0) {
     $startup | ForEach-Object { Write-Host "  $_" }
     throw "GMM registered $($startup.Count) startup entries; it is expected to register none"
@@ -276,7 +283,7 @@ if ($exeHashAfter -eq $exeHashBefore) {
 
 # The failure #71's pinned UpgradeCode exists to prevent: an upgrade that
 # is really a second, side-by-side install.
-$entries = Get-UninstallEntries
+$entries = @(Get-UninstallEntries)
 if ($entries.Count -ne 1) {
     $entries | ForEach-Object { Write-Host "  $($_.DisplayName) $($_.DisplayVersion) $($_.PSPath)" }
     throw "upgrade produced $($entries.Count) Add/Remove Programs entries; a side-by-side " +
@@ -285,7 +292,7 @@ if ($entries.Count -ne 1) {
 if ((Split-Path -Parent $exe) -ne $installDir) {
     throw "the upgrade installed to $(Split-Path -Parent $exe) instead of replacing $installDir"
 }
-$startup = Get-StartupRegistrations
+$startup = @(Get-StartupRegistrations)
 if ($startup.Count -ne 0) { throw "the upgrade added $($startup.Count) startup registrations" }
 Write-Host "one entry, one install directory, binaries replaced"
 
@@ -321,7 +328,7 @@ Invoke-Msi @("/x", "`"$($newMsi.FullName)`"") "msi-lifecycle-uninstall.log"
 
 # 1. The install directory goes.
 if (Get-InstalledExe) { throw "GMM.exe still present after uninstall" }
-$entries = Get-UninstallEntries
+$entries = @(Get-UninstallEntries)
 if ($entries.Count -ne 0) {
     throw "uninstall left $($entries.Count) Add/Remove Programs entries behind"
 }
