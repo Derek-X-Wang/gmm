@@ -924,6 +924,16 @@ impl Core {
         updates::set_importer_pinned(&self.pool, game, version).await
     }
 
+    /// The per-game Importer Pin, or `None` when the game is unpinned.
+    ///
+    /// The stored value is the version the user is comfortable on, but
+    /// [`updates::compute_status`] only ever asks whether *a* pin
+    /// exists — which is exactly why an origin change has to delete it
+    /// rather than carry it (#110).
+    pub async fn importer_pinned(&self, game: GameCode) -> Result<Option<String>> {
+        updates::importer_pinned(&self.pool, game).await
+    }
+
     /// Persist the per-game installed importer tag. Production calls
     /// this from inside `install_importer` after a successful apply;
     /// integration tests can call it directly to seed state.
@@ -969,6 +979,13 @@ impl Core {
     /// `None` clears it, returning the game to following layers 2 and 3
     /// — the same `Option` idiom as `set_library_path_for_game` and
     /// `set_importer_pinned`.
+    ///
+    /// Whatever this leaves in force, the game's Importer Pin and
+    /// recorded install are reconciled against it before returning
+    /// (#110). Clearing an override is as much an origin change as
+    /// setting one — it can move the game onto a recommendation or back
+    /// onto the compiled-in default — so both go through the same
+    /// reconciliation rather than only the obvious half.
     pub async fn set_importer_origin_override(
         &self,
         game: GameCode,
@@ -986,7 +1003,47 @@ impl Core {
             &importer_origin::keys::origin_override(game),
             encoded.as_deref(),
         )
-        .await
+        .await?;
+
+        // Resolve *after* writing so the answer is the origin now in
+        // force through all three layers, not the argument. With no
+        // origin in effect there is nothing to have moved onto, so
+        // nothing is invalidated.
+        let resolution = self.resolve_importer_origin(game).await?;
+        if let Some(now_in_effect) = resolution.origin() {
+            self.reconcile_after_origin_change(game, now_in_effect)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Bring a game's Importer Pin and recorded install in line with an
+    /// Importer Origin that is now in force (ADR 0005 / #110).
+    ///
+    /// Private and called from every path that can move a game onto a
+    /// different origin, so no caller can change origin and leave
+    /// either behind. Returns what it actually did.
+    async fn reconcile_after_origin_change(
+        &self,
+        game: GameCode,
+        now_in_effect: &importer_origin::ImporterOrigin,
+    ) -> Result<importer_origin::ChangeEffects> {
+        let installed = self.installed_importer_origin(game).await?;
+        let effects = importer_origin::change_effects(&installed, now_in_effect);
+
+        if effects.clears_pin {
+            updates::set_importer_pinned(&self.pool, game, None).await?;
+        }
+        if effects.invalidates_install {
+            put_setting(&self.pool, &updates::keys::importer_installed(game), None).await?;
+            put_setting(
+                &self.pool,
+                &importer_origin::keys::installed_origin(game),
+                None,
+            )
+            .await?;
+        }
+        Ok(effects)
     }
 
     /// Resolve a game's effective Importer Origin through ADR 0005's
@@ -1014,6 +1071,26 @@ impl Core {
             recommendation.as_ref(),
             compiled.as_ref(),
         ))
+    }
+
+    /// The Importer Origin change GMM would propose for `game`, or
+    /// `None` when it has nothing to propose.
+    ///
+    /// Reads the resolved origin and the installed one and nothing
+    /// else. In particular it never reads the Importer Pin: a pinned
+    /// game still gets told its origin is dead (#98). See
+    /// [`importer_origin::pending_change`] for the rule.
+    ///
+    /// Nothing here applies anything — ADR 0005 is explicit that the
+    /// manifest proposes and never auto-applies. The surface that shows
+    /// the proposal, and remembers a decline, is #109.
+    pub async fn pending_importer_origin_change(
+        &self,
+        game: GameCode,
+    ) -> Result<Option<importer_origin::ImporterOrigin>> {
+        let resolution = self.resolve_importer_origin(game).await?;
+        let installed = self.installed_importer_origin(game).await?;
+        Ok(importer_origin::pending_change(&resolution, &installed).cloned())
     }
 
     // ---- The recommended-importers manifest (ADR 0005 / #108) ----
@@ -1201,12 +1278,24 @@ impl Core {
     /// Recording an origin without an actual install was explicitly
     /// rejected — it would assert both an origin and a version for
     /// files GMM has never seen.
+    ///
+    /// Being the only writer of the installed origin makes this the
+    /// chokepoint for the other half of #110: accepting a recommended
+    /// origin is an origin change, so any Importer Pin taken against
+    /// the origin being replaced is cleared here. A version update from
+    /// the *same* origin is not a change and leaves the pin alone.
     pub async fn record_importer_install(
         &self,
         game: GameCode,
         version: &str,
         origin: &importer_origin::ImporterOrigin,
     ) -> Result<()> {
+        // Reconcile before writing: the comparison needs the origin the
+        // install being replaced came from. Invalidating the record is
+        // moot here — this call replaces it with a fresher one either
+        // way — but the pin has to go before the new state lands.
+        self.reconcile_after_origin_change(game, origin).await?;
+
         let encoded = serde_json::to_string(origin)
             .map_err(|e| Error::Importer(format!("could not encode Importer Origin: {e}")))?;
         put_setting(
