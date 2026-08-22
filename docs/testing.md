@@ -442,6 +442,21 @@ pnpm test                     # vitest
 pnpm build
 ```
 
+CI scripts (PowerShell 7, PSScriptAnalyzer 1.25.0, ShellCheck, and
+actionlint 1.7.12):
+
+```bash
+pwsh -NoProfile -Command \
+  'Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force'
+pwsh -NoProfile -File .github/scripts/lint-ci-scripts.ps1
+find .github/scripts -type f -name '*.sh' -exec bash -n {} +
+find .github/scripts -type f -name '*.sh' -exec shellcheck {} +
+actionlint
+```
+
+The CI job runs these static checks on Ubuntu and is part of the aggregate
+`check`; it neither waits for nor executes on a Windows runner.
+
 Windows-only, from a Windows host:
 
 ```bash
