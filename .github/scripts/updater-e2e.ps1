@@ -159,6 +159,28 @@ function Build-Version($version, $destDir) {
             updater = [ordered]@{
                 pubkey    = $PubKey
                 endpoints = @("http://127.0.0.1:$Port/latest.json")
+                # Release builds of tauri-plugin-updater refuse a non-HTTPS
+                # endpoint outright — `validate_endpoints` returns
+                # `InsecureTransportProtocol`, the plugin fails to set up,
+                # and the app dies at startup with exit code 101 before it
+                # ever draws a window. (In debug builds it is only a
+                # warning, which is why this was invisible until a real
+                # release build ran.)
+                #
+                # The endpoint has to be loopback HTTP: an HTTPS server
+                # would need a certificate the app trusts, and a
+                # self-signed one is refused for a different reason. So the
+                # flag is set HERE, in the throwaway per-build override,
+                # and deliberately not in the shipped tauri.conf.json —
+                # which still ships HTTPS-only endpoints, asserted by
+                # `updater_config.rs`.
+                #
+                # Transport security is not what this test covers. The
+                # signature is: the artifact is fetched over the wire and
+                # verified against the pinned key, and a tampered copy is
+                # required to fail. That property is unaffected by how the
+                # bytes arrived.
+                dangerousInsecureTransportProtocol = $true
             }
         }
     }

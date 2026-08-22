@@ -333,6 +333,24 @@ Two layers cover the rest:
   moved, the app still starts (via the IPC readiness marker), and
   `%APPDATA%\GMM` survived.
 
+Two things about that script are worth knowing before you edit it.
+
+**The updater artifact is found via its `.sig`, not by extension.** What
+the bundler signs has changed shape across Tauri versions — v1 and early
+v2 signed a zipped installer, the 2.11 line this repo pins signs the raw
+`.msi`. Asserting a fixed extension is how the script came to fail on
+every correct build. It now takes the `*.sig` the bundler emitted and
+derives the artifact beside it.
+
+**The throwaway build sets `dangerousInsecureTransportProtocol`.** A
+release build of `tauri-plugin-updater` refuses a non-HTTPS endpoint
+outright, so an app pointed at `http://127.0.0.1` dies at startup with
+exit code 101 before drawing a window. The flag lives only in the
+per-build override the script writes; the shipped `tauri.conf.json`
+keeps HTTPS-only endpoints, and `updater_config.rs` asserts it. Transport
+security is not what this test covers — the signature is, and that is
+unaffected by how the bytes arrived.
+
 Runs in its own `updater` CI job on every pull request, alongside
 `installer`, and its result gates `check`. You can also run it by hand
 from a Windows checkout with `pwsh .github/scripts/updater-e2e.ps1`.
