@@ -242,7 +242,7 @@ jobs:
         run: cargo build --release -p gmm-lifecycle-fixture
         working-directory: src-tauri
 
-      - name: Upgrade, repair, uninstall
+      - name: Upgrade, refuse downgrade, repair, uninstall
         shell: pwsh
         run: .github/scripts/installer-lifecycle.ps1
 

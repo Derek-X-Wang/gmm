@@ -332,14 +332,13 @@ Assert-AppStarts $exe
 # ---------------------------------------------------------------------
 Write-Section "Refuse a downgrade and preserve the working install"
 
-# Deliberately starts with the wrong expected code for the first Windows run.
-# That red run establishes the real Windows Installer code rather than relying
-# on a remembered or generic non-zero value; the follow-up commit pins what CI
-# actually reports.
+# The first Windows run deliberately expected 1 and reported 1603. Pin that
+# observed code together with the launch-condition message: a generic non-zero
+# assertion could be satisfied by an unrelated installer failure.
 Invoke-MsiExpectFailure `
     @("/i", "`"$($oldMsi.FullName)`"") `
     "msi-lifecycle-downgrade-refused.log" `
-    1 `
+    1603 `
     "A newer version of GMM is already installed."
 
 $exe = Get-InstalledExe
@@ -357,6 +356,9 @@ $entries = @(Get-UninstallEntries)
 if ($entries.Count -ne 1) {
     $entries | ForEach-Object { Write-Host "  $($_.DisplayName) $($_.DisplayVersion) $($_.PSPath)" }
     throw "refused downgrade left $($entries.Count) Add/Remove Programs entries"
+}
+if (-not "$($entries[0].DisplayVersion)".StartsWith("9.9.1")) {
+    throw "refused downgrade changed the Add/Remove Programs version to $($entries[0].DisplayVersion)"
 }
 Write-Host "one entry remains: $($entries[0].DisplayName) $($entries[0].DisplayVersion)"
 

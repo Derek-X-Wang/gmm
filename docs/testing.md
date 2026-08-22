@@ -377,7 +377,8 @@ unaffected by how the bytes arrived.
 ## 7. Installer lifecycle (`.github/scripts/installer-lifecycle.ps1`)
 
 `installer-smoke.ps1` covers a clean machine. This covers the path every
-*existing* user takes: upgrade, repair, uninstall (#57).
+*existing* user takes: upgrade, downgrade refusal, repair, uninstall (#57,
+#141).
 
 Runs as a second step in the same `updater` job and **reuses the two MSIs
 `updater-e2e.ps1` already built**. A sibling job would have to run
@@ -390,10 +391,19 @@ roughly doubles the Windows CI bill.
 3. upgrade to 9.9.1; assert one entry, one install directory, and that
    `GMM.exe`'s bytes actually changed
 4. assert every seeded invariant survived
-5. delete `GMM.exe`, run `msiexec /f`, assert it comes back
+5. run the 9.9.0 MSI over 9.9.1; require Windows Installer exit code 1603
+   and the `A newer version of GMM is already installed.` launch-condition
+   message, then recheck version 9.9.1, the one Add/Remove Programs entry,
+   the executable bytes, a working launch, and every seeded invariant
+6. delete `GMM.exe`, run `msiexec /f`, assert it comes back
    byte-identical and user data is untouched
-6. uninstall; assert the documented policy — install directory gone,
+7. uninstall; assert the documented policy — install directory gone,
    `%APPDATA%\GMM` and Junctions kept
+
+The refused-downgrade verbose log is retained in `ci-diagnostics/`. The exit
+code is deliberately pinned rather than checked only for non-zero: a missing
+MSI, malformed command line, or locked file must not impersonate the downgrade
+guarantee.
 
 ### Why there is a fixture binary
 
