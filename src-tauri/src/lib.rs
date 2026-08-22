@@ -67,7 +67,7 @@ pub fn run() {
     // out from under a running game corrupts it.
     {
         let core_for_pass = core.clone();
-        std::thread::spawn(move || {
+        {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -94,7 +94,7 @@ pub fn run() {
                     tracing::warn!(error = %e, "startup reconcile pass errored");
                 }
             });
-        });
+        }
     }
 
     // Refresh GMM's curated `recommended-importers.json` once per launch
@@ -105,13 +105,26 @@ pub fn run() {
     // still in force and still correct — so it is logged and dropped.
     {
         let core_for_manifest = core.clone();
+        let manifest_url_override =
+            crate::core::recommended_importers::loopback_manifest_url_override(
+                std::env::var(crate::core::recommended_importers::MANIFEST_URL_OVERRIDE_ENV).ok(),
+            );
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build manifest refresh runtime");
             rt.block_on(async move {
-                match core_for_manifest.refresh_recommended_importers().await {
+                diagnostics::record_manifest_refresh_started();
+                let refresh = match manifest_url_override {
+                    Some(url) => {
+                        core_for_manifest
+                            .refresh_recommended_importers_from(&url)
+                            .await
+                    }
+                    None => core_for_manifest.refresh_recommended_importers().await,
+                };
+                match refresh {
                     Ok(outcome) => tracing::info!(
                         target: "gmm::recommendations",
                         outcome = ?outcome,

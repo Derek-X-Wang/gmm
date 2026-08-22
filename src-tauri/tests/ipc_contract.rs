@@ -295,3 +295,59 @@ mod ipc_readiness_marker {
         }
     }
 }
+
+/// The packaged startup smoke holds the manifest endpoint open and proves
+/// both that this launch started the refresh and that IPC became ready
+/// without waiting for the response. Keep the Rust marker and the script's
+/// literal/counting contract in lockstep.
+mod manifest_refresh_started_marker {
+    use super::read;
+    use gmm_lib::core::diagnostics::MANIFEST_REFRESH_STARTED_MARKER;
+    use gmm_lib::core::recommended_importers::MANIFEST_URL_OVERRIDE_ENV;
+
+    #[test]
+    fn installer_smoke_counts_the_same_marker_for_this_launch() {
+        let script = read(".github/scripts/installer-smoke.ps1");
+        assert!(
+            script.contains(MANIFEST_REFRESH_STARTED_MARKER),
+            "installer-smoke.ps1 must count the marker literal \
+             '{MANIFEST_REFRESH_STARTED_MARKER}'",
+        );
+        assert!(
+            script.contains("Get-DiagnosticMarkerCount"),
+            "installer-smoke.ps1 must compare marker counts so an old log line \
+             cannot satisfy the current launch",
+        );
+        assert!(
+            script.contains(MANIFEST_URL_OVERRIDE_ENV),
+            "installer-smoke.ps1 must set {MANIFEST_URL_OVERRIDE_ENV} to the \
+             endpoint it deliberately holds open",
+        );
+        assert!(
+            script.contains("Get-DiagnosticEventTimestamp"),
+            "installer-smoke.ps1 must compare structured log timestamps rather \
+             than impose a machine-speed deadline",
+        );
+        assert!(
+            script.contains("$ipcReadyAt -ge $manifestRefreshFinishedAt"),
+            "installer-smoke.ps1 must require IPC readiness before the held-open \
+             refresh reaches its own terminal event",
+        );
+        assert!(
+            !script.contains("$manifestRequestAcceptedAt.AddSeconds("),
+            "the startup guard must not depend on an arbitrary wall-clock margin",
+        );
+    }
+
+    #[test]
+    fn startup_refresh_emits_the_marker_at_the_kickoff_site() {
+        let lib = read("src-tauri/src/lib.rs");
+        assert!(
+            lib.contains(
+                "diagnostics::record_manifest_refresh_started();\n                let refresh = match"
+            ),
+            "the startup refresh must emit its diagnostic marker immediately \
+             before choosing and polling the refresh future",
+        );
+    }
+}

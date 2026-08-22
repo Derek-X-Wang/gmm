@@ -324,6 +324,22 @@ pub fn record_ipc_ready() {
     );
 }
 
+/// Distinctive log line proving the once-per-launch manifest refresh was
+/// kicked off. The packaged startup smoke counts this marker before and
+/// after launching GMM, so a line left by an earlier process cannot satisfy
+/// the current launch.
+pub const MANIFEST_REFRESH_STARTED_MARKER: &str = "gmm-manifest-refresh-started";
+
+/// Emit [`MANIFEST_REFRESH_STARTED_MARKER`] immediately before the refresh
+/// future is polled. Completion has a separate ordinary diagnostic; this
+/// marker intentionally proves kickoff even while the endpoint is stalled.
+pub fn record_manifest_refresh_started() {
+    tracing::info!(
+        marker = MANIFEST_REFRESH_STARTED_MARKER,
+        "recommended-importers refresh started",
+    );
+}
+
 /// Record a structured event sourced from the frontend. The Tauri
 /// command shell calls this; nothing else should.
 pub fn record_frontend_error(message: &str, stack: Option<&str>, route: Option<&str>) {

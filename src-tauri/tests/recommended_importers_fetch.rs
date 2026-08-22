@@ -662,35 +662,6 @@ async fn the_refresh_goes_through_the_users_proxy_like_every_other_network_call(
     );
 }
 
-/// Nothing in the app is reachable from an integration test's `Core`, so
-/// the one thing these tests cannot otherwise assert is that a real
-/// launch ever calls the refresh at all. A feature that is fully tested
-/// and never invoked is exactly the shape of #78, so the wiring is
-/// checked at the source level — the same technique `ipc_contract.rs`
-/// uses for the command registry.
-#[test]
-fn startup_kicks_off_the_refresh_in_the_background() {
-    let lib = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
-    )
-    .expect("read lib.rs");
-
-    assert!(
-        lib.contains("refresh_recommended_importers"),
-        "run() must start the once-per-launch manifest refresh, or layer 2 \
-         is permanently whatever the last release cached",
-    );
-
-    let call = lib
-        .find("refresh_recommended_importers")
-        .expect("the call site");
-    let preamble = &lib[..call];
-    assert!(
-        preamble.contains("std::thread::spawn"),
-        "the refresh must run off the startup path — nothing waits on it",
-    );
-}
-
 #[tokio::test]
 async fn a_304_with_nothing_cached_is_not_a_success() {
     // A 304 is only meaningful as an answer to a conditional request.

@@ -7,7 +7,8 @@
 //! which is why the validator has to fail loudly and name what is wrong.
 
 use gmm_lib::core::recommended_importers::{
-    self as manifest, ManifestError, MANIFEST_PATH, MANIFEST_URL, SUPPORTED_SCHEMA_VERSION,
+    self as manifest, loopback_manifest_url_override, ManifestError, MANIFEST_PATH, MANIFEST_URL,
+    SUPPORTED_SCHEMA_VERSION,
 };
 use gmm_lib::core::GameCode;
 
@@ -36,6 +37,33 @@ fn the_apps_fetch_url_points_at_the_committed_path() {
         MANIFEST_URL.ends_with(MANIFEST_PATH),
         "the fetch URL must end with the committed path",
     );
+}
+
+#[test]
+fn the_packaged_smoke_override_cannot_redirect_releases_to_the_internet() {
+    for loopback in [
+        "http://127.0.0.1:48123/recommended-importers.json",
+        "http://[::1]:48123/recommended-importers.json",
+    ] {
+        assert_eq!(
+            loopback_manifest_url_override(Some(loopback.to_string())).as_deref(),
+            Some(loopback),
+        );
+    }
+
+    for rejected in [
+        MANIFEST_URL,
+        "http://localhost:48123/recommended-importers.json",
+        "file:///tmp/recommended-importers.json",
+        "not a URL",
+    ] {
+        assert_eq!(
+            loopback_manifest_url_override(Some(rejected.to_string())),
+            None,
+            "the release-build seam must reject {rejected}",
+        );
+    }
+    assert_eq!(loopback_manifest_url_override(None), None);
 }
 
 #[test]
