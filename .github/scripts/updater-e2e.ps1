@@ -121,12 +121,27 @@ Write-Section "Throwaway signing key"
 # a pull request. This one exists for the length of this job.
 $KeyPath = Join-Path $Work "e2e-key"
 Remove-Item "$KeyPath*" -Force -ErrorAction SilentlyContinue
-pnpm tauri signer generate --ci -p "" -w $KeyPath | Out-Null
+
+# The key gets a real password rather than an empty one, and that is not
+# cosmetic. PowerShell's default native-argument passing on Windows
+# *drops* an empty-string argument entirely, so `-p ""` reached the
+# Tauri CLI as no `-p` at all:
+#
+#   error: a value is required for '--password <PASSWORD>' but none was supplied
+#
+# (It works from a POSIX shell, which is why it survived review — the
+# script was written on macOS. See $PSNativeCommandArgumentPassing.)
+# A non-empty password also matches how the real release key is used,
+# so this exercises the same code path releases do.
+$KeyPassword = "updater-e2e"
+
+pnpm tauri signer generate --ci -p $KeyPassword -w $KeyPath | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "tauri signer generate exited $LASTEXITCODE" }
 if (-not (Test-Path "$KeyPath.pub")) { throw "signer generate produced no public key" }
 
 $PubKey = (Get-Content "$KeyPath.pub" -Raw).Trim()
 $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $KeyPath -Raw).Trim()
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $KeyPassword
 Write-Host "throwaway pubkey: $($PubKey.Substring(0, 24))…"
 
 # ---------------------------------------------------------------------
