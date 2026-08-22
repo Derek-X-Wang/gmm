@@ -127,34 +127,42 @@ pub fn compute_status(
 
 /// Read the per-game installed importer version (or `None` if never
 /// recorded).
-pub async fn importer_installed(pool: &sqlx::SqlitePool, game: GameCode) -> Result<Option<String>> {
-    get_setting(pool, &keys::importer_installed(game)).await
+pub async fn importer_installed<'e, E>(executor: E, game: GameCode) -> Result<Option<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    get_setting(executor, &keys::importer_installed(game)).await
 }
 
 /// Persist the per-game installed importer version. Called by
 /// [`crate::core::Core::install_importer`] on a successful apply.
-pub async fn set_importer_installed(
-    pool: &sqlx::SqlitePool,
-    game: GameCode,
-    version: &str,
-) -> Result<()> {
-    put_setting(pool, &keys::importer_installed(game), Some(version)).await
+pub async fn set_importer_installed<'e, E>(executor: E, game: GameCode, version: &str) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    put_setting(executor, &keys::importer_installed(game), Some(version)).await
 }
 
 /// Read the per-game pin (or `None` when unpinned).
-pub async fn importer_pinned(pool: &sqlx::SqlitePool, game: GameCode) -> Result<Option<String>> {
-    get_setting(pool, &keys::importer_pinned(game)).await
+pub async fn importer_pinned<'e, E>(executor: E, game: GameCode) -> Result<Option<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    get_setting(executor, &keys::importer_pinned(game)).await
 }
 
 /// Pin (or clear) the per-game importer version. Passing `None`
 /// clears the pin. The stored value is a free-form string — usually
 /// the tag the user is comfortable on.
-pub async fn set_importer_pinned(
-    pool: &sqlx::SqlitePool,
+pub async fn set_importer_pinned<'e, E>(
+    executor: E,
     game: GameCode,
     version: Option<&str>,
-) -> Result<()> {
-    put_setting(pool, &keys::importer_pinned(game), version).await
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    put_setting(executor, &keys::importer_pinned(game), version).await
 }
 
 /// What GMM knows about the Loader it ships versus what upstream has

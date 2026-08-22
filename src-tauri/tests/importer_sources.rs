@@ -121,7 +121,14 @@ async fn every_importer_origin_reaches_the_verdict_its_recording_predicts() {
         let expected = importer::parse_latest_release(&recorded(game), &pattern)
             .map(|release| release.asset_name);
 
-        let live = importer::fetch_latest_release(&client, repo, &pattern, None).await;
+        let live = importer::fetch_latest_release(
+            &client,
+            &importer::Endpoints::default(),
+            repo,
+            &pattern,
+            None,
+        )
+        .await;
 
         match (&expected, &live) {
             (Ok(recorded_asset), Ok(Some(release))) => {

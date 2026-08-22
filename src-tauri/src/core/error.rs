@@ -138,6 +138,35 @@ pub enum Error {
         count: usize,
     },
 
+    /// No Importer Origin is in effect for the game, so there is
+    /// nothing to install or check (ADR 0005 / #97). Either the
+    /// recommended manifest retracted the compiled-in default, or the
+    /// game never had one.
+    #[error(
+        "no Model Importer origin is in effect for {game}. \
+         Choose one in Settings to install it.{reason}"
+    )]
+    NoImporterOriginInEffect { game: String, reason: String },
+
+    /// The Model Importer files were installed, but GMM could not
+    /// record what it installed.
+    ///
+    /// Never collapsed into success. The install command used to
+    /// discard this failure and return the report anyway (#122), so the
+    /// UI said "Installed" while GMM still held the previous version,
+    /// the previous origin, or a mixture — and pin clearing, the update
+    /// badge and the recommendation logic all went on reading it.
+    #[error(
+        "{game}'s Model Importer {version} was installed, but GMM could not record it: \
+         {message}. The files are in place; GMM's record of the version and the \
+         Importer Origin is not. Re-run the install once the problem is resolved."
+    )]
+    ImporterInstallNotRecorded {
+        game: String,
+        version: String,
+        message: String,
+    },
+
     #[error("network error: {0}")]
     Network(String),
 

@@ -795,7 +795,15 @@ impl Core {
     ) -> Result<updates::UpdateStatus> {
         let pattern = importer::AssetPattern::new(asset_pattern)?;
         let client = self.http_client().await?;
-        let latest = match importer::fetch_latest_release(&client, repo, &pattern, None).await {
+        let latest = match importer::fetch_latest_release(
+            &client,
+            &importer::Endpoints::default(),
+            repo,
+            &pattern,
+            None,
+        )
+        .await
+        {
             Ok(Some(release)) => Ok(release.tag_name),
             // `None` means 304 Not Modified, which needs an ETag we
             // never send. Treat it as "nothing learned" rather than
@@ -857,6 +865,7 @@ impl Core {
         let client = self.http_client().await?;
         let latest = match importer::fetch_latest_release(
             &client,
+            &importer::Endpoints::default(),
             &origin.repo_slug(),
             &pattern,
             None,
@@ -904,7 +913,14 @@ impl Core {
     ) -> Result<updates::LoaderVersionStatus> {
         let pattern = importer::AssetPattern::new(asset_pattern)?;
         let client = self.http_client().await?;
-        let latest = importer::fetch_latest_release(&client, repo, &pattern, None).await;
+        let latest = importer::fetch_latest_release(
+            &client,
+            &importer::Endpoints::default(),
+            repo,
+            &pattern,
+            None,
+        )
+        .await;
 
         let latest = match latest {
             // `None` means 304 Not Modified, which we can only get by
@@ -970,7 +986,20 @@ impl Core {
         &self,
         game: GameCode,
     ) -> Result<Option<importer_origin::ImporterOrigin>> {
-        let raw = get_setting(&self.pool, &importer_origin::keys::origin_override(game)).await?;
+        Self::importer_origin_override_in(&self.pool, game).await
+    }
+
+    /// [`Self::importer_origin_override`] against an arbitrary executor,
+    /// so a transaction can resolve against the override it has just
+    /// written rather than against the committed one (#122).
+    async fn importer_origin_override_in<'e, E>(
+        executor: E,
+        game: GameCode,
+    ) -> Result<Option<importer_origin::ImporterOrigin>>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let raw = get_setting(executor, &importer_origin::keys::origin_override(game)).await?;
         Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
     }
 
@@ -998,22 +1027,24 @@ impl Core {
                 })?),
                 None => None,
             };
+        let mut tx = self.pool.begin().await?;
         put_setting(
-            &self.pool,
+            &mut *tx,
             &importer_origin::keys::origin_override(game),
             encoded.as_deref(),
         )
         .await?;
 
         // Resolve *after* writing so the answer is the origin now in
-        // force through all three layers, not the argument. With no
+        // force through all three layers, not the argument — and read it
+        // through the transaction, so it sees the write above. With no
         // origin in effect there is nothing to have moved onto, so
         // nothing is invalidated.
-        let resolution = self.resolve_importer_origin(game).await?;
+        let resolution = Self::resolve_importer_origin_in(&mut tx, game).await?;
         if let Some(now_in_effect) = resolution.origin() {
-            self.reconcile_after_origin_change(game, now_in_effect)
-                .await?;
+            Self::reconcile_after_origin_change(&mut tx, game, now_in_effect).await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1023,21 +1054,25 @@ impl Core {
     /// Private and called from every path that can move a game onto a
     /// different origin, so no caller can change origin and leave
     /// either behind. Returns what it actually did.
+    /// Runs on a connection rather than on the pool so every caller can
+    /// wrap it, together with whatever moved the origin, in one
+    /// transaction: clearing a pin for a move that then fails to land
+    /// discards the user's ban-wave escape hatch for nothing (#122).
     async fn reconcile_after_origin_change(
-        &self,
+        conn: &mut sqlx::SqliteConnection,
         game: GameCode,
         now_in_effect: &importer_origin::ImporterOrigin,
     ) -> Result<importer_origin::ChangeEffects> {
-        let installed = self.installed_importer_origin(game).await?;
+        let installed = Self::installed_importer_origin_in(&mut *conn, game).await?;
         let effects = importer_origin::change_effects(&installed, now_in_effect);
 
         if effects.clears_pin {
-            updates::set_importer_pinned(&self.pool, game, None).await?;
+            updates::set_importer_pinned(&mut *conn, game, None).await?;
         }
         if effects.invalidates_install {
-            put_setting(&self.pool, &updates::keys::importer_installed(game), None).await?;
+            put_setting(&mut *conn, &updates::keys::importer_installed(game), None).await?;
             put_setting(
-                &self.pool,
+                &mut *conn,
                 &importer_origin::keys::installed_origin(game),
                 None,
             )
@@ -1057,8 +1092,19 @@ impl Core {
         &self,
         game: GameCode,
     ) -> Result<importer_origin::OriginResolution> {
-        let user_override = self.importer_origin_override(game).await?;
-        let manifest = self.cached_recommended_manifest().await?;
+        let mut conn = self.pool.acquire().await?;
+        Self::resolve_importer_origin_in(&mut conn, game).await
+    }
+
+    /// [`Self::resolve_importer_origin`] against a specific connection,
+    /// so a transaction resolves against its own uncommitted writes
+    /// (#122).
+    async fn resolve_importer_origin_in(
+        conn: &mut sqlx::SqliteConnection,
+        game: GameCode,
+    ) -> Result<importer_origin::OriginResolution> {
+        let user_override = Self::importer_origin_override_in(&mut *conn, game).await?;
+        let manifest = Self::cached_recommended_manifest_in(&mut *conn).await?;
         // Both `None`s here mean *fall through*, which is the correct
         // behaviour for every one of them: no manifest cached yet, or a
         // cached manifest that says nothing about this game. Only an
@@ -1110,8 +1156,18 @@ impl Core {
     pub async fn cached_recommended_manifest(
         &self,
     ) -> Result<Option<recommended_importers::Manifest>> {
-        let Some(raw) =
-            get_setting(&self.pool, recommended_importers::cache_keys::DOCUMENT).await?
+        Self::cached_recommended_manifest_in(&self.pool).await
+    }
+
+    /// [`Self::cached_recommended_manifest`] against an arbitrary
+    /// executor (#122).
+    async fn cached_recommended_manifest_in<'e, E>(
+        executor: E,
+    ) -> Result<Option<recommended_importers::Manifest>>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let Some(raw) = get_setting(executor, recommended_importers::cache_keys::DOCUMENT).await?
         else {
             return Ok(None);
         };
@@ -1262,7 +1318,21 @@ impl Core {
         &self,
         game: GameCode,
     ) -> Result<importer_origin::InstalledOrigin> {
-        let raw = get_setting(&self.pool, &importer_origin::keys::installed_origin(game)).await?;
+        Self::installed_importer_origin_in(&self.pool, game).await
+    }
+
+    /// [`Self::installed_importer_origin`] against an arbitrary
+    /// executor, so the recording transaction reads the origin it is
+    /// about to replace from inside that transaction rather than from a
+    /// separate connection (#122).
+    async fn installed_importer_origin_in<'e, E>(
+        executor: E,
+        game: GameCode,
+    ) -> Result<importer_origin::InstalledOrigin>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
+        let raw = get_setting(executor, &importer_origin::keys::installed_origin(game)).await?;
         Ok(
             match raw.as_deref().and_then(|j| serde_json::from_str(j).ok()) {
                 Some(origin) => importer_origin::InstalledOrigin::Known(origin),
@@ -1284,27 +1354,169 @@ impl Core {
     /// origin is an origin change, so any Importer Pin taken against
     /// the origin being replaced is cleared here. A version update from
     /// the *same* origin is not a change and leaves the pin alone.
+    /// The pin reconciliation, the recorded origin and the recorded
+    /// version are **one transaction** (#122). They describe a single
+    /// install, and any subset of them is state no later decision can
+    /// read correctly: pin clearing compares origins, the update badge
+    /// compares versions, and the recommendation logic reads the
+    /// recorded origin to decide whether it is proposing a change. A
+    /// half-written install is worse than an unwritten one, because the
+    /// unwritten one is still internally consistent.
     pub async fn record_importer_install(
         &self,
         game: GameCode,
         version: &str,
         origin: &importer_origin::ImporterOrigin,
     ) -> Result<()> {
-        // Reconcile before writing: the comparison needs the origin the
-        // install being replaced came from. Invalidating the record is
-        // moot here — this call replaces it with a fresher one either
-        // way — but the pin has to go before the new state lands.
-        self.reconcile_after_origin_change(game, origin).await?;
-
         let encoded = serde_json::to_string(origin)
             .map_err(|e| Error::Importer(format!("could not encode Importer Origin: {e}")))?;
+
+        let mut tx = self.pool.begin().await?;
+        // Reconcile before writing: the comparison needs the origin the
+        // install being replaced came from. Invalidating the record is
+        // moot here — the two writes below replace it with a fresher one
+        // either way — but the pin has to go before the new state lands.
+        Self::reconcile_after_origin_change(&mut tx, game, origin).await?;
         put_setting(
-            &self.pool,
+            &mut *tx,
             &importer_origin::keys::installed_origin(game),
             Some(&encoded),
         )
         .await?;
-        updates::set_importer_installed(&self.pool, game, version).await
+        updates::set_importer_installed(&mut *tx, game, version).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The Importer Origin in effect for `game` and its compiled asset
+    /// pattern, or an error when no origin is in effect.
+    ///
+    /// Lives here rather than in the Tauri command layer so the install
+    /// path is one testable unit (#122).
+    pub async fn resolved_importer_origin(
+        &self,
+        game: GameCode,
+    ) -> Result<(importer_origin::ImporterOrigin, importer::AssetPattern)> {
+        let origin = match self.resolve_importer_origin(game).await? {
+            importer_origin::OriginResolution::InEffect { origin, .. } => origin,
+            importer_origin::OriginResolution::NoneInEffect { reason } => {
+                return Err(Error::NoImporterOriginInEffect {
+                    game: game.profile().display_name.to_string(),
+                    reason: reason.map(|r| format!(" {r}")).unwrap_or_default(),
+                })
+            }
+        };
+        let pattern = importer::AssetPattern::new(origin.asset_pattern())?;
+        Ok((origin, pattern))
+    }
+
+    /// The latest upstream release for the game's resolved Importer
+    /// Origin.
+    pub async fn latest_importer_release(
+        &self,
+        game: GameCode,
+    ) -> Result<Option<importer::LatestRelease>> {
+        let (origin, pattern) = self.resolved_importer_origin(game).await?;
+        let client = self.http_client().await?;
+        importer::fetch_latest_release(
+            &client,
+            &importer::Endpoints::default(),
+            &origin.repo_slug(),
+            &pattern,
+            None,
+        )
+        .await
+    }
+
+    /// Download and install the latest Model Importer for `game` from
+    /// its resolved Importer Origin, then record what was installed.
+    ///
+    /// The whole path — resolve, fetch, download, unpack, record — lives
+    /// on `Core` so a test can drive the same code production runs.
+    /// While it lived in the Tauri command the only thing a test could
+    /// assert about it was that a function name appeared in the source
+    /// file, which is how the discarded `record_importer_install` result
+    /// survived review (#122).
+    pub async fn install_importer(&self, game: GameCode) -> Result<importer::InstallReport> {
+        self.install_importer_with_endpoints(game, &importer::Endpoints::default())
+            .await
+    }
+
+    /// Test seam for [`Self::install_importer`] — production uses the
+    /// `Endpoints::default()` overload.
+    pub async fn install_importer_with_endpoints(
+        &self,
+        game: GameCode,
+        endpoints: &importer::Endpoints,
+    ) -> Result<importer::InstallReport> {
+        self.ensure_no_active_session().await?;
+        let install = self.game_install_path(game).await?.ok_or_else(|| {
+            Error::Importer(format!(
+                "set {}'s install path in Settings before installing its Model Importer",
+                game.profile().display_name,
+            ))
+        })?;
+        let (origin, pattern) = self.resolved_importer_origin(game).await?;
+
+        let client = self.http_client().await?;
+        let release =
+            importer::fetch_latest_release(&client, endpoints, &origin.repo_slug(), &pattern, None)
+                .await?
+                .ok_or_else(|| {
+                    Error::ReleaseMetadata(format!(
+                        "no release returned for {}",
+                        origin.repo_slug()
+                    ))
+                })?;
+
+        let data = self.data_dir();
+        let backups_root = data.join("backups").join(game.as_str());
+        let zip_path = data
+            .join("downloads")
+            .join(game.as_str())
+            .join(&release.asset_name);
+        importer::download_to(&client, &release.asset_url, &zip_path).await?;
+
+        let report = tokio::task::spawn_blocking(move || {
+            importer::install_from_local_zip(
+                &zip_path,
+                &install,
+                &backups_root,
+                importer::DEFAULT_LOADER_EXE,
+            )
+        })
+        .await
+        .map_err(|e| Error::Importer(format!("install task join error: {e}")))??;
+
+        // Record the installed tag *and* the Importer Origin it came
+        // from, so the update check can compare against it next launch
+        // and so origin changes are detectable (ADR 0005). This is the
+        // only way an unknown origin becomes known (#99).
+        //
+        // A failure here is **not** best-effort. The files are on disk
+        // and GMM's record of them is not, which is a state the caller
+        // has to be told about — reporting "Installed" over it is the
+        // defect #122 fixed.
+        self.record_importer_install(game, &release.tag_name, &origin)
+            .await
+            .map_err(|e| Error::ImporterInstallNotRecorded {
+                game: game.profile().display_name.to_string(),
+                version: release.tag_name.clone(),
+                message: e.to_string(),
+            })?;
+
+        Ok(report)
+    }
+
+    /// GMM's app-data directory — the Library root's parent, which is
+    /// exactly how `build_core` lays it out. Derived rather than read
+    /// from `crate::data_dir()` so an integration test's temp directory
+    /// carries the downloads and backups too.
+    fn data_dir(&self) -> PathBuf {
+        self.default_library_root
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     // `set_loader_installed` lived here until #78. It never had a

@@ -727,16 +727,40 @@ fn describe(names: &[&str]) -> String {
 /// this origin's [`AssetPattern`]. Returns `Ok(None)` on a 304 Not
 /// Modified when `etag` is supplied.
 ///
+/// Where release metadata is read from.
+///
+/// The same test seam as [`super::gamebanana::Endpoints`], and for the
+/// same reason: the install path is only worth testing end-to-end if a
+/// test can stand in for upstream. Production always uses
+/// [`Endpoints::default`]; nothing in the shipped code constructs any
+/// other value.
+#[derive(Debug, Clone)]
+pub struct Endpoints {
+    pub api_base: String,
+}
+
+impl Default for Endpoints {
+    fn default() -> Self {
+        Self {
+            api_base: "https://api.github.com".to_string(),
+        }
+    }
+}
+
 /// The caller must build the `client` via
 /// [`crate::core::Core::http_client`] so the request honours any
 /// configured proxy.
 pub async fn fetch_latest_release(
     client: &reqwest::Client,
+    endpoints: &Endpoints,
     owner_repo: &str,
     pattern: &AssetPattern,
     etag: Option<&str>,
 ) -> Result<Option<LatestRelease>> {
-    let url = format!("https://api.github.com/repos/{owner_repo}/releases/latest");
+    let url = format!(
+        "{}/repos/{owner_repo}/releases/latest",
+        endpoints.api_base.trim_end_matches('/')
+    );
     let mut req = client.get(&url);
     if let Some(tag) = etag {
         req = req.header("If-None-Match", tag);
