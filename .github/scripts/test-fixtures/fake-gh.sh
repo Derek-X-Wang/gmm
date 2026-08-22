@@ -75,11 +75,19 @@ expect_issue_create() {
   [ "$#" -eq 12 ] || die "expected 12 issue-create arguments, received $# ($*)"
   [ "$1" = issue ] || die "$@"
   [ "$2" = create ] || die "$@"
-  [ "$3" = --repo ] && [ "$4" = "$REPO" ] || die "$@"
-  [ "$5" = --title ] &&
-    [ "$6" = "Recommended Importer Origin for himi stopped resolving: a/b" ] || die "$@"
-  [ "$7" = --label ] && [ "$8" = importer-origin-down ] || die "$@"
-  [ "$9" = --label ] && [ "${10}" = bug ] || die "$@"
+  if [ "$3" != --repo ] || [ "$4" != "$REPO" ]; then
+    die "$@"
+  fi
+  if [ "$5" != --title ] ||
+    [ "$6" != "Recommended Importer Origin for himi stopped resolving: a/b" ]; then
+    die "$@"
+  fi
+  if [ "$7" != --label ] || [ "$8" != importer-origin-down ]; then
+    die "$@"
+  fi
+  if [ "$9" != --label ] || [ "${10}" != bug ]; then
+    die "$@"
+  fi
   [ "${11}" = --body ] || die "$@"
   case "${12}" in
     *"$expected_game_row"*a/b*gone*) ;;
