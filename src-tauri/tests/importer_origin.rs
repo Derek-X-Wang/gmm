@@ -63,7 +63,9 @@ fn an_origin_preserves_the_spelling_it_was_given_for_display_and_fetching() {
 // manifest → compiled-in default.
 // ---------------------------------------------------------------
 
-use gmm_lib::core::importer_origin::{resolve, OriginLayer, OriginResolution, Recommendation};
+use gmm_lib::core::importer_origin::{
+    resolve, OriginLayer, OriginResolution, Recommendation, StoredOverride,
+};
 
 fn gimi_default() -> ImporterOrigin {
     ImporterOrigin::github(
@@ -89,7 +91,7 @@ fn a_recommended_origin() -> ImporterOrigin {
 fn with_no_override_and_no_manifest_a_game_resolves_to_its_compiled_in_default() {
     // The layer-2 input is absent here, which is the state until #108
     // lands the fetch. Installs must behave exactly as they do today.
-    let resolved = resolve(None, None, Some(&gimi_default()));
+    let resolved = resolve(&StoredOverride::NotSet, None, Some(&gimi_default()));
 
     match resolved {
         OriginResolution::InEffect { origin, layer } => {
@@ -104,7 +106,7 @@ fn with_no_override_and_no_manifest_a_game_resolves_to_its_compiled_in_default()
 fn a_user_override_outranks_both_the_manifest_and_the_default() {
     let recommended = Recommendation::Recommended(a_recommended_origin());
     let resolved = resolve(
-        Some(&a_users_own_origin()),
+        &StoredOverride::Set(a_users_own_origin()),
         Some(&recommended),
         Some(&gimi_default()),
     );
@@ -121,7 +123,11 @@ fn a_user_override_outranks_both_the_manifest_and_the_default() {
 #[test]
 fn a_recommendation_outranks_the_compiled_in_default() {
     let recommended = Recommendation::Recommended(a_recommended_origin());
-    let resolved = resolve(None, Some(&recommended), Some(&gimi_default()));
+    let resolved = resolve(
+        &StoredOverride::NotSet,
+        Some(&recommended),
+        Some(&gimi_default()),
+    );
 
     match resolved {
         OriginResolution::InEffect { origin, layer } => {
@@ -141,7 +147,11 @@ fn a_none_recommendation_retracts_the_compiled_in_default() {
     let retracted = Recommendation::NoRecommendation {
         reason: Some("No maintained package known right now.".to_string()),
     };
-    let resolved = resolve(None, Some(&retracted), Some(&gimi_default()));
+    let resolved = resolve(
+        &StoredOverride::NotSet,
+        Some(&retracted),
+        Some(&gimi_default()),
+    );
 
     match resolved {
         OriginResolution::NoneInEffect { reason } => {
@@ -161,7 +171,7 @@ fn a_user_override_rescues_a_game_whose_default_was_retracted() {
     // never stuck, because their own choice sits above the manifest.
     let retracted = Recommendation::NoRecommendation { reason: None };
     let resolved = resolve(
-        Some(&a_users_own_origin()),
+        &StoredOverride::Set(a_users_own_origin()),
         Some(&retracted),
         Some(&gimi_default()),
     );
@@ -180,7 +190,7 @@ fn a_game_absent_from_the_manifest_falls_through_to_the_default() {
     // Absent is *not* retraction. This is the distinction #93 called
     // the dangerous one: if absence were read as retraction, one bad
     // commit would silently strip every user's default.
-    let resolved = resolve(None, None, Some(&gimi_default()));
+    let resolved = resolve(&StoredOverride::NotSet, None, Some(&gimi_default()));
     assert!(matches!(
         resolved,
         OriginResolution::InEffect {
@@ -192,9 +202,9 @@ fn a_game_absent_from_the_manifest_falls_through_to_the_default() {
 
 #[test]
 fn retraction_and_absence_are_different_outcomes_for_the_same_game() {
-    let absent = resolve(None, None, Some(&gimi_default()));
+    let absent = resolve(&StoredOverride::NotSet, None, Some(&gimi_default()));
     let retracted = resolve(
-        None,
+        &StoredOverride::NotSet,
         Some(&Recommendation::NoRecommendation { reason: None }),
         Some(&gimi_default()),
     );
@@ -211,7 +221,7 @@ fn retraction_and_absence_are_different_outcomes_for_the_same_game() {
 fn an_unported_game_with_no_default_has_no_origin_in_effect() {
     // Not an error and not a panic — the same warn-never-block state a
     // retraction produces.
-    let resolved = resolve(None, None, None);
+    let resolved = resolve(&StoredOverride::NotSet, None, None);
     assert!(matches!(
         resolved,
         OriginResolution::NoneInEffect { reason: None }
@@ -405,12 +415,13 @@ async fn no_origin_in_effect_no_override_set_and_unknown_origin_are_three_distin
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
 
-    // (1) no override set — an absent *input*, an Option
-    let no_override: Option<ImporterOrigin> = core
+    // (1) no override set — a distinct state of the stored value, and
+    // since #124 distinct from a stored value GMM cannot read
+    let no_override = core
         .importer_origin_override(GameCode::Gimi)
         .await
         .expect("read override");
-    assert!(no_override.is_none());
+    assert_eq!(no_override, StoredOverride::NotSet);
 
     // (2) unknown origin on an install — its own type
     let unknown = core
@@ -421,7 +432,7 @@ async fn no_origin_in_effect_no_override_set_and_unknown_origin_are_three_distin
 
     // (3) no origin in effect — a resolution outcome, not an Option
     let none_in_effect = resolve(
-        None,
+        &StoredOverride::NotSet,
         Some(&Recommendation::NoRecommendation { reason: None }),
         Some(&gimi_default()),
     );
