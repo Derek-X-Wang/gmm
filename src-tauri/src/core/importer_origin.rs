@@ -698,6 +698,23 @@ pub fn origin_for_install(
         // one" — that is precisely the switch this rule forbids,
         // performed on the one install GMM understands least. The
         // caller surfaces it; it never quietly becomes an origin.
+        //
+        // Unless the origin in effect is the **user's own**, which is
+        // not GMM substituting an opinion but the user saying where this
+        // game's importer comes from — the same explicit act as
+        // accepting a proposal. That exception is also what keeps the
+        // refusal from being permanent: setting an override does not
+        // clear an unreadable record ([`change_effects`] deliberately
+        // keeps the install, because the recorded *version* still
+        // describes real files), so without it every later Install would
+        // hit the same refusal with no way out. The install it performs
+        // replaces the unreadable record.
+        InstalledOrigin::Unreadable { .. } if layer == OriginLayer::UserOverride => {
+            InstallOrigin::Resolved {
+                origin: origin.clone(),
+                layer,
+            }
+        }
         InstalledOrigin::Unreadable { raw, error } => InstallOrigin::InstalledUnreadable {
             raw: raw.clone(),
             error: error.clone(),

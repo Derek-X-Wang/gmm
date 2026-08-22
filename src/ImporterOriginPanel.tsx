@@ -30,7 +30,11 @@ function describeInstalled(installed: InstalledOrigin): string {
     // Never rendered as "nothing installed": those users hand-installed
     // their importers precisely because GMM could not help them (#99).
     case "unknown":
-      return "an importer GMM did not install";
+      // True whether the folder holds a hand-installed importer or
+      // nothing at all, which is the same state as far as GMM's records
+      // go (#99). Claiming either specifically would be a guess about a
+      // machine GMM cannot see.
+      return "whatever Model Importer files are already in your game folder";
     case "unreadable":
       return "an importer whose origin GMM can no longer read";
   }
@@ -104,6 +108,9 @@ export function ImporterOriginPanel({
   });
 
   const data = status.data;
+  // Bound once so the decline handler closes over a value rather than
+  // re-narrowing `data.proposal` inside a callback.
+  const proposalOrigin = data?.proposal?.origin;
 
   return (
     <section className="card" aria-label="Importer Origin">
@@ -170,6 +177,17 @@ export function ImporterOriginPanel({
             </div>
           ) : null}
 
+          {data.installTarget.state === "installedUnreadable" ? (
+            <p className="error">
+              GMM recorded a Model Importer install for {displayName} but can no
+              longer read which Importer Origin it came from:{" "}
+              {data.installTarget.error}. It will not install over it from a
+              different origin, so Install and the update check are unavailable
+              until you save an origin below — which also replaces the
+              unreadable record.
+            </p>
+          ) : null}
+
           {data.recommendationsUnusableReason ? (
             <p className="error">
               GMM could not use the recommendation list it fetched:{" "}
@@ -177,7 +195,7 @@ export function ImporterOriginPanel({
             </p>
           ) : null}
 
-          {data.proposal ? (
+          {data.proposal && proposalOrigin ? (
             <div
               className="library-audit-warning"
               role="group"
@@ -202,7 +220,7 @@ export function ImporterOriginPanel({
                   {accept.isPending ? "Switching…" : "Switch and install"}
                 </button>
                 <button
-                  onClick={() => decline.mutate(data.proposal!.origin)}
+                  onClick={() => decline.mutate(proposalOrigin)}
                   disabled={decline.isPending}
                 >
                   Not now

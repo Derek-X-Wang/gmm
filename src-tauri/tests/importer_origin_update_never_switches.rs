@@ -444,3 +444,51 @@ async fn a_first_install_does_follow_the_recommendation() {
          for",
     );
 }
+
+#[test]
+fn the_users_own_origin_is_not_a_substitution_and_unblocks_an_unreadable_record() {
+    // The escape hatch the refusal above needs to leave open.
+    //
+    // GMM refuses to install over an install whose recorded origin it
+    // cannot read, because choosing a replacement would be exactly the
+    // silent switch this rule forbids. But that refusal has to end
+    // somewhere, and without this the user is stuck permanently: setting
+    // an override does not clear an unreadable record (`change_effects`
+    // keeps the install for an unreadable origin on purpose, because the
+    // recorded *version* still describes real files), so every later
+    // Install would hit the same refusal.
+    //
+    // A user override is not GMM substituting its own opinion — it is
+    // the user saying where this game's importer comes from, which is
+    // the same explicit act as accepting a proposal. So it proceeds, and
+    // the install it performs replaces the unreadable record.
+    let unreadable = InstalledOrigin::Unreadable {
+        raw: "{\"kind\":\"localZip\"}".to_string(),
+        error: "unknown variant".to_string(),
+    };
+
+    match origin_for_install(
+        &unreadable,
+        &in_effect(&recommended_instead(), OriginLayer::UserOverride),
+    ) {
+        InstallOrigin::Resolved { origin, layer } => {
+            assert_eq!(origin, recommended_instead());
+            assert_eq!(layer, OriginLayer::UserOverride);
+        }
+        other => panic!("the user's own choice is the way out, got {other:?}"),
+    }
+
+    // GMM's own layers still do not get to make the substitution.
+    for layer in [
+        OriginLayer::RecommendedManifest,
+        OriginLayer::CompiledInDefault,
+    ] {
+        assert!(
+            matches!(
+                origin_for_install(&unreadable, &in_effect(&recommended_instead(), layer)),
+                InstallOrigin::InstalledUnreadable { .. },
+            ),
+            "{layer:?} is GMM's opinion, not the user's instruction",
+        );
+    }
+}
