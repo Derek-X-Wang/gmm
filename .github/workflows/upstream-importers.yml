@@ -55,6 +55,39 @@ jobs:
             exit 1
           fi
 
+      # The step above proves the release asset can still be *found*. This
+      # one proves it can still be *installed*: it downloads all six real
+      # packages and runs GMM's own `validate_importer_archive` over the
+      # actual bytes.
+      #
+      # Every other importer test in the suite runs against a zip GMM's own
+      # test helper wrote, including the one that derives the shape rule —
+      # it rebuilds each package from a recorded entry listing with
+      # synthetic file bodies. So the rule that decides whether an archive
+      # "is a Model Importer" was frozen against a recording, and the day
+      # upstream reshapes a package GMM starts refusing the real thing with
+      # every test still green. This is the step that notices.
+      #
+      # Here rather than on the PR gate for the same reason as the step
+      # above: it is ~100 MB of downloads against three third-party
+      # repositories, and putting their availability on the critical path
+      # of merging would make the repo unmergeable whenever one of them is
+      # having a bad day.
+      - name: Verify every live Model Importer package still installs
+        working-directory: src-tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo test --test importer_package_contents -- \
+            --ignored --exact \
+            every_live_importer_package_installs_as_a_model_importer \
+            --nocapture | tee contents.txt
+          if grep -q "0 passed" contents.txt; then
+            echo "::error::the live package contract ran 0 tests — a green run that asserted nothing"
+            exit 1
+          fi
+
   # ADR 0005's scheduled guarantee, and the half that does the real
   # work. The job above checks the origins *compiled into this build* —
   # the offline fallback. This one checks the origins the manifest is
