@@ -122,9 +122,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Scoped to this ref. Scheduled runs are always on the
+          # default branch, so in production this is just "the previous
+          # weekly run" — but without it, a one-off workflow_dispatch on
+          # a branch would be compared against main's history and could
+          # alert on evidence from a different manifest entirely.
           previous="$(gh run list \
             --repo "$GITHUB_REPOSITORY" \
             --workflow upstream-importers.yml \
+            --branch "$GITHUB_REF_NAME" \
             --status completed \
             --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
           if [ -z "$previous" ]; then
