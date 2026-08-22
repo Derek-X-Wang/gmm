@@ -5,17 +5,25 @@
 //! (`library.root`, `library.gimi`, etc); `value = NULL` means the key
 //! has been explicitly reset to the default.
 
-use sqlx::{Row, SqlitePool};
+use sqlx::{Executor, Row, Sqlite};
 
 use super::error::{Error, Result};
 use super::games::GameCode;
 
 /// Read a settings value. Returns `Ok(None)` if the key is absent or
 /// stored as `NULL`.
-pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
+///
+/// Generic over the executor rather than taking a `&SqlitePool` so a
+/// caller that has to write several related keys as one unit can run
+/// the whole group inside a transaction (#122). `&SqlitePool` still
+/// satisfies it, so single-key callers read unchanged.
+pub async fn get<'e, E>(executor: E, key: &str) -> Result<Option<String>>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     let row = sqlx::query("SELECT value FROM settings WHERE key = ?")
         .bind(key)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await?;
     match row {
         Some(r) => Ok(r.try_get::<Option<String>, _>("value")?),
@@ -25,14 +33,17 @@ pub async fn get(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
 
 /// Upsert a settings value. Pass `None` to clear (the row stays with a
 /// NULL value so we don't have to special-case absence vs. cleared).
-pub async fn put(pool: &SqlitePool, key: &str, value: Option<&str>) -> Result<()> {
+pub async fn put<'e, E>(executor: E, key: &str, value: Option<&str>) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     sqlx::query(
         "INSERT INTO settings (key, value) VALUES (?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .bind(key)
     .bind(value)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }

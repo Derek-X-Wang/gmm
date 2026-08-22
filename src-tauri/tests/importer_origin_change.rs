@@ -482,27 +482,11 @@ async fn clearing_an_override_that_moves_the_game_back_onto_a_different_origin_r
     );
 }
 
-#[test]
-fn no_tauri_command_records_an_install_without_going_through_the_reconciliation() {
-    // `record_importer_install` is the only writer of the installed
-    // origin, and therefore the only place that can notice an origin
-    // change on the accept path. A command that reached
-    // `set_importer_installed` directly would record a version against
-    // a new origin and quietly leave the old pin in place — which is
-    // the whole defect. Asserted against the real source so it cannot
-    // be reintroduced by accident.
-    let commands = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("commands.rs");
-    let text = std::fs::read_to_string(&commands).expect("read commands.rs");
-
-    assert!(
-        !text.contains("set_importer_installed"),
-        "commands.rs must record installs through record_importer_install, \
-         which reconciles the pin and the install record against the origin (#110)",
-    );
-    assert!(
-        text.contains("record_importer_install"),
-        "the install command must still record what it installed",
-    );
-}
+// `no_tauri_command_records_an_install_without_going_through_the_reconciliation`
+// stood here until #122. It read `commands.rs` as text and asserted that
+// the string `record_importer_install` appeared in it — which no
+// persistence failure could ever have made fail, and which is why the
+// discarded result of that very call survived review. Its intent is now
+// covered behaviourally in `tests/importer_install_recording.rs`, where
+// `the_install_command_records_the_version_and_the_origin_it_came_from`
+// drives the real install path and asserts the pin is cleared.

@@ -15,8 +15,7 @@ use serde::Serialize;
 use crate::core::av;
 use crate::core::conflicts::ConflictReport;
 use crate::core::diagnostics;
-use crate::core::importer::{self, AssetPattern, InstallReport, LatestRelease, DEFAULT_LOADER_EXE};
-use crate::core::importer_origin::{ImporterOrigin, OriginResolution};
+use crate::core::importer::{self, InstallReport, LatestRelease};
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
@@ -416,109 +415,31 @@ pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> Result<(
         .map_err(|e| e.to_string())
 }
 
-/// Resolve the Game's effective Importer Origin (ADR 0005) and compile
-/// its release-asset pattern (#79).
-///
-/// Replaces the compiled-in lookup this used to do: the user's per-game
-/// override now wins, and once #108 lands the recommended manifest sits
-/// between the two. The compiled-in profile row is the bottom layer,
-/// not the only one.
-///
-/// A pattern that does not compile is a build defect for the
-/// compiled-in origins — the `every_shipped_asset_pattern_compiles`
-/// test guards that — but a pattern can arrive from a manifest or from
-/// the user, so the failure is surfaced rather than unwrapped.
-///
-/// When **no origin is in effect** the user is told what to do rather
-/// than shown a generic failure. That is the warn-never-block posture
-/// of #97: there is genuinely nothing to install *from*, and the way
-/// forward is to supply an origin.
-async fn resolved_origin_for(
-    core: &Core,
-    game: GameCode,
-) -> Result<(ImporterOrigin, AssetPattern), String> {
-    let resolution = core
-        .resolve_importer_origin(game)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let origin = match resolution {
-        OriginResolution::InEffect { origin, .. } => origin,
-        OriginResolution::NoneInEffect { reason } => {
-            let mut message = format!(
-                "No Model Importer origin is in effect for {}. \
-                 Choose one in Settings to install it.",
-                game.profile().display_name,
-            );
-            if let Some(reason) = reason.as_deref() {
-                message.push(' ');
-                message.push_str(reason);
-            }
-            return Err(message);
-        }
-    };
-
-    let pattern = AssetPattern::new(origin.asset_pattern()).map_err(|e| e.to_string())?;
-    Ok((origin, pattern))
-}
-
 #[tauri::command]
 pub async fn fetch_latest_importer_release(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<Option<LatestRelease>, String> {
-    let (origin, pattern) = resolved_origin_for(&core, game).await?;
-    let client = core.http_client().await.map_err(|e| e.to_string())?;
-    importer::fetch_latest_release(&client, &origin.repo_slug(), &pattern, None)
+    core.latest_importer_release(game)
         .await
         .map_err(|e| e.to_string())
 }
 
+/// Download and install the Game's Model Importer from its resolved
+/// Importer Origin (ADR 0005).
+///
+/// A thin wrapper on purpose. The install used to be written out here,
+/// which put the only interesting failure — a successful file install
+/// whose bookkeeping did not persist — somewhere no test could reach
+/// (#122). It now lives on `Core`, where `install_importer_with_endpoints`
+/// drives the same code against a stand-in upstream.
 #[tauri::command]
 pub async fn install_importer(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<InstallReport, String> {
     refuse_during_session(&core).await?;
-    let install = core
-        .game_install_path(game)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Set the game install path in Settings before installing.".to_string())?;
-    let (origin, pattern) = resolved_origin_for(&core, game).await?;
-
-    let client = core.http_client().await.map_err(|e| e.to_string())?;
-    let release = importer::fetch_latest_release(&client, &origin.repo_slug(), &pattern, None)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no release returned for importer repo".to_string())?;
-
-    let data = crate::data_dir().map_err(|e| e.to_string())?;
-    let backups_root = data.join("backups").join(game.as_str());
-    let downloads_dir = data.join("downloads").join(game.as_str());
-    let zip_path = downloads_dir.join(&release.asset_name);
-    importer::download_to(&client, &release.asset_url, &zip_path)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let report = tokio::task::spawn_blocking(move || {
-        importer::install_from_local_zip(&zip_path, &install, &backups_root, DEFAULT_LOADER_EXE)
-    })
-    .await
-    .map_err(|e| format!("install task join error: {e}"))?
-    .map_err(|e| e.to_string())?;
-
-    // Record the installed tag *and* the Importer Origin it came from,
-    // so the update check can compare against it next launch and so
-    // origin changes are detectable (ADR 0005). This is the only way an
-    // unknown origin becomes known (#99). Best-effort; never fails the
-    // install, because the files are already on disk by this point.
-    let _ = core
-        .record_importer_install(game, &release.tag_name, &origin)
-        .await
-        .map_err(|e| e.to_string());
-
-    Ok(report)
+    core.install_importer(game).await.map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Deserialize)]
