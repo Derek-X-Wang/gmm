@@ -488,6 +488,48 @@ pub fn change_effects(installed: &InstalledOrigin, next: &ImporterOrigin) -> Cha
     }
 }
 
+/// Whether moving a game onto `next` is a change GMM can honestly
+/// **propose**, as opposed to one that merely invalidates state.
+///
+/// Separate from [`change_effects`] on purpose (#125). The proposal
+/// logic used to read *would this clear the pin?* as its signal for *is
+/// there a change worth proposing?*, and those are two different
+/// questions. [`InstalledOrigin::Unknown`] is exactly where they
+/// diverge: an unknown origin always clears the pin — GMM cannot reason
+/// about a pin taken against an origin it does not know — so under that
+/// rule it always looked like a change.
+///
+/// `compiled_default` is the game's layer-3 origin, and it is compared
+/// **by value rather than by which layer resolution came from**. The
+/// layer was the old signal and it made correctness depend on manifest
+/// contents: the committed manifest recommends origins byte-identical to
+/// the compiled-in defaults, so once a manifest is cached — after the
+/// first successful launch, i.e. always — those games resolve at the
+/// manifest layer and a layer-keyed guard never fires.
+pub fn is_worth_proposing(
+    installed: &InstalledOrigin,
+    next: &ImporterOrigin,
+    compiled_default: Option<&ImporterOrigin>,
+) -> bool {
+    match installed {
+        // A known origin that differs is a real move, whatever layer
+        // proposed it — including a corrected compiled-in default.
+        InstalledOrigin::Known(current) => current != next,
+        // GMM does not know where this install came from, so the only
+        // thing it can honestly propose is an origin it has actually
+        // *decided* on. The default it has always shipped is the status
+        // quo, not a decision, and proposing it would nag every
+        // hand-installed setup on every launch — the proactive surfacing
+        // of unknown origin that #99 rejects. A genuinely different
+        // recommendation still reaches them; that is the one route by
+        // which unknown becomes known.
+        InstalledOrigin::Unknown => !matches!(compiled_default, Some(d) if d == next),
+        // The comparison cannot be made at all (#124). "We could not
+        // tell" must not be rendered as "yes, switch".
+        InstalledOrigin::Unreadable { .. } => false,
+    }
+}
+
 /// Whether GMM has an Importer Origin change to *propose* for a game,
 /// and which origin it would propose.
 ///
@@ -499,14 +541,14 @@ pub fn change_effects(installed: &InstalledOrigin, next: &ImporterOrigin) -> Cha
 /// stay pinned. Withholding that does not protect the pinned user, it
 /// only means they find out later with less room to react (#98).
 ///
-/// Layer 3 is not a proposal when the install's origin is
-/// [`InstalledOrigin::Unknown`]: the compiled-in default is the status
-/// quo GMM has always shipped, not something it has newly decided, and
-/// proposing it would nag every hand-installed setup on every launch —
-/// exactly the proactive surfacing of unknown origin that #99 rejects.
-/// A game whose origin is *known* and differs from a corrected default
-/// is a real proposal, which is why the exclusion is scoped to unknown
-/// rather than to the layer alone.
+/// The compiled-in default is not a proposal when the install's origin
+/// is [`InstalledOrigin::Unknown`]: it is the status quo GMM has always
+/// shipped, not something it has newly decided, and proposing it would
+/// nag every hand-installed setup on every launch — exactly the
+/// proactive surfacing of unknown origin that #99 rejects. A game whose
+/// origin is *known* and differs from a corrected default is a real
+/// proposal, which is why the exclusion is scoped to unknown rather than
+/// to the origin alone. See [`is_worth_proposing`].
 ///
 /// This answers "is there something to propose?". Whether the user has
 /// already declined this particular origin, and how the proposal is
@@ -514,28 +556,15 @@ pub fn change_effects(installed: &InstalledOrigin, next: &ImporterOrigin) -> Cha
 pub fn pending_change<'a>(
     resolution: &'a OriginResolution,
     installed: &InstalledOrigin,
+    compiled_default: Option<&ImporterOrigin>,
 ) -> Option<&'a ImporterOrigin> {
-    let (origin, layer) = match resolution {
-        OriginResolution::InEffect { origin, layer } => (origin, *layer),
+    let origin = match resolution {
+        OriginResolution::InEffect { origin, .. } => origin,
         // Nothing is in force, so there is nothing to move onto. That
         // state has its own surface: a warning that the user must
         // supply an origin (#97).
         OriginResolution::NoneInEffect { .. } => return None,
     };
 
-    if matches!(installed, InstalledOrigin::Unknown) && layer == OriginLayer::CompiledInDefault {
-        return None;
-    }
-
-    // An origin GMM recorded and can no longer read is not a proposal
-    // either (#124): the comparison that decides whether there is a
-    // change to propose cannot be made, and "we could not tell" must not
-    // be rendered as "yes, switch".
-    if matches!(installed, InstalledOrigin::Unreadable { .. }) {
-        return None;
-    }
-
-    change_effects(installed, origin)
-        .is_change()
-        .then_some(origin)
+    is_worth_proposing(installed, origin, compiled_default).then_some(origin)
 }
