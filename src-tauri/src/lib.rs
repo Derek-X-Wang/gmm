@@ -97,6 +97,36 @@ pub fn run() {
         });
     }
 
+    // Refresh GMM's curated `recommended-importers.json` once per launch
+    // (ADR 0005 / #96). Its own thread, and nothing waits on it: the
+    // cached manifest is already in force, a refresh only applies when it
+    // lands, and "GitHub is slow today" must never become "GMM won't
+    // start". A failure has no user-visible consequence — the cache is
+    // still in force and still correct — so it is logged and dropped.
+    {
+        let core_for_manifest = core.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build manifest refresh runtime");
+            rt.block_on(async move {
+                match core_for_manifest.refresh_recommended_importers().await {
+                    Ok(outcome) => tracing::info!(
+                        target: "gmm::recommendations",
+                        outcome = ?outcome,
+                        "recommended-importers refresh finished",
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "gmm::recommendations",
+                        error = %e,
+                        "recommended-importers refresh could not run",
+                    ),
+                }
+            });
+        });
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

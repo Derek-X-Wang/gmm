@@ -259,3 +259,127 @@ fn required_str<'a>(
             field: field.to_string(),
         })
 }
+
+// ---------------------------------------------------------------------
+// Fetch + cache (#108) — layer 2's supply side.
+//
+// The rule everything below serves: **a fetch error, an unusable
+// manifest, an explicit `none` and a game absent from the file are four
+// distinct conditions with four different behaviours** (#96). The Loader
+// update check collapsed a failure into a success value with
+// `.ok().flatten()` and reported "up to date" for the entire life of the
+// feature (#78); nothing on this path may do the same.
+// ---------------------------------------------------------------------
+
+use std::time::Duration;
+
+/// How long one refresh may spend before GMM gives up on it.
+///
+/// Nothing waits on the refresh, so this is not about responsiveness —
+/// it is so a host that accepts the connection and then says nothing
+/// cannot leave a task and a connection alive for the rest of the
+/// session.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Settings keys holding the cached manifest.
+///
+/// The cache lives in the existing key/value `settings` table, so it
+/// survives a restart with no migration. ADR 0005 leaves the physical
+/// location to the implementer; what it fixes is that the last
+/// successfully fetched manifest stays authoritative until replaced.
+pub mod cache_keys {
+    /// The last manifest GMM fetched **and could read**, stored raw.
+    ///
+    /// Raw rather than the parsed form on purpose: the document is the
+    /// artefact GMM was given, and re-parsing on read keeps one parser
+    /// rather than a parser plus a serialiser that can disagree.
+    pub const DOCUMENT: &str = "importer.recommendations.cached_manifest";
+
+    /// The `ETag` that came with [`DOCUMENT`], so a refresh usually
+    /// costs a 304 rather than a download.
+    pub const ETAG: &str = "importer.recommendations.etag";
+
+    /// Why the **last** fetch produced a document this build cannot
+    /// read, or absent when it did not.
+    ///
+    /// This key is what keeps "unusable" from going silent. The layer
+    /// itself falls through on an unusable document (never retracts),
+    /// which on its own would be indistinguishable from "no manifest
+    /// yet" — so the reason is recorded separately for the surface that
+    /// tells the user their build is too old.
+    pub const UNUSABLE_REASON: &str = "importer.recommendations.unusable_reason";
+}
+
+/// What one HTTP attempt produced. Transport only — whether the bytes
+/// are a manifest this build can read is a separate question, answered
+/// by [`parse`], because collapsing the two is how "we could not ask"
+/// becomes "the answer is nothing".
+#[derive(Debug)]
+pub enum Fetched {
+    /// A document arrived. Nothing has been said about its contents yet.
+    Document { raw: String, etag: Option<String> },
+    /// 304 Not Modified: the cached document is still current. Only
+    /// reachable when an `ETag` was sent.
+    NotModified,
+    /// No document arrived — DNS, proxy, TLS, timeout, a 5xx. Says
+    /// nothing whatsoever about what GMM recommends.
+    Unreachable(String),
+}
+
+/// GET the manifest, conditionally when `etag` is known.
+///
+/// Never returns `Err`: an unreachable host is an expected, benign
+/// outcome for a background refresh, and modelling it as a variant
+/// rather than an error is what stops a caller from `?`-ing it into
+/// something that looks like "no recommendations".
+///
+/// The caller must build `client` from
+/// [`crate::core::Core::http_client_builder`] so the request honours the
+/// user's proxy configuration, like every other network call in the app.
+pub async fn fetch(client: &reqwest::Client, url: &str, etag: Option<&str>) -> Fetched {
+    let mut req = client.get(url);
+    if let Some(tag) = etag {
+        req = req.header("If-None-Match", tag);
+    }
+    let res = match req.send().await {
+        Ok(res) => res,
+        Err(e) => return Fetched::Unreachable(format!("GET {url}: {e}")),
+    };
+
+    if res.status().as_u16() == 304 {
+        return Fetched::NotModified;
+    }
+    if !res.status().is_success() {
+        return Fetched::Unreachable(format!("GET {url} returned {}", res.status()));
+    }
+
+    let etag = res
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    match res.text().await {
+        Ok(raw) => Fetched::Document { raw, etag },
+        // A body that dies mid-stream is a transport failure, not a
+        // malformed manifest: GMM never saw the whole document.
+        Err(e) => Fetched::Unreachable(format!("read body of {url}: {e}")),
+    }
+}
+
+/// What one refresh did to the cache. Four conditions, four values.
+#[derive(Debug)]
+pub enum Refreshed {
+    /// A readable manifest arrived and is now the cache.
+    Replaced(Manifest),
+    /// Upstream confirmed the cached document is still current.
+    NotModified,
+    /// A document arrived that this build cannot read. The cache is
+    /// **left alone** — it is authoritative until *replaced*, and an
+    /// unreadable document replaces nothing. With no cache the layer is
+    /// simply absent, which falls through to the compiled-in defaults
+    /// and never retracts them.
+    Unusable(ManifestError),
+    /// No document arrived. The cache is left alone and still correct.
+    Unreachable(String),
+}
