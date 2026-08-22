@@ -5,8 +5,9 @@
 .DESCRIPTION
     `tests/updater_config.rs` checks that tauri.conf.json *says* the right
     things. This checks that the pipeline *does* them: that a build
-    actually emits updater artifacts, that the signature over the real
-    MSI zip verifies, that a tampered one does not, and that installing
+    actually emits exactly one updater artifact, that the manifest advertises
+    that artifact, that its signature verifies, that a tampered one does not,
+    and that installing
     the newer build over the older one leaves the user's data alone.
 
     The very first release tag shipped without `createUpdaterArtifacts`,
@@ -18,10 +19,12 @@
          which stays a repository secret and is not read here
       2. build version OLD and version NEW with that key, both pointed at
          a local update endpoint
-      3. assert NEW produced a signed updater artifact (the bundler's
+      3. enumerate the whole bundle and assert NEW produced exactly one
+         signed updater artifact (the bundler's
          `*.sig` plus the file it signs — a raw `.msi` on the Tauri
          version this repo pins, a `.msi.zip` on older ones)
-      4. serve NEW's `latest.json` + artifact over 127.0.0.1
+      4. serve NEW's `latest.json` + artifact over 127.0.0.1 and assert
+         the manifest advertises the same artifact
       5. fetch both back through that endpoint and verify the signature
          the way tauri-plugin-updater does; assert a tampered artifact is
          refused
@@ -226,10 +229,11 @@ Write-Section "Updater artifacts exist"
 # "createUpdaterArtifacts produced nothing" about a build that had just
 # printed "Finished 2 updater signatures at: ...msi.sig".
 #
-# So derive the artifact from the signature rather than hardcoding
-# either container. What matters is that *something* got signed and that
-# the signature verifies over exactly those bytes; the extension is
-# Tauri's business and is allowed to change again.
+# So derive the artifact from its signature rather than hardcoding either
+# container. Enumerating the entire bundle root is deliberate: an additional
+# installer target also adds a signature, and no shipped updater artifact is
+# allowed to escape this round trip merely because it lives in another
+# subdirectory.
 $signatures = @(Get-ChildItem $NewDir -File |
     Where-Object { $_.Name.EndsWith(".sig") })
 if ($signatures.Count -eq 0) {
@@ -286,8 +290,14 @@ try {
     if ($manifest.version -ne $NewVersion) {
         throw "served manifest advertises $($manifest.version), expected $NewVersion"
     }
+    $advertisedUrl = $manifest.platforms."windows-x86_64".url
+    $advertisedName = [System.IO.Path]::GetFileName(([Uri]$advertisedUrl).AbsolutePath)
+    Write-Host "generated updater manifest advertises: $advertisedName"
+    if ($advertisedName -ne $artifact.Name) {
+        throw "manifest advertises $advertisedName, but the verified artifact is $($artifact.Name)"
+    }
     $downloaded = Join-Path $Work ("downloaded" + [System.IO.Path]::GetExtension($artifact.Name))
-    Invoke-WebRequest $manifest.platforms."windows-x86_64".url -OutFile $downloaded
+    Invoke-WebRequest $advertisedUrl -OutFile $downloaded
     Write-Host "fetched $((Get-Item $downloaded).Length) bytes through the endpoint"
 
     # ------------------------------------------------------------------

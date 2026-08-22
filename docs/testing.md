@@ -334,8 +334,10 @@ Two layers cover the rest:
   are all refused. The real signing key is a release secret and is never
   read.
 - **`.github/scripts/updater-e2e.ps1`** (Windows). Builds two versions
-  with the throwaway key, serves the newer one's `latest.json` over
-  `127.0.0.1`, downloads it back, verifies it via the ignored
+  with the throwaway key, enumerates signatures across the entire bundle,
+  and requires exactly one signed artifact. It serves the newer one's
+  `latest.json` over `127.0.0.1`, logs and checks the exact artifact that
+  the manifest advertises, downloads it back, verifies it via the ignored
   `the_bundled_artifact_verifies_against_the_key_that_signed_it` test,
   then installs the update over the older build and asserts the version
   moved, the app still starts (via the IPC readiness marker), and
@@ -357,6 +359,15 @@ reads `TAURI_SIGNING_PRIVATE_KEY`, which stays release-only. That is
 what lets this run on a fork's pull request.
 
 Two things about that script are worth knowing before you edit it.
+
+**GMM ships only the MSI installer.** The installer smoke and lifecycle jobs
+exercise MSI installation, upgrade, repair, downgrade refusal, and uninstall,
+so `bundle.targets` is deliberately `["msi"]` and users auto-update through
+that MSI artifact. The updater test searches the whole bundle root and requires
+exactly one signature; adding another installer target without extending the
+product's lifecycle contract fails the job rather than silently leaving a
+shipped updater artifact unverified. The
+`v0.1.0-alpha.2` release exposed this gap by emitting both MSI and NSIS.
 
 **The updater artifact is found via its `.sig`, not by extension.** What
 the bundler signs has changed shape across Tauri versions — v1 and early

@@ -125,6 +125,13 @@ manifest, and drafts a GitHub Release with the binary, `.sig`, and
 Windows machine, double-check the changelog) and clicks Publish; only
 after Publish does the `latest.../latest.json` URL resolve.
 
+**Installer format.** GMM ships one Windows installer: MSI. The
+`v0.1.0-alpha.2` release also emitted an NSIS installer because the bundle
+target was set to `all`, but every installer lifecycle check and the documented
+install path cover MSI. Shipping a second, unverified updater artifact makes it
+possible for `latest.json` to advertise bytes the end-to-end test never
+downloaded, so the release target is deliberately limited to MSI.
+
 **Downgrading is not supported.** Running an older GMM MSI over a newer
 install is refused by Windows Installer with its standard *"A newer
 version of GMM is already installed"* message
