@@ -471,8 +471,60 @@ fn to_expanded_path(path: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::to_long_path;
+    use super::{to_long_path, to_wide_nul};
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
     use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Storage::FileSystem::{
+        SetFileShortNameW, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
+    };
+
+    /// The ordinary drive-letter spelling Windows reports for a file.
+    /// `canonicalize` supplies the OS-backed source of truth; removing its
+    /// verbatim prefix mirrors the documented `MODULEENTRY32.szExePath`
+    /// representation without calling the helper under test.
+    fn module_list_spelling(path: &Path) -> PathBuf {
+        let canonical = std::fs::canonicalize(path).expect("canonicalize fixture");
+        let text = canonical.to_string_lossy();
+        let ordinary = text
+            .strip_prefix(r"\\?\")
+            .unwrap_or_else(|| panic!("canonicalize returned a non-verbatim path: {canonical:?}"));
+        PathBuf::from(ordinary)
+    }
+
+    fn assert_same_windows_path(actual: &Path, expected: &Path) {
+        assert!(
+            actual
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&expected.to_string_lossy()),
+            "expected {actual:?} to match Windows' spelling {expected:?}",
+        );
+    }
+
+    /// Give an existing file an explicit 8.3 alias. Modern NTFS volumes
+    /// often disable automatic short-name creation, so relying on
+    /// `C:\\PROGRA~1` silently skipped the one case this helper exists for.
+    fn set_short_name(path: &Path, short_name: &str) {
+        let file = OpenOptions::new()
+            .access_mode(DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .expect("open fixture with DELETE access for SetFileShortNameW");
+        let short_wide =
+            to_wide_nul(std::ffi::OsStr::new(short_name)).expect("short name contains no NUL");
+
+        // SAFETY: `file` owns a live handle opened with the access and flags
+        // SetFileShortNameW requires; `short_wide` is NUL-terminated and
+        // remains alive for the call.
+        let ok = unsafe { SetFileShortNameW(file.as_raw_handle(), short_wide.as_ptr()) };
+        assert_ne!(
+            ok,
+            0,
+            "SetFileShortNameW could not create the required 8.3 fixture: {}",
+            std::io::Error::last_os_error(),
+        );
+    }
 
     /// A path already in long form must survive unchanged — this runs on
     /// every hook/inject call, so a mangling bug here would break
@@ -483,14 +535,9 @@ mod tests {
         let file = tmp.path().join("some-file.dll");
         std::fs::write(&file, b"MZ").expect("write");
 
-        // Resolve the tempdir through the same API so the comparison is
-        // against the OS's own long form, not whatever TempDir handed us.
-        let expected = to_long_path(&file);
-        assert_eq!(
-            to_long_path(&expected),
-            expected,
-            "to_long_path must be idempotent",
-        );
+        let expected = module_list_spelling(&file);
+        let actual = to_long_path(&expected);
+        assert_same_windows_path(&actual, &expected);
     }
 
     /// The 8.3 short form of a path must expand back to the long form.
@@ -498,24 +545,21 @@ mod tests {
     /// reports module paths in long form, so a short path never matches.
     #[test]
     fn short_paths_expand_to_long_form() {
-        // "Program Files" is guaranteed to exist and to have an 8.3
-        // alias on every stock Windows install.
-        let long = PathBuf::from(r"C:\Program Files");
-        if !long.exists() {
-            return; // non-standard image; nothing to assert
-        }
-        let short = Path::new(r"C:\PROGRA~1");
-        if !short.exists() {
-            return; // 8.3 name creation disabled on this volume
-        }
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let long = tmp.path().join("manifest-loader-probe.dll");
+        std::fs::write(&long, b"MZ").expect("write");
+        set_short_name(&long, "GMMLDR~1.DLL");
 
-        let expanded = to_long_path(short);
+        let short = tmp.path().join("GMMLDR~1.DLL");
         assert!(
-            expanded
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&long.to_string_lossy()),
-            "expected {short:?} to expand to {long:?}, got {expanded:?}",
+            short.exists(),
+            "the explicit 8.3 fixture must resolve before normalisation: {short:?}",
         );
+
+        let expected = module_list_spelling(&long);
+        let expanded = to_long_path(&short);
+        assert_same_windows_path(&expanded, &expected);
+        eprintln!("8.3 path case exercised: {short:?} expanded to Windows spelling {expected:?}",);
     }
 
     /// A path that doesn't exist can't have its 8.3 aliases expanded.
