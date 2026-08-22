@@ -100,7 +100,7 @@ fn himi_is_an_explicit_retraction_carrying_a_reason() {
 #[test]
 fn the_committed_manifest_retracts_himi_rather_than_omitting_it() {
     use gmm_lib::core::importer_origin::compiled_in_default;
-    use gmm_lib::core::importer_origin::{resolve, OriginResolution};
+    use gmm_lib::core::importer_origin::{resolve, OriginResolution, StoredOverride};
 
     // The distinction the whole schema exists to protect. If HIMI were
     // merely absent, the compiled-in default would still apply and the
@@ -109,7 +109,11 @@ fn the_committed_manifest_retracts_himi_rather_than_omitting_it() {
     let recommendation = parsed.recommendation_for(GameCode::Himi);
     let default = compiled_in_default(GameCode::Himi);
 
-    let resolved = resolve(None, recommendation.as_ref(), default.as_ref());
+    let resolved = resolve(
+        &StoredOverride::NotSet,
+        recommendation.as_ref(),
+        default.as_ref(),
+    );
     assert!(
         matches!(resolved, OriginResolution::NoneInEffect { .. }),
         "HIMI's entry must retract its compiled-in default, got {resolved:?}",

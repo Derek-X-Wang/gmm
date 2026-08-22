@@ -977,15 +977,18 @@ impl Core {
     /// with [`OriginResolution::NoneInEffect`] ("no origin is in
     /// effect") or with [`InstalledOrigin::Unknown`].
     ///
-    /// A stored value that no longer parses is treated as no override
-    /// rather than as an error: the layer drops out and the game falls
-    /// back, which is the same warn-never-block posture the rest of ADR
-    /// 0005 takes. Failing here would make a game uninstallable because
-    /// of a settings row.
+    /// A stored value that no longer parses comes back as
+    /// [`StoredOverride::Unreadable`], never as absence (#124). It used
+    /// to be `.ok()`-ed into "no override", which silently dropped the
+    /// game to a lower precedence layer — for a user who set an override
+    /// *because* the default went bad, that is GMM quietly reinstating
+    /// the package they moved away from. Resolution still warns rather
+    /// than blocking; it simply refuses to answer a read failure by
+    /// applying its own opinion.
     pub async fn importer_origin_override(
         &self,
         game: GameCode,
-    ) -> Result<Option<importer_origin::ImporterOrigin>> {
+    ) -> Result<importer_origin::StoredOverride> {
         Self::importer_origin_override_in(&self.pool, game).await
     }
 
@@ -995,12 +998,25 @@ impl Core {
     async fn importer_origin_override_in<'e, E>(
         executor: E,
         game: GameCode,
-    ) -> Result<Option<importer_origin::ImporterOrigin>>
+    ) -> Result<importer_origin::StoredOverride>
     where
         E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
     {
         let raw = get_setting(executor, &importer_origin::keys::origin_override(game)).await?;
-        Ok(raw.and_then(|json| serde_json::from_str(&json).ok()))
+        let stored = importer_origin::StoredOverride::decode(raw);
+        if let importer_origin::StoredOverride::Unreadable { raw, error } = &stored {
+            // Logged like the cached-manifest path logs its parse
+            // failures. Silence on this read is what let it go unnoticed.
+            tracing::warn!(
+                target: "gmm::importer_origin",
+                game = game.as_str(),
+                error = %error,
+                raw = %raw,
+                "stored Importer Origin override could not be read; no origin is \
+                 in effect for this game until the user sets one again",
+            );
+        }
+        Ok(stored)
     }
 
     /// Set or clear the user's per-game Importer Origin override.
@@ -1113,7 +1129,7 @@ impl Core {
         let recommendation = manifest.as_ref().and_then(|m| m.recommendation_for(game));
         let compiled = importer_origin::compiled_in_default(game);
         Ok(importer_origin::resolve(
-            user_override.as_ref(),
+            &user_override,
             recommendation.as_ref(),
             compiled.as_ref(),
         ))
@@ -1311,9 +1327,13 @@ impl Core {
 
     /// The Importer Origin the current install was performed from.
     ///
-    /// Absent reads back as [`InstalledOrigin::Unknown`] — a real,
-    /// first-class state (#99), never backfilled to the compiled-in
-    /// default and never treated as "not installed".
+    /// Absent reads back as [`importer_origin::InstalledOrigin::Unknown`]
+    /// — a real, first-class state (#99), never backfilled to the
+    /// compiled-in default and never treated as "not installed". A value
+    /// that is present and unreadable comes back as
+    /// [`importer_origin::InstalledOrigin::Unreadable`] instead (#124):
+    /// it makes the opposite claim about the machine and must not be
+    /// folded into `Unknown`.
     pub async fn installed_importer_origin(
         &self,
         game: GameCode,
@@ -1333,12 +1353,18 @@ impl Core {
         E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
     {
         let raw = get_setting(executor, &importer_origin::keys::installed_origin(game)).await?;
-        Ok(
-            match raw.as_deref().and_then(|j| serde_json::from_str(j).ok()) {
-                Some(origin) => importer_origin::InstalledOrigin::Known(origin),
-                None => importer_origin::InstalledOrigin::Unknown,
-            },
-        )
+        let installed = importer_origin::InstalledOrigin::decode(raw);
+        if let importer_origin::InstalledOrigin::Unreadable { raw, error } = &installed {
+            tracing::warn!(
+                target: "gmm::importer_origin",
+                game = game.as_str(),
+                error = %error,
+                raw = %raw,
+                "recorded Importer Origin could not be read; treated as an \
+                 unreadable record, never as a hand-install GMM never performed",
+            );
+        }
+        Ok(installed)
     }
 
     /// Record a completed importer install: the version *and* the

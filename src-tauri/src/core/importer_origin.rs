@@ -198,11 +198,61 @@ impl OriginResolution {
     }
 }
 
+/// What the settings row for a game's user override actually held.
+///
+/// Three states, because a stored value that cannot be read back is not
+/// the same thing as no stored value (#124). Collapsing them with
+/// `.ok()` discarded the user's highest-precedence choice and dropped
+/// the game to whatever layer 2 or layer 3 says — which, for anyone who
+/// set an override *because* the default went bad, is GMM quietly
+/// reinstating the package they moved away from.
+///
+/// Unreachable with today's serialisation, and deliberately modelled
+/// anyway: ADR 0005 already specifies a local-zip variant of
+/// [`ImporterOrigin`], and a user who downgrades past the build that
+/// adds it lands here on their next launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredOverride {
+    /// The user has set no override; the game follows layers 2 and 3.
+    NotSet,
+    /// The user's own choice, which outranks everything.
+    Set(ImporterOrigin),
+    /// Something is stored and this build cannot read it.
+    Unreadable {
+        /// The stored text, verbatim, so a maintainer can see what was
+        /// written rather than only that something was.
+        raw: String,
+        /// The parser's complaint.
+        error: String,
+    },
+}
+
+impl StoredOverride {
+    /// Decode a stored settings value. `None` is [`Self::NotSet`]; text
+    /// that does not parse is [`Self::Unreadable`], never absence.
+    pub fn decode(raw: Option<String>) -> Self {
+        let Some(raw) = raw else {
+            return StoredOverride::NotSet;
+        };
+        match serde_json::from_str(&raw) {
+            Ok(origin) => StoredOverride::Set(origin),
+            Err(e) => StoredOverride::Unreadable {
+                raw,
+                error: e.to_string(),
+            },
+        }
+    }
+}
+
 /// Resolve a game's effective Importer Origin through ADR 0005's three
 /// layers, highest first.
 ///
-/// - `user_override` — layer 1. `None` means the user has set none, so
-///   the game follows layers 2 and 3.
+/// - `user_override` — layer 1. [`StoredOverride::NotSet`] means the
+///   user has set none, so the game follows layers 2 and 3. An
+///   [`StoredOverride::Unreadable`] stops here rather than falling
+///   through (#124): the user made a choice, and answering a read
+///   failure by silently applying GMM's own opinion instead is the
+///   opposite of what layer 1 is for.
 /// - `recommendation` — layer 2, for this game. `None` means the game
 ///   is absent from the manifest *or* there is no manifest layer at all
 ///   (not fetched yet, fetch failed, user switched recommendations off,
@@ -213,17 +263,34 @@ impl OriginResolution {
 ///   [`crate::core::games::GameProfile`]. `None` for a game that has
 ///   not been wired.
 pub fn resolve(
-    user_override: Option<&ImporterOrigin>,
+    user_override: &StoredOverride,
     recommendation: Option<&Recommendation>,
     compiled_default: Option<&ImporterOrigin>,
 ) -> OriginResolution {
     // Layer 1. The user's own choice always wins — including over a
     // retraction, which is what keeps a retracted game usable.
-    if let Some(origin) = user_override {
-        return OriginResolution::InEffect {
-            origin: origin.clone(),
-            layer: OriginLayer::UserOverride,
-        };
+    match user_override {
+        StoredOverride::Set(origin) => {
+            return OriginResolution::InEffect {
+                origin: origin.clone(),
+                layer: OriginLayer::UserOverride,
+            };
+        }
+        // Warn, never block (#97), and never demote. The game is
+        // installable again the moment the user sets an origin — the
+        // same recovery a retraction offers — whereas falling through
+        // would install a package they had explicitly replaced and say
+        // nothing about it.
+        StoredOverride::Unreadable { .. } => {
+            return OriginResolution::NoneInEffect {
+                reason: Some(
+                    "GMM could not read the Importer Origin saved for this game. \
+                     Set it again to put it back in effect."
+                        .to_string(),
+                ),
+            };
+        }
+        StoredOverride::NotSet => {}
     }
 
     // Layer 2. A recommendation applies; a retraction stops here rather
@@ -277,6 +344,40 @@ pub fn resolve(
 pub enum InstalledOrigin {
     Known(ImporterOrigin),
     Unknown,
+    /// An origin was recorded and this build cannot read it back
+    /// (#124).
+    ///
+    /// Its own variant rather than folding into [`Self::Unknown`],
+    /// because the two make opposite claims about the user's machine.
+    /// `Unknown` says *GMM never performed this install* — which is why
+    /// #99 forbids backfilling it and forbids treating it as "not
+    /// installed". This says GMM did perform it and can no longer say
+    /// from where. Reporting the second as the first is GMM asserting
+    /// something false about a machine it cannot see.
+    Unreadable {
+        /// The stored text, verbatim.
+        raw: String,
+        /// The parser's complaint.
+        error: String,
+    },
+}
+
+impl InstalledOrigin {
+    /// Decode a stored settings value. Absent is [`Self::Unknown`] — a
+    /// real state, not a missing value — and unparseable text is
+    /// [`Self::Unreadable`], never either of the other two.
+    pub fn decode(raw: Option<String>) -> Self {
+        let Some(raw) = raw else {
+            return InstalledOrigin::Unknown;
+        };
+        match serde_json::from_str(&raw) {
+            Ok(origin) => InstalledOrigin::Known(origin),
+            Err(e) => InstalledOrigin::Unreadable {
+                raw,
+                error: e.to_string(),
+            },
+        }
+    }
 }
 
 /// Canonical settings keys for Importer Origin state.
@@ -372,7 +473,15 @@ pub fn change_effects(installed: &InstalledOrigin, next: &ImporterOrigin) -> Cha
             clears_pin: true,
             invalidates_install: true,
         },
-        InstalledOrigin::Unknown => ChangeEffects {
+        // Same effects as `Unknown`, for the same reason and no other:
+        // GMM cannot compare a pin against an origin it cannot read, so
+        // the pin is a gate it can no longer reason about; but the
+        // recorded *version* is still readable and still describes real
+        // files in the game directory, so invalidating the install would
+        // tell the user they have nothing installed when they do. The
+        // variants stay distinct because what they claim about the
+        // machine is opposite — see [`InstalledOrigin::Unreadable`].
+        InstalledOrigin::Unknown | InstalledOrigin::Unreadable { .. } => ChangeEffects {
             clears_pin: true,
             invalidates_install: false,
         },
@@ -415,6 +524,14 @@ pub fn pending_change<'a>(
     };
 
     if matches!(installed, InstalledOrigin::Unknown) && layer == OriginLayer::CompiledInDefault {
+        return None;
+    }
+
+    // An origin GMM recorded and can no longer read is not a proposal
+    // either (#124): the comparison that decides whether there is a
+    // change to propose cannot be made, and "we could not tell" must not
+    // be rendered as "yes, switch".
+    if matches!(installed, InstalledOrigin::Unreadable { .. }) {
         return None;
     }
 
