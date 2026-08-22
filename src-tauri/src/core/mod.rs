@@ -523,11 +523,9 @@ impl Core {
     }
 
     /// List the GameBanana mods for `game` along with their current
-    /// install vs. upstream-version state. Does NOT hit the network.
-    /// When global update checks are off, the rows remain visible but
-    /// cached upstream state is not consulted or surfaced.
+    /// install vs. upstream-version state. Does NOT hit the network —
+    /// it only reads what the last poll wrote.
     pub async fn list_mod_updates(&self, game: GameCode) -> Result<Vec<mod_updates::ModUpdateRow>> {
-        let include_cached_state = self.mod_updates_globally_enabled().await?;
         let rows = sqlx::query(
             "SELECT id, name, version, upstream_version, update_check_enabled
              FROM mods
@@ -540,11 +538,7 @@ impl Core {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let installed: Option<String> = row.try_get("version")?;
-            let upstream: Option<String> = if include_cached_state {
-                row.try_get("upstream_version")?
-            } else {
-                None
-            };
+            let upstream: Option<String> = row.try_get("upstream_version")?;
             out.push(mod_updates::ModUpdateRow {
                 mod_id: row.try_get("id")?,
                 name: row.try_get("name")?,
@@ -564,7 +558,7 @@ impl Core {
     /// `update_check_enabled` is true. Updates `upstream_version` in
     /// the DB and persists `mod_updates.last_check_at`. Honours the
     /// global toggle: if `mod_updates.enabled` is `false`, returns the
-    /// existing rows without a fetch or cached upstream state.
+    /// existing rows without a fetch.
     pub async fn check_mod_updates_now(
         &self,
         game: GameCode,

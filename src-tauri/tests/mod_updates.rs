@@ -196,7 +196,7 @@ async fn global_toggle_off_skips_network_but_still_lists_rows() {
         .expect("toggle");
     let mut poll_server = mockito::Server::new_async().await;
     let no_fetch = poll_server
-        .mock("GET", mockito::Matcher::Regex("/apiv11/Mod/7777.*".into()))
+        .mock("GET", mockito::Matcher::Any)
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(
@@ -228,7 +228,7 @@ async fn global_toggle_off_skips_network_but_still_lists_rows() {
 }
 
 #[tokio::test]
-async fn global_toggle_off_does_not_consult_cached_update_state() {
+async fn global_toggle_off_preserves_cached_update_state() {
     let tmp = TempDir::new().expect("tmp");
     let library_root = tmp.path().join("library");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
@@ -288,10 +288,14 @@ async fn global_toggle_off_does_not_consult_cached_update_state() {
         .expect("list off");
     assert_eq!(off_rows.len(), 1, "rows still listed while off");
     assert_eq!(
-        off_rows[0].upstream_version, None,
-        "off removes the cached update layer"
+        off_rows[0].upstream_version.as_deref(),
+        Some("0.2.0"),
+        "the weekly-check toggle does not hide an update already found"
     );
-    assert!(!off_rows[0].upstream_ahead, "off hides the cached badge");
+    assert!(
+        off_rows[0].upstream_ahead,
+        "the known update stays actionable"
+    );
 
     core.set_mod_updates_globally_enabled(true)
         .await
@@ -303,7 +307,7 @@ async fn global_toggle_off_does_not_consult_cached_update_state() {
     assert_eq!(
         restored[0].upstream_version.as_deref(),
         Some("0.2.0"),
-        "off does not destructively delete cached update state"
+        "the cached state remains unchanged across an off/on cycle"
     );
     assert!(restored[0].upstream_ahead);
 }
