@@ -231,6 +231,15 @@ pub enum Error {
     #[error("GameBanana error: {0}")]
     GameBanana(String),
 
+    /// A reveal, recover or delete was asked for on a Library directory
+    /// that does not (or no longer) qualifies.
+    ///
+    /// Always checked at the instant of the action rather than trusted
+    /// from the report the user clicked: a Mod row can be created between
+    /// the two, and delete is the one place GMM destroys Library bytes.
+    #[error("{path:?} is not an unreferenced Library folder GMM can act on: {reason}.")]
+    NotAnUnreferencedLibraryDir { path: PathBuf, reason: String },
+
     #[error(
         "{game} is running (game session active since {since}); close the game before changing mods."
     )]

@@ -168,6 +168,17 @@ code {
   overflow-wrap: anywhere;
 }
 
+.library-audit-warning li > .row {
+  margin: 0.3rem 0 0.6rem;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.library-audit-warning [role="alertdialog"] p {
+  flex-basis: 100%;
+}
+
 .dropzone {
   border: 1.5px dashed #3a3a44;
   border-radius: 10px;
