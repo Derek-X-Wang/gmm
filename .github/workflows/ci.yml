@@ -80,20 +80,24 @@ jobs:
         working-directory: src-tauri
         run: cargo build --workspace
 
-      - name: cargo test
-        working-directory: src-tauri
-        run: cargo test --workspace
-
       # ADR 0005's PR-time guarantee. `manifest/recommended-importers.json`
       # is fetched at runtime by every released build, so a bad commit
-      # reconfigures every install within minutes with no staged
-      # rollout — the review gate on `main` plus this validator are the
-      # only things in the way, which is why a malformed manifest has to
-      # be *unmergeable* rather than merely noticed.
+      # reconfigures every install within minutes with no staged rollout.
+      # The review gate on `main` plus this validator are the only things
+      # in the way, which is why a malformed manifest has to be
+      # *unmergeable* rather than merely noticed.
       #
-      # A step in this job rather than a job of its own: `check` already
-      # requires `build`, so a separate runner would buy no extra
-      # protection and would pay for a second Tauri compile to get it.
+      # Runs BEFORE `cargo test`, and that ordering is the point. The
+      # test suite already refuses a malformed manifest — but it reports
+      # it as an assertion failure inside
+      # `anything_the_validator_accepts_the_app_can_parse`, which tells a
+      # maintainer staring at a one-line manifest diff nothing about
+      # *what* is wrong. The validator names the offending game key or
+      # field, so it has to be the thing that fails first.
+      #
+      # It is also the command `manifest/README.md` tells a human to run.
+      # Nothing ran it before, which is how it went unnoticed that the
+      # documented invocation did not work at all.
       #
       # Deliberately offline. Live resolution is the scheduled
       # `upstream importers` workflow's business; putting GitHub's
@@ -105,6 +109,11 @@ jobs:
       - name: validate the recommended-importers manifest
         working-directory: src-tauri
         run: cargo run -p gmm-manifest-validator --bin validate-manifest
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --workspace
+
 
       # Windows-only: smoke-test the gmm-loader FFI binding against the
       # vendored 3dmloader.dll — loads the DLL, installs the CBT hook,
