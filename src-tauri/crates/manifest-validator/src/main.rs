@@ -17,9 +17,14 @@
 //! construction one the app can read.
 //!
 //! ```text
-//! cargo run --bin validate-manifest              # the committed file
-//! cargo run --bin validate-manifest -- <path>    # any file
+//! # from src-tauri/. `-p` is required: the root package has a
+//! # default-run binary, so a bare `--bin` only searches that package.
+//! cargo run -p gmm-manifest-validator --bin validate-manifest
+//! cargo run -p gmm-manifest-validator --bin validate-manifest -- <path>
 //! ```
+//!
+//! Run on every pull request by the `build` job in `ci.yml`, which gates
+//! the required `check` status — so a malformed manifest cannot merge.
 //!
 //! It lives in its own workspace crate rather than as a second binary
 //! inside the Tauri package. A `src/bin/` entry there makes the bundler

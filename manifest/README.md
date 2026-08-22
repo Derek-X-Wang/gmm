@@ -24,16 +24,46 @@ the offline shape validator are the only things in the way.
 Before merging a change here, run:
 
 ```bash
-cd src-tauri && cargo run --bin validate-manifest
+cd src-tauri && cargo run -p gmm-manifest-validator --bin validate-manifest
 ```
 
 It exits non-zero and names the offending game key or field. Point it at
 another file with `-- <path>`.
 
+`-p` is not optional: the root package has a `default-run` binary, so a
+bare `--bin` only searches that package and cargo answers "no bin target
+named `validate-manifest`".
+
+You do not have to remember to run it. CI runs the same command on every
+pull request, as a step in the `build` job that gates the required
+`check` status — a malformed manifest is unmergeable.
+
 The validator lives in its own workspace crate,
 `src-tauri/crates/manifest-validator/`, rather than as a second binary
 inside the Tauri package — a `src/bin/` entry there makes the bundler
 ship the wrong executable.
+
+## The other half: are the recommendations still true?
+
+Shape validation is offline and says nothing about whether the origins
+in this file still exist. That is checked live on a schedule, by
+`.github/workflows/upstream-importers.yml`:
+
+```bash
+cd src-tauri && cargo run -p gmm-manifest-validator --bin check-origins
+```
+
+It resolves every `recommended` entry against GitHub and exits non-zero
+if any of them stops selecting an asset. When one fails on **two
+consecutive** scheduled runs, the workflow opens a single
+`importer-origin-down` issue naming the game, the origin, and what
+upstream actually published. That is where ADR 0005 puts staleness
+detection — the maintainer's process, not the user's screen.
+
+Deliberately *not* run on pull requests: it would put GitHub's
+availability on the critical path of merging, making this file
+unmergeable whenever the API is rate-limited or an upstream repository is
+briefly down.
 
 ## The rules
 
