@@ -33,8 +33,10 @@ jobs:
             -Force
 
       - name: Parse and analyze PowerShell scripts
-        shell: pwsh
-        run: .github/scripts/lint-ci-scripts.ps1
+        run: pwsh -NoProfile -File .github/scripts/lint-ci-scripts.ps1
+
+      - name: Prove PSScriptAnalyzer findings fail the linter
+        run: pwsh -NoProfile -File .github/scripts/test-lint-ci-scripts.ps1
 
       - name: Install ShellCheck
         run: |
@@ -44,8 +46,12 @@ jobs:
       - name: Parse and lint shell scripts
         run: |
           mapfile -t scripts < <(find .github/scripts -type f -name '*.sh' -print)
+          [ "${#scripts[@]}" -gt 0 ] || { echo "no shell scripts found"; exit 1; }
           bash -n "${scripts[@]}"
           shellcheck "${scripts[@]}"
+
+      - name: Test dead-origin alerting
+        run: .github/scripts/test-dead-origin-issues.sh
 
       - name: Lint workflow files
         uses: docker://rhysd/actionlint:1.7.12
@@ -61,10 +67,6 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Test dead-origin alerting
-        if: runner.os == 'Linux'
-        run: .github/scripts/test-dead-origin-issues.sh
 
       - uses: pnpm/action-setup@v4
         with:

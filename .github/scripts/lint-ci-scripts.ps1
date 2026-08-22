@@ -37,6 +37,10 @@ foreach ($File in $Files) {
     # maintainer, so accidental control characters are correctness failures.
     # An intentional one must carry `ci-lint: allow-control-character-string`
     # on the same or immediately preceding line, with its reason at the site.
+    # Multi-line strings are deliberately excluded: their intended line breaks
+    # are control characters too, and the AST value does not distinguish those
+    # source newlines from backtick escapes. Parsing and PSScriptAnalyzer still
+    # cover them, but this additional diagnostic check does not.
     $Lines = @(Get-Content -Path $File.FullName)
     $ExpandableStrings = $Ast.FindAll({
         param($Node)

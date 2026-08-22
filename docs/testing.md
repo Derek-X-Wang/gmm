@@ -482,8 +482,10 @@ actionlint 1.7.12):
 pwsh -NoProfile -Command \
   'Set-PSRepository PSGallery -InstallationPolicy Trusted; Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force'
 pwsh -NoProfile -File .github/scripts/lint-ci-scripts.ps1
+pwsh -NoProfile -File .github/scripts/test-lint-ci-scripts.ps1
 find .github/scripts -type f -name '*.sh' -exec bash -n {} +
 find .github/scripts -type f -name '*.sh' -exec shellcheck {} +
+.github/scripts/test-dead-origin-issues.sh
 actionlint
 ```
 
