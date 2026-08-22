@@ -33,6 +33,7 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "allowDowngrades": false,
       "wix": {
         "upgradeCode": "dd0ec6e6-1c70-5cb0-8601-4edd35c6d33e"
       }

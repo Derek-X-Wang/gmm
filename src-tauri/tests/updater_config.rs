@@ -149,6 +149,63 @@ fn msi_upgrade_code_is_pinned_to_the_shipped_identity() {
 }
 
 #[test]
+fn msi_refuses_to_install_over_a_newer_version() {
+    let conf = tauri_conf();
+    let windows = conf
+        .get("bundle")
+        .and_then(|bundle| bundle.get("windows"))
+        .expect("bundle.windows must exist — it carries the MSI's identity");
+
+    // `allowDowngrades` defaults to `true` in Tauri, so the MSI would
+    // emit `<MajorUpgrade AllowDowngrades="yes" />` and a user who runs
+    // an OLDER GMM installer over a newer install would be silently
+    // rolled back. No prompt, no warning, no error.
+    //
+    // For GMM that does not merely surprise — it produces an app that
+    // will not start. `Core::new` runs the sqlx migrations against
+    // `%APPDATA%\GMM` on every launch, and the data directory is
+    // neither versioned with the install nor touched by the MSI. So the
+    // older binary opens a database already migrated forward, does not
+    // recognise the applied migrations, and fails at startup. That is
+    // the exact `VersionMismatch` shape the v0.1.0-alpha.2 checksum
+    // break produced in #64 — without anyone deliberately downgrading.
+    //
+    // So the choice was never "a working rollback vs. blocking one":
+    // the rollback is already broken. It is "fail loudly at install
+    // time, or fail confusingly at next launch", and only one of those
+    // is debuggable before the working version has been overwritten.
+    // See the decision on #76 and ADR 0004's posture against silent
+    // changes to a user's setup.
+    //
+    // Flipping this to `true`, or deleting the key so the framework
+    // default returns, restores that silent rollback. This constant is
+    // load-bearing, not a redundant restatement of a default.
+    assert_eq!(
+        windows.get("allowDowngrades"),
+        Some(&Value::Bool(false)),
+        "bundle.windows.allowDowngrades must be explicitly false — an \
+         older MSI must refuse to install over a newer one rather than \
+         silently reverting the app to a build that cannot open the \
+         migrated database",
+    );
+
+    // Guard against the placement the issue itself got wrong. `wix` is
+    // a sibling of `allowDowngrades`, not its parent, and `WixConfig`
+    // is `deny_unknown_fields` — so putting it there is not a silent
+    // no-op that leaves the default in force, it is a hard build
+    // failure. Cheap to assert, and it names the mistake.
+    assert!(
+        windows
+            .get("wix")
+            .and_then(|wix| wix.get("allowDowngrades"))
+            .is_none(),
+        "allowDowngrades belongs at bundle.windows.allowDowngrades, not \
+         inside bundle.windows.wix — WixConfig denies unknown fields, so \
+         the bundler would reject the config outright",
+    );
+}
+
+#[test]
 fn updater_and_process_permissions_are_granted_to_the_main_window() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
     let raw = std::fs::read_to_string(&path).expect("read capabilities/default.json");
