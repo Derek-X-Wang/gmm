@@ -337,6 +337,26 @@ mod manifest_refresh_started_marker {
             !script.contains("$manifestRequestAcceptedAt.AddSeconds("),
             "the startup guard must not depend on an arbitrary wall-clock margin",
         );
+        assert!(
+            script.contains("startup work blocked Tauri past the deadline"),
+            "the ordinary readiness timeout must name blocking startup work as a \
+             possible cause rather than diagnosing only frontend/IPC failures",
+        );
+    }
+
+    #[test]
+    fn startup_reads_the_override_only_through_the_loopback_guard() {
+        let lib = read("src-tauri/src/lib.rs");
+        assert!(
+            lib.contains("recommended_importers::loopback_manifest_url_override();"),
+            "startup must obtain the test URL through the no-argument accessor that \
+             reads and validates the environment value together",
+        );
+        assert!(
+            !lib.contains("MANIFEST_URL_OVERRIDE_ENV"),
+            "lib.rs must not name the manifest override environment variable \
+             directly, where the loopback-only validator could be bypassed",
+        );
     }
 
     #[test]

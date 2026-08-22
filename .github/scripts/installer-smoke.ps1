@@ -276,7 +276,8 @@ if (-not $logSeen) { throw "timed out waiting for a log file in $logDir" }
 if (-not $ipcSeen) {
     throw "timed out waiting for the IPC readiness marker '$IpcReadyMarker' in $logDir — " +
           "the backend started but the frontend never completed a command round-trip " +
-          "(unregistered command, ACL denial, or a WebView that never loaded)"
+          "(unregistered command, ACL denial, a WebView that never loaded, or " +
+          "startup work blocked Tauri past the deadline)"
 }
 if (-not $manifestRefreshSeen) {
     throw "timed out waiting for a new manifest-refresh marker " +
