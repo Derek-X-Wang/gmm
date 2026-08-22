@@ -559,7 +559,6 @@ mod tests {
         let expected = module_list_spelling(&long);
         let expanded = to_long_path(&short);
         assert_same_windows_path(&expanded, &expected);
-        eprintln!("8.3 path case exercised: {short:?} expanded to Windows spelling {expected:?}",);
     }
 
     /// A path that doesn't exist can't have its 8.3 aliases expanded.
@@ -601,11 +600,8 @@ mod tests {
             !out.to_string_lossy().starts_with(r"\\?\"),
             "verbatim prefix must be stripped, got {out:?}",
         );
-        assert_eq!(
-            out,
-            to_long_path(&file),
-            "verbatim and plain spellings must normalise identically",
-        );
+        let expected = module_list_spelling(&file);
+        assert_same_windows_path(&out, &expected);
     }
 
     /// Forward slashes are legal input to most Windows APIs, but the
@@ -630,11 +626,8 @@ mod tests {
             !normalised.to_string_lossy().contains('/'),
             "forward slashes must be rewritten, got {normalised:?}",
         );
-        assert_eq!(
-            normalised,
-            to_long_path(&file),
-            "both spellings of the same file must normalise identically",
-        );
+        let expected = module_list_spelling(&file);
+        assert_same_windows_path(&normalised, &expected);
     }
 
     /// The normalisation has to agree with what Windows itself reports
