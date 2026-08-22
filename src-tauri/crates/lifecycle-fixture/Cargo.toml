@@ -1,0 +1,20 @@
+[package]
+name = "gmm-lifecycle-fixture"
+version = "0.1.0"
+description = "Test-only GMM process that seeds and then re-checks realistic user state — a Library with a Mod, a live Junction, a game install path and an Importer Pin — so the Windows installer-lifecycle script can assert an MSI upgrade preserved it. Not shipped."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "lifecycle-fixture"
+path = "src/main.rs"
+
+[dependencies]
+gmm = { path = "../.." }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"

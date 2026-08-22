@@ -7,6 +7,7 @@ members = [
     "crates/noop_dll",
     "crates/probe",
     "crates/manifest-validator",
+    "crates/lifecycle-fixture",
 ]
 resolver = "2"
 

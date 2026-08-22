@@ -366,6 +366,54 @@ keypair with `tauri signer generate` for the length of the job and never
 reads `TAURI_SIGNING_PRIVATE_KEY`, which stays release-only. That is
 what lets this run on a fork's pull request.
 
+## 7. Installer lifecycle (`.github/scripts/installer-lifecycle.ps1`)
+
+`installer-smoke.ps1` covers a clean machine. This covers the path every
+*existing* user takes: upgrade, repair, uninstall (#57).
+
+Runs as a second step in the same `updater` job and **reuses the two MSIs
+`updater-e2e.ps1` already built**. A sibling job would have to run
+`tauri build --release` twice more for coverage that overlaps, which
+roughly doubles the Windows CI bill.
+
+1. install 9.9.0, launch it, seed realistic state
+2. assert exactly one Add/Remove Programs entry and **zero** startup
+   registrations
+3. upgrade to 9.9.1; assert one entry, one install directory, and that
+   `GMM.exe`'s bytes actually changed
+4. assert every seeded invariant survived
+5. delete `GMM.exe`, run `msiexec /f`, assert it comes back
+   byte-identical and user data is untouched
+6. uninstall; assert the documented policy — install directory gone,
+   `%APPDATA%\GMM` and Junctions kept
+
+### Why there is a fixture binary
+
+The hard part of testing an upgrade is not running `msiexec` twice, it is
+having something real to preserve. A canary text file proves almost
+nothing: it is not written through GMM's code, not in the database, and
+not a Junction.
+
+`src-tauri/crates/lifecycle-fixture/` seeds the four things that matter
+through `Core`'s own API — a Library entry, an enabled Mod, a live
+Junction into a game directory, and an **Importer Pin** — then re-checks
+them. The pin gets its own assertion rather than riding on a generic "app
+data preserved" check because ADR 0004 makes it the escape hatch during a
+ban-wave window: losing it silently is an account-safety regression.
+
+The Junction is checked by **reading through it**, not by `exists()`. A
+directory that is still there but no longer points at the Library passes
+an existence check and loads nothing, which is exactly the failure an
+upgrade could introduce.
+
+`verify` reports every failure rather than stopping at the first, because
+a Windows-less maintainer reads that CI log once.
+
+It is test-only and never shipped — `tauri build` bundles only the `gmm`
+binary, and `updater_config.rs` asserts the app package declares exactly
+one. Helper binaries live in their own crate under `crates/` for that
+reason.
+
 ## Running the suite
 
 ```bash

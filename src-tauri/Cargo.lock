@@ -1585,6 +1585,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gmm-lifecycle-fixture"
+version = "0.1.0"
+dependencies = [
+ "gmm",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "gmm-loader"
 version = "0.1.0"
 dependencies = [
