@@ -45,26 +45,93 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$CURRENT" ] || [ ! -f "$CURRENT" ]; then
-  # No current report means check-origins never ran or died before
-  # writing one. That is a broken job, not a healthy manifest, and
-  # exiting 0 here would hide it.
-  echo "no current report at '${CURRENT}' — cannot decide anything" >&2
-  exit 1
-fi
+# Validate a report before deriving failures from it. Do this before entering a
+# process substitution: bash does not propagate a producer's status from
+# `while ... done < <(...)`, which is how an unreadable report used to become
+# an empty (healthy-looking) failure set.
+read_failures() {
+  local role="$1"
+  local file="$2"
+  local output="$3"
+  local error_file="${PARSE_DIR}/${role}.error"
 
-# jq that yields one "<game>\t<origin>\t<detail>" line per failing origin.
-failing() {
-  local file="$1"
   if [ -z "$file" ] || [ ! -f "$file" ]; then
-    return 0
+    if [ "$role" = "previous" ]; then
+      if [ -n "$file" ]; then
+        echo "no previous report at '$file'; treating this as the first run"
+      else
+        echo "no previous report supplied; treating this as the first run"
+      fi
+      : >"$output"
+      return 0
+    fi
+    echo "no current report at '$file' — cannot decide anything" >&2
+    return 1
   fi
-  jq -r '.origins[]? | select(.ok == false)
-         | [.game, .origin, (.detail // "")] | @tsv' "$file"
+
+  if [ ! -s "$file" ]; then
+    echo "could not read ${role} report '$file': file is empty" >&2
+    return 1
+  fi
+
+  # Parse the whole input before emitting anything. `--slurp` lets this reject
+  # both an empty stream and concatenated JSON documents. The counts are
+  # independent corroboration written by check-origins: a valid zero-check
+  # report is allowed for the ADR-0005 state where every game is retracted,
+  # but a bare `{"origins":[]}` is not evidence.
+  if ! jq --slurp --raw-output '
+    def nonempty_string: type == "string" and length > 0;
+    def nonnegative_integer:
+      type == "number" and . >= 0 and floor == .;
+
+    if length != 1 then
+      error("expected exactly one top-level JSON document")
+    else
+      .[0] as $report
+      | if ($report | type) != "object"
+          or ($report.manifest | nonempty_string | not)
+          or ($report.checked | nonnegative_integer | not)
+          or ($report.failed | nonnegative_integer | not)
+          or ($report.origins | type) != "array" then
+          error("expected manifest, nonnegative integer checked/failed counts, and an origins array")
+        elif all($report.origins[];
+          type == "object"
+          and (.game | nonempty_string)
+          and (.origin | nonempty_string)
+          and (.assetPattern | nonempty_string)
+          and (.ok | type == "boolean")
+          and (.detail | type == "string")
+          and ((.ok == false) or (.asset | nonempty_string))) | not then
+          error("every verdict must have usable game, origin, assetPattern, ok, detail, and successful asset fields")
+        elif $report.checked != ($report.origins | length) then
+          error("checked does not match origins length")
+        elif $report.failed != ([$report.origins[] | select(.ok == false)] | length) then
+          error("failed does not match failing verdicts")
+        elif ([$report.origins[] | [.game, .origin]] | unique | length) != $report.checked then
+          error("duplicate game and origin alert key")
+        else
+          $report.origins[]
+          | select(.ok == false)
+          | [.game, .origin, .detail]
+          | @tsv
+        end
+    end
+  ' "$file" >"$output" 2>"$error_file"; then
+    echo "could not read ${role} report '$file': $(tr '\n' ' ' < "$error_file")" >&2
+    return 1
+  fi
 }
 
+PARSE_DIR="$(mktemp -d)"
+trap 'rm -rf "$PARSE_DIR"' EXIT
+CURRENT_FAILURES="${PARSE_DIR}/current.tsv"
+PREVIOUS_FAILURES="${PARSE_DIR}/previous.tsv"
+
+read_failures current "$CURRENT" "$CURRENT_FAILURES"
+read_failures previous "$PREVIOUS" "$PREVIOUS_FAILURES"
+
 # The keys (game + origin) that failed last time, as a lookup.
-PREV_KEYS="$(failing "$PREVIOUS" | cut -f1,2 || true)"
+PREV_KEYS="$(cut -f1,2 "$PREVIOUS_FAILURES")"
 
 ALERTS=""
 while IFS=$'\t' read -r game origin detail; do
@@ -74,7 +141,7 @@ while IFS=$'\t' read -r game origin detail; do
   else
     echo "first failure for ${game} (${origin}) — not alerting yet"
   fi
-done < <(failing "$CURRENT")
+done <"$CURRENT_FAILURES"
 
 if [ -z "${ALERTS//[$'\n\t ']/}" ]; then
   echo "no origin has failed twice in a row; nothing to open"
@@ -106,7 +173,11 @@ while IFS=$'\t' read -r game origin detail; do
     echo "already tracked: ${title}"
     continue
   fi
-  body="$(cat <<EOF
+  # Keep the heredoc out of a command substitution for Bash 3.2 portability.
+  # GitHub's Bash 4.4+ runner parses the former construct correctly; macOS's
+  # system Bash does not.
+  body=""
+  IFS= read -r -d '' body <<EOF || true
 > *Opened automatically by the scheduled \`upstream importers\` workflow.*
 
 The Importer Origin GMM recommends for **${game}** has failed to resolve on
@@ -139,7 +210,6 @@ Validate before merging: \`cd src-tauri && cargo run --bin validate-manifest\`.
 This issue is not reopened or duplicated while it stays open. Close it once
 the manifest is fixed; the next scheduled run will re-open one if it is not.
 EOF
-)"
   echo "opening: ${title}"
   gh issue create --repo "$REPO" \
     --title "$title" \
