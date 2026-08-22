@@ -5,8 +5,8 @@
 .DESCRIPTION
     `tests/updater_config.rs` checks that tauri.conf.json *says* the right
     things. This checks that the pipeline *does* them: that a build
-    actually emits updater artifacts, that the signature over the real
-    MSI zip verifies, that a tampered one does not, and that installing
+    actually emits exactly one updater artifact, that its signature verifies,
+    that a tampered one does not, and that installing
     the newer build over the older one leaves the user's data alone.
 
     The very first release tag shipped without `createUpdaterArtifacts`,
@@ -18,10 +18,12 @@
          which stays a repository secret and is not read here
       2. build version OLD and version NEW with that key, both pointed at
          a local update endpoint
-      3. assert NEW produced a signed updater artifact (the bundler's
+      3. enumerate the whole bundle and assert NEW produced exactly one
+         signed updater artifact (the bundler's
          `*.sig` plus the file it signs — a raw `.msi` on the Tauri
          version this repo pins, a `.msi.zip` on older ones)
-      4. serve NEW's `latest.json` + artifact over 127.0.0.1
+      4. construct and serve a test-only `latest.json` + artifact over
+         127.0.0.1
       5. fetch both back through that endpoint and verify the signature
          the way tauri-plugin-updater does; assert a tampered artifact is
          refused
@@ -37,7 +39,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$BundleDir = Join-Path $RepoRoot "src-tauri\target\release\bundle\msi"
+$BundleRoot = Join-Path $RepoRoot "src-tauri\target\release\bundle"
 $AppData = Join-Path $env:APPDATA "GMM"
 $Work = Join-Path $RepoRoot "ci-updater"
 $LogDir = Join-Path $RepoRoot "ci-diagnostics"
@@ -199,12 +201,14 @@ function Build-Version($version, $destDir) {
     $confPath = Join-Path $Work "tauri.$version.conf.json"
     $conf | ConvertTo-Json -Depth 8 | Set-Content -Path $confPath -Encoding utf8
 
-    if (Test-Path $BundleDir) { Remove-Item $BundleDir -Recurse -Force }
+    if (Test-Path $BundleRoot) { Remove-Item $BundleRoot -Recurse -Force }
     pnpm tauri build --config $confPath
     if ($LASTEXITCODE -ne 0) { throw "tauri build ($version) exited $LASTEXITCODE" }
 
+    if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-    Copy-Item (Join-Path $BundleDir "*") $destDir -Recurse -Force
+    Get-ChildItem $BundleRoot -Recurse -File |
+        Copy-Item -Destination $destDir -Force
     Get-ChildItem $destDir | ForEach-Object { Write-Host "  $($_.Name)" }
 }
 
@@ -224,19 +228,25 @@ Write-Section "Updater artifacts exist"
 # "createUpdaterArtifacts produced nothing" about a build that had just
 # printed "Finished 2 updater signatures at: ...msi.sig".
 #
-# So derive the artifact from the signature rather than hardcoding
-# either container. What matters is that *something* got signed and that
-# the signature verifies over exactly those bytes; the extension is
-# Tauri's business and is allowed to change again.
-$sig = Get-ChildItem $NewDir -File |
-    Where-Object { $_.Name.EndsWith(".sig") } |
-    Select-Object -First 1
-if (-not $sig) {
+# So derive the artifact from its signature rather than hardcoding either
+# container. Enumerating the entire bundle root is deliberate: an additional
+# installer target also adds a signature, and no shipped updater artifact is
+# allowed to escape this round trip merely because it lives in another
+# subdirectory.
+$signatures = @(Get-ChildItem $NewDir -File |
+    Where-Object { $_.Name.EndsWith(".sig") })
+if ($signatures.Count -eq 0) {
     $present = (Get-ChildItem $NewDir -File | ForEach-Object Name) -join ", "
     throw "no updater signature (*.sig) in $NewDir — createUpdaterArtifacts " +
           "produced nothing, which is exactly how the first release shipped " +
           "with no update path. Bundle contained: $present"
 }
+if ($signatures.Count -ne 1) {
+    $names = ($signatures | ForEach-Object Name) -join ", "
+    throw "expected exactly one updater signature so every shipped updater " +
+          "artifact is verified, found $($signatures.Count): $names"
+}
+$sig = $signatures[0]
 $artifactPath = $sig.FullName -replace '\.sig$', ''
 if (-not (Test-Path $artifactPath)) {
     throw "signature $($sig.Name) has no artifact beside it at $artifactPath — " +
@@ -279,8 +289,14 @@ try {
     if ($manifest.version -ne $NewVersion) {
         throw "served manifest advertises $($manifest.version), expected $NewVersion"
     }
+    $advertisedUrl = $manifest.platforms."windows-x86_64".url
+    $advertisedName = [System.IO.Path]::GetFileName(([Uri]$advertisedUrl).AbsolutePath)
+    # This manifest was constructed just above from $artifact.Name. Printing
+    # it identifies the bytes exercised by this round trip; it is not an
+    # oracle for the production latest.json that tauri-action generates.
+    Write-Host "local test manifest advertises: $advertisedName"
     $downloaded = Join-Path $Work ("downloaded" + [System.IO.Path]::GetExtension($artifact.Name))
-    Invoke-WebRequest $manifest.platforms."windows-x86_64".url -OutFile $downloaded
+    Invoke-WebRequest $advertisedUrl -OutFile $downloaded
     Write-Host "fetched $((Get-Item $downloaded).Length) bytes through the endpoint"
 
     # ------------------------------------------------------------------

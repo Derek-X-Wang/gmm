@@ -110,6 +110,21 @@ fn updater_artifacts_are_enabled_so_releases_ship_a_manifest() {
 }
 
 #[test]
+fn bundle_targets_only_the_lifecycle_tested_msi() {
+    let conf = tauri_conf();
+    let targets = conf.pointer("/bundle/targets");
+
+    // Every installer guarantee in this repository is MSI-specific. Reverting
+    // to `all` silently re-ships an NSIS artifact and updater signature that
+    // no install, upgrade, downgrade, uninstall, or updater lifecycle verifies.
+    assert_eq!(
+        targets,
+        Some(&serde_json::json!(["msi"])),
+        "bundle.targets must remain MSI-only until another installer format has its own lifecycle coverage",
+    );
+}
+
+#[test]
 fn bundle_identifier_and_product_name_are_stable() {
     let conf = tauri_conf();
 
