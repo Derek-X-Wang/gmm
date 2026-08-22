@@ -12,7 +12,9 @@
 //! pure decision in `core::importer_origin`. Nothing here reaches the
 //! network or a game directory.
 
-use gmm_lib::core::importer_origin::{ImporterOrigin, InstalledOrigin};
+use gmm_lib::core::importer_origin::{
+    ImporterOrigin, InstalledOrigin, OriginLayer, OriginResolution,
+};
 use gmm_lib::core::{Core, GameCode};
 use tempfile::TempDir;
 
@@ -270,11 +272,22 @@ fn recommending_gimi(owner: &str, repo: &str) -> String {
 }
 
 async fn core_with_a_gimi_recommendation(tmp: &TempDir) -> (Core, mockito::ServerGuard) {
+    core_with_a_gimi_recommendation_of(tmp, "curated", "GIMI-Fork").await
+}
+
+/// The same, with the recommended origin spelled out — so a test can put
+/// the manifest and the compiled-in default in agreement, which is what
+/// the committed manifest actually does for five of the six games.
+async fn core_with_a_gimi_recommendation_of(
+    tmp: &TempDir,
+    owner: &str,
+    repo: &str,
+) -> (Core, mockito::ServerGuard) {
     let mut server = mockito::Server::new_async().await;
     server
         .mock("GET", "/recommended-importers.json")
         .with_status(200)
-        .with_body(recommending_gimi("curated", "GIMI-Fork"))
+        .with_body(recommending_gimi(owner, repo))
         .create_async()
         .await;
 
@@ -370,24 +383,82 @@ async fn a_game_already_on_the_recommended_origin_has_nothing_to_propose() {
 }
 
 #[tokio::test]
-async fn an_unknown_origin_install_is_never_nagged_towards_the_compiled_in_default() {
+async fn an_unknown_origin_install_is_never_nagged_towards_the_shipped_default() {
     // #99: unknown origin is never surfaced proactively. Without this,
     // every hand-installed setup would be prompted on every launch to
     // adopt a default GMM merely ships — which is not a recommendation
     // at all.
+    //
+    // Driven from **the production configuration** (#125): a cached
+    // manifest that recommends exactly what the compiled-in default
+    // already is, which is what the committed manifest does for five of
+    // the six games. The guard this replaces was keyed on the resolution
+    // *layer*, so it only held on a core with no cached manifest — the
+    // one state production is never in after a first successful launch.
+    // It read as coverage and was dead.
     let tmp = TempDir::new().expect("tmp");
-    let core = fresh_core(&tmp).await;
+    let (core, _server) =
+        core_with_a_gimi_recommendation_of(&tmp, "SilentNightSound", "GIMI-Package").await;
     core.set_importer_installed(GameCode::Gimi, "v8.8.0")
         .await
         .expect("seed a hand-installed shape");
+
+    // Precondition: the origin really does arrive from the manifest.
+    match core
+        .resolve_importer_origin(GameCode::Gimi)
+        .await
+        .expect("resolve")
+    {
+        OriginResolution::InEffect { layer, .. } => assert_eq!(
+            layer,
+            OriginLayer::RecommendedManifest,
+            "this test is only meaningful when the manifest is what resolves",
+        ),
+        other => panic!("expected an origin in effect; got {other:?}"),
+    }
 
     assert_eq!(
         core.pending_importer_origin_change(GameCode::Gimi)
             .await
             .expect("decide"),
         None,
-        "the compiled-in default is the status quo, not a proposal",
+        "an origin identical to the shipped default is the status quo, whichever \
+         layer it arrives from — not a proposal",
     );
+}
+
+#[test]
+fn pin_clearing_and_proposal_worthiness_are_decided_separately() {
+    // The root cause of the dead guard: the proposal logic used *would
+    // this clear the pin?* as its signal for *is there a change worth
+    // proposing?*. An unknown origin is exactly where the two diverge —
+    // it always clears the pin, because GMM cannot compare a pin against
+    // an origin it does not know, so under the old rule it always looked
+    // like a change.
+    use gmm_lib::core::importer_origin::{change_effects, is_worth_proposing};
+
+    let shipped = gimi_default();
+    let unknown = InstalledOrigin::Unknown;
+
+    assert!(
+        change_effects(&unknown, &shipped).clears_pin,
+        "an unknown origin still clears the pin: GMM cannot reason about a pin \
+         taken against an origin it does not know",
+    );
+    assert!(
+        !is_worth_proposing(&unknown, &shipped, Some(&shipped)),
+        "but moving nobody onto the default they are presumably already on is \
+         not a proposal",
+    );
+
+    // And they agree where they should.
+    let known_elsewhere = InstalledOrigin::Known(a_different_origin());
+    assert!(change_effects(&known_elsewhere, &shipped).clears_pin);
+    assert!(is_worth_proposing(
+        &known_elsewhere,
+        &shipped,
+        Some(&shipped)
+    ));
 }
 
 #[tokio::test]

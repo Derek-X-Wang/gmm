@@ -1152,7 +1152,12 @@ impl Core {
     ) -> Result<Option<importer_origin::ImporterOrigin>> {
         let resolution = self.resolve_importer_origin(game).await?;
         let installed = self.installed_importer_origin(game).await?;
-        Ok(importer_origin::pending_change(&resolution, &installed).cloned())
+        Ok(importer_origin::pending_change(
+            &resolution,
+            &installed,
+            importer_origin::compiled_in_default(game).as_ref(),
+        )
+        .cloned())
     }
 
     // ---- The recommended-importers manifest (ADR 0005 / #108) ----
