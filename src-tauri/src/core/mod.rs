@@ -992,23 +992,188 @@ impl Core {
     /// Resolve a game's effective Importer Origin through ADR 0005's
     /// three layers.
     ///
-    /// Layer 2 (the recommended manifest) is not wired yet — #108 lands
-    /// the fetch and cache. Until then it is passed as absent, which
-    /// falls through to the compiled-in default and leaves today's
-    /// install behaviour unchanged. Absent is deliberately *not*
-    /// retraction (#93).
+    /// Layer 2 reads the **cached** manifest, never the network (#96):
+    /// the last manifest GMM successfully fetched is authoritative until
+    /// replaced, so resolution never flaps with connectivity and never
+    /// waits on a third-party host.
     pub async fn resolve_importer_origin(
         &self,
         game: GameCode,
     ) -> Result<importer_origin::OriginResolution> {
         let user_override = self.importer_origin_override(game).await?;
+        let manifest = self.cached_recommended_manifest().await?;
+        // Both `None`s here mean *fall through*, which is the correct
+        // behaviour for every one of them: no manifest cached yet, or a
+        // cached manifest that says nothing about this game. Only an
+        // explicit `Recommendation::NoRecommendation` retracts, and it
+        // survives this expression intact.
+        let recommendation = manifest.as_ref().and_then(|m| m.recommendation_for(game));
         let compiled = importer_origin::compiled_in_default(game);
         Ok(importer_origin::resolve(
             user_override.as_ref(),
-            // Layer 2 input, absent until #108.
-            None,
+            recommendation.as_ref(),
             compiled.as_ref(),
         ))
+    }
+
+    // ---- The recommended-importers manifest (ADR 0005 / #108) ----
+
+    /// The cached manifest, or `None` when GMM holds none it can read.
+    ///
+    /// `None` is deliberately *fall-through*, never retraction: with no
+    /// usable cache the whole layer is absent and every game resolves to
+    /// its compiled-in default. That is the behaviour #93 requires for a
+    /// document the build cannot make sense of — landing on retraction
+    /// instead would let one bad commit clear every default for every
+    /// user.
+    ///
+    /// A cached document that no longer parses is only reachable by
+    /// downgrading GMM, since nothing is cached without parsing first.
+    /// It is logged rather than swallowed.
+    pub async fn cached_recommended_manifest(
+        &self,
+    ) -> Result<Option<recommended_importers::Manifest>> {
+        let Some(raw) =
+            get_setting(&self.pool, recommended_importers::cache_keys::DOCUMENT).await?
+        else {
+            return Ok(None);
+        };
+        match recommended_importers::parse(&raw) {
+            Ok(manifest) => Ok(Some(manifest)),
+            Err(e) => {
+                tracing::warn!(
+                    target: "gmm::recommendations",
+                    error = %e,
+                    "cached recommended-importers manifest no longer parses; \
+                     falling through to compiled-in defaults",
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Why the last refresh produced a manifest this build cannot read,
+    /// or `None` when it did not.
+    ///
+    /// This is the signal behind "your build is too old". It is kept
+    /// separate from the layer itself because the layer's response to an
+    /// unusable document is to fall through — which on its own is
+    /// indistinguishable from having no manifest at all, and that
+    /// silence is precisely the #78 defect.
+    pub async fn recommended_importers_unusable_reason(&self) -> Result<Option<String>> {
+        get_setting(
+            &self.pool,
+            recommended_importers::cache_keys::UNUSABLE_REASON,
+        )
+        .await
+    }
+
+    /// Refresh the cached manifest from
+    /// [`recommended_importers::MANIFEST_URL`].
+    ///
+    /// Background best-effort, once per app start. **Nothing waits on
+    /// it**: the cached manifest is already in force, and a refresh only
+    /// applies when it lands (#96). A failure has no user-visible
+    /// consequence and is logged, not surfaced.
+    ///
+    /// This is the single entry point to the fetch, so the "off switch"
+    /// precondition can be added in front of it rather than as a filter
+    /// on its result — off must mean *no request at all*.
+    pub async fn refresh_recommended_importers(&self) -> Result<recommended_importers::Refreshed> {
+        self.refresh_recommended_importers_from(recommended_importers::MANIFEST_URL)
+            .await
+    }
+
+    /// [`Core::refresh_recommended_importers`] against an explicit URL.
+    ///
+    /// Production always passes the constant; tests use this to drive
+    /// every outcome without depending on GitHub being reachable — the
+    /// same seam [`Core::check_loader_update_from`] provides.
+    pub async fn refresh_recommended_importers_from(
+        &self,
+        url: &str,
+    ) -> Result<recommended_importers::Refreshed> {
+        let client = self
+            .http_client_builder()
+            .await?
+            .timeout(recommended_importers::FETCH_TIMEOUT)
+            .build()
+            .map_err(|e| Error::Network(format!("client build: {e}")))?;
+
+        // Only claim to still hold a document when one is actually
+        // cached. A conditional request whose 304 we could not act on
+        // would turn "unchanged" into "nothing learned".
+        let cached_raw =
+            get_setting(&self.pool, recommended_importers::cache_keys::DOCUMENT).await?;
+        let etag = match cached_raw {
+            Some(_) => get_setting(&self.pool, recommended_importers::cache_keys::ETAG).await?,
+            None => None,
+        };
+
+        match recommended_importers::fetch(&client, url, etag.as_deref()).await {
+            recommended_importers::Fetched::Document { raw, etag } => {
+                match recommended_importers::parse(&raw) {
+                    Ok(manifest) => {
+                        self.store_recommended_manifest(&raw, etag.as_deref())
+                            .await?;
+                        Ok(recommended_importers::Refreshed::Replaced(manifest))
+                    }
+                    Err(e) => {
+                        // The cache is untouched: authoritative until
+                        // *replaced*, and an unreadable document
+                        // replaces nothing.
+                        tracing::warn!(
+                            target: "gmm::recommendations",
+                            error = %e,
+                            "recommended-importers manifest is unusable by this build",
+                        );
+                        put_setting(
+                            &self.pool,
+                            recommended_importers::cache_keys::UNUSABLE_REASON,
+                            Some(&e.to_string()),
+                        )
+                        .await?;
+                        Ok(recommended_importers::Refreshed::Unusable(e))
+                    }
+                }
+            }
+            recommended_importers::Fetched::NotModified => {
+                Ok(recommended_importers::Refreshed::NotModified)
+            }
+            recommended_importers::Fetched::Unreachable(message) => {
+                tracing::warn!(
+                    target: "gmm::recommendations",
+                    error = %message,
+                    "recommended-importers refresh failed; the cached manifest stays in force",
+                );
+                Ok(recommended_importers::Refreshed::Unreachable(message))
+            }
+        }
+    }
+
+    /// Replace the cached manifest with `raw`, which the caller has
+    /// already parsed successfully.
+    ///
+    /// Writing the document before the ETag matters: a crash between the
+    /// two costs one full download next launch, whereas the other order
+    /// would leave an ETag describing a document GMM does not hold and
+    /// a 304 it could not act on.
+    async fn store_recommended_manifest(&self, raw: &str, etag: Option<&str>) -> Result<()> {
+        put_setting(
+            &self.pool,
+            recommended_importers::cache_keys::DOCUMENT,
+            Some(raw),
+        )
+        .await?;
+        put_setting(&self.pool, recommended_importers::cache_keys::ETAG, etag).await?;
+        // A readable document clears the "your build is too old" state:
+        // whatever it was complaining about is no longer what GMM holds.
+        put_setting(
+            &self.pool,
+            recommended_importers::cache_keys::UNUSABLE_REASON,
+            None,
+        )
+        .await
     }
 
     /// The Importer Origin the current install was performed from.
