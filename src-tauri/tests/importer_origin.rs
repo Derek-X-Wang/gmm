@@ -104,7 +104,10 @@ fn with_no_override_and_no_manifest_a_game_resolves_to_its_compiled_in_default()
 
 #[test]
 fn a_user_override_outranks_both_the_manifest_and_the_default() {
-    let recommended = Recommendation::Recommended(a_recommended_origin());
+    let recommended = Recommendation::Recommended {
+        origin: a_recommended_origin(),
+        reason: None,
+    };
     let resolved = resolve(
         &StoredOverride::Set(a_users_own_origin()),
         Some(&recommended),
@@ -122,7 +125,10 @@ fn a_user_override_outranks_both_the_manifest_and_the_default() {
 
 #[test]
 fn a_recommendation_outranks_the_compiled_in_default() {
-    let recommended = Recommendation::Recommended(a_recommended_origin());
+    let recommended = Recommendation::Recommended {
+        origin: a_recommended_origin(),
+        reason: None,
+    };
     let resolved = resolve(
         &StoredOverride::NotSet,
         Some(&recommended),
@@ -649,5 +655,67 @@ fn nothing_in_the_ui_announces_that_an_install_has_an_unknown_origin() {
     assert!(
         offenders.is_empty(),
         "unknown Importer Origin must not be surfaced proactively: {offenders:?}",
+    );
+}
+
+// ---------------------------------------------------------------------
+// #109 — building an origin out of what a user typed.
+//
+// The override control is free text, so this is the one place an
+// `ImporterOrigin` is constructed from something nobody validated. Every
+// rejection has to name what is wrong: the user is staring at three
+// boxes and one of them is the problem.
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_typed_origin_is_accepted_with_its_spelling_preserved() {
+    let origin = ImporterOrigin::from_user_input(
+        "  SilentNightSound ",
+        "GIMI-Package ",
+        r"GIMI-PACKAGE-v\d+\.\d+\.\d+\.zip",
+    )
+    .expect("a well-formed origin");
+
+    assert_eq!(origin.repo_slug(), "SilentNightSound/GIMI-Package");
+    assert_eq!(origin.asset_pattern(), r"GIMI-PACKAGE-v\d+\.\d+\.\d+\.zip");
+}
+
+#[test]
+fn a_blank_field_is_rejected_naming_the_field() {
+    for (owner, repo, pattern, expected) in [
+        ("", "GIMI-Package", r"x\.zip", "owner"),
+        ("SilentNightSound", "  ", r"x\.zip", "repository"),
+        ("SilentNightSound", "GIMI-Package", "", "asset"),
+    ] {
+        let error = ImporterOrigin::from_user_input(owner, repo, pattern)
+            .expect_err("a blank field cannot make an origin");
+        assert!(
+            error.to_lowercase().contains(expected),
+            "the message has to say which box is empty; got {error:?}",
+        );
+    }
+}
+
+#[test]
+fn an_owner_repo_pasted_into_one_box_is_rejected_rather_than_silently_wrong() {
+    // `owner/repo` pasted whole into the owner box would otherwise build
+    // an origin whose slug is `owner/repo/repo` — a URL that 404s at
+    // install time with nothing pointing back at the typo.
+    let error =
+        ImporterOrigin::from_user_input("SilentNightSound/GIMI-Package", "GIMI-Package", "x")
+            .expect_err("a slash in the owner is a paste, not an owner");
+    assert!(error.contains('/'), "got {error:?}");
+}
+
+#[test]
+fn an_asset_pattern_that_is_not_a_regex_is_rejected_at_the_point_of_entry() {
+    // The same rule the manifest is held to (#79 / #123): compile it
+    // once, up front, rather than storing something that fails later
+    // during an install the user has already committed to.
+    let error = ImporterOrigin::from_user_input("owner", "repo", "GIMI-PACKAGE-v[")
+        .expect_err("an uncompilable pattern is not an asset match");
+    assert!(
+        error.to_lowercase().contains("regular expression"),
+        "got {error:?}",
     );
 }

@@ -509,3 +509,147 @@ export function partitionLaunchError(
   }
   return { isAvPattern: false, message };
 }
+
+// ---- Importer Origin surface (ADR 0005 / #109) ----
+
+/**
+ * A GitHub Importer Origin. `asset_pattern` is snake_case because this
+ * shape is also what GMM persists in its settings table — renaming the
+ * field would make every already-recorded origin unreadable.
+ */
+export interface ImporterOriginRef {
+  kind: "gitHubRelease";
+  owner: string;
+  repo: string;
+  asset_pattern: string;
+}
+
+/** `owner/repo`, the form GitHub and the UI both use. */
+export function originSlug(origin: ImporterOriginRef): string {
+  return `${origin.owner}/${origin.repo}`;
+}
+
+/** Which precedence layer supplied the origin in effect. */
+export type OriginLayer =
+  | "userOverride"
+  | "recommendedManifest"
+  | "compiledInDefault";
+
+/**
+ * Which origin is in effect, or that none is. Deliberately not
+ * `ImporterOriginRef | null`: "no origin is in effect" is a real state
+ * with a reason to show, not a missing value.
+ */
+export type OriginResolution =
+  | { state: "inEffect"; origin: ImporterOriginRef; layer: OriginLayer }
+  | { state: "noneInEffect"; reason: string | null };
+
+/**
+ * The origin an install came from. `unknown` means no install GMM
+ * performed — a first-class state, never "not installed" and never
+ * backfilled. `unreadable` makes the opposite claim: GMM did perform the
+ * install and can no longer say from where.
+ */
+export type InstalledOrigin =
+  | ({ state: "known" } & Omit<ImporterOriginRef, "kind"> & { kind: "gitHubRelease" })
+  | { state: "unknown" }
+  | { state: "unreadable"; raw: string; error: string };
+
+export type OverrideState =
+  | { state: "notSet" }
+  | ({ state: "set" } & ImporterOriginRef)
+  | { state: "unreadable"; raw: string; error: string };
+
+/** Which origin an ordinary Install / Update would act on. */
+export type InstallTarget =
+  | ({ state: "installed" } & ImporterOriginRef)
+  | { state: "resolved"; origin: ImporterOriginRef; layer: OriginLayer }
+  | { state: "noneInEffect"; reason: string | null }
+  | { state: "installedUnreadable"; raw: string; error: string };
+
+export interface OriginProposal {
+  origin: ImporterOriginRef;
+  /** The manifest entry's explanation, when it wrote one down. */
+  reason: string | null;
+  replaces: InstalledOrigin;
+}
+
+export interface ImporterOriginStatus {
+  game: GameCode;
+  displayName: string;
+  resolved: OriginResolution;
+  installTarget: InstallTarget;
+  installed: InstalledOrigin;
+  userOverride: OverrideState;
+  compiledDefault: ImporterOriginRef | null;
+  proposal: OriginProposal | null;
+  dismissed: ImporterOriginRef[];
+  /** GMM holds dismissal state it cannot read. Shown, never swallowed. */
+  dismissalsError: string | null;
+  recommendationsEnabled: boolean;
+  recommendationsUnusableReason: string | null;
+}
+
+export async function importerOriginStatus(
+  game: GameCode,
+): Promise<ImporterOriginStatus> {
+  return invoke<ImporterOriginStatus>("importer_origin_status", { game });
+}
+
+/** What the override editor collects. Validated in Rust, not here. */
+export interface ImporterOriginInput {
+  owner: string;
+  repo: string;
+  assetPattern: string;
+}
+
+export async function setImporterOriginOverride(
+  game: GameCode,
+  origin: ImporterOriginInput | null,
+): Promise<void> {
+  await invoke("set_importer_origin_override", { game, origin });
+}
+
+/**
+ * Accept the proposed Importer Origin: install from it, backing up and
+ * leaving the move rollbackable. There is deliberately no way to record
+ * an origin without installing.
+ */
+export async function acceptImporterOriginProposal(
+  game: GameCode,
+): Promise<InstallReport> {
+  return invoke<InstallReport>("accept_importer_origin_proposal", { game });
+}
+
+export async function dismissImporterOrigin(
+  game: GameCode,
+  origin: ImporterOriginInput,
+): Promise<void> {
+  await invoke("dismiss_importer_origin", { game, origin });
+}
+
+export async function restoreImporterOrigin(
+  game: GameCode,
+  origin: ImporterOriginInput,
+): Promise<void> {
+  await invoke("restore_importer_origin", { game, origin });
+}
+
+export async function importerRecommendationsEnabled(): Promise<boolean> {
+  return invoke<boolean>("importer_recommendations_enabled");
+}
+
+export async function setImporterRecommendationsEnabled(
+  enabled: boolean,
+): Promise<void> {
+  await invoke("set_importer_recommendations_enabled", { enabled });
+}
+
+/** An `ImporterOriginRef` as the commands want it. */
+export function toOriginInput(origin: ImporterOriginRef): ImporterOriginInput {
+  return {
+    owner: origin.owner,
+    repo: origin.repo,
+    assetPattern: origin.asset_pattern,
+  };
+}

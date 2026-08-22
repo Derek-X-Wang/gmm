@@ -2,6 +2,7 @@
 
 Date: 2026-08-17
 Status: Accepted
+Amended: 2026-08-21 (#109) — the propose-versus-takes-effect rule, clarified below. The decision is unchanged; the wording that produced the ambiguity is not.
 
 ## Context
 
@@ -43,6 +44,16 @@ GMM never maintains, forks, hosts, or mirrors Model Importer packages. Instead:
 
 **The manifest proposes and never auto-applies.** ADR 0004 requires it: GMM notifies, the user applies, nothing reaches a game directory without an explicit click.
 
+**A recommendation determines the Importer Origin for an install that does not exist yet. An existing install's origin changes only when the user accepts a proposal. Update never switches origin.** *(Clarified 2026-08-21, #109. The original wording stated the three-layer precedence and "proposes and never auto-applies" side by side without saying where the boundary between them fell, and it was implemented as "resolution applies everywhere" — including for the ordinary Update action.)*
+
+The risk is asymmetric, which is where the boundary comes from. A fresh install has no game directory to damage and the user has just clicked Install, so honouring the recommendation is both safe and the entire point of the mechanism. An *existing* install is where silent substitution would rewrite a game directory with a different maintainer's package, and ADR 0004's posture is that nothing reaches a game directory without a click.
+
+This removes an incoherence rather than adding a rule. Changing origin already **invalidates the install and requires a fresh one** (see the consequence below), so an "update" across an origin change was contradictory: the thing being updated is not the thing installed. A secondary consequence worth naming is that comparing a version string taken against origin Y with the latest release of origin X produces a meaningless `upstream_ahead`; under this rule that comparison never arises, because the update path only ever looks at the origin the install actually came from.
+
+**Retraction is unaffected.** A `none` entry only *removes* GMM's own default and never installs anything, so it still takes effect: a retracted game has no origin in effect and nothing to install from until the user supplies one. Substituting a *different* origin is a separate act, and that is the one this rule governs.
+
+*Rejected: proposing only, including for fresh installs.* It would make the manifest useless in the case where it is safest, and leave the compiled-in defaults as the real source of truth while the manifest pretended otherwise.
+
 **Entries are tagged, keyed by game, and a `none` status retracts the compiled-in default.** Three states must never collapse into each other: an origin is recommended; there is explicitly no recommendation, which *clears* layer 3 so no origin is in effect until the user supplies one; and the game is simply absent from the file, which falls through to layer 3. A tagged discriminator rather than a nullable value, because `null` and key-absent are one keystroke apart and many JSON tools drop null keys — turning an editing accident into "every user quietly gets the dead default back". Retraction is the honest reading of the state: GMM publishes no-recommendation precisely *because* the compiled-in default went bad, so falling through would make the state do no work at all. A manifest the build cannot interpret at all behaves as absent, never as retraction, and drops the whole layer rather than being partially applied.
 
 **The last successfully fetched manifest is authoritative until replaced.** Refresh is a background best-effort once per app start; nothing waits on it and a failure is invisible to the user, because the cache is still in force and still correct. Without a cache, a user's configuration would flap with their network — and in the wrong direction, quietly restoring a package GMM had withdrawn. Silence in the UI is a product choice; a failed fetch must never be collapsed into "recommends nothing" anywhere in the data model, which is the defect that left the Loader update check reporting "up to date" for its entire life (#78).
@@ -64,6 +75,7 @@ Two supporting commitments follow: CI validates the manifest's shape offline on 
 - **`main` can never be renamed and the manifest path can never move.** Every build ever shipped requests exactly one URL, forever. This is a permanent constraint on the repository, not a preference.
 - **A valid-but-wrong manifest reaches every user immediately.** Raw content is served with a cache measured in minutes, and there is no staged rollout. The review gate on `main` plus offline shape validation are the only things standing between a bad commit and every install; that is why the gate, not the branch, drove the location decision.
 - **A user who opts out and later sits on a dead compiled-in default gets no warning.** They have explicitly taken on managing this themselves, and their own override sits above everything regardless.
+- **The only act that moves an existing install onto a different origin is the user accepting a proposal** — or setting their own override, which is the same explicit act one layer up. Recording an origin *without* installing is deliberately not offered: it would assert an origin and a version for files GMM has never seen, and pin clearing, the update badge and the proposal logic all read that record.
 - **Switching Importer Origin invalidates the install.** The game directory still physically holds the old package, so the install is cleared and must be re-run; `backup_existing` and `rollback_to` bound the downside. A user with a working hand-install who accepts a recommendation gets their game directory rewritten — acceptable, because accepting is an explicit act on a prompt that says so.
 - **Origin equality is load-bearing in three places** — the decline key, the pin-clearing trigger, and install bookkeeping — so it is compared case-insensitively, since GitHub treats owner/repo case-insensitively and a capitalisation fix must not re-prompt everyone who declined.
 - **GMM now curates an opinion about third-party software.** That is a small, ongoing editorial responsibility with no code attached, and the scheduled resolution check is what keeps it from silently rotting.

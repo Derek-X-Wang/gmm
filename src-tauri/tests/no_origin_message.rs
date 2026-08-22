@@ -1,24 +1,28 @@
-//! Issue #127 — the "no Importer Origin in effect" message tells the
-//! user the truth and does not point at a control that does not exist.
+//! Issue #127, revisited by #109 — the "no Importer Origin in effect"
+//! message tells the user the truth about where the control is.
 //!
-//! When a game has no Importer Origin in effect, install and the update
-//! check both told the user to *choose one in Settings*. There is no
-//! such control: no origin command is registered with Tauri and nothing
-//! in the frontend exposes one. The surface that will provide it is
-//! #109, still open.
+//! #127 removed "choose one in Settings" from these messages, and the
+//! reason was not that pointing at a control is wrong: it was that **the
+//! control did not exist**. No origin command was registered and nothing
+//! in the frontend exposed one, so the copy sent every user of a
+//! retracted game somewhere they could not go. The test written then
+//! said so explicitly — "no user-facing no-origin message may mention
+//! Settings until Settings actually has the control" — and noted that
+//! #109 would have to change it, which is the point: the copy gets
+//! revisited on purpose rather than inherited.
 //!
-//! This is a mechanism problem rather than a HIMI problem. HIMI is the
-//! game that reaches the state today, because its manifest entry
+//! #109 built the control. So the assertion inverts: these messages must
+//! now name it, and must name the *same* one, which is why they all
+//! render a single constant rather than each spelling it out.
+//!
+//! This remains a mechanism problem rather than a HIMI problem. HIMI is
+//! the game that reaches the state today, because its manifest entry
 //! deliberately retracts the compiled-in default (ADR 0005 — the
 //! upstream package is 13 months stale and carries no licence). The
-//! message is wrong for *any* retracted game, and will be wrong for the
-//! next one.
-//!
-//! The assertion is deliberately blunt: no user-facing no-origin message
-//! may mention Settings until Settings actually has the control. When
-//! #109 lands it will have to change this test, which is the point —
-//! the copy gets revisited on purpose rather than inherited.
+//! message has to be right for *any* retracted game, and for the next
+//! one.
 
+use gmm_lib::core::error::SET_AN_ORIGIN_HINT;
 use gmm_lib::core::importer_origin::{
     resolve, ImporterOrigin, OriginResolution, Recommendation, StoredOverride,
 };
@@ -65,21 +69,23 @@ async fn core_with_gimi_retracted(tmp: &TempDir) -> (Core, mockito::ServerGuard)
     (core, server)
 }
 
-fn assert_points_at_no_imaginary_control(context: &str, message: &str) {
+/// Every no-origin message points the user at the control that exists,
+/// by rendering the one constant that names it.
+///
+/// Asserting on the constant rather than on a phrase is what stops the
+/// two drifting apart again: renaming the control changes the constant,
+/// and every message that failed to render it fails here.
+fn assert_points_at_the_real_control(context: &str, message: &str) {
     assert!(
-        !message.to_lowercase().contains("settings"),
-        "{context}: the message sends the user to Settings, which has no Importer \\
-         Origin control — #109 is the ticket that adds one. Message was: {message}",
-    );
-    assert!(
-        !message.to_lowercase().contains("choose one"),
-        "{context}: \"choose one\" is an instruction to use a control that does not \\
-         exist. Message was: {message}",
+        message.contains(SET_AN_ORIGIN_HINT),
+        "{context}: a user told GMM cannot proceed has to be told what to do \
+         about it, and the Importer Origin control now exists to do it with. \
+         Message was: {message}",
     );
 }
 
 #[tokio::test]
-async fn the_install_failure_for_a_retracted_game_does_not_send_the_user_to_settings() {
+async fn the_install_failure_for_a_retracted_game_names_the_origin_control() {
     let tmp = TempDir::new().expect("tmp");
     let (core, _server) = core_with_gimi_retracted(&tmp).await;
     core.set_game_install_path(GameCode::Gimi, &tmp.path().join("Genshin"))
@@ -92,7 +98,7 @@ async fn the_install_failure_for_a_retracted_game_does_not_send_the_user_to_sett
         .expect_err("a retracted game has nothing to install from");
     let message = error.to_string();
 
-    assert_points_at_no_imaginary_control("install", &message);
+    assert_points_at_the_real_control("install", &message);
     assert!(
         message.contains("Genshin Impact"),
         "the message must name the game it is about: {message}",
@@ -104,7 +110,7 @@ async fn the_install_failure_for_a_retracted_game_does_not_send_the_user_to_sett
 }
 
 #[tokio::test]
-async fn the_update_check_for_a_retracted_game_does_not_send_the_user_to_settings() {
+async fn the_update_check_for_a_retracted_game_names_the_origin_control() {
     let tmp = TempDir::new().expect("tmp");
     let (core, _server) = core_with_gimi_retracted(&tmp).await;
 
@@ -117,12 +123,12 @@ async fn the_update_check_for_a_retracted_game_does_not_send_the_user_to_setting
                  reporting itself up to date",
     );
 
-    assert_points_at_no_imaginary_control("update check", &message);
+    assert_points_at_the_real_control("update check", &message);
     assert!(!status.available, "nothing can be applied");
 }
 
 #[test]
-fn the_unreadable_override_message_does_not_send_the_user_to_settings_either() {
+fn an_unreadable_override_explains_its_own_cause() {
     // Same mechanism, different cause (#124): a stored override GMM
     // cannot read leaves no origin in effect, and the reason it carries
     // travels to exactly the same places.
@@ -136,9 +142,11 @@ fn the_unreadable_override_message_does_not_send_the_user_to_settings_either() {
     );
     match resolved {
         OriginResolution::NoneInEffect { reason } => {
-            assert_points_at_no_imaginary_control(
-                "unreadable override",
-                &reason.expect("the user has to be told something"),
+            let reason = reason.expect("the user has to be told something");
+            assert!(
+                reason.contains("could not read"),
+                "the reason has to name the cause; the control is named by the \
+                 message that carries this reason. Was: {reason}",
             );
         }
         other => panic!("expected no origin in effect; got {other:?}"),

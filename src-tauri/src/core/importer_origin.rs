@@ -62,6 +62,64 @@ impl ImporterOrigin {
         })
     }
 
+    /// Build a GitHub release origin from what a user typed into the
+    /// override control (#109).
+    ///
+    /// The one place an [`ImporterOrigin`] is constructed from
+    /// unvalidated input — everywhere else it comes from the compiled-in
+    /// defaults or from a manifest that has already been through
+    /// [`crate::core::recommended_importers::parse`]. Every rejection
+    /// names the offending field, because the user is looking at three
+    /// boxes and one of them is the problem.
+    ///
+    /// Surrounding whitespace is trimmed rather than rejected: it is
+    /// what a paste leaves behind, and the value goes into a URL where
+    /// it would be a 404 with no explanation. The *asset pattern* is
+    /// trimmed too but otherwise untouched — it is a regex, and its
+    /// interior is the user's business.
+    pub fn from_user_input(
+        owner: &str,
+        repo: &str,
+        asset_pattern: &str,
+    ) -> std::result::Result<Self, String> {
+        let owner = owner.trim();
+        let repo = repo.trim();
+        let asset_pattern = asset_pattern.trim();
+
+        if owner.is_empty() {
+            return Err("Enter the GitHub owner the Model Importer is published under.".into());
+        }
+        if repo.is_empty() {
+            return Err("Enter the GitHub repository the Model Importer is published in.".into());
+        }
+        if asset_pattern.is_empty() {
+            return Err(
+                r"Enter the asset pattern that picks the package out of a release, for example GIMI-PACKAGE-v\d+\.\d+\.\d+\.zip."
+                    .into(),
+            );
+        }
+        // `owner/repo` pasted whole into one box would otherwise build a
+        // slug of `owner/repo/repo`: a URL that 404s during an install
+        // the user has already committed to, with nothing pointing back
+        // at the typo.
+        for (field, value) in [("owner", owner), ("repository", repo)] {
+            if value.contains('/') {
+                return Err(format!(
+                    "The {field} must not contain a \"/\" — put the owner and \
+                     the repository in their own boxes."
+                ));
+            }
+        }
+        // Compiled here, once, for the reason #123 gives for compiling
+        // the manifest's patterns at parse time: a pattern that cannot
+        // compile must fail while the user is looking at the box, not
+        // later during an install.
+        crate::core::importer::AssetPattern::new(asset_pattern)
+            .map_err(|e| format!("The asset pattern is not a valid regular expression: {e}"))?;
+
+        Ok(ImporterOrigin::github(owner, repo, asset_pattern))
+    }
+
     pub fn owner(&self) -> &str {
         match self {
             ImporterOrigin::GitHubRelease(o) => &o.owner,
@@ -136,7 +194,19 @@ impl Eq for ImporterOrigin {}
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum Recommendation {
     /// GMM recommends this origin for the game.
-    Recommended(ImporterOrigin),
+    ///
+    /// A struct variant rather than a newtype so it can carry the
+    /// manifest entry's optional `reason` (#109). `manifest/README.md`
+    /// has documented that field since the file was written and the
+    /// committed manifest uses it, but the parser dropped it: the only
+    /// `reason` that reached the app was the one on a retraction. The
+    /// accept/decline prompt is where it earns its place — a trust
+    /// prompt with no grounds to evaluate is one people dismiss on
+    /// reflex.
+    Recommended {
+        origin: ImporterOrigin,
+        reason: Option<String>,
+    },
     /// GMM has no recommendation. This **retracts** the compiled-in
     /// default: no origin is in effect until the user supplies one.
     #[serde(rename = "none")]
@@ -296,7 +366,7 @@ pub fn resolve(
     // Layer 2. A recommendation applies; a retraction stops here rather
     // than falling through to layer 3.
     match recommendation {
-        Some(Recommendation::Recommended(origin)) => {
+        Some(Recommendation::Recommended { origin, .. }) => {
             return OriginResolution::InEffect {
                 origin: origin.clone(),
                 layer: OriginLayer::RecommendedManifest,
@@ -399,6 +469,17 @@ pub mod keys {
     /// a missing value to be filled in.
     pub fn installed_origin(game: GameCode) -> String {
         format!("importer.{}.installed_origin", game.as_str())
+    }
+
+    /// The Importer Origins the user has declined for this game, as a
+    /// JSON array (#95 / #109).
+    ///
+    /// Per-game and keyed by origin, which is the scope #95 settled on:
+    /// a game-wide suppression would silently strand the user a later
+    /// recommendation is meant to rescue, and a version-scoped one would
+    /// re-prompt several times a week.
+    pub fn declined_origins(game: GameCode) -> String {
+        format!("importer.{}.declined_origins", game.as_str())
     }
 }
 
@@ -530,6 +611,117 @@ pub fn is_worth_proposing(
     }
 }
 
+/// Which Importer Origin an ordinary Install / Update action acts on.
+///
+/// Four outcomes rather than an `Option<ImporterOrigin>`, because the
+/// two that carry no origin make different claims and need different
+/// messages, and because *which* of the two origins was chosen is the
+/// thing this decision is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallOrigin {
+    /// The origin the recorded install came from. Update stays here.
+    Installed(ImporterOrigin),
+    /// GMM has no install of its own to preserve, so the resolved
+    /// origin decides — which is exactly what a recommendation is for.
+    Resolved {
+        origin: ImporterOrigin,
+        layer: OriginLayer,
+    },
+    /// No origin is in effect, so there is nothing to install from.
+    /// Warn, never block (#97).
+    NoneInEffect { reason: Option<String> },
+    /// An install is recorded and GMM cannot read the origin it came
+    /// from (#124). Not an origin, and deliberately not silently
+    /// answered with a different one.
+    InstalledUnreadable { raw: String, error: String },
+}
+
+/// Decide which Importer Origin an ordinary Install / Update acts on.
+///
+/// **A recommendation decides a *new* install; it never switches an
+/// existing one** (#109). ADR 0005 read both ways — a three-layer
+/// precedence *and* "the manifest proposes and never auto-applies" — and
+/// as built, resolution drove every path including the ordinary Update
+/// action. An existing install's origin now changes only when the user
+/// accepts a proposal.
+///
+/// The risk is asymmetric, which is why the two halves differ:
+///
+/// - A **fresh** install has no game directory to damage and the user
+///   has just clicked Install, so honouring the recommendation is both
+///   safe and the entire point of the mechanism. Proposing even here was
+///   rejected: it would make the manifest useless in the case where it
+///   is safest, leaving the compiled-in defaults as the real source of
+///   truth while the manifest pretended otherwise.
+/// - An **existing** install is where silent substitution would rewrite
+///   a game directory with a different maintainer's package, and ADR
+///   0004's posture is that nothing reaches a game directory without a
+///   click.
+///
+/// It removes an incoherence rather than adding a rule: #110 already
+/// established that changing origin **invalidates the install and
+/// requires a fresh one**, so an "update" across an origin change was
+/// contradictory — the thing being updated is not the thing installed.
+/// A secondary consequence is that comparing a version taken against
+/// origin Y with the latest release of origin X, which produces a
+/// meaningless `upstream_ahead`, can no longer arise.
+///
+/// **Retraction is unaffected** (#97) and is checked first. It only
+/// *removes* GMM's own default and never installs anything, so a
+/// recorded origin is not a licence to keep pulling releases from a
+/// package GMM has withdrawn. Substituting a different origin is a
+/// different act, and that is the one this governs.
+pub fn origin_for_install(
+    installed: &InstalledOrigin,
+    resolution: &OriginResolution,
+) -> InstallOrigin {
+    let (origin, layer) = match resolution {
+        OriginResolution::InEffect { origin, layer } => (origin, *layer),
+        OriginResolution::NoneInEffect { reason } => {
+            return InstallOrigin::NoneInEffect {
+                reason: reason.clone(),
+            }
+        }
+    };
+
+    match installed {
+        // Including when it equals the resolved origin: "stay where you
+        // are" and "go where you already are" are the same instruction,
+        // and case-insensitive origin equality means a capitalisation
+        // fix upstream is not a different package either way.
+        InstalledOrigin::Known(current) => InstallOrigin::Installed(current.clone()),
+        InstalledOrigin::Unknown => InstallOrigin::Resolved {
+            origin: origin.clone(),
+            layer,
+        },
+        // "We could not tell" must not be rendered as "then use this
+        // one" — that is precisely the switch this rule forbids,
+        // performed on the one install GMM understands least. The
+        // caller surfaces it; it never quietly becomes an origin.
+        //
+        // Unless the origin in effect is the **user's own**, which is
+        // not GMM substituting an opinion but the user saying where this
+        // game's importer comes from — the same explicit act as
+        // accepting a proposal. That exception is also what keeps the
+        // refusal from being permanent: setting an override does not
+        // clear an unreadable record ([`change_effects`] deliberately
+        // keeps the install, because the recorded *version* still
+        // describes real files), so without it every later Install would
+        // hit the same refusal with no way out. The install it performs
+        // replaces the unreadable record.
+        InstalledOrigin::Unreadable { .. } if layer == OriginLayer::UserOverride => {
+            InstallOrigin::Resolved {
+                origin: origin.clone(),
+                layer,
+            }
+        }
+        InstalledOrigin::Unreadable { raw, error } => InstallOrigin::InstalledUnreadable {
+            raw: raw.clone(),
+            error: error.clone(),
+        },
+    }
+}
+
 /// Whether GMM has an Importer Origin change to *propose* for a game,
 /// and which origin it would propose.
 ///
@@ -567,4 +759,242 @@ pub fn pending_change<'a>(
     };
 
     is_worth_proposing(installed, origin, compiled_default).then_some(origin)
+}
+
+// ---------------------------------------------------------------------
+// The recommendation surface (#109) — what the user sees and answers.
+// ---------------------------------------------------------------------
+
+/// [`StoredOverride`] as the UI sees it.
+///
+/// A separate type from the domain value so the IPC shape can be chosen
+/// for a TypeScript reader without pinning the internal representation,
+/// and so the three states survive the crossing. In particular
+/// [`Self::Unreadable`] must not be flattened into [`Self::NotSet`] on
+/// the way out: "the user set nothing" and "the user set something GMM
+/// cannot read" ask for opposite things from the surface — an empty
+/// editor versus an explanation and a way to replace the value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum OverrideView {
+    NotSet,
+    Set(ImporterOrigin),
+    Unreadable { raw: String, error: String },
+}
+
+impl From<&StoredOverride> for OverrideView {
+    fn from(stored: &StoredOverride) -> Self {
+        match stored {
+            StoredOverride::NotSet => OverrideView::NotSet,
+            StoredOverride::Set(origin) => OverrideView::Set(origin.clone()),
+            StoredOverride::Unreadable { raw, error } => OverrideView::Unreadable {
+                raw: raw.clone(),
+                error: error.clone(),
+            },
+        }
+    }
+}
+
+/// The Importer Origins a user has declined for one game.
+///
+/// Scoped **to the origin**, per #95: not to the game, which would
+/// silently strand the one user who most needs a later fix, and not to
+/// origin plus version, which would re-prompt on every upstream release
+/// — GIMI shipped two on one day. Entry-scoped was rejected too: a
+/// copy-edit to a `reason` string would re-nag everyone who declined.
+///
+/// Three states for the same reason [`StoredOverride`] has three (#124):
+/// a stored value that cannot be read back is not the same thing as no
+/// stored value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredDeclines {
+    /// Nothing has been declined for this game.
+    NotSet,
+    /// The origins the user has declined, in the order they declined
+    /// them.
+    Set(Vec<ImporterOrigin>),
+    /// Something is stored and this build cannot read it.
+    Unreadable { raw: String, error: String },
+}
+
+impl StoredDeclines {
+    /// Decode a stored settings value. `None` is [`Self::NotSet`]; text
+    /// that does not parse is [`Self::Unreadable`], never absence and
+    /// never an empty list.
+    pub fn decode(raw: Option<String>) -> Self {
+        let Some(raw) = raw else {
+            return StoredDeclines::NotSet;
+        };
+        match serde_json::from_str::<Vec<ImporterOrigin>>(&raw) {
+            Ok(origins) => StoredDeclines::Set(origins),
+            Err(e) => StoredDeclines::Unreadable {
+                raw,
+                error: e.to_string(),
+            },
+        }
+    }
+
+    /// The declined origins, for the affordance that makes them visible
+    /// and reversible. Empty for both of the non-`Set` states — a
+    /// dismissal GMM cannot read is not a dismissal it can offer to
+    /// undo, so it is reported through
+    /// [`OriginStatus::dismissals_error`] instead of appearing here as a
+    /// row that does nothing.
+    pub fn origins(&self) -> &[ImporterOrigin] {
+        match self {
+            StoredDeclines::Set(origins) => origins,
+            StoredDeclines::NotSet | StoredDeclines::Unreadable { .. } => &[],
+        }
+    }
+
+    /// Whether a proposal of `origin` should stay quiet.
+    ///
+    /// [`Self::Unreadable`] answers **no**, and that is the deliberate
+    /// direction. GMM cannot tell whether this proposal was declined, so
+    /// it either shows a prompt the user may have already answered, or
+    /// hides one they have not. A proposal applies nothing on its own —
+    /// the cost of the first is a click, the cost of the second is a
+    /// user stranded on a dead importer with the fix silenced by a
+    /// corrupt row. Declining again also rewrites the row, so the state
+    /// heals rather than persisting.
+    pub fn suppresses(&self, origin: &ImporterOrigin) -> bool {
+        self.origins().iter().any(|o| o == origin)
+    }
+
+    /// The list to store after declining `origin`. Idempotent: declining
+    /// twice records one dismissal.
+    ///
+    /// From [`Self::Unreadable`] this starts a fresh list rather than
+    /// merging, because there is nothing readable to merge with. That is
+    /// the healing path named in [`Self::suppresses`].
+    pub fn with(&self, origin: &ImporterOrigin) -> Vec<ImporterOrigin> {
+        let mut next = self.origins().to_vec();
+        if !next.iter().any(|o| o == origin) {
+            next.push(origin.clone());
+        }
+        next
+    }
+
+    /// The list to store after undoing the dismissal of `origin`.
+    pub fn without(&self, origin: &ImporterOrigin) -> Vec<ImporterOrigin> {
+        self.origins()
+            .iter()
+            .filter(|o| *o != origin)
+            .cloned()
+            .collect()
+    }
+
+    /// The read failure to surface, or `None` when there was none.
+    pub fn error(&self) -> Option<String> {
+        match self {
+            StoredDeclines::Unreadable { error, .. } => Some(error.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// An Importer Origin change GMM is offering, and the grounds for it.
+///
+/// Answering it is the *only* way an existing install's origin changes
+/// (#109), and accepting it is the only way an unknown origin becomes
+/// known (#99).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginProposal {
+    /// The origin the user is being offered.
+    pub origin: ImporterOrigin,
+    /// The manifest entry's optional explanation. Present only when the
+    /// proposal comes from a recommendation that wrote one down — it is
+    /// the difference between a trust prompt someone can evaluate and
+    /// one they dismiss on reflex.
+    pub reason: Option<String>,
+    /// What accepting replaces. The prompt has to say plainly what it
+    /// will do: a user with an unknown-origin install who accepts gets
+    /// their game directory rewritten, and that is the accepted cost.
+    pub replaces: InstalledOrigin,
+}
+
+/// Everything one game's Importer Origin surface needs, in one read.
+///
+/// One aggregate rather than six commands because these values are only
+/// meaningful together: a resolved origin without its layer cannot be
+/// explained, a proposal without the dismissal state cannot be rendered,
+/// and a dismissal list without the global switch would offer to undo
+/// something that is switched off entirely.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginStatus {
+    pub game: crate::core::games::GameCode,
+    pub display_name: String,
+    /// Which origin is in effect and which layer supplied it — or that
+    /// none is, with the reason to show the user. Never a bare
+    /// `Option`: see [`OriginResolution`].
+    pub resolved: OriginResolution,
+    /// Which origin an ordinary Install / Update would act on. Differs
+    /// from `resolved` exactly when a recommendation is proposing a
+    /// change that has not been accepted (#109).
+    pub install_target: InstallTargetView,
+    /// The origin the recorded install came from, `unknown` included.
+    pub installed: InstalledOrigin,
+    pub user_override: OverrideView,
+    /// The compiled-in default, so the surface can say what clearing an
+    /// override falls back to.
+    pub compiled_default: Option<ImporterOrigin>,
+    /// The change GMM is offering, if any and if not dismissed.
+    pub proposal: Option<OriginProposal>,
+    /// Origins the user has declined for this game, so the dismissal is
+    /// visible and reversible where the user is looking at the affected
+    /// game. Empty while recommendations are switched off — the whole
+    /// layer is gone, not just its fetch.
+    pub dismissed: Vec<ImporterOrigin>,
+    /// Set when GMM holds dismissal state it cannot read. Surfaced
+    /// rather than swallowed: silently reading it as "nothing was
+    /// declined" is the benign-looking value this codebase has shipped
+    /// three times.
+    pub dismissals_error: Option<String>,
+    pub recommendations_enabled: bool,
+    /// Why the last manifest GMM fetched could not be used, when that
+    /// happened. `None` while recommendations are off.
+    pub recommendations_unusable_reason: Option<String>,
+}
+
+/// [`InstallOrigin`] as the UI sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum InstallTargetView {
+    /// Update stays on the origin the install came from.
+    Installed(ImporterOrigin),
+    /// Nothing is installed, so the resolved origin decides.
+    Resolved {
+        origin: ImporterOrigin,
+        layer: OriginLayer,
+    },
+    NoneInEffect {
+        reason: Option<String>,
+    },
+    InstalledUnreadable {
+        raw: String,
+        error: String,
+    },
+}
+
+impl From<&InstallOrigin> for InstallTargetView {
+    fn from(target: &InstallOrigin) -> Self {
+        match target {
+            InstallOrigin::Installed(origin) => InstallTargetView::Installed(origin.clone()),
+            InstallOrigin::Resolved { origin, layer } => InstallTargetView::Resolved {
+                origin: origin.clone(),
+                layer: *layer,
+            },
+            InstallOrigin::NoneInEffect { reason } => InstallTargetView::NoneInEffect {
+                reason: reason.clone(),
+            },
+            InstallOrigin::InstalledUnreadable { raw, error } => {
+                InstallTargetView::InstalledUnreadable {
+                    raw: raw.clone(),
+                    error: error.clone(),
+                }
+            }
+        }
+    }
 }

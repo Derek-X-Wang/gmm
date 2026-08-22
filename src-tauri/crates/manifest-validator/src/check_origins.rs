@@ -129,7 +129,11 @@ async fn main() -> ExitCode {
         // retracts the compiled-in default and points nowhere, so there
         // is nothing to resolve — and an absent key is layer 3's
         // business, not this file's.
-        let Some(Recommendation::Recommended(origin)) = manifest.recommendation_for(code) else {
+        // The entry's `reason` is deliberately ignored here: this job
+        // asks whether the origin still resolves, and prose about why it
+        // was chosen has no bearing on that.
+        let Some(Recommendation::Recommended { origin, .. }) = manifest.recommendation_for(code)
+        else {
             continue;
         };
         let slug = origin.repo_slug();

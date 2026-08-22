@@ -60,7 +60,7 @@ fn five_games_are_recommended_and_match_the_compiled_in_defaults() {
         GameCode::Efmi,
     ] {
         match parsed.recommendation_for(game) {
-            Some(Recommendation::Recommended(origin)) => {
+            Some(Recommendation::Recommended { origin, .. }) => {
                 let default = compiled_in_default(game)
                     .unwrap_or_else(|| panic!("{} has no compiled-in default", game.as_str()));
                 assert_eq!(
@@ -370,7 +370,7 @@ fn every_recommended_pattern_compiles_and_selects_its_real_recorded_asset() {
 
     for (game, raw, expected_asset) in recorded {
         let origin = match parsed.recommendation_for(game) {
-            Some(Recommendation::Recommended(origin)) => origin,
+            Some(Recommendation::Recommended { origin, .. }) => origin,
             other => panic!("{} must be recommended, got {other:?}", game.as_str()),
         };
 
@@ -501,4 +501,67 @@ fn an_unknown_game_key_is_skipped_before_its_contents_are_validated() {
         manifest::validate(raw).is_err(),
         "the review gate must still catch an unrecognised game key",
     );
+}
+
+// ---------------------------------------------------------------------
+// #109 — a `recommended` entry's optional `reason` reaches the prompt.
+//
+// `manifest/README.md` has documented `reason` as an optional field on a
+// recommended entry since the file was written, and the committed
+// manifest carries one on `srmi`. The parser dropped it on the floor:
+// it read `reason` only for a `none` entry. Nothing downstream could
+// show it, so the accept/decline prompt had nothing to offer but a
+// repository name — a trust prompt with no grounds to evaluate, which
+// is the one #109 says people dismiss on reflex.
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_recommended_entry_carries_its_reason_through_to_the_app() {
+    use gmm_lib::core::importer_origin::Recommendation;
+
+    let raw = r#"{
+      "schemaVersion": 1,
+      "games": {
+        "gimi": {
+          "status": "recommended",
+          "owner": "SomeoneElse",
+          "repo": "GIMI-Package",
+          "assetPattern": "GIMI-PACKAGE-v\\d+\\.\\d+\\.\\d+\\.zip",
+          "reason": "The original owner archived the repository; this fork carries the fixes."
+        }
+      }
+    }"#;
+
+    match manifest::parse(raw)
+        .expect("parse")
+        .recommendation_for(GameCode::Gimi)
+    {
+        Some(Recommendation::Recommended { reason, .. }) => assert_eq!(
+            reason.as_deref(),
+            Some("The original owner archived the repository; this fork carries the fixes."),
+            "the reason is the only thing that lets a user evaluate the prompt",
+        ),
+        other => panic!("expected a recommendation, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_recommended_entry_without_a_reason_is_still_valid() {
+    use gmm_lib::core::importer_origin::Recommendation;
+
+    // Four of the five committed recommendations carry no reason. The
+    // field is optional and its absence must stay a non-event rather
+    // than becoming a required-field error for every entry in the file.
+    let parsed = manifest::parse(&committed()).expect("parse");
+    match parsed.recommendation_for(GameCode::Gimi) {
+        Some(Recommendation::Recommended { reason, .. }) => assert_eq!(reason, None),
+        other => panic!("gimi must be recommended, got {other:?}"),
+    }
+    match parsed.recommendation_for(GameCode::Srmi) {
+        Some(Recommendation::Recommended { reason, .. }) => assert!(
+            reason.is_some(),
+            "srmi's committed entry explains why its package is named TEST",
+        ),
+        other => panic!("srmi must be recommended, got {other:?}"),
+    }
 }
