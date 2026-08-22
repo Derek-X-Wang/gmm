@@ -42,6 +42,9 @@ $LogDir = Join-Path $RepoRoot "ci-diagnostics"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $InstallLog = Join-Path $LogDir "msi-install.log"
 $UninstallLog = Join-Path $LogDir "msi-uninstall.log"
+$AppProc = $null
+$ManifestListener = $null
+$HeldManifestConnection = $null
 
 function Write-Section($msg) {
     Write-Host ""
@@ -75,6 +78,11 @@ function Dump-Diagnostics {
 
 trap {
     Write-Host "SMOKE FAILED: $_" -ForegroundColor Red
+    if ($null -ne $AppProc) {
+        Stop-Process -Id $AppProc.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $HeldManifestConnection) { $HeldManifestConnection.Dispose() }
+    if ($null -ne $ManifestListener) { $ManifestListener.Stop() }
     Dump-Diagnostics
     exit 1
 }
@@ -130,20 +138,66 @@ Write-Host "exe: $exe"
 # ---------------------------------------------------------------------
 Write-Section "Launch and verify startup"
 
-$proc = Start-Process $exe -PassThru
-Write-Host "launched pid $($proc.Id)"
-
 $dbPath = Join-Path $AppData "gmm.db"
 $logDir = Join-Path $AppData "logs"
 
 # Must match `IPC_READY_MARKER` in src-tauri/src/core/diagnostics.rs.
 # tests/ipc_contract.rs fails if the two drift apart.
 $IpcReadyMarker = "gmm-ipc-ready"
+# Must match `MANIFEST_REFRESH_STARTED_MARKER`. This is separate from
+# readiness: seeing both while the HTTP response is held open proves the
+# refresh ran and did not block the usable application behind the network.
+$ManifestRefreshStartedMarker = "gmm-manifest-refresh-started"
+# Must match `MANIFEST_URL_OVERRIDE_ENV` in recommended_importers.rs.
+$ManifestUrlOverrideEnv = "GMM_RECOMMENDED_IMPORTERS_URL"
+
+function Get-DiagnosticMarkerCount($marker) {
+    if (-not (Test-Path $logDir)) { return 0 }
+    @(Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue |
+        Select-String -SimpleMatch $marker).Count
+}
+
+# Accept the refresh request but never answer it. A blocking startup would
+# now miss the ordinary 90-second readiness deadline; the background refresh
+# reaches its own 20-second timeout without holding up IPC.
+$ManifestListener = [System.Net.Sockets.TcpListener]::new(
+    [System.Net.IPAddress]::Loopback,
+    0
+)
+$ManifestListener.Start()
+$manifestPort = ([System.Net.IPEndPoint]$ManifestListener.LocalEndpoint).Port
+$manifestAccept = $ManifestListener.AcceptTcpClientAsync()
+$manifestUrl = "http://127.0.0.1:$manifestPort/recommended-importers.json"
+
+$ipcBefore = Get-DiagnosticMarkerCount $IpcReadyMarker
+$manifestRefreshBefore = Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker
+$previousManifestUrl = [System.Environment]::GetEnvironmentVariable(
+    $ManifestUrlOverrideEnv,
+    [System.EnvironmentVariableTarget]::Process
+)
+[System.Environment]::SetEnvironmentVariable(
+    $ManifestUrlOverrideEnv,
+    $manifestUrl,
+    [System.EnvironmentVariableTarget]::Process
+)
+try {
+    $AppProc = Start-Process $exe -PassThru
+} finally {
+    [System.Environment]::SetEnvironmentVariable(
+        $ManifestUrlOverrideEnv,
+        $previousManifestUrl,
+        [System.EnvironmentVariableTarget]::Process
+    )
+}
+Write-Host "launched pid $($AppProc.Id) with a held-open manifest endpoint"
 
 $deadline = (Get-Date).AddSeconds(90)
 $dbSeen = $false
 $logSeen = $false
 $ipcSeen = $false
+$manifestRefreshSeen = $false
+$manifestRequestSeen = $false
+$manifestRequestAcceptedAt = $null
 
 while ((Get-Date) -lt $deadline) {
     if (-not $dbSeen -and (Test-Path $dbPath)) {
@@ -155,21 +209,38 @@ while ((Get-Date) -lt $deadline) {
         $logSeen = $true
         Write-Host "log file created (tracing subscriber up)"
     }
-    if ($logSeen -and -not $ipcSeen) {
-        # The app holds these files open; read a copy of the bytes
-        # rather than fighting the writer for a lock.
-        $hit = Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue |
-            ForEach-Object { Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue } |
-            Select-String -SimpleMatch $IpcReadyMarker -Quiet
-        if ($hit) {
+    if ($logSeen) {
+        if (-not $ipcSeen -and
+            (Get-DiagnosticMarkerCount $IpcReadyMarker) -gt $ipcBefore) {
             $ipcSeen = $true
-            Write-Host "IPC readiness marker seen (frontend reached the backend)"
+            Write-Host "new IPC readiness marker seen (frontend reached the backend)"
+        }
+        if (-not $manifestRefreshSeen -and
+            (Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker) -gt $manifestRefreshBefore) {
+            $manifestRefreshSeen = $true
+            Write-Host "new manifest-refresh marker seen"
         }
     }
-    if ($dbSeen -and $logSeen -and $ipcSeen) { break }
+    if (-not $manifestRequestSeen -and $manifestAccept.IsCompletedSuccessfully) {
+        $HeldManifestConnection = $manifestAccept.Result
+        $manifestRequestSeen = $true
+        $manifestRequestAcceptedAt = Get-Date
+        Write-Host "manifest request accepted and deliberately left unanswered"
+    }
+    if ($dbSeen -and $logSeen -and $ipcSeen -and
+        $manifestRefreshSeen -and $manifestRequestSeen) { break }
 
-    if ($proc.HasExited) {
-        throw "GMM exited early with code $($proc.ExitCode) before finishing startup"
+    if ($AppProc.HasExited) {
+        throw "GMM exited early with code $($AppProc.ExitCode) before finishing startup"
+    }
+    # The production fetch has a 20-second total timeout. Give IPC half of
+    # that after the request is accepted: a blocking implementation cannot
+    # reach readiness until the fetch times out, while the background path
+    # has ample time to bring up the already-installed WebView.
+    if (-not $ipcSeen -and $null -ne $manifestRequestAcceptedAt -and
+        (Get-Date) -gt $manifestRequestAcceptedAt.AddSeconds(10)) {
+        throw "IPC did not become ready while the manifest response was still pending — " +
+              "startup appears to be waiting on the network"
     }
     Start-Sleep -Milliseconds 500
 }
@@ -181,11 +252,18 @@ if (-not $ipcSeen) {
           "the backend started but the frontend never completed a command round-trip " +
           "(unregistered command, ACL denial, or a WebView that never loaded)"
 }
+if (-not $manifestRefreshSeen) {
+    throw "timed out waiting for a new manifest-refresh marker " +
+          "'$ManifestRefreshStartedMarker' in $logDir"
+}
+if (-not $manifestRequestSeen) {
+    throw "timed out waiting for the manifest refresh to reach $manifestUrl"
+}
 
 # A crash-on-idle would show up here.
 Start-Sleep -Seconds 5
-if ($proc.HasExited) {
-    throw "GMM exited with code $($proc.ExitCode) shortly after startup"
+if ($AppProc.HasExited) {
+    throw "GMM exited with code $($AppProc.ExitCode) shortly after startup"
 }
 Write-Host "process still alive after startup — no crash loop"
 
@@ -194,7 +272,14 @@ Write-Section "Shut down"
 
 # Must happen before reading gmm.db: the running app holds the SQLite
 # file open, and a read while it's locked fails with a sharing violation.
-Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+Stop-Process -Id $AppProc.Id -Force -ErrorAction SilentlyContinue
+$AppProc = $null
+if ($null -ne $HeldManifestConnection) {
+    $HeldManifestConnection.Dispose()
+    $HeldManifestConnection = $null
+}
+$ManifestListener.Stop()
+$ManifestListener = $null
 Start-Sleep -Seconds 3
 
 # ---------------------------------------------------------------------

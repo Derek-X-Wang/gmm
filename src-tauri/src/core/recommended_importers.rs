@@ -46,6 +46,11 @@ pub const MANIFEST_PATH: &str = "manifest/recommended-importers.json";
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/Derek-X-Wang/gmm/main/manifest/recommended-importers.json";
 
+/// Process-local override used by the packaged startup smoke to hold a
+/// refresh request open and prove startup does not wait for the network.
+/// Ordinary launches leave it unset and always use [`MANIFEST_URL`].
+pub const MANIFEST_URL_OVERRIDE_ENV: &str = "GMM_RECOMMENDED_IMPORTERS_URL";
+
 /// The only `schemaVersion` this build understands.
 ///
 /// A higher version means the manifest was written for a newer GMM.
