@@ -848,9 +848,13 @@ impl Core {
         let origin = match resolution {
             importer_origin::OriginResolution::InEffect { origin, .. } => origin,
             importer_origin::OriginResolution::NoneInEffect { reason } => {
+                // Names no control, for the reason
+                // `Error::NoImporterOriginInEffect` spells out (#127):
+                // the Settings surface that would let the user fix this
+                // is #109 and does not exist yet.
                 let mut message = format!(
-                    "No Model Importer origin is in effect for {}. \
-                     Choose one in Settings to install or update it.",
+                    "GMM has no Model Importer origin for {}, so there is nothing to \
+                     check for updates.",
                     game.profile().display_name,
                 );
                 if let Some(reason) = reason {

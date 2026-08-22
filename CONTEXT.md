@@ -38,7 +38,7 @@ On-disk shape: `%AppData%\GMM\library\<game-code>\<mod-id>\<variant-or-root>\…
 Where a Game's Model Importer comes from: either a GitHub release origin (an `owner`/`repo` pair plus a release-asset match) or a user-supplied local ZIP. Not to be confused with **Source**, which is about a Mod's files; Importer Origin is about the per-game importer package. Resolved through three layers — the user's per-game override, GMM's curated `recommended-importers.json` recommendation, then the compiled-in default — and recorded per install, where `unknown` is a valid value for importers installed outside GMM. Changing a Game's Importer Origin invalidates its install and clears its Importer Pin. See ADR 0005.
 
 ### Importer Pin
-A per-game `pinned_version` setting that suppresses Model Importer update prompts for that game. Used by users during ban-wave windows or when a new importer release breaks a mod they care about. See ADR 0004.
+A per-game `pinned_version` setting that suppresses Model Importer **version** update prompts for that game. Used by users during ban-wave windows or when a new importer release breaks a mod they care about. It does not suppress Importer Origin recommendations: a pin says "don't move me to a newer build of this package", not "stop telling me the package's source has died". Changing a game's Importer Origin clears its pin, because a version string taken against one origin means nothing against another. See ADR 0004 and ADR 0005.
 
 ### Game Session
 The window of time between GMM spawning the game process and the game process exiting. During a Game Session, GMM holds the Loader in-process, mod enable/disable is locked, and the UI shows a "Game running" banner. Mods can only be toggled outside Game Sessions.

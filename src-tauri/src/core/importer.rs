@@ -33,9 +33,19 @@ use sha2::{Digest, Sha256};
 use super::error::{Error, Result};
 use super::zip_import;
 
-/// Filenames the Model Importer drops at the root of the game directory.
-/// Used by the backup-and-restore code path so we know what to move
-/// even when extracting a fresh release for the first time.
+/// Root-level filenames the backup-and-restore path must move out of
+/// the way before an install, and put back on a rollback.
+///
+/// **This is a backup set, not a list of what a Model Importer ships**
+/// (#127). Since #113 [`validate_importer_archive`] refuses any archive
+/// containing a `.dll`, so an importer shipping these is false by
+/// construction — the DLLs come with the Loader package (ADR 0001).
+///
+/// The DLLs stay in this list precisely *because* GMM did not put them
+/// there: a user who hand-installed an XXMI setup before adopting GMM
+/// has them sitting beside their `d3dx.ini`, and an install that swapped
+/// over the top without capturing them would leave [`rollback_to`]
+/// unable to restore the setup it replaced.
 pub const IMPORTER_ROOT_FILES: &[&str] = &["d3d11.dll", "d3dcompiler_46.dll", "d3dx.ini"];
 
 /// Directories the Model Importer owns and may freely replace.
