@@ -1,6 +1,12 @@
 {
   "schemaVersion": 1,
   "games": {
+    "grmi": {
+      "status": "recommended",
+      "owner": "SilentNightSound",
+      "repo": "GIMI-Package",
+      "assetPattern": "GIMI-PACKAGE-v\\d+\\.\\d+\\.\\d+\\.zip"
+    },
     "gimi": {
       "status": "recommended",
       "owner": "SilentNightSound",
