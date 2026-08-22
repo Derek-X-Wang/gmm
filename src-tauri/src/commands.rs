@@ -16,6 +16,7 @@ use crate::core::av;
 use crate::core::conflicts::ConflictReport;
 use crate::core::diagnostics;
 use crate::core::importer::{InstallReport, LatestRelease};
+use crate::core::importer_origin::{ImporterOrigin, OriginStatus};
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
@@ -440,6 +441,147 @@ pub async fn install_importer(
 ) -> Result<InstallReport, String> {
     refuse_during_session(&core).await?;
     core.install_importer(game).await.map_err(|e| e.to_string())
+}
+
+// ---- Importer Origin surface (ADR 0005 / #109) ----
+
+/// A GitHub Importer Origin as the override control sends it.
+///
+/// Three fields rather than a serialised [`ImporterOrigin`], because
+/// this is what a user typed: the shape the UI collects, validated on
+/// the way in by [`ImporterOrigin::from_user_input`]. Accepting the
+/// domain type's own JSON here would make the frontend responsible for
+/// GMM's internal representation and would let an unvalidated origin in
+/// through the back door.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImporterOriginInput {
+    pub owner: String,
+    pub repo: String,
+    pub asset_pattern: String,
+}
+
+impl ImporterOriginInput {
+    fn build(&self) -> Result<ImporterOrigin, String> {
+        ImporterOrigin::from_user_input(&self.owner, &self.repo, &self.asset_pattern)
+    }
+}
+
+/// Everything one game's Importer Origin surface needs, in one read.
+#[tauri::command]
+pub async fn importer_origin_status(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<OriginStatus, String> {
+    core.importer_origin_status(game)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Set or clear the user's per-game Importer Origin override (layer 1).
+///
+/// `None` clears it, returning the game to following GMM's
+/// recommendation and then the compiled-in default.
+#[tauri::command]
+pub async fn set_importer_origin_override(
+    core: State<'_, Core>,
+    game: GameCode,
+    origin: Option<ImporterOriginInput>,
+) -> Result<(), String> {
+    let origin = origin.map(|o| o.build()).transpose()?;
+    core.set_importer_origin_override(game, origin.as_ref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Accept the Importer Origin change GMM is offering: install from the
+/// proposed origin.
+///
+/// Refused during a Game Session like every other write into a game
+/// directory — this one rewrites the Model Importer wholesale.
+#[tauri::command]
+pub async fn accept_importer_origin_proposal(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> Result<InstallReport, String> {
+    refuse_during_session(&core).await?;
+    core.accept_importer_origin_proposal(game)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Decline an Importer Origin: remember it and stop proposing it.
+///
+/// Takes the origin explicitly rather than "whatever is proposed right
+/// now", so a click always dismisses the proposal the user was actually
+/// reading — the manifest can change under an open window.
+#[tauri::command]
+pub async fn dismiss_importer_origin(
+    core: State<'_, Core>,
+    game: GameCode,
+    origin: ImporterOriginInput,
+) -> Result<(), String> {
+    core.dismiss_importer_origin(game, &origin.build()?)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Undo a dismissal from the affected game's own surface.
+#[tauri::command]
+pub async fn restore_importer_origin(
+    core: State<'_, Core>,
+    game: GameCode,
+    origin: ImporterOriginInput,
+) -> Result<(), String> {
+    core.restore_importer_origin(game, &origin.build()?)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The global recommendations switch. On for a user who has never
+/// touched it.
+#[tauri::command]
+pub async fn importer_recommendations_enabled(core: State<'_, Core>) -> Result<bool, String> {
+    core.importer_recommendations_enabled()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Switch GMM's curated recommendations on or off.
+///
+/// Switching **on** kicks off a refresh rather than waiting for the next
+/// launch: the cached manifest may be months old, or absent entirely for
+/// a user who has never had the layer enabled, and a switch that appears
+/// to do nothing until a restart is a switch users conclude is broken.
+/// It is spawned and unawaited for the same reason the startup refresh
+/// is (#96) — nothing waits on the network, and the cache is already in
+/// force.
+#[tauri::command]
+pub async fn set_importer_recommendations_enabled(
+    core: State<'_, Core>,
+    enabled: bool,
+) -> Result<(), String> {
+    core.set_importer_recommendations_enabled(enabled)
+        .await
+        .map_err(|e| e.to_string())?;
+    if enabled {
+        let core = Core::clone(&core);
+        tauri::async_runtime::spawn(async move {
+            match core.refresh_recommended_importers().await {
+                Ok(outcome) => tracing::info!(
+                    target: "gmm::recommendations",
+                    outcome = ?outcome,
+                    "refresh after switching recommendations on",
+                ),
+                Err(e) => tracing::warn!(
+                    target: "gmm::recommendations",
+                    error = %e,
+                    "refresh after switching recommendations on could not run",
+                ),
+            }
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

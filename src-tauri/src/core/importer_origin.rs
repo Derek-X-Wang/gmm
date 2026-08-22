@@ -62,6 +62,64 @@ impl ImporterOrigin {
         })
     }
 
+    /// Build a GitHub release origin from what a user typed into the
+    /// override control (#109).
+    ///
+    /// The one place an [`ImporterOrigin`] is constructed from
+    /// unvalidated input — everywhere else it comes from the compiled-in
+    /// defaults or from a manifest that has already been through
+    /// [`crate::core::recommended_importers::parse`]. Every rejection
+    /// names the offending field, because the user is looking at three
+    /// boxes and one of them is the problem.
+    ///
+    /// Surrounding whitespace is trimmed rather than rejected: it is
+    /// what a paste leaves behind, and the value goes into a URL where
+    /// it would be a 404 with no explanation. The *asset pattern* is
+    /// trimmed too but otherwise untouched — it is a regex, and its
+    /// interior is the user's business.
+    pub fn from_user_input(
+        owner: &str,
+        repo: &str,
+        asset_pattern: &str,
+    ) -> std::result::Result<Self, String> {
+        let owner = owner.trim();
+        let repo = repo.trim();
+        let asset_pattern = asset_pattern.trim();
+
+        if owner.is_empty() {
+            return Err("Enter the GitHub owner the Model Importer is published under.".into());
+        }
+        if repo.is_empty() {
+            return Err("Enter the GitHub repository the Model Importer is published in.".into());
+        }
+        if asset_pattern.is_empty() {
+            return Err(
+                r"Enter the asset pattern that picks the package out of a release, for example GIMI-PACKAGE-v\d+\.\d+\.\d+\.zip."
+                    .into(),
+            );
+        }
+        // `owner/repo` pasted whole into one box would otherwise build a
+        // slug of `owner/repo/repo`: a URL that 404s during an install
+        // the user has already committed to, with nothing pointing back
+        // at the typo.
+        for (field, value) in [("owner", owner), ("repository", repo)] {
+            if value.contains('/') {
+                return Err(format!(
+                    "The {field} must not contain a \"/\" — put the owner and \
+                     the repository in their own boxes."
+                ));
+            }
+        }
+        // Compiled here, once, for the reason #123 gives for compiling
+        // the manifest's patterns at parse time: a pattern that cannot
+        // compile must fail while the user is looking at the box, not
+        // later during an install.
+        crate::core::importer::AssetPattern::new(asset_pattern)
+            .map_err(|e| format!("The asset pattern is not a valid regular expression: {e}"))?;
+
+        Ok(ImporterOrigin::github(owner, repo, asset_pattern))
+    }
+
     pub fn owner(&self) -> &str {
         match self {
             ImporterOrigin::GitHubRelease(o) => &o.owner,

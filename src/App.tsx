@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+
+import { ImporterOriginPanel } from "./ImporterOriginPanel";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -175,6 +177,7 @@ function MainApp({
       <Settings game={activeGame} displayName={active.displayName} />
       <NetworkPanel />
       <ImporterPanel game={activeGame} displayName={active.displayName} />
+      <ImporterOriginPanel game={activeGame} displayName={active.displayName} />
       <ModUpdatesPanel game={activeGame} />
       <LibraryPathsPanel />
       <UpdatesPanel />
