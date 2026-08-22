@@ -37,7 +37,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$BundleDir = Join-Path $RepoRoot "src-tauri\target\release\bundle\msi"
+$BundleRoot = Join-Path $RepoRoot "src-tauri\target\release\bundle"
 $AppData = Join-Path $env:APPDATA "GMM"
 $Work = Join-Path $RepoRoot "ci-updater"
 $LogDir = Join-Path $RepoRoot "ci-diagnostics"
@@ -199,12 +199,14 @@ function Build-Version($version, $destDir) {
     $confPath = Join-Path $Work "tauri.$version.conf.json"
     $conf | ConvertTo-Json -Depth 8 | Set-Content -Path $confPath -Encoding utf8
 
-    if (Test-Path $BundleDir) { Remove-Item $BundleDir -Recurse -Force }
+    if (Test-Path $BundleRoot) { Remove-Item $BundleRoot -Recurse -Force }
     pnpm tauri build --config $confPath
     if ($LASTEXITCODE -ne 0) { throw "tauri build ($version) exited $LASTEXITCODE" }
 
+    if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-    Copy-Item (Join-Path $BundleDir "*") $destDir -Recurse -Force
+    Get-ChildItem $BundleRoot -Recurse -File |
+        Copy-Item -Destination $destDir -Force
     Get-ChildItem $destDir | ForEach-Object { Write-Host "  $($_.Name)" }
 }
 
@@ -228,15 +230,20 @@ Write-Section "Updater artifacts exist"
 # either container. What matters is that *something* got signed and that
 # the signature verifies over exactly those bytes; the extension is
 # Tauri's business and is allowed to change again.
-$sig = Get-ChildItem $NewDir -File |
-    Where-Object { $_.Name.EndsWith(".sig") } |
-    Select-Object -First 1
-if (-not $sig) {
+$signatures = @(Get-ChildItem $NewDir -File |
+    Where-Object { $_.Name.EndsWith(".sig") })
+if ($signatures.Count -eq 0) {
     $present = (Get-ChildItem $NewDir -File | ForEach-Object Name) -join ", "
     throw "no updater signature (*.sig) in $NewDir — createUpdaterArtifacts " +
           "produced nothing, which is exactly how the first release shipped " +
           "with no update path. Bundle contained: $present"
 }
+if ($signatures.Count -ne 1) {
+    $names = ($signatures | ForEach-Object Name) -join ", "
+    throw "expected exactly one updater signature so every shipped updater " +
+          "artifact is verified, found $($signatures.Count): $names"
+}
+$sig = $signatures[0]
 $artifactPath = $sig.FullName -replace '\.sig$', ''
 if (-not (Test-Path $artifactPath)) {
     throw "signature $($sig.Name) has no artifact beside it at $artifactPath — " +
