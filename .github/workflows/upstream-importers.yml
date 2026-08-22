@@ -34,14 +34,26 @@ jobs:
           workspaces: src-tauri
           key: upstream-importers
 
+      # `--exact` is a filter, and a filter that matches nothing exits 0
+      # after printing `running 0 tests`. This step named a test that has
+      # never existed, so every run of it was green and empty. The `0
+      # passed` guard below is the runtime half of the fix;
+      # `tests/ci_test_selection.rs` is the PR-time half, and fails the
+      # build if this name and the Rust identifier ever drift again.
       - name: Verify every Model Importer source resolves
         working-directory: src-tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          cargo test --test importer_sources --
-          --ignored --exact
-          every_importer_profile_resolves_to_a_live_release_with_a_matching_asset
+        run: |
+          set -euo pipefail
+          cargo test --test importer_sources -- \
+            --ignored --exact \
+            every_importer_origin_reaches_the_verdict_its_recording_predicts \
+            | tee result.txt
+          if grep -q "0 passed" result.txt; then
+            echo "::error::the live release contract ran 0 tests — a green run that asserted nothing"
+            exit 1
+          fi
 
   # ADR 0005's scheduled guarantee, and the half that does the real
   # work. The job above checks the origins *compiled into this build* —
