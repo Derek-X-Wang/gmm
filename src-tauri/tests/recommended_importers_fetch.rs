@@ -271,6 +271,21 @@ fn unusable_documents() -> Vec<(&'static str, &'static str)> {
                 "wwmi": {"status": "none"}
             }}"#,
         ),
+        // #123: `games` carried a serde default, so this parsed as a
+        // valid manifest that recommends nothing — and replaced the
+        // cache with it.
+        ("no games key at all", r#"{"schemaVersion": 1}"#),
+        (
+            "a mistyped games key",
+            r#"{"schemaVersion": 1, "game": {"gimi": {"status": "none"}}}"#,
+        ),
+        (
+            "an assetPattern that cannot compile",
+            r#"{"schemaVersion": 1, "games": {
+                "gimi": {"status": "recommended", "owner": "SilentNightSound",
+                         "repo": "GIMI-Package", "assetPattern": "GIMI-PACKAGE-v[.zip"}
+            }}"#,
+        ),
     ]
 }
 
@@ -674,4 +689,56 @@ fn startup_kicks_off_the_refresh_in_the_background() {
         preamble.contains("std::thread::spawn"),
         "the refresh must run off the startup path — nothing waits on it",
     );
+}
+
+#[tokio::test]
+async fn a_304_with_nothing_cached_is_not_a_success() {
+    // A 304 is only meaningful as an answer to a conditional request.
+    // GMM sends `If-None-Match` only when it actually holds a cached
+    // document, so a 304 arriving with no ETag sent is impossible by
+    // contract — which in practice means a misbehaving proxy on a first
+    // launch. Treating it as `NotModified` claims the cache is confirmed
+    // current when there is no cache at all: "we could not ask"
+    // rendered as "the answer is unchanged", which is #78 exactly.
+    let mut server = mockito::Server::new_async().await;
+    let url = format!("{}/recommended-importers.json", server.url());
+    let m = server
+        .mock("GET", "/recommended-importers.json")
+        .match_header("if-none-match", mockito::Matcher::Missing)
+        .with_status(304)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let outcome = core
+        .refresh_recommended_importers_from(&url)
+        .await
+        .expect("refresh");
+    m.assert_async().await;
+
+    match outcome {
+        Refreshed::Unreachable(reason) => assert!(
+            reason.contains("304"),
+            "the reason must say what upstream actually did: {reason}",
+        ),
+        other => panic!(
+            "a 304 with no cache to revalidate says nothing was learned, \
+             not that the cache is current; got {other:?}",
+        ),
+    }
+
+    // And the layer is absent, so every game falls through — it must
+    // never look like a manifest that recommends nothing.
+    match core
+        .resolve_importer_origin(GameCode::Gimi)
+        .await
+        .expect("resolve")
+    {
+        OriginResolution::InEffect { layer, .. } => {
+            assert_eq!(layer, OriginLayer::CompiledInDefault)
+        }
+        other => panic!("nothing cached means fall-through; got {other:?}"),
+    }
 }

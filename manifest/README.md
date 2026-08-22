@@ -86,10 +86,17 @@ default.
 }
 ```
 
+Both keys are **required**. To recommend nothing at all, write
+`"games": {}` — do not omit the key. A missing or mistyped `games`
+would otherwise read as a valid manifest recommending nothing, and
+would empty every user's recommendations from a single keystroke.
+
 Game codes are GMM's own: `gimi`, `srmi`, `zzmi`, `wwmi`, `himi`,
 `efmi`. The validator rejects any key it does not recognise, because a
 typo would otherwise sit here doing nothing while the game it was meant
-for silently kept its old default.
+for silently kept its old default. The *app* skips an unrecognised key
+whole, without reading inside it, so that adding a seventh game does not
+break builds that predate it.
 
 ### A `recommended` entry
 
@@ -126,6 +133,10 @@ second one. A bare substring is what this replaced — `SRMI` matched
 upstream labelled TEST.
 
 Remember JSON escaping: a regex `\d` is written `\\d` in this file.
+
+The pattern is compiled when the manifest is parsed, so one that is not
+a valid regular expression makes the whole document unusable rather than
+failing later for that one game.
 
 ## Current state
 

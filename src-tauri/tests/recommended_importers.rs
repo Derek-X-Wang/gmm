@@ -287,6 +287,10 @@ fn anything_the_validator_accepts_the_app_can_parse() {
         r#"{"schemaVersion": 99, "games": {}}"#,
         r#"{"schemaVersion": 1, "games": {"gimi": {"status": "nope"}}}"#,
         r#"{"schemaVersion": 1, "games": {"gimi": {"status": "recommended", "owner": "a"}}}"#,
+        r#"{"schemaVersion": 1}"#,
+        r#"{"schemaVersion": 1, "game": {"gimi": {"status": "none"}}}"#,
+        r#"{"schemaVersion": 1, "games": {"gimi": {"status": "recommended", "owner": "a",
+             "repo": "b", "assetPattern": "v[.zip"}}}"#,
     ] {
         assert!(manifest::parse(bad).is_err(), "app must reject: {bad}");
         assert!(
@@ -383,4 +387,114 @@ fn every_recommended_pattern_compiles_and_selects_its_real_recorded_asset() {
 
         assert_eq!(selected.asset_name, expected_asset, "{}", game.as_str());
     }
+}
+
+// ---------------------------------------------------------------
+// #123 — ingestion is exactly as strict as the contract it advertises.
+//
+// This file is fetched at runtime by every shipped build, so an
+// authoring mistake reaches every install within minutes and ingestion
+// strictness is the only guard. Each test below covers a way a
+// malformed document was previously accepted, misclassified, or
+// silently turned into "there are no recommendations".
+// ---------------------------------------------------------------
+
+#[test]
+fn a_manifest_with_no_games_key_is_rejected_rather_than_read_as_an_empty_one() {
+    // `games` carried a serde default, so one mistyped key — `game`
+    // instead of `games` — parsed as a perfectly valid manifest that
+    // recommends nothing, replaced the cache, and silently emptied every
+    // user's recommendations. No error anywhere, and the offline
+    // validator checks different properties so it did not save this.
+    //
+    // An empty recommendation set is still expressible; it just has to
+    // be written down as `"games": {}` rather than arrived at by
+    // omission.
+    for (label, raw) in [
+        ("the key omitted entirely", r#"{"schemaVersion": 1}"#),
+        (
+            "the key mistyped",
+            r#"{"schemaVersion": 1, "game": {"gimi": {"status": "none"}}}"#,
+        ),
+    ] {
+        let error = manifest::parse(raw)
+            .err()
+            .unwrap_or_else(|| panic!("{label}: must be rejected, not read as an empty manifest"));
+        assert!(
+            error_message(&error).contains("games"),
+            "{label}: the rejection must name the key that is missing: {error}",
+        );
+        assert!(
+            manifest::validate(raw).is_err(),
+            "{label}: the validator must reject it too",
+        );
+    }
+
+    assert!(
+        manifest::parse(r#"{"schemaVersion": 1, "games": {}}"#).is_ok(),
+        "an explicitly empty recommendation set is still a valid manifest",
+    );
+}
+
+#[test]
+fn an_asset_pattern_that_cannot_compile_is_rejected_at_parse_time() {
+    // The pattern was only checked for being a non-empty string, so an
+    // invalid regex was cached and applied — failing later, at the point
+    // of use, for one game, while every other entry stayed active. The
+    // manifest is the one place this can be caught before it reaches a
+    // user, and it costs one compile.
+    let raw = r#"{"schemaVersion": 1, "games": {
+        "gimi": {"status": "recommended", "owner": "SilentNightSound",
+                 "repo": "GIMI-Package", "assetPattern": "GIMI-PACKAGE-v[.zip"}
+    }}"#;
+
+    let error = manifest::parse(raw).expect_err("an uncompilable pattern must be rejected");
+    let message = error_message(&error);
+    assert!(
+        message.contains("gimi"),
+        "the rejection must name the offending game key: {message}",
+    );
+    assert!(
+        message.contains("GIMI-PACKAGE-v[.zip"),
+        "the rejection must quote the pattern the author wrote: {message}",
+    );
+    assert!(
+        manifest::validate(raw).is_err(),
+        "the validator must reject it too, so a green check stays a guarantee",
+    );
+}
+
+#[test]
+fn an_unknown_game_key_is_skipped_before_its_contents_are_validated() {
+    // The ignore branch exists so that shipping a seventh game does not
+    // break already-shipped builds. It parsed the entry first "so a
+    // malformed one is caught rather than hidden", which defeated the
+    // whole point: the seventh game will arrive with whatever fields and
+    // status values *its* schema needs, and validating them against this
+    // build's vocabulary drops the entire layer on the day it lands.
+    //
+    // The status has to be an unrecognised one for this test to mean
+    // anything — a well-formed entry under an unknown key passes either
+    // way.
+    let raw = r#"{"schemaVersion": 1, "games": {
+        "gimi": {"status": "recommended", "owner": "SilentNightSound",
+                 "repo": "GIMI-Package", "assetPattern": "GIMI-PACKAGE-v1[.]zip"},
+        "hsri": {"status": "recommended-with-caveats", "someFutureField": 7}
+    }}"#;
+
+    let parsed = manifest::parse(raw).expect(
+        "a future game's entry must be skipped whole, not validated against \
+         this build's vocabulary",
+    );
+    assert!(
+        parsed.recommendation_for(GameCode::Gimi).is_some(),
+        "the games this build does know must still apply",
+    );
+
+    // The validator still rejects the key, because at review time an
+    // unrecognised key is overwhelmingly a typo.
+    assert!(
+        manifest::validate(raw).is_err(),
+        "the review gate must still catch an unrecognised game key",
+    );
 }

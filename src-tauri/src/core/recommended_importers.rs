@@ -80,6 +80,23 @@ pub enum ManifestError {
          would silently do nothing"
     )]
     UnknownGame { game: String },
+
+    #[error(
+        "manifest has no \"games\" key. An empty recommendation set is written \
+         \"games\": {{}}; omitting or mistyping the key would otherwise clear every \
+         user's recommendations from a single keystroke"
+    )]
+    MissingGames,
+
+    #[error(
+        "game {game:?}: assetPattern {pattern:?} is not a valid regular expression: \
+         {message}"
+    )]
+    InvalidAssetPattern {
+        game: String,
+        pattern: String,
+        message: String,
+    },
 }
 
 /// A parsed, validated manifest.
@@ -120,8 +137,19 @@ impl Manifest {
 struct WireManifest {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
-    #[serde(default)]
-    games: BTreeMap<String, serde_json::Value>,
+    /// Required, and deliberately an `Option` rather than a serde
+    /// default (#123). With a default, `{"schemaVersion": 1}` — or one
+    /// mistyped key, `game` for `games` — parsed as a perfectly valid
+    /// manifest that recommends nothing, replaced the cache, and
+    /// silently emptied every user's recommendations with no error
+    /// anywhere. An empty set is still expressible; it just has to be
+    /// written down as `"games": {}`.
+    ///
+    /// Unknown *other* top-level fields stay permitted, on purpose:
+    /// `deny_unknown_fields` here would break the additive-only rule
+    /// the whole schema rests on, since a field added by a later author
+    /// would then drop the layer for every already-shipped build.
+    games: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 /// Parse and validate a manifest document.
@@ -189,17 +217,23 @@ fn read(raw: &str, unknown_games: UnknownGames) -> Result<Manifest, ManifestErro
         });
     }
 
+    let wire_games = wire.games.ok_or(ManifestError::MissingGames)?;
+
     let mut games = BTreeMap::new();
-    for (game, entry) in wire.games {
+    for (game, entry) in wire_games {
         if !is_known_game(&game) {
             match unknown_games {
                 UnknownGames::Reject => return Err(ManifestError::UnknownGame { game }),
-                // Still parse the entry, so a malformed one is caught
-                // rather than hidden behind an unrecognised key.
-                UnknownGames::Ignore => {
-                    parse_entry(&game, &entry)?;
-                    continue;
-                }
+                // Skipped **whole**, without looking inside (#123). The
+                // entry used to be parsed first "so a malformed one is
+                // caught rather than hidden", which defeated the branch's
+                // only purpose: a seventh game arrives with whatever
+                // fields and status values its own schema needs, and
+                // validating those against this build's vocabulary drops
+                // the entire layer for every shipped build on the day
+                // that game lands. The validator still rejects the key,
+                // which is where a typo is meant to be caught.
+                UnknownGames::Ignore => continue,
             }
         }
         let recommendation = parse_entry(&game, &entry)?;
@@ -224,6 +258,20 @@ fn parse_entry(game: &str, entry: &serde_json::Value) -> Result<Recommendation, 
             let owner = required_str(game, entry, "owner")?;
             let repo = required_str(game, entry, "repo")?;
             let asset_pattern = required_str(game, entry, "assetPattern")?;
+            // Compile it here, once, rather than at the point of use.
+            // An uncompilable pattern was previously cached and applied,
+            // failing later for that one game while every other entry
+            // stayed active — a per-entry failure smuggled past a
+            // whole-document contract (#123). Compiled through
+            // `AssetPattern` so what is checked is the anchored form GMM
+            // will actually run (#79), not a looser reading of it.
+            super::importer::AssetPattern::new(asset_pattern).map_err(|e| {
+                ManifestError::InvalidAssetPattern {
+                    game: game.to_string(),
+                    pattern: asset_pattern.to_string(),
+                    message: e.to_string(),
+                }
+            })?;
             Ok(Recommendation::Recommended(ImporterOrigin::github(
                 owner,
                 repo,
@@ -318,8 +366,11 @@ pub mod cache_keys {
 pub enum Fetched {
     /// A document arrived. Nothing has been said about its contents yet.
     Document { raw: String, etag: Option<String> },
-    /// 304 Not Modified: the cached document is still current. Only
-    /// reachable when an `ETag` was sent.
+    /// 304 Not Modified: the cached document is still current.
+    ///
+    /// Only produced when an `ETag` was actually sent — [`fetch`]
+    /// enforces that rather than trusting the caller, because a 304
+    /// with nothing to revalidate confirms nothing (#123).
     NotModified,
     /// No document arrived — DNS, proxy, TLS, timeout, a 5xx. Says
     /// nothing whatsoever about what GMM recommends.
@@ -347,7 +398,20 @@ pub async fn fetch(client: &reqwest::Client, url: &str, etag: Option<&str>) -> F
     };
 
     if res.status().as_u16() == 304 {
-        return Fetched::NotModified;
+        return match etag {
+            Some(_) => Fetched::NotModified,
+            // Impossible by contract — GMM sends `If-None-Match` only
+            // when it holds a document to revalidate — so in practice a
+            // misbehaving proxy on a first launch. There is no cache
+            // this can confirm, and calling it `NotModified` would say
+            // the cache is current when there is none: "we could not
+            // ask" rendered as "the answer is unchanged", which is the
+            // #78 collapse (#123).
+            None => Fetched::Unreachable(format!(
+                "GET {url} returned 304 Not Modified, but GMM sent no ETag and \
+                 holds no cached manifest to revalidate"
+            )),
+        };
     }
     if !res.status().is_success() {
         return Fetched::Unreachable(format!("GET {url} returned {}", res.status()));
