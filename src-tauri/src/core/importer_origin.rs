@@ -309,3 +309,116 @@ pub fn compiled_in_default(game: crate::core::games::GameCode) -> Option<Importe
     let (owner, repo) = repo_slug.split_once('/')?;
     Some(ImporterOrigin::github(owner, repo, asset_pattern))
 }
+
+/// What a move onto a new Importer Origin does to the state the
+/// *previous* origin left behind (ADR 0005 / #110).
+///
+/// Two effects rather than one boolean, because the unknown case pulls
+/// them apart — see [`change_effects`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeEffects {
+    /// Delete the game's Importer Pin.
+    pub clears_pin: bool,
+    /// Delete the game's recorded install — version *and* origin — so
+    /// it reports as not installed for the new origin.
+    pub invalidates_install: bool,
+}
+
+impl ChangeEffects {
+    /// Nothing to undo: the game is already on this origin.
+    pub const NOTHING: Self = ChangeEffects {
+        clears_pin: false,
+        invalidates_install: false,
+    };
+
+    /// `true` when this move touches anything at all.
+    pub fn is_change(&self) -> bool {
+        self.clears_pin || self.invalidates_install
+    }
+}
+
+/// Decide what moving a game onto `next` invalidates, given the origin
+/// its current install came from.
+///
+/// - **Same origin** (case-insensitively, per [`ImporterOrigin`]'s
+///   `PartialEq`) — nothing. Re-applying an origin, including a
+///   capitalisation fix, must not throw away a working install and the
+///   user's pin.
+/// - **A different known origin** — both. The pin holds a version
+///   string taken against a package that is not this one, and version
+///   schemes do not survive an origin change (one package is at v8.8.9,
+///   another at v1.4.4). Carrying it across is the defect this exists
+///   to prevent: [`crate::core::updates::compute_status`] gates on
+///   *pinned as a boolean*, so a stale pin would suppress **every**
+///   update for the new origin, indefinitely, while the user believed
+///   they were current — #78's class of failure. The install goes too,
+///   because the game directory still physically holds the previous
+///   origin's package and a record that says otherwise lets the
+///   database and the disk disagree.
+/// - **[`InstalledOrigin::Unknown`]** — the pin only. Asymmetric on
+///   purpose. GMM cannot compare a pin against an origin it does not
+///   know, so keeping it is keeping a gate it cannot reason about; but
+///   #99 rejected treating unknown as "not installed", and those users
+///   hand-installed their importers precisely because GMM could not
+///   help them. In practice this is invisible: an unknown origin means
+///   no install GMM performed, so there is usually neither a pin nor a
+///   recorded version to clear. It is visible for one real cohort —
+///   installs made by GMM builds that predate origin tracking (#107),
+///   which recorded a version but no origin.
+pub fn change_effects(installed: &InstalledOrigin, next: &ImporterOrigin) -> ChangeEffects {
+    match installed {
+        InstalledOrigin::Known(current) if current == next => ChangeEffects::NOTHING,
+        InstalledOrigin::Known(_) => ChangeEffects {
+            clears_pin: true,
+            invalidates_install: true,
+        },
+        InstalledOrigin::Unknown => ChangeEffects {
+            clears_pin: true,
+            invalidates_install: false,
+        },
+    }
+}
+
+/// Whether GMM has an Importer Origin change to *propose* for a game,
+/// and which origin it would propose.
+///
+/// The decision takes exactly two inputs — what resolves, and what is
+/// installed. **The Importer Pin is deliberately not one of them.** A
+/// pin means "don't move me to a newer build of *this* package"; it
+/// says nothing about whether the package's source is still alive, so a
+/// pinned game still gets told its origin is dead and can decline and
+/// stay pinned. Withholding that does not protect the pinned user, it
+/// only means they find out later with less room to react (#98).
+///
+/// Layer 3 is not a proposal when the install's origin is
+/// [`InstalledOrigin::Unknown`]: the compiled-in default is the status
+/// quo GMM has always shipped, not something it has newly decided, and
+/// proposing it would nag every hand-installed setup on every launch —
+/// exactly the proactive surfacing of unknown origin that #99 rejects.
+/// A game whose origin is *known* and differs from a corrected default
+/// is a real proposal, which is why the exclusion is scoped to unknown
+/// rather than to the layer alone.
+///
+/// This answers "is there something to propose?". Whether the user has
+/// already declined this particular origin, and how the proposal is
+/// rendered, belong to the recommendation surface (#109).
+pub fn pending_change<'a>(
+    resolution: &'a OriginResolution,
+    installed: &InstalledOrigin,
+) -> Option<&'a ImporterOrigin> {
+    let (origin, layer) = match resolution {
+        OriginResolution::InEffect { origin, layer } => (origin, *layer),
+        // Nothing is in force, so there is nothing to move onto. That
+        // state has its own surface: a warning that the user must
+        // supply an origin (#97).
+        OriginResolution::NoneInEffect { .. } => return None,
+    };
+
+    if matches!(installed, InstalledOrigin::Unknown) && layer == OriginLayer::CompiledInDefault {
+        return None;
+    }
+
+    change_effects(installed, origin)
+        .is_change()
+        .then_some(origin)
+}
