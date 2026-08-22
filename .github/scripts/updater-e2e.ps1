@@ -5,9 +5,8 @@
 .DESCRIPTION
     `tests/updater_config.rs` checks that tauri.conf.json *says* the right
     things. This checks that the pipeline *does* them: that a build
-    actually emits exactly one updater artifact, that the manifest advertises
-    that artifact, that its signature verifies, that a tampered one does not,
-    and that installing
+    actually emits exactly one updater artifact, that its signature verifies,
+    that a tampered one does not, and that installing
     the newer build over the older one leaves the user's data alone.
 
     The very first release tag shipped without `createUpdaterArtifacts`,
@@ -23,8 +22,8 @@
          signed updater artifact (the bundler's
          `*.sig` plus the file it signs — a raw `.msi` on the Tauri
          version this repo pins, a `.msi.zip` on older ones)
-      4. serve NEW's `latest.json` + artifact over 127.0.0.1 and assert
-         the manifest advertises the same artifact
+      4. construct and serve a test-only `latest.json` + artifact over
+         127.0.0.1
       5. fetch both back through that endpoint and verify the signature
          the way tauri-plugin-updater does; assert a tampered artifact is
          refused
@@ -292,10 +291,10 @@ try {
     }
     $advertisedUrl = $manifest.platforms."windows-x86_64".url
     $advertisedName = [System.IO.Path]::GetFileName(([Uri]$advertisedUrl).AbsolutePath)
-    Write-Host "generated updater manifest advertises: $advertisedName"
-    if ($advertisedName -ne $artifact.Name) {
-        throw "manifest advertises $advertisedName, but the verified artifact is $($artifact.Name)"
-    }
+    # This manifest was constructed just above from $artifact.Name. Printing
+    # it identifies the bytes exercised by this round trip; it is not an
+    # oracle for the production latest.json that tauri-action generates.
+    Write-Host "local test manifest advertises: $advertisedName"
     $downloaded = Join-Path $Work ("downloaded" + [System.IO.Path]::GetExtension($artifact.Name))
     Invoke-WebRequest $advertisedUrl -OutFile $downloaded
     Write-Host "fetched $((Get-Item $downloaded).Length) bytes through the endpoint"

@@ -131,6 +131,11 @@ target was set to `all`, but every installer lifecycle check and the documented
 install path cover MSI. Shipping a second, unverified updater artifact makes it
 possible for `latest.json` to advertise bytes the end-to-end test never
 downloaded, so the release target is deliberately limited to MSI.
+Anyone who installed alpha2's NSIS `.exe` will not be upgraded in place by the
+MSI because Windows treats them as different products. They must uninstall the
+NSIS copy before installing the MSI or risk ending up with two GMM installs;
+this one-release compatibility cost was accepted while the install base is
+effectively zero, before it could grow with every release.
 
 **Downgrading is not supported.** Running an older GMM MSI over a newer
 install is refused by Windows Installer with its standard *"A newer
