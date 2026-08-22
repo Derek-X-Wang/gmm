@@ -125,6 +125,36 @@ manifest, and drafts a GitHub Release with the binary, `.sig`, and
 Windows machine, double-check the changelog) and clicks Publish; only
 after Publish does the `latest.../latest.json` URL resolve.
 
+**Downgrading is not supported.** Running an older GMM MSI over a newer
+install is refused by Windows Installer with its standard *"A newer
+version of GMM is already installed"* message
+(`bundle.windows.allowDowngrades` is explicitly `false`). This is
+deliberate, and it is not merely caution: GMM runs its database
+migrations against `%APPDATA%\GMM` on every launch, and that directory
+is not versioned with the install or touched by the installer. A
+successful downgrade would therefore leave an older binary opening a
+database that has already been migrated forward, and it would fail to
+start — a silent self-revert followed by an app that will not launch,
+with nothing in the UI explaining either half.
+
+Failing at install time is the debuggable version of that, and it fails
+*before* the working install has been overwritten.
+
+If you need to move to an older version, the supported route is:
+
+1. Uninstall the current version from Add/Remove Programs.
+2. Back up `%APPDATA%\GMM` — in particular `gmm.db` and your Library, if
+   it still lives at the default location.
+3. Install the older MSI.
+4. If it refuses to start with a migration error, restore `gmm.db` from a
+   backup taken while that older version was in use. There is no
+   schema-downgrade path; a database migrated forward cannot be read by
+   an earlier build.
+
+Your Library and settings are never removed by an uninstall, so nothing
+above puts your mods at risk — but step 4 is why a plain reinstall of an
+older build is not enough on its own.
+
 **If the key rotates** (lost, leaked, or maintainer turnover), every
 existing GMM install becomes unable to install future updates and must
 be reinstalled manually from a fresh GitHub Release. There is no
