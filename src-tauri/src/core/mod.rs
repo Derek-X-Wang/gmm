@@ -1508,6 +1508,22 @@ impl Core {
             .join(&release.asset_name);
         importer::download_to(&client, &release.asset_url, &zip_path).await?;
 
+        // What is about to be replaced, captured *before* the swap. A
+        // backup is a pile of files and carries no provenance of its
+        // own, so without this a rollback can only restore the files
+        // and has to leave the record describing the install it just
+        // undid (#126). Either field may legitimately be `None` — an
+        // install over a hand-installed setup replaces files GMM never
+        // recorded, and unknown is the honest answer for those.
+        let replacing = importer::BackupProvenance {
+            version: self.installed_importer_version(game).await?,
+            origin: match self.installed_importer_origin(game).await? {
+                importer_origin::InstalledOrigin::Known(origin) => Some(origin),
+                importer_origin::InstalledOrigin::Unknown
+                | importer_origin::InstalledOrigin::Unreadable { .. } => None,
+            },
+        };
+
         let report = tokio::task::spawn_blocking(move || {
             importer::install_from_local_zip(
                 &zip_path,
@@ -1518,6 +1534,10 @@ impl Core {
         })
         .await
         .map_err(|e| Error::Importer(format!("install task join error: {e}")))??;
+
+        if let Some(backup_dir) = report.backup_dir.as_deref() {
+            importer::write_backup_provenance(backup_dir, &replacing)?;
+        }
 
         // Record the installed tag *and* the Importer Origin it came
         // from, so the update check can compare against it next launch
@@ -1537,6 +1557,103 @@ impl Core {
             })?;
 
         Ok(report)
+    }
+
+    /// Restore the game's Model Importer from its most recent backup,
+    /// and bring GMM's record of what is installed back in line with it.
+    ///
+    /// Returns the backup that was restored, or `None` when there is
+    /// nothing to roll back to.
+    ///
+    /// The record half is the point of #126. Restoring only the files
+    /// left the database describing the install that had just been
+    /// undone — and since the recorded origin drives pin clearing and
+    /// the change-proposal logic, rolling back an origin switch left GMM
+    /// convinced the switch had happened and with nothing to propose.
+    pub async fn rollback_importer(&self, game: GameCode) -> Result<Option<PathBuf>> {
+        self.ensure_no_active_session().await?;
+        let install = self.game_install_path(game).await?.ok_or_else(|| {
+            Error::Importer(format!(
+                "set {}'s install path in Settings before rolling back its Model Importer",
+                game.profile().display_name,
+            ))
+        })?;
+        let backups_root = self.data_dir().join("backups").join(game.as_str());
+        let Some(latest) = importer::latest_backup(&backups_root)? else {
+            return Ok(None);
+        };
+
+        // Read the provenance before the restore: it sits beside the
+        // backup rather than inside it, but reading first keeps the
+        // ordering obvious.
+        let provenance = importer::read_backup_provenance(&latest);
+
+        let backup_for_blocking = latest.clone();
+        tokio::task::spawn_blocking(move || importer::rollback_to(&backup_for_blocking, &install))
+            .await
+            .map_err(|e| Error::Importer(format!("rollback task join error: {e}")))??;
+
+        self.restore_install_record(game, provenance.as_ref())
+            .await
+            .map_err(|e| Error::RollbackNotRecorded {
+                game: game.profile().display_name.to_string(),
+                backup: latest.display().to_string(),
+                message: e.to_string(),
+            })?;
+
+        Ok(Some(latest))
+    }
+
+    /// Set the recorded install to what a backup's provenance says it
+    /// was — or to unknown when there is no provenance to read.
+    ///
+    /// One transaction, for the same reason [`Self::record_importer_install`]
+    /// is one: the version, the origin and the pin describe a single
+    /// install and any subset of them is state no later decision can
+    /// read correctly (#122).
+    async fn restore_install_record(
+        &self,
+        game: GameCode,
+        provenance: Option<&importer::BackupProvenance>,
+    ) -> Result<()> {
+        let version = provenance.and_then(|p| p.version.clone());
+        let origin = provenance.and_then(|p| p.origin.clone());
+        let encoded =
+            match origin.as_ref() {
+                Some(o) => Some(serde_json::to_string(o).map_err(|e| {
+                    Error::Importer(format!("could not encode Importer Origin: {e}"))
+                })?),
+                None => None,
+            };
+
+        let mut tx = self.pool.begin().await?;
+        match origin.as_ref() {
+            // A rollback is an origin move like any other, so the same
+            // reconciliation decides what the previous origin's state
+            // meant. Rolling back a version within one origin leaves the
+            // pin alone; rolling back across origins clears it.
+            Some(o) => {
+                Self::reconcile_after_origin_change(&mut tx, game, o).await?;
+            }
+            // Nothing to compare against, so the pin is a gate GMM can no
+            // longer reason about — the same call `InstalledOrigin::Unknown`
+            // makes in `change_effects`.
+            None => updates::set_importer_pinned(&mut *tx, game, None).await?,
+        }
+        put_setting(
+            &mut *tx,
+            &importer_origin::keys::installed_origin(game),
+            encoded.as_deref(),
+        )
+        .await?;
+        put_setting(
+            &mut *tx,
+            &updates::keys::importer_installed(game),
+            version.as_deref(),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// GMM's app-data directory — the Library root's parent, which is

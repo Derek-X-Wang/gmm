@@ -167,6 +167,24 @@ pub enum Error {
         message: String,
     },
 
+    /// The previous package was restored into the game directory, but
+    /// GMM could not update its record of what is installed.
+    ///
+    /// Same rule as [`Self::ImporterInstallNotRecorded`] (#122), on the
+    /// other path (#126): the files moved and the bookkeeping did not,
+    /// which the caller has to be told rather than shown a success.
+    #[error(
+        "{game}'s Model Importer was rolled back to the backup at {backup}, but GMM \
+         could not update its record of what is installed: {message}. The previous \
+         package is in place; GMM's record still describes the install that was \
+         undone."
+    )]
+    RollbackNotRecorded {
+        game: String,
+        backup: String,
+        message: String,
+    },
+
     #[error("network error: {0}")]
     Network(String),
 
