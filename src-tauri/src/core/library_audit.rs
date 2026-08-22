@@ -115,7 +115,7 @@ fn scan_game_root(
     })
 }
 
-fn directory_size_without_links(path: &Path) -> io::Result<u64> {
+pub(super) fn directory_size_without_links(path: &Path) -> io::Result<u64> {
     let metadata = fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
     if is_link_or_reparse_point(&metadata) {
@@ -136,7 +136,7 @@ fn directory_size_without_links(path: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(super) fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }

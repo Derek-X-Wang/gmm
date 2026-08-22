@@ -73,6 +73,13 @@ pub const IMPORT_ZIP_AFTER_EXTRACT: &str = "import_zip.after_extract";
 /// `import_zip`: the row exists, Variants have not been detected yet.
 pub const IMPORT_ZIP_AFTER_ROW_INSERT: &str = "import_zip.after_row_insert";
 
+/// `recover_unreferenced_library_dir`: a Library-root directory whose
+/// name was not a usable ULID has been renamed to the fresh one, and no
+/// row references it yet. Leaves the same orphan shape as
+/// [`ADOPT_AFTER_LIBRARY_COPY`], under the new name — recoverable a
+/// second time by the same feature, which is why the rename goes first.
+pub const RECOVER_AFTER_LIBRARY_MOVE: &str = "recover.after_library_move";
+
 /// Every point, so a test can enumerate them and so adding one without
 /// covering it is visible in review.
 pub const ALL: &[&str] = &[
@@ -84,4 +91,5 @@ pub const ALL: &[&str] = &[
     ADOPT_AFTER_ROW_INSERT,
     IMPORT_ZIP_AFTER_EXTRACT,
     IMPORT_ZIP_AFTER_ROW_INSERT,
+    RECOVER_AFTER_LIBRARY_MOVE,
 ];
