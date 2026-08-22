@@ -323,5 +323,31 @@ mod manifest_refresh_started_marker {
             "installer-smoke.ps1 must set {MANIFEST_URL_OVERRIDE_ENV} to the \
              endpoint it deliberately holds open",
         );
+        assert!(
+            script.contains("Get-DiagnosticEventTimestamp"),
+            "installer-smoke.ps1 must compare structured log timestamps rather \
+             than impose a machine-speed deadline",
+        );
+        assert!(
+            script.contains("$ipcReadyAt -ge $manifestRefreshFinishedAt"),
+            "installer-smoke.ps1 must require IPC readiness before the held-open \
+             refresh reaches its own terminal event",
+        );
+        assert!(
+            !script.contains("$manifestRequestAcceptedAt.AddSeconds("),
+            "the startup guard must not depend on an arbitrary wall-clock margin",
+        );
+    }
+
+    #[test]
+    fn startup_refresh_emits_the_marker_at_the_kickoff_site() {
+        let lib = read("src-tauri/src/lib.rs");
+        assert!(
+            lib.contains(
+                "diagnostics::record_manifest_refresh_started();\n                let refresh = match"
+            ),
+            "the startup refresh must emit its diagnostic marker immediately \
+             before choosing and polling the refresh future",
+        );
     }
 }

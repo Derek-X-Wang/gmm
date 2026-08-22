@@ -48,8 +48,30 @@ pub const MANIFEST_URL: &str =
 
 /// Process-local override used by the packaged startup smoke to hold a
 /// refresh request open and prove startup does not wait for the network.
-/// Ordinary launches leave it unset and always use [`MANIFEST_URL`].
+/// Ordinary launches leave it unset and always use [`MANIFEST_URL`]. The
+/// value is accepted only after [`loopback_manifest_url_override`] proves it
+/// names a numeric loopback host, so release builds cannot be redirected to
+/// another internet origin by their environment.
 pub const MANIFEST_URL_OVERRIDE_ENV: &str = "GMM_RECOMMENDED_IMPORTERS_URL";
+
+/// Accept the packaged-smoke URL seam only for HTTP(S) URLs whose host is a
+/// numeric loopback address. Requiring an address rather than a hostname
+/// avoids trusting host-file or DNS resolution for this release-build seam.
+pub fn loopback_manifest_url_override(candidate: Option<String>) -> Option<String> {
+    let candidate = candidate?;
+    let url = reqwest::Url::parse(&candidate).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse::<std::net::IpAddr>()
+        .ok()?;
+    host.is_loopback().then_some(candidate)
+}
 
 /// The only `schemaVersion` this build understands.
 ///

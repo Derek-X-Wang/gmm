@@ -148,6 +148,9 @@ $IpcReadyMarker = "gmm-ipc-ready"
 # readiness: seeing both while the HTTP response is held open proves the
 # refresh ran and did not block the usable application behind the network.
 $ManifestRefreshStartedMarker = "gmm-manifest-refresh-started"
+# This is the terminal event emitted by the startup refresh thread after the
+# held-open request reaches the production client's own timeout.
+$ManifestRefreshFinishedMessage = "recommended-importers refresh finished"
 # Must match `MANIFEST_URL_OVERRIDE_ENV` in recommended_importers.rs.
 $ManifestUrlOverrideEnv = "GMM_RECOMMENDED_IMPORTERS_URL"
 
@@ -157,9 +160,28 @@ function Get-DiagnosticMarkerCount($marker) {
         Select-String -SimpleMatch $marker).Count
 }
 
-# Accept the refresh request but never answer it. A blocking startup would
-# now miss the ordinary 90-second readiness deadline; the background refresh
-# reaches its own 20-second timeout without holding up IPC.
+function Get-DiagnosticEventTimestamp($needle, $previousCount) {
+    $matchingLines = @(Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue |
+        Sort-Object FullName |
+        ForEach-Object { Get-Content $_.FullName } |
+        Where-Object { $_.Contains($needle) })
+    if ($matchingLines.Count -le $previousCount) { return $null }
+
+    try {
+        $event = $matchingLines[$previousCount] | ConvertFrom-Json
+        if ($null -eq $event.timestamp) {
+            throw "event has no timestamp"
+        }
+        return [System.DateTimeOffset]::Parse([string]$event.timestamp)
+    } catch {
+        throw "could not parse timestamp for diagnostic event '$needle': $_"
+    }
+}
+
+# Accept the refresh request but never answer it. The startup guard is event
+# ordering, not the ordinary 90-second liveness deadline: a blocking startup
+# logs refresh completion before IPC readiness, while a background refresh
+# lets IPC become ready before the client's own 20-second timeout completes.
 $ManifestListener = [System.Net.Sockets.TcpListener]::new(
     [System.Net.IPAddress]::Loopback,
     0
@@ -171,6 +193,7 @@ $manifestUrl = "http://127.0.0.1:$manifestPort/recommended-importers.json"
 
 $ipcBefore = Get-DiagnosticMarkerCount $IpcReadyMarker
 $manifestRefreshBefore = Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker
+$manifestRefreshFinishedBefore = Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage
 $previousManifestUrl = [System.Environment]::GetEnvironmentVariable(
     $ManifestUrlOverrideEnv,
     [System.EnvironmentVariableTarget]::Process
@@ -196,8 +219,10 @@ $dbSeen = $false
 $logSeen = $false
 $ipcSeen = $false
 $manifestRefreshSeen = $false
+$manifestRefreshFinishedSeen = $false
 $manifestRequestSeen = $false
-$manifestRequestAcceptedAt = $null
+$ipcReadyAt = $null
+$manifestRefreshFinishedAt = $null
 
 while ((Get-Date) -lt $deadline) {
     if (-not $dbSeen -and (Test-Path $dbPath)) {
@@ -213,6 +238,7 @@ while ((Get-Date) -lt $deadline) {
         if (-not $ipcSeen -and
             (Get-DiagnosticMarkerCount $IpcReadyMarker) -gt $ipcBefore) {
             $ipcSeen = $true
+            $ipcReadyAt = Get-DiagnosticEventTimestamp $IpcReadyMarker $ipcBefore
             Write-Host "new IPC readiness marker seen (frontend reached the backend)"
         }
         if (-not $manifestRefreshSeen -and
@@ -220,27 +246,27 @@ while ((Get-Date) -lt $deadline) {
             $manifestRefreshSeen = $true
             Write-Host "new manifest-refresh marker seen"
         }
+        if (-not $manifestRefreshFinishedSeen -and
+            (Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage) -gt
+                $manifestRefreshFinishedBefore) {
+            $manifestRefreshFinishedSeen = $true
+            $manifestRefreshFinishedAt = Get-DiagnosticEventTimestamp `
+                $ManifestRefreshFinishedMessage `
+                $manifestRefreshFinishedBefore
+            Write-Host "manifest refresh reached its terminal event"
+        }
     }
     if (-not $manifestRequestSeen -and $manifestAccept.IsCompletedSuccessfully) {
         $HeldManifestConnection = $manifestAccept.Result
         $manifestRequestSeen = $true
-        $manifestRequestAcceptedAt = Get-Date
         Write-Host "manifest request accepted and deliberately left unanswered"
     }
     if ($dbSeen -and $logSeen -and $ipcSeen -and
-        $manifestRefreshSeen -and $manifestRequestSeen) { break }
+        $manifestRefreshSeen -and $manifestRefreshFinishedSeen -and
+        $manifestRequestSeen) { break }
 
     if ($AppProc.HasExited) {
         throw "GMM exited early with code $($AppProc.ExitCode) before finishing startup"
-    }
-    # The production fetch has a 20-second total timeout. Give IPC half of
-    # that after the request is accepted: a blocking implementation cannot
-    # reach readiness until the fetch times out, while the background path
-    # has ample time to bring up the already-installed WebView.
-    if (-not $ipcSeen -and $null -ne $manifestRequestAcceptedAt -and
-        (Get-Date) -gt $manifestRequestAcceptedAt.AddSeconds(10)) {
-        throw "IPC did not become ready while the manifest response was still pending — " +
-              "startup appears to be waiting on the network"
     }
     Start-Sleep -Milliseconds 500
 }
@@ -259,6 +285,14 @@ if (-not $manifestRefreshSeen) {
 if (-not $manifestRequestSeen) {
     throw "timed out waiting for the manifest refresh to reach $manifestUrl"
 }
+if (-not $manifestRefreshFinishedSeen) {
+    throw "timed out waiting for the held-open manifest refresh to reach its terminal event"
+}
+if ($ipcReadyAt -ge $manifestRefreshFinishedAt) {
+    throw "IPC readiness at $ipcReadyAt did not precede manifest refresh completion at " +
+          "$manifestRefreshFinishedAt — startup appears to be waiting on the network"
+}
+Write-Host "IPC readiness preceded manifest refresh completion"
 
 # A crash-on-idle would show up here.
 Start-Sleep -Seconds 5
