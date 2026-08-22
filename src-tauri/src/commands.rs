@@ -23,11 +23,13 @@ use crate::core::reconcile::ReconcileResult;
 use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
-    Core, GameCode, ImportZipOptions, LibraryAuditReport, Mod, MoveReport, SessionInfo,
+    Core, DeletedLibraryDir, GameCode, ImportZipOptions, LibraryAuditReport, Mod, MoveReport,
+    SessionInfo,
 };
 use crate::runtime::launch::{self, LaunchOptions};
 use crate::runtime::SessionRuntime;
 use tauri::AppHandle;
+use tauri_plugin_opener::OpenerExt;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,6 +245,64 @@ pub async fn audit_library(
     game: GameCode,
 ) -> Result<LibraryAuditReport, String> {
     core.audit_library(game).await.map_err(|e| e.to_string())
+}
+
+/// Arguments for recovering an unreferenced Library directory.
+///
+/// The name is the user's, exactly as in [`AdoptArgs`]: nothing on disk
+/// records what the interrupted import was called, so GMM asks rather than
+/// inventing a display name and presenting it as a recovered fact.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverLibraryDirArgs {
+    pub game: GameCode,
+    pub path: PathBuf,
+    pub name: String,
+}
+
+/// Open the user's file manager on an unreferenced Library folder so they
+/// can see what is inside before choosing to recover or delete it.
+#[tauri::command]
+pub async fn reveal_unreferenced_library_dir(
+    core: State<'_, Core>,
+    app: AppHandle,
+    game: GameCode,
+    path: PathBuf,
+) -> Result<(), String> {
+    let path = core
+        .unreferenced_library_dir_for_reveal(game, &path)
+        .await
+        .map_err(|e| e.to_string())?;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|e| format!("could not open {}: {e}", path.display()))
+}
+
+/// Adopt an unreferenced Library folder as a Mod without copying it.
+#[tauri::command]
+pub async fn recover_unreferenced_library_dir(
+    core: State<'_, Core>,
+    args: RecoverLibraryDirArgs,
+) -> Result<Mod, String> {
+    core.recover_unreferenced_library_dir(args.game, &args.path, &args.name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Permanently delete one unreferenced Library folder the user confirmed.
+///
+/// One path, never a list: the confirmation the user answered named a
+/// single folder and its size, and a bulk variant of this command would be
+/// a bulk confirmation waiting to happen.
+#[tauri::command]
+pub async fn delete_unreferenced_library_dir(
+    core: State<'_, Core>,
+    game: GameCode,
+    path: PathBuf,
+) -> Result<DeletedLibraryDir, String> {
+    core.delete_unreferenced_library_dir(game, &path)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

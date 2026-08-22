@@ -169,6 +169,19 @@ async fn run(args: &Args) -> Result<(), String> {
             .map_err(|e| e.to_string())
         }
 
+        // Recovering an unreferenced Library directory (#72). Only the
+        // fallback path — a directory whose name is not a usable ULID —
+        // has a filesystem step to be interrupted; the ULID case moves
+        // nothing at all.
+        "recover" => {
+            let path = PathBuf::from(args.req("--path")?);
+            let name = args.req("--name")?;
+            core.recover_unreferenced_library_dir(args.game()?, &path, &name)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
         "reconcile" => {
             let mods_dir = PathBuf::from(args.req("--mods-dir")?);
             core.reconcile_junctions(args.game()?, &mods_dir)

@@ -26,7 +26,7 @@ use std::io::Write;
 
 use gmm_lib::commands::{
     list_supported_games, AdoptArgs, GameBananaImportArgs, ImportZipArgs, LibraryPaths,
-    NO_INSTALL_PATH_FOR_ENABLE_MSG,
+    RecoverLibraryDirArgs, NO_INSTALL_PATH_FOR_ENABLE_MSG,
 };
 use gmm_lib::core::av;
 use gmm_lib::core::conflicts::ConflictReport;
@@ -36,7 +36,8 @@ use gmm_lib::core::reconcile::ReconcileResult;
 use gmm_lib::core::updates::UpdateStatus;
 use gmm_lib::core::variants::Variant;
 use gmm_lib::core::{
-    Core, GameCode, ImportZipOptions, LibraryAuditReport, Mod, Source, UnreferencedLibraryDir,
+    Core, DeletedLibraryDir, GameCode, ImportZipOptions, LibraryAuditReport, Mod, Source,
+    UnreferencedLibraryDir,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -246,6 +247,37 @@ fn library_audit_response_uses_camel_case() {
         Some("01ORPHAN")
     );
     assert_eq!(directory.get("sizeBytes").and_then(Value::as_u64), Some(42));
+}
+
+#[test]
+fn recover_library_dir_args_deserialise_from_camel_case_json() {
+    let args: RecoverLibraryDirArgs = from_json(serde_json::json!({
+        "game": "srmi",
+        "path": "D:\\GMM Library\\srmi\\01FIRST",
+        "name": "Raiden Shogun Alt",
+    }));
+    assert_eq!(args.game, GameCode::Srmi);
+    assert_eq!(
+        args.path,
+        std::path::PathBuf::from("D:\\GMM Library\\srmi\\01FIRST"),
+    );
+    assert_eq!(args.name, "Raiden Shogun Alt");
+}
+
+#[test]
+fn deleted_library_dir_response_uses_camel_case() {
+    let value = to_json(&DeletedLibraryDir {
+        directory_name: "01ORPHAN".into(),
+        path: "/library/gimi/01ORPHAN".into(),
+        size_bytes: Some(42),
+    });
+    let object = value.as_object().expect("deleted object");
+    assert_eq!(
+        object.get("directoryName").and_then(Value::as_str),
+        Some("01ORPHAN"),
+    );
+    assert_eq!(object.get("sizeBytes").and_then(Value::as_u64), Some(42));
+    assert!(object.contains_key("path"));
 }
 
 #[test]

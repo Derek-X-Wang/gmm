@@ -44,6 +44,14 @@
 //!   only copy of the interrupted import. Inspect/delete/recovery actions
 //!   are deliberately deferred to issue #72.
 //!
+//! * **Orphan renamed but not yet adopted.** Recovering a Library-root
+//!   directory whose name is not a usable ULID renames it before writing
+//!   the row (#72), for the same reason imports copy before inserting: a
+//!   row pointing at a directory that is not there is worse than a
+//!   directory no row points at. A crash in that window therefore leaves
+//!   the same orphan shape under the new name, which the audit reports
+//!   and the same feature can recover a second time.
+//!
 //! * **Missing Variant rows.** A crash between the row insert and
 //!   `detect_and_record_variants` leaves a Mod whose Library subtree has
 //!   Variant subfolders but whose `mod_variants` table is empty, so
@@ -637,6 +645,78 @@ async fn variant_switch_crashing_between_junctions_recovers() {
 
     let core = recover_and_assert(&env, "variant switch crashed between junctions").await;
     assert_rows_match_disk(&core, &env, "variant switch crashed between junctions").await;
+}
+
+// ---------------------------------------------------------------------
+// recover_unreferenced_library_dir
+// ---------------------------------------------------------------------
+
+/// Crash after the rename, before the row insert.
+///
+/// Nothing is lost and nothing is duplicated: the bytes sit under the
+/// fresh ULID, no row claims them, and the audit reports them again — so
+/// the user's next click recovers exactly the same folder. That is the
+/// whole reason the rename goes first.
+#[tokio::test]
+async fn recovery_crashing_after_the_rename_leaves_the_folder_recoverable_again() {
+    let env = TestEnv::new();
+    let game_root = env.library.join("gimi");
+    let dropped = game_root.join("Dropped In By Hand");
+    std::fs::create_dir_all(&dropped).expect("dropped dir");
+    std::fs::write(dropped.join("merged.ini"), b"hash=11\n").expect("ini");
+
+    env.crash_during(
+        crash_points::RECOVER_AFTER_LIBRARY_MOVE,
+        &[
+            "recover",
+            "--path",
+            &dropped.display().to_string(),
+            "--name",
+            "Recovered By Hand",
+        ],
+    );
+
+    let core = recover_and_assert(&env, "recovery crashed after the rename").await;
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list")
+            .is_empty(),
+        "no Mod row should exist — the insert never ran",
+    );
+    assert!(
+        !dropped.exists(),
+        "the rename committed before the crash, so the old name is gone",
+    );
+
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after the crashed recovery");
+    assert_eq!(
+        report.unreferenced.len(),
+        1,
+        "the renamed folder must still be reported: {report:?}",
+    );
+    let orphan = &report.unreferenced[0];
+    assert_eq!(
+        std::fs::read(orphan.path.join("merged.ini")).expect("the user's bytes"),
+        b"hash=11\n",
+        "an interrupted recovery must not have cost the user their files",
+    );
+
+    // And a second attempt now succeeds against the reported path.
+    let recovered = core
+        .recover_unreferenced_library_dir(GameCode::Gimi, &orphan.path, "Recovered By Hand")
+        .await
+        .expect("recover the folder the crashed attempt renamed");
+    assert_eq!(recovered.library_path, orphan.path);
+    assert!(core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after the second attempt")
+        .unreferenced
+        .is_empty(),);
 }
 
 // ---------------------------------------------------------------------
