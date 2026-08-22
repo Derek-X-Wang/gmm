@@ -549,6 +549,93 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What GMM knew about the install a backup replaced.
+///
+/// A backup is a pile of files and carries no provenance of its own, so
+/// rolling one back left GMM's record describing the install that had
+/// just been undone (#126). This is written *beside* the backup at
+/// install time and read back at rollback time.
+///
+/// Both fields are optional because GMM may genuinely not have known:
+/// an install performed over a hand-installed setup replaces files GMM
+/// never recorded. `None` here means unknown, which is a first-class
+/// state (#99) and strictly better than a confident wrong answer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupProvenance {
+    /// The importer version GMM had recorded for the backed-up files.
+    pub version: Option<String>,
+    /// The Importer Origin GMM had recorded for them.
+    pub origin: Option<super::importer_origin::ImporterOrigin>,
+}
+
+/// Where [`BackupProvenance`] is stored for `backup_dir`.
+///
+/// A **sibling** of the backup directory, never a file inside it:
+/// [`rollback_to`] moves every entry of the backup directory into the
+/// game directory, so a sidecar stored inside would be deposited next to
+/// the user's `d3dx.ini`. The rollback picker only considers
+/// directories, so the sibling is invisible to it.
+pub fn provenance_path(backup_dir: &Path) -> PathBuf {
+    let mut name = backup_dir.file_name().unwrap_or_default().to_os_string();
+    name.push(".gmm-provenance.json");
+    backup_dir.with_file_name(name)
+}
+
+/// Record what the files in `backup_dir` were, so a later rollback can
+/// restore GMM's bookkeeping along with the files.
+pub fn write_backup_provenance(backup_dir: &Path, provenance: &BackupProvenance) -> Result<()> {
+    let path = provenance_path(backup_dir);
+    let json = serde_json::to_string_pretty(provenance)
+        .map_err(|e| Error::Importer(format!("could not encode backup provenance: {e}")))?;
+    fs::write(&path, json).map_err(|source| Error::Io { path, source })
+}
+
+/// Read back what [`write_backup_provenance`] recorded.
+///
+/// `None` for every reason: no sidecar (a backup taken by a GMM that
+/// predates this, or one taken over files GMM never installed) and an
+/// unreadable one alike. All of them mean the same thing to the caller —
+/// GMM cannot say what these files were — and the caller's response is
+/// to record unknown rather than to guess.
+pub fn read_backup_provenance(backup_dir: &Path) -> Option<BackupProvenance> {
+    let path = provenance_path(backup_dir);
+    let raw = fs::read_to_string(&path).ok()?;
+    match serde_json::from_str(&raw) {
+        Ok(provenance) => Some(provenance),
+        Err(e) => {
+            tracing::warn!(
+                target: "gmm::importer",
+                path = %path.display(),
+                error = %e,
+                "backup provenance could not be read; the rollback will record an \
+                 unknown Importer Origin rather than guess",
+            );
+            None
+        }
+    }
+}
+
+/// The most recent backup under `backups_root`, or `None` when there is
+/// nothing to roll back to.
+///
+/// Backups are named with an ISO-8601 timestamp, so lexicographic order
+/// is chronological order.
+pub fn latest_backup(backups_root: &Path) -> Result<Option<PathBuf>> {
+    if !backups_root.exists() {
+        return Ok(None);
+    }
+    let mut entries: Vec<PathBuf> = fs::read_dir(backups_root)
+        .map_err(|source| Error::Io {
+            path: backups_root.to_path_buf(),
+            source,
+        })?
+        .filter_map(|r| r.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    entries.sort();
+    Ok(entries.pop())
+}
+
 /// Restore `game_dir` to the state captured in `backup_dir`. Files
 /// currently in `game_dir` with the same name are removed first.
 pub fn rollback_to(backup_dir: &Path, game_dir: &Path) -> Result<()> {

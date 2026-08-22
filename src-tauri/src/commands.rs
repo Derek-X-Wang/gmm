@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::core::av;
 use crate::core::conflicts::ConflictReport;
 use crate::core::diagnostics;
-use crate::core::importer::{self, InstallReport, LatestRelease};
+use crate::core::importer::{InstallReport, LatestRelease};
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
 use crate::core::reconcile::ReconcileResult;
@@ -478,45 +478,20 @@ pub async fn test_proxy_connection(core: State<'_, Core>) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
+/// Roll the Game's Model Importer back to its most recent backup.
+///
+/// Thin wrapper: the rollback restores GMM's record of what is
+/// installed as well as the files, which is DB work and belongs on
+/// `Core` (#126).
 #[tauri::command]
 pub async fn rollback_importer(
     core: State<'_, Core>,
     game: GameCode,
 ) -> Result<Option<PathBuf>, String> {
     refuse_during_session(&core).await?;
-    let install = core
-        .game_install_path(game)
+    core.rollback_importer(game)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Set the game install path in Settings before rolling back.".to_string())?;
-    let data = crate::data_dir().map_err(|e| e.to_string())?;
-    let backups_root = data.join("backups").join(game.as_str());
-
-    if !backups_root.exists() {
-        return Ok(None);
-    }
-    // Pick the lexicographically-newest backup (we name them with an
-    // ISO-8601 timestamp).
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(&backups_root)
-        .map_err(|e| format!("read backups dir: {e}"))?
-        .filter_map(|r| r.ok().map(|e| e.path()))
-        .filter(|p| p.is_dir())
-        .collect();
-    entries.sort();
-    let Some(latest) = entries.pop() else {
-        return Ok(None);
-    };
-
-    let latest_for_blocking = latest.clone();
-    let install_for_blocking = install.clone();
-    tokio::task::spawn_blocking(move || {
-        importer::rollback_to(&latest_for_blocking, &install_for_blocking)
-    })
-    .await
-    .map_err(|e| format!("rollback task join error: {e}"))?
-    .map_err(|e| e.to_string())?;
-
-    Ok(Some(latest))
+        .map_err(|e| e.to_string())
 }
 
 /// Tauri command — reconcile junctions for a game in place. Used by
