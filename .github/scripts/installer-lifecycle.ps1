@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    MSI upgrade, repair and uninstall against realistic user state.
+    MSI upgrade, downgrade refusal, repair and uninstall against realistic user state.
 
 .DESCRIPTION
     `installer-smoke.ps1` covers install → launch → uninstall on a clean
@@ -30,9 +30,11 @@
       5. upgrade to N+1 (9.9.1) and assert it replaced rather than
          duplicated — one entry, one install directory, binaries moved
       6. assert every seeded invariant survived
-      7. delete a shipped binary, run an MSI repair, assert the binary is
+      7. attempt to install N over N+1 and require the specific Windows
+         Installer downgrade refusal, then prove N+1 and all user state remain
+      8. delete a shipped binary, run an MSI repair, assert the binary is
          restored byte-for-byte and the user data is untouched
-      8. uninstall, and assert the documented policy — install directory
+      9. uninstall, and assert the documented policy — install directory
          gone, `%APPDATA%\GMM` kept, Junctions left in place
 
     The uninstall policy is documented in README.md under "Uninstalling".
@@ -91,6 +93,33 @@ function Invoke-Msi($arguments, $logName) {
         if (Test-Path $log) { Get-Content $log -Tail 60 }
         throw "msiexec $($arguments -join ' ') exited $($p.ExitCode)"
     }
+}
+
+# A failed msiexec is not necessarily a refused downgrade: it can also mean
+# the MSI is missing, the command line is malformed, or a file is locked.
+# Require both Windows Installer's specific exit code and the WiX launch-
+# condition message, while retaining the verbose log as a CI diagnostic.
+function Invoke-MsiExpectFailure($arguments, $logName, $expectedExitCode, $expectedLogMessage) {
+    $log = Join-Path $LogDir $logName
+    $p = Start-Process msiexec.exe `
+        -ArgumentList ($arguments + @("/quiet", "/norestart", "/l*v", "`"$log`"")) `
+        -Wait -PassThru
+    Write-Host "msiexec $($arguments -join ' ') returned exit code $($p.ExitCode)"
+
+    if ($p.ExitCode -ne $expectedExitCode) {
+        if (Test-Path $log) { Get-Content $log -Tail 60 }
+        throw "expected msiexec exit code $expectedExitCode, got $($p.ExitCode)"
+    }
+    if (-not (Test-Path $log)) {
+        throw "msiexec produced no verbose log at $log"
+    }
+    $message = Select-String -Path $log -SimpleMatch $expectedLogMessage |
+        Select-Object -First 1
+    if (-not $message) {
+        Get-Content $log -Tail 60
+        throw "msiexec log did not contain the expected refusal: $expectedLogMessage"
+    }
+    Write-Host "specific refusal: $($message.Line.Trim())"
 }
 
 # Launch the installed app and wait until it proves the frontend reached
@@ -299,6 +328,41 @@ Write-Host "one entry, one install directory, binaries replaced"
 Write-Section "Every seeded invariant survived the upgrade"
 Invoke-Fixture "verify"
 Assert-AppStarts $exe
+
+# ---------------------------------------------------------------------
+Write-Section "Refuse a downgrade and preserve the working install"
+
+# Deliberately starts with the wrong expected code for the first Windows run.
+# That red run establishes the real Windows Installer code rather than relying
+# on a remembered or generic non-zero value; the follow-up commit pins what CI
+# actually reports.
+Invoke-MsiExpectFailure `
+    @("/i", "`"$($oldMsi.FullName)`"") `
+    "msi-lifecycle-downgrade-refused.log" `
+    1 `
+    "A newer version of GMM is already installed."
+
+$exe = Get-InstalledExe
+if (-not $exe) { throw "GMM.exe missing after the refused downgrade" }
+$installedVersion = (Get-Item $exe).VersionInfo.ProductVersion
+Write-Host "installed version after refused downgrade: $installedVersion"
+if (-not $installedVersion.StartsWith("9.9.1")) {
+    throw "refused downgrade changed the installed version to $installedVersion"
+}
+if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $exeHashAfter) {
+    throw "refused downgrade changed the installed GMM.exe bytes"
+}
+
+$entries = @(Get-UninstallEntries)
+if ($entries.Count -ne 1) {
+    $entries | ForEach-Object { Write-Host "  $($_.DisplayName) $($_.DisplayVersion) $($_.PSPath)" }
+    throw "refused downgrade left $($entries.Count) Add/Remove Programs entries"
+}
+Write-Host "one entry remains: $($entries[0].DisplayName) $($entries[0].DisplayVersion)"
+
+Invoke-Fixture "verify"
+Assert-AppStarts $exe
+Write-Host "version N+1, its binary, user state and working launch all survived"
 
 # ---------------------------------------------------------------------
 Write-Section "Repair restores binaries without touching user data"
