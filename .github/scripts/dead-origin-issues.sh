@@ -45,14 +45,6 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$CURRENT" ] || [ ! -f "$CURRENT" ]; then
-  # No current report means check-origins never ran or died before
-  # writing one. That is a broken job, not a healthy manifest, and
-  # exiting 0 here would hide it.
-  echo "no current report at '${CURRENT}' — cannot decide anything" >&2
-  exit 1
-fi
-
 # Validate a report before deriving failures from it. Do this before entering a
 # process substitution: bash does not propagate a producer's status from
 # `while ... done < <(...)`, which is how an unreadable report used to become
@@ -77,25 +69,54 @@ read_failures() {
     return 1
   fi
 
-  if ! jq empty "$file" 2>"$error_file"; then
-    echo "could not read ${role} report '$file': $(tr '\n' ' ' < "$error_file")" >&2
+  if [ ! -s "$file" ]; then
+    echo "could not read ${role} report '$file': file is empty" >&2
     return 1
   fi
 
-  if ! jq -e 'type == "object" and (.origins | type == "array")' \
-    "$file" >/dev/null 2>"$error_file"; then
-    echo "could not read ${role} report '$file': expected an .origins array" >&2
-    return 1
-  fi
+  # Parse the whole input before emitting anything. `--slurp` lets this reject
+  # both an empty stream and concatenated JSON documents. The counts are
+  # independent corroboration written by check-origins: a valid zero-check
+  # report is allowed for the ADR-0005 state where every game is retracted,
+  # but a bare `{"origins":[]}` is not evidence.
+  if ! jq --slurp --raw-output '
+    def nonempty_string: type == "string" and length > 0;
+    def nonnegative_integer:
+      type == "number" and . >= 0 and floor == .;
 
-  if [ "$(jq '.origins | length' "$file")" -eq 0 ]; then
-    echo "could not read ${role} report '$file': report contains no origins" >&2
-    return 1
-  fi
-
-  if ! jq -r '.origins[] | select(.ok == false)
-         | [.game, .origin, (.detail // "")] | @tsv' \
-    "$file" >"$output" 2>"$error_file"; then
+    if length != 1 then
+      error("expected exactly one top-level JSON document")
+    else
+      .[0] as $report
+      | if ($report | type) != "object"
+          or ($report.manifest | nonempty_string | not)
+          or ($report.checked | nonnegative_integer | not)
+          or ($report.failed | nonnegative_integer | not)
+          or ($report.origins | type) != "array" then
+          error("expected manifest, nonnegative integer checked/failed counts, and an origins array")
+        elif all($report.origins[];
+          type == "object"
+          and (.game | nonempty_string)
+          and (.origin | nonempty_string)
+          and (.assetPattern | nonempty_string)
+          and (.ok | type == "boolean")
+          and (.detail | type == "string")
+          and ((.ok == false) or (.asset | nonempty_string))) | not then
+          error("every verdict must have usable game, origin, assetPattern, ok, detail, and successful asset fields")
+        elif $report.checked != ($report.origins | length) then
+          error("checked does not match origins length")
+        elif $report.failed != ([$report.origins[] | select(.ok == false)] | length) then
+          error("failed does not match failing verdicts")
+        elif ([$report.origins[] | [.game, .origin]] | unique | length) != $report.checked then
+          error("duplicate game and origin alert key")
+        else
+          $report.origins[]
+          | select(.ok == false)
+          | [.game, .origin, .detail]
+          | @tsv
+        end
+    end
+  ' "$file" >"$output" 2>"$error_file"; then
     echo "could not read ${role} report '$file': $(tr '\n' ' ' < "$error_file")" >&2
     return 1
   fi
@@ -152,10 +173,9 @@ while IFS=$'\t' read -r game origin detail; do
     echo "already tracked: ${title}"
     continue
   fi
-  # `read` avoids nesting the heredoc inside a command substitution. Bash
-  # otherwise parses Markdown's escaped backticks as an unterminated legacy
-  # command substitution in this branch; dry-run exits before reaching it and
-  # hid the defect.
+  # Keep the heredoc out of a command substitution for Bash 3.2 portability.
+  # GitHub's Bash 4.4+ runner parses the former construct correctly; macOS's
+  # system Bash does not.
   body=""
   IFS= read -r -d '' body <<EOF || true
 > *Opened automatically by the scheduled \`upstream importers\` workflow.*
