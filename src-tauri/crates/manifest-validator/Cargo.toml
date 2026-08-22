@@ -1,7 +1,7 @@
 [package]
 name = "gmm-manifest-validator"
 version = "0.1.0"
-description = "Offline shape validator for manifest/recommended-importers.json. Lives outside the Tauri package so that package keeps exactly one binary — a second bin there makes the bundler ship the wrong executable."
+description = "CI tooling for manifest/recommended-importers.json: an offline shape validator run on every pull request, and a live origin-resolution check run on a schedule. Lives outside the Tauri package so that package keeps exactly one binary — a second bin there makes the bundler ship the wrong executable."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,8 +11,22 @@ publish = false
 name = "validate-manifest"
 path = "src/main.rs"
 
+# The live half of ADR 0005's two CI guarantees. Deliberately a second
+# binary next to the offline validator rather than a flag on it: one is
+# run on every pull request and must never touch the network, the other
+# is run on a schedule and does nothing else.
+[[bin]]
+name = "check-origins"
+path = "src/check_origins.rs"
+
 [dependencies]
 gmm = { path = "../.." }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
+mockito = "1"
+serde_json = "1"
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

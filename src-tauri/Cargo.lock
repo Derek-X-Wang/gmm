@@ -1599,7 +1599,11 @@ name = "gmm-manifest-validator"
 version = "0.1.0"
 dependencies = [
  "gmm",
+ "mockito",
+ "reqwest 0.12.28",
+ "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

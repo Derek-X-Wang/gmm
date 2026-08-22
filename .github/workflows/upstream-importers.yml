@@ -42,3 +42,115 @@ jobs:
           cargo test --test importer_sources --
           --ignored --exact
           every_importer_profile_resolves_to_a_live_release_with_a_matching_asset
+
+  # ADR 0005's scheduled guarantee, and the half that does the real
+  # work. The job above checks the origins *compiled into this build* —
+  # the offline fallback. This one checks the origins the manifest is
+  # pointing live installs at right now, which is a different set the
+  # moment the manifest and the compiled-in defaults diverge, and that
+  # divergence is the manifest's entire reason to exist.
+  #
+  # ADR 0005 puts staleness detection here rather than on the user's
+  # screen: "GMM never asks a user to judge whether an importer is
+  # abandoned, because age is a bad proxy for health." HIMI is the case
+  # this would have caught 13 months ago.
+  recommended-origin-contract:
+    name: recommended origins still resolve
+    runs-on: ubuntu-latest
+    permissions:
+      # Settled deliberately rather than inherited (#112). The job's own
+      # GITHUB_TOKEN, not a PAT: it only ever reads public repositories
+      # and writes issues on this one.
+      #
+      #   contents: read  — checkout
+      #   issues:  write  — open the alert
+      #   actions: read   — download the previous run's report, which is
+      #                     the entire memory behind "twice in a row"
+      #
+      # A GITHUB_TOKEN-authored issue deliberately does not trigger
+      # further workflows, so this cannot start a loop.
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: recommended-origins
+
+      # Writes the report whether or not the origins resolve, then exits
+      # non-zero if any failed. `continue-on-error` keeps the alerting
+      # steps reachable; the last step re-imposes the failure so the run
+      # is still red.
+      - name: Resolve every recommended Importer Origin
+        id: resolve
+        continue-on-error: true
+        working-directory: src-tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          cargo run -p gmm-manifest-validator --bin check-origins --
+          --report ../origin-report.json
+
+      - name: Upload this run's report
+        uses: actions/upload-artifact@v4
+        with:
+          name: origin-report
+          path: origin-report.json
+          if-no-files-found: error
+
+      # The "twice in a row" memory. No state store: the previous
+      # scheduled run's own artifact is the record. Absent on the first
+      # run ever, and after the 90-day artifact expiry — both of which
+      # read as "nothing failed last time", so the worst case is one
+      # week's delay in alerting rather than a false alarm.
+      - name: Fetch the previous run's report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          previous="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow upstream-importers.yml \
+            --status completed \
+            --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          if [ -z "$previous" ]; then
+            echo "no previous completed run — nothing to compare against"
+            exit 0
+          fi
+          echo "comparing against run $previous"
+          mkdir -p previous
+          gh run download "$previous" --repo "$GITHUB_REPOSITORY" \
+            --name origin-report --dir previous \
+            || echo "run $previous published no origin-report artifact"
+
+      - name: Open an issue for anything dead two runs running
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: >-
+          .github/scripts/dead-origin-issues.sh
+          --current origin-report.json
+          --previous previous/origin-report.json
+
+      # Re-impose the resolution failure. The alerting above is about
+      # what the maintainer gets *told*; the run still has to go red so
+      # the workflow list shows it.
+      - name: Fail the run if any origin did not resolve
+        if: steps.resolve.outcome != 'success'
+        run: |
+          echo "check-origins reported at least one unresolved origin"
+          exit 1
