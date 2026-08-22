@@ -151,9 +151,10 @@ If you need to move to an older version, the supported route is:
    schema-downgrade path; a database migrated forward cannot be read by
    an earlier build.
 
-Your Library and settings are never removed by an uninstall, so nothing
-above puts your mods at risk — but step 4 is why a plain reinstall of an
-older build is not enough on its own.
+Your Library and settings are never removed by an uninstall (see
+[Uninstalling](#uninstalling)), so nothing above puts your mods at risk —
+but step 4 is why a plain reinstall of an older build is not enough on
+its own.
 
 **If the key rotates** (lost, leaked, or maintainer turnover), every
 existing GMM install becomes unable to install future updates and must
