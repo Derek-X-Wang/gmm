@@ -106,7 +106,11 @@ while IFS=$'\t' read -r game origin detail; do
     echo "already tracked: ${title}"
     continue
   fi
-  body="$(cat <<EOF
+  # Avoid nesting this heredoc inside a command substitution. Bash otherwise
+  # parses its escaped Markdown backticks as an unterminated legacy command
+  # substitution, leaving this non-dry-run branch syntactically invalid.
+  body=""
+  IFS= read -r -d '' body <<EOF || true
 > *Opened automatically by the scheduled \`upstream importers\` workflow.*
 
 The Importer Origin GMM recommends for **${game}** has failed to resolve on
@@ -139,7 +143,6 @@ Validate before merging: \`cd src-tauri && cargo run --bin validate-manifest\`.
 This issue is not reopened or duplicated while it stays open. Close it once
 the manifest is fixed; the next scheduled run will re-open one if it is not.
 EOF
-)"
   echo "opening: ${title}"
   gh issue create --repo "$REPO" \
     --title "$title" \
