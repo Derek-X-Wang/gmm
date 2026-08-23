@@ -38,6 +38,9 @@ jobs:
       - name: Prove PSScriptAnalyzer findings fail the linter
         run: pwsh -NoProfile -File .github/scripts/test-lint-ci-scripts.ps1
 
+      - name: Test updater server readiness
+        run: pwsh -NoProfile -File .github/scripts/test-updater-server-readiness.ps1
+
       - name: Install ShellCheck
         run: |
           sudo apt-get update
