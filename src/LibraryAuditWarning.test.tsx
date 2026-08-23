@@ -38,9 +38,7 @@ beforeEach(() => {
     directoryName: "01FIRST",
     path: FIRST,
     sizeBytes: 400 * 1024 * 1024,
-    reclamationDeferred: false,
-    reclamationFailed: false,
-    reclamationPath: null,
+    reclamation: { status: "reclaimed" },
   });
 });
 
@@ -167,7 +165,7 @@ it("surfaces a refused action instead of silently doing nothing", async () => {
   );
 });
 
-it("tells the user where deferred reclamation remains and that startup will retry", async () => {
+it("says deferred bytes remain at the reserved path and later startups will retry", async () => {
   const user = userEvent.setup();
   const quarantine = "C:\\Users\\me\\AppData\\Roaming\\GMM\\library\\gimi\\.gmm-delete-DEFERRED";
   auditLibrary
@@ -177,23 +175,22 @@ it("tells the user where deferred reclamation remains and that startup will retr
     directoryName: "01FIRST",
     path: FIRST,
     sizeBytes: null,
-    reclamationDeferred: true,
-    reclamationFailed: false,
-    reclamationPath: quarantine,
+    reclamation: { status: "deferred", path: quarantine },
   });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
 
   await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
   await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
 
-  const notice = await screen.findByText(/GMM will retry at startup/i);
+  const notice = await screen.findByText(/GMM will retry during a later startup/i);
   await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
   expect(notice).toBeInTheDocument();
   expect(notice).toHaveTextContent(quarantine);
-  expect(notice).toHaveTextContent(/disk space has not been reclaimed/i);
+  expect(notice).toHaveTextContent(/could not reclaim its disk space now/i);
+  expect(notice).toHaveTextContent(/remains at its reserved name/i);
 });
 
-it("tells the user where reclamation failed and that GMM will not retry", async () => {
+it("announces ownership loss without presenting the reserved path as a cleanup target", async () => {
   const user = userEvent.setup();
   const quarantine = "C:\\Users\\me\\AppData\\Roaming\\GMM\\library\\gimi\\.gmm-delete-FAILED";
   auditLibrary
@@ -203,18 +200,18 @@ it("tells the user where reclamation failed and that GMM will not retry", async 
     directoryName: "01FIRST",
     path: FIRST,
     sizeBytes: null,
-    reclamationDeferred: false,
-    reclamationFailed: true,
-    reclamationPath: quarantine,
+    reclamation: { status: "ownershipLost" },
   });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
 
   await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
   await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
 
-  const notice = await screen.findByText(/GMM will not retry/i);
+  const notice = await screen.findByRole("alert");
   await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
-  expect(notice).toBeInTheDocument();
-  expect(notice).toHaveTextContent(quarantine);
-  expect(notice).toHaveTextContent(/disk space was not reclaimed/i);
+  expect(notice).toHaveTextContent(FIRST);
+  expect(notice).toHaveTextContent(/could not confirm whether its disk space was reclaimed/i);
+  expect(notice).toHaveTextContent(/no longer knows where that folder's bytes are/i);
+  expect(notice).toHaveTextContent(/verify the original directory at its reserved name/i);
+  expect(notice).not.toHaveTextContent(quarantine);
 });

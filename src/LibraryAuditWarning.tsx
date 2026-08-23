@@ -74,7 +74,7 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
     mutationFn: (path: string) => deleteUnreferencedLibraryDir(game, path),
     onSuccess: (deleted) => {
       setReclamation(
-        deleted.reclamationDeferred || deleted.reclamationFailed ? deleted : null,
+        deleted.reclamation && deleted.reclamation.status !== "reclaimed" ? deleted : null,
       );
       refresh();
     },
@@ -168,20 +168,24 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
 }
 
 function ReclamationNotice({ reclamation }: { reclamation: DeletedLibraryDir | null }) {
-  if (reclamation?.reclamationDeferred && reclamation.reclamationPath) {
+  if (!reclamation) return null;
+  const outcome = reclamation.reclamation;
+  if (outcome?.status === "deferred") {
     return (
       <p className="muted small">
-        The folder left the Library, but its disk space has not been reclaimed. Its bytes
-        remain at {reclamation.reclamationPath}. GMM will retry at startup.
+        GMM removed {reclamation.path} from the Library, but could not reclaim its disk
+        space now. Its bytes remain at {outcome.path}. GMM will retry during a later
+        startup while that directory remains at its reserved name.
       </p>
     );
   }
-  if (reclamation?.reclamationFailed && reclamation.reclamationPath) {
+  if (outcome?.status === "ownershipLost") {
     return (
-      <p className="error">
-        The folder left the Library, but its disk space was not reclaimed. The quarantine at{" "}
-        {reclamation.reclamationPath} changed, so GMM will not retry; the moved bytes need
-        manual cleanup.
+      <p className="error" role="alert">
+        GMM removed {reclamation.path} from the Library, but could not confirm whether its
+        disk space was reclaimed. GMM no longer knows where that folder&apos;s bytes are. If
+        GMM can again verify the original directory at its reserved name, a later startup
+        will retry reclamation.
       </p>
     );
   }

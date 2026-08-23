@@ -341,15 +341,14 @@ impl Core {
                         path = %staged_path.display(),
                         quarantine = %path.display(),
                         error = %error,
-                        "staged Library cleanup bytes remain in an owned quarantine; startup will retry reclamation",
+                        "GMM could not reclaim the staged Library cleanup bytes now; later startups will retry while the directory remains at its reserved name",
                     );
                 }
-                Ok(super::library_recovery::QuarantinePurgeOutcome::Failed { path }) => {
+                Ok(super::library_recovery::QuarantinePurgeOutcome::OwnershipLost) => {
                     tracing::error!(
                         target: "gmm::library",
                         path = %staged_path.display(),
-                        quarantine = %path.display(),
-                        "staged Library cleanup quarantine identity changed; automatic byte reclamation has stopped",
+                        "GMM cannot locate the staged Library cleanup quarantine or determine whether its bytes were reclaimed; a later startup will retry only if GMM can again verify the original directory at its reserved name",
                     );
                 }
                 Err(error) => tracing::warn!(

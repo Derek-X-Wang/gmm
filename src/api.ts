@@ -189,9 +189,10 @@ export interface DeletedLibraryDir {
   directoryName: string;
   path: string;
   sizeBytes: number | null;
-  reclamationDeferred: boolean;
-  reclamationFailed: boolean;
-  reclamationPath: string | null;
+  reclamation:
+    | { status: "reclaimed" }
+    | { status: "deferred"; path: string }
+    | { status: "ownershipLost" };
 }
 
 /** Open the file manager on an unreferenced Library folder. */
