@@ -38,6 +38,8 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot "updater-server-readiness.ps1")
+
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $BundleRoot = Join-Path $RepoRoot "src-tauri\target\release\bundle"
 $AppData = Join-Path $env:APPDATA "GMM"
@@ -280,11 +282,24 @@ $latest = [ordered]@{
 }
 $latest | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $Serve "latest.json") -Encoding utf8
 
+$serverStdOut = Join-Path $LogDir "updater-server.stdout.log"
+$serverStdErr = Join-Path $LogDir "updater-server.stderr.log"
+Remove-Item $serverStdOut, $serverStdErr -Force -ErrorAction SilentlyContinue
 $server = Start-Process python -ArgumentList "-m", "http.server", "$Port", "--bind", "127.0.0.1" `
-    -WorkingDirectory $Serve -PassThru -WindowStyle Hidden
-Start-Sleep -Seconds 3
+    -WorkingDirectory $Serve `
+    -RedirectStandardOutput $serverStdOut `
+    -RedirectStandardError $serverStdErr `
+    -PassThru `
+    -WindowStyle Hidden
 
 try {
+    Wait-ForUpdateServer `
+        -Port $Port `
+        -TimeoutSeconds 15 `
+        -ServerProcess $server `
+        -StandardOutputPath $serverStdOut `
+        -StandardErrorPath $serverStdErr
+
     $manifest = Invoke-RestMethod "http://127.0.0.1:$Port/latest.json"
     if ($manifest.version -ne $NewVersion) {
         throw "served manifest advertises $($manifest.version), expected $NewVersion"
