@@ -1006,7 +1006,14 @@ fn drop_bounds_and_kills_a_live_unreaped_child_during_unwinding() {
         .honouring_the_lock()
         .with_cleanup_timeout(Duration::from_millis(250))
         .forcing_reap_timeout()
-        .op(["hold-lock", "--ms", "3000"])
+        // The hold must outlast anything the rest of this test can wait for.
+        // At three seconds a contended runner could let the child exit on its
+        // own between the unwind and the lock probe below, freeing the lock
+        // without Drop ever killing anything — the test would then pass with
+        // Drop's kill removed. Thirty seconds is the same hold the rest of the
+        // suite uses, and is far longer than the one-second unwind budget plus
+        // the fresh probe's startup.
+        .op(["hold-lock", "--ms", "30000"])
         .spawn();
     running
         .wait_for_outcome()
