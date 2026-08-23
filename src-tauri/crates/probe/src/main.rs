@@ -24,9 +24,10 @@
 //! final state rather than on who won.
 //!
 //! Exit status: 0 when the operation succeeded, 2 when it failed, 1 on a
-//! usage error. The JSON line is printed either way — a probe that was
-//! *correctly refused* and a probe that failed to start must not look
-//! alike to the test.
+//! usage error, and 3 when a pause event cannot be written or flushed. The
+//! JSON line is printed on operation success or failure — a probe that was
+//! *correctly refused* and a probe that failed to start must not look alike
+//! to the test.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -120,8 +121,10 @@ async fn run(args: &Args) -> Result<(), String> {
             if pause_at.as_deref() == Some(reached) {
                 let line = serde_json::json!({ "pausedAt": reached });
                 let mut stdout = std::io::stdout();
-                let _ = writeln!(stdout, "{line}");
-                let _ = stdout.flush();
+                if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+                    eprintln!("failed to report pause at crash point {reached}: {error}");
+                    std::process::exit(3);
+                }
 
                 // The parent closes or writes to stdin to release this exact
                 // crash-point rendezvous. This is deliberately event-driven:
