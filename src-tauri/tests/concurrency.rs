@@ -1949,6 +1949,75 @@ async fn failed_reinstall_recovery_stops_startup_until_the_obstruction_is_fixed(
     );
 }
 
+/// Reinstall rollback and ordinary delete-quarantine reclamation are separate
+/// startup phases. If rollback succeeds but a later root cannot be inspected,
+/// the committed witness deletion must survive so routine cleanup remains
+/// best-effort and does not prevent the whole application from starting.
+#[tokio::test]
+async fn purge_failure_after_successful_reinstall_rollback_does_not_stop_startup() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Recovered Before Purge Failure").await;
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("reinstall stage");
+    std::fs::write(stage.join("replacement.ini"), b"staged replacement")
+        .expect("staged replacement bytes");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for reinstall witness");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("commit recoverable reinstall witness");
+    pool.close().await;
+    drop(core);
+
+    // `read_dir` on a regular file fails on every supported platform. Use an
+    // otherwise-unused game root so rollback itself succeeds before ordinary
+    // quarantine scanning reaches this routine cleanup failure.
+    let unreadable_root = env.library.join(GameCode::Srmi.as_str());
+    std::fs::write(&unreadable_root, b"not a directory").expect("failing purge root");
+
+    let restarted = Core::new(env.library.clone(), &env.db_url)
+        .await
+        .expect("ordinary purge failure after successful reinstall rollback must not stop startup");
+    assert_eq!(
+        std::fs::read(imported.library_path.join("merged.ini"))
+            .expect("installed bytes after successful rollback"),
+        b"[TextureOverride]\nhash=42\n",
+        "startup must keep the restored installed Mod bytes",
+    );
+    drop(restarted);
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after best-effort purge failure");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&pool)
+        .await
+        .expect("count witnesses after best-effort purge failure");
+    assert_eq!(
+        witnesses, 0,
+        "successful rollback must stay committed when ordinary purge later fails",
+    );
+}
+
 fn write_single_file_mod_zip(path: &Path) {
     let file = std::fs::File::create(path).expect("create zip");
     let mut archive = zip::ZipWriter::new(file);

@@ -54,13 +54,28 @@ impl Core {
             }
         }
 
+        // A committed witness owns the exact staged filesystem object while
+        // extraction runs outside the writer fence. Identity, not its reserved
+        // name, is what makes that live stage safe to suppress.
+        let witness_rows =
+            sqlx::query("SELECT staged_identity FROM reinstall_swaps WHERE game_code = ?")
+                .bind(game.as_str())
+                .fetch_all(&self.pool)
+                .await?;
+        let mut active_reinstall_stages = HashSet::new();
+        for row in witness_rows {
+            active_reinstall_stages.insert(row.try_get::<String, _>("staged_identity")?);
+        }
+
         let join_error_path = root.clone();
-        tokio::task::spawn_blocking(move || scan_game_root(game, &root, &referenced))
-            .await
-            .map_err(|join_error| Error::Io {
-                path: join_error_path,
-                source: io::Error::other(format!("Library audit worker failed: {join_error}")),
-            })?
+        tokio::task::spawn_blocking(move || {
+            scan_game_root(game, &root, &referenced, &active_reinstall_stages)
+        })
+        .await
+        .map_err(|join_error| Error::Io {
+            path: join_error_path,
+            source: io::Error::other(format!("Library audit worker failed: {join_error}")),
+        })?
     }
 }
 
@@ -68,6 +83,7 @@ fn scan_game_root(
     game: GameCode,
     root: &Path,
     referenced: &HashSet<DirectoryIdentity>,
+    active_reinstall_stages: &HashSet<String>,
 ) -> Result<LibraryAuditReport> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
@@ -103,6 +119,13 @@ fn scan_game_root(
         if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
             continue;
         }
+        let directory = IdentifiedDirectory::open(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if active_reinstall_stages.contains(&directory.identity().durable_key()) {
+            continue;
+        }
         // A process can die after creating reinstall's reserved stage but
         // before its witness transaction commits. Only a directory proven
         // empty is harmless internal residue. A reserved name containing any
@@ -116,10 +139,6 @@ fn scan_game_root(
         {
             continue;
         }
-        let directory = IdentifiedDirectory::open(&path).map_err(|source| Error::Io {
-            path: path.clone(),
-            source,
-        })?;
         if referenced.contains(directory.identity()) {
             continue;
         }
