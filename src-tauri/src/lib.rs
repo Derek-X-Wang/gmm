@@ -117,7 +117,7 @@ pub fn run() {
                 let refresh = match manifest_url_override {
                     Some(url) => {
                         core_for_manifest
-                            .refresh_recommended_importers_from(&url)
+                            .refresh_recommended_importers_from_loopback_override(&url)
                             .await
                     }
                     None => core_for_manifest.refresh_recommended_importers().await,

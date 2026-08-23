@@ -255,6 +255,70 @@ async fn a_failed_fetch_and_an_empty_but_valid_manifest_are_not_the_same_value()
     );
 }
 
+#[tokio::test]
+async fn the_loopback_override_does_not_follow_a_redirect_off_loopback() {
+    // Bind the target on every local interface, then address it through this
+    // machine's non-loopback interface. If reqwest follows the redirect, the
+    // target observes a real second request that `.expect(0)` rejects.
+    let route_probe = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind route probe");
+    route_probe
+        .connect("192.0.2.1:80")
+        .expect("select the host's outbound interface");
+    let off_loopback_ip = route_probe.local_addr().expect("route probe address").ip();
+    assert!(
+        !off_loopback_ip.is_loopback() && !off_loopback_ip.is_unspecified(),
+        "the redirect target must exercise a non-loopback interface: {off_loopback_ip}",
+    );
+
+    let mut escaped_target = mockito::Server::new_with_opts_async(mockito::ServerOpts {
+        host: "0.0.0.0",
+        ..Default::default()
+    })
+    .await;
+    let escaped_url = format!(
+        "http://{off_loopback_ip}:{}/escaped-manifest.json",
+        escaped_target.socket_address().port(),
+    );
+    let no_escape = escaped_target
+        .mock("GET", "/escaped-manifest.json")
+        .with_status(200)
+        .with_body(r#"{"schemaVersion": 1, "games": {}}"#)
+        .expect(0)
+        .create_async()
+        .await;
+
+    let mut loopback = mockito::Server::new_async().await;
+    let redirect = loopback
+        .mock("GET", "/recommended-importers.json")
+        .with_status(302)
+        .with_header("location", &escaped_url)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let tmp = TempDir::new().expect("tmp");
+    let outcome = fresh_core(&tmp)
+        .await
+        .refresh_recommended_importers_from_loopback_override(&format!(
+            "{}/recommended-importers.json",
+            loopback.url(),
+        ))
+        .await
+        .expect("refresh");
+
+    redirect.assert_async().await;
+    no_escape.assert_async().await;
+    match outcome {
+        Refreshed::Unreachable(reason) => assert!(
+            reason.contains("302"),
+            "the failed fetch must identify the redirect response: {reason}",
+        ),
+        other => panic!(
+            "a refused redirect is an unreachable fetch, not a successful empty manifest: {other:?}",
+        ),
+    }
+}
+
 /// The three shapes this build cannot make sense of. Each must drop the
 /// whole layer — never apply the readable half, never land on retraction.
 fn unusable_documents() -> Vec<(&'static str, &'static str)> {

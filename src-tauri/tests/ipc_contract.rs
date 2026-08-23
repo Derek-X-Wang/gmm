@@ -357,6 +357,11 @@ mod manifest_refresh_started_marker {
             "lib.rs must not name the manifest override environment variable \
              directly, where the loopback-only validator could be bypassed",
         );
+        assert!(
+            lib.contains("refresh_recommended_importers_from_loopback_override(&url)"),
+            "the validated URL must use the refresh path that refuses redirects, \
+             not the shipped URL path that deliberately follows them",
+        );
     }
 
     #[test]
