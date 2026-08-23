@@ -120,8 +120,10 @@ async fn run(args: &Args) -> Result<(), String> {
             if pause_at.as_deref() == Some(reached) {
                 let line = serde_json::json!({ "pausedAt": reached });
                 let mut stdout = std::io::stdout();
-                let _ = writeln!(stdout, "{line}");
-                let _ = stdout.flush();
+                if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+                    eprintln!("failed to report pause at crash point {reached}: {error}");
+                    std::process::exit(3);
+                }
 
                 // The parent closes or writes to stdin to release this exact
                 // crash-point rendezvous. This is deliberately event-driven:

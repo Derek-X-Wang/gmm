@@ -33,10 +33,12 @@
 //! which reports exactly the two failure modes by name, plus a direct
 //! scan of `<Game>/Mods/` for the inverse case reconcile does not cover.
 
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gmm_lib::core::{Core, GameCode};
 use tempfile::TempDir;
@@ -45,6 +47,11 @@ use ulid::Ulid;
 // ---------------------------------------------------------------------
 // Probe process harness
 // ---------------------------------------------------------------------
+
+/// Long enough for a cold Windows runner to start the probe and open SQLite,
+/// but short enough to report the missing crash point instead of burning the
+/// CI job's timeout.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn probe_bin() -> PathBuf {
     let name = if cfg!(windows) {
@@ -115,6 +122,7 @@ struct Probe {
     at: Option<u128>,
     pause_at: Option<&'static str>,
     crash_at: Option<&'static str>,
+    timeout: Duration,
     args: Vec<String>,
 }
 
@@ -127,6 +135,7 @@ fn probe(env: &TestEnv) -> Probe {
         at: None,
         pause_at: None,
         crash_at: None,
+        timeout: PROBE_TIMEOUT,
         args: Vec::new(),
     }
 }
@@ -159,6 +168,11 @@ impl Probe {
 
     fn crashing_at(mut self, point: &'static str) -> Self {
         self.crash_at = Some(point);
+        self
+    }
+
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -196,15 +210,18 @@ impl Probe {
 
     /// Run to completion and parse the outcome.
     fn run(self) -> ProbeOutcome {
-        let out = self.command().output().expect("spawn probe");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let line = stdout.lines().last().unwrap_or_else(|| {
-            panic!(
-                "probe printed nothing on stdout; stderr was:\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            )
+        let mut running = self.spawn();
+        // `Command::output` closes the piped stdin before waiting. Preserve
+        // that behaviour so a mistakenly paused `run` probe reaches its next
+        // step instead of being held open by the harness itself.
+        running.stdin.take();
+        let status = running.wait_for_exit("finish", running.expected_crash_point());
+        let lines = running.finish_stdout();
+        let line = lines.last().unwrap_or_else(|| {
+            let stderr = running.finish_stderr();
+            panic!("probe printed nothing on stdout; exit status {status}; stderr was:\n{stderr}")
         });
-        ProbeOutcome::parse(line)
+        ProbeOutcome::parse(line.trim())
     }
 
     /// Spawn without waiting. Used for the probe that holds a lock open
@@ -213,10 +230,51 @@ impl Probe {
         let mut child = self.command().spawn().expect("spawn probe");
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+
+        // Pipe reads are blocking on both Unix and Windows. Dedicated readers
+        // let the harness enforce its own deadline while continuously draining
+        // both streams so a noisy child cannot block on a full pipe.
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+        let stdout_reader = std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if stdout_tx.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = stdout_tx.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut stderr = stderr;
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
+        });
+
+        let operation = self
+            .args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<missing operation>".to_string());
         RunningProbe {
             child,
             stdin: Some(stdin),
-            stdout: BufReader::new(stdout),
+            stdout: stdout_rx,
+            stdout_reader: Some(stdout_reader),
+            stderr_reader: Some(stderr_reader),
+            operation,
+            pause_at: self.pause_at,
+            crash_at: self.crash_at,
+            timeout: self.timeout,
         }
     }
 }
@@ -224,17 +282,113 @@ impl Probe {
 struct RunningProbe {
     child: Child,
     stdin: Option<ChildStdin>,
-    stdout: BufReader<std::process::ChildStdout>,
+    stdout: Receiver<std::io::Result<String>>,
+    stdout_reader: Option<JoinHandle<()>>,
+    stderr_reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    operation: String,
+    pause_at: Option<&'static str>,
+    crash_at: Option<&'static str>,
+    timeout: Duration,
 }
 
 impl RunningProbe {
+    fn expected_crash_point(&self) -> Option<&'static str> {
+        self.crash_at.or(self.pause_at)
+    }
+
+    fn recv_stdout_line(&mut self, action: &str, expected: Option<&str>) -> String {
+        match self.stdout.recv_timeout(self.timeout) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => self.fail_after_kill(
+                format!("failed to read probe stdout while waiting to {action}: {error}"),
+                expected,
+            ),
+            Err(RecvTimeoutError::Timeout) => self.fail_after_kill(
+                format!(
+                    "timed out after {:?} waiting for probe to {action}",
+                    self.timeout
+                ),
+                expected,
+            ),
+            Err(RecvTimeoutError::Disconnected) => self.fail_after_kill(
+                format!("probe closed stdout before it could {action}"),
+                expected,
+            ),
+        }
+    }
+
+    fn wait_for_exit(&mut self, action: &str, expected: Option<&str>) -> ExitStatus {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) => self.fail_after_kill(
+                    format!(
+                        "timed out after {:?} waiting for probe to {action}",
+                        self.timeout
+                    ),
+                    expected,
+                ),
+                Err(error) => self.fail_after_kill(
+                    format!("failed while waiting for probe to {action}: {error}"),
+                    expected,
+                ),
+            }
+        }
+    }
+
+    fn fail_after_kill(&mut self, message: String, expected: Option<&str>) -> ! {
+        let status = self.kill_and_reap();
+        let stderr = self.finish_stderr();
+        let expected = expected
+            .map(|point| format!(" at crash point {point}"))
+            .unwrap_or_default();
+        panic!(
+            "{message}{expected} (operation {:?}); child exit status after kill: {status}; \
+             stderr:\n{stderr}",
+            self.operation,
+        );
+    }
+
+    fn finish_stdout(&mut self) -> Vec<String> {
+        if let Some(reader) = self.stdout_reader.take() {
+            reader.join().expect("probe stdout reader panicked");
+        }
+        self.stdout
+            .try_iter()
+            .map(|line| line.expect("read probe stdout"))
+            .collect()
+    }
+
+    fn finish_stderr(&mut self) -> String {
+        let Some(reader) = self.stderr_reader.take() else {
+            return String::new();
+        };
+        match reader.join() {
+            Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+            Ok(Err(error)) => format!("<failed to read probe stderr: {error}>"),
+            Err(_) => "<probe stderr reader panicked>".to_string(),
+        }
+    }
+
+    fn kill_and_reap(&mut self) -> ExitStatus {
+        self.stdin.take();
+        match self.child.try_wait().expect("inspect probe before kill") {
+            Some(status) => status,
+            None => {
+                self.child.kill().expect("kill timed-out probe");
+                self.child.wait().expect("reap killed probe")
+            }
+        }
+    }
+
     /// Block until the probe reports its operation's result. Removes the
     /// need for a sleep before the test's own half of the race.
     fn wait_for_outcome(&mut self) -> ProbeOutcome {
-        let mut line = String::new();
-        self.stdout
-            .read_line(&mut line)
-            .expect("read probe outcome line");
+        let line = self.recv_stdout_line("report its outcome", None);
         assert!(
             !line.trim().is_empty(),
             "probe closed stdout without reporting"
@@ -243,10 +397,7 @@ impl RunningProbe {
     }
 
     fn wait_for_pause(&mut self, expected: &str) {
-        let mut line = String::new();
-        self.stdout
-            .read_line(&mut line)
-            .expect("read probe pause line");
+        let line = self.recv_stdout_line("pause", Some(expected));
         assert!(
             !line.trim().is_empty(),
             "probe closed stdout before pausing at {expected}"
@@ -268,16 +419,22 @@ impl RunningProbe {
 
     fn wait_for_crash(&mut self) {
         self.stdin.take();
-        let status = self.child.wait().expect("wait for crashed probe");
-        assert!(!status.success(), "probe completed instead of crashing");
+        let expected = self.expected_crash_point();
+        let status = self.wait_for_exit("crash", expected);
+        if status.success() {
+            let stderr = self.finish_stderr();
+            panic!(
+                "probe completed instead of crashing at crash point {}; \
+                 child exit status: {status}; stderr:\n{stderr}",
+                expected.unwrap_or("<unspecified>"),
+            );
+        }
     }
 
     /// Kill without letting the process unwind — the point is to prove
     /// the *kernel* releases the lock, not that a Drop impl does.
     fn kill(&mut self) {
-        self.stdin.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.kill_and_reap();
     }
 }
 
@@ -285,6 +442,12 @@ impl Drop for RunningProbe {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             self.kill();
+        }
+        if let Some(reader) = self.stdout_reader.take() {
+            let _ = reader.join();
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
         }
     }
 }
@@ -404,6 +567,43 @@ async fn reconcile_then_assert_invariant(core: &Core, game_mods: &Path, context:
 // ---------------------------------------------------------------------
 // 1. The gate works
 // ---------------------------------------------------------------------
+
+/// A missing crash point must identify itself quickly instead of consuming the
+/// surrounding CI job timeout. `migrate` never reaches the delete crash point;
+/// the far-future `--at` keeps the child alive so this exercises the harness's
+/// deadline rather than an ordinary early exit.
+#[test]
+fn missing_pause_point_fails_fast_with_expected_crash_point() {
+    let env = TestEnv::new();
+    let expected = gmm_lib::core::crash_points::DELETE_AFTER_INTENT_WRITE;
+    let mut running = probe(&env)
+        .at(rendezvous_in(Duration::from_secs(30)))
+        .pausing_at(expected)
+        .with_timeout(Duration::from_millis(250))
+        .op(["migrate"])
+        .spawn();
+
+    let started = Instant::now();
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        running.wait_for_pause(expected);
+    }))
+    .expect_err("an unreachable crash point must hit the probe deadline");
+    let elapsed = started.elapsed();
+    let message = failure
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| failure.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_else(|| "<non-string panic>".to_string());
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "probe deadline did not fail fast: elapsed {elapsed:?}; failure: {message}",
+    );
+    assert!(
+        message.contains(expected),
+        "probe deadline failure did not name expected crash point {expected:?}: {message}",
+    );
+}
 
 #[test]
 fn a_second_gmm_process_is_refused_the_instance_lock() {
