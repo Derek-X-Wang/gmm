@@ -163,10 +163,11 @@ async fn recovering_a_ulid_named_orphan_reuses_its_id_and_copies_nothing() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn variant_detection_error_rolls_back_recovery_and_keeps_the_orphan_actionable() {
+async fn assert_nested_variant_detection_error_is_actionable(
+    candidate_variants: &[&str],
+    inaccessible_variant: &str,
+) {
     use std::os::unix::fs::PermissionsExt as _;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
@@ -175,51 +176,54 @@ async fn variant_detection_error_rolls_back_recovery_and_keeps_the_orphan_action
         .await
         .expect("game root");
     let orphan = root.join(Ulid::new().to_string());
-    for variant in ["Blue", "Red"] {
+    for variant in candidate_variants {
         let dir = orphan.join(variant);
         fs::create_dir_all(&dir).expect("Variant directory");
         fs::write(dir.join("merged.ini"), format!("hash={variant}\n")).expect("Variant INI");
     }
 
-    let hook_ran = Arc::new(AtomicBool::new(false));
-    let hook_path = orphan.clone();
-    let hook_ran_in_closure = Arc::clone(&hook_ran);
-    let inaccessible = core.clone().with_crash_hook(Arc::new(move |point| {
-        if point == crash_points::RECOVER_AFTER_ROW_INSERT {
-            fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o0))
-                .expect("make Variant root unreadable after row insert");
-            hook_ran_in_closure.store(true, Ordering::SeqCst);
-        }
-    }));
-
-    let result = inaccessible
-        .recover_unreferenced_library_dir(GameCode::Gimi, &orphan, "Unreadable Variants")
+    let inaccessible = orphan.join(inaccessible_variant);
+    fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o0))
+        .expect("make one Variant subtree unreadable");
+    let result = core
+        .recover_unreferenced_library_dir(GameCode::Gimi, &orphan, "Nested Detection Error")
         .await;
-    fs::set_permissions(&orphan, fs::Permissions::from_mode(0o755))
-        .expect("restore orphan access after injected detection error");
+    fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o755))
+        .expect("restore inaccessible Variant subtree");
+
     assert!(
-        hook_ran.load(Ordering::SeqCst),
-        "the detection-error seam must fire"
-    );
-    assert!(
-        matches!(result, Err(gmm_lib::core::Error::Io { ref path, .. }) if path == &orphan),
-        "recovery must surface the actual Variant detection error, got {result:?}",
+        matches!(result, Err(gmm_lib::core::Error::Io { ref path, .. }) if path == &inaccessible),
+        "recovery with {} candidate Variants must surface the nested detection error at {}, got {result:?}",
+        candidate_variants.len(),
+        inaccessible.display(),
     );
     assert!(
         core.list_mods(GameCode::Gimi)
             .await
-            .expect("list after detection error")
+            .expect("list after nested detection error")
             .is_empty(),
-        "a Variant detection error must roll back the recovery row",
+        "a nested Variant detection error must leave no recovery row",
     );
     let report = core
         .audit_library(GameCode::Gimi)
         .await
-        .expect("audit after detection error");
+        .expect("audit after nested detection error");
     assert!(
         report.unreferenced.iter().any(|entry| entry.path == orphan),
-        "the failed recovery must remain visible for user action: {report:?}",
+        "the nested detection failure must leave the orphan visible for retry: {report:?}",
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn two_candidate_variants_with_one_unreadable_subtree_refuse_recovery() {
+    assert_nested_variant_detection_error_is_actionable(&["Blue", "Red"], "Red").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn three_candidate_variants_with_one_unreadable_subtree_refuse_partial_recovery() {
+    assert_nested_variant_detection_error_is_actionable(&["Blue", "Green", "Red"], "Red").await;
 }
 
 #[tokio::test]
@@ -227,7 +231,7 @@ async fn recovered_variants_match_the_equivalent_adopt_shape() {
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
     let source = tmp.path().join("equivalent-variant-source");
-    for variant in ["Blue", "Red"] {
+    for variant in ["Red", "Blue", "Green"] {
         let dir = source.join(variant);
         fs::create_dir_all(&dir).expect("adopt Variant directory");
         fs::write(dir.join("merged.ini"), format!("hash={variant}\n")).expect("adopt Variant INI");
@@ -242,7 +246,7 @@ async fn recovered_variants_match_the_equivalent_adopt_shape() {
         .await
         .expect("game root");
     let orphan = root.join(Ulid::new().to_string());
-    for variant in ["Blue", "Red"] {
+    for variant in ["Red", "Blue", "Green"] {
         let dir = orphan.join(variant);
         fs::create_dir_all(&dir).expect("recovery Variant directory");
         fs::write(dir.join("merged.ini"), format!("hash={variant}\n"))
@@ -272,6 +276,15 @@ async fn recovered_variants_match_the_equivalent_adopt_shape() {
         shape(&adopted_variants),
         "recovery and adopt must persist the same ordered names and subpaths",
     );
+    assert_eq!(
+        shape(&recovered_variants),
+        [
+            ("Blue".to_string(), PathBuf::from("Blue")),
+            ("Green".to_string(), PathBuf::from("Green")),
+            ("Red".to_string(), PathBuf::from("Red")),
+        ],
+        "recovery must independently persist the expected alphabetical Variant shape",
+    );
 
     let adopted_active = core
         .active_variant_id(&adopted.id)
@@ -295,6 +308,11 @@ async fn recovered_variants_match_the_equivalent_adopt_shape() {
         active_name(&recovered_variants, &recovered_active),
         active_name(&adopted_variants, &adopted_active),
         "recovery and adopt must select the same initial active Variant",
+    );
+    assert_eq!(
+        active_name(&recovered_variants, &recovered_active),
+        "Blue",
+        "recovery must independently select the first alphabetical Variant",
     );
 }
 

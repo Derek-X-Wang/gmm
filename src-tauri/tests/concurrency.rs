@@ -1440,11 +1440,12 @@ async fn relocation_with_an_open_snapshot_transaction_excludes_recovery_commit()
     );
 }
 
-/// Recovery has validated the orphan and is paused immediately before its row
-/// insert. Relocation must be refused before touching the filesystem, leaving
-/// the path recovery commits both present and identity-stable.
+/// Recovery has finished its bounded ownership step and released the writer
+/// fence before recursive Variant detection. Relocation can therefore win
+/// while recovery is paused; recovery must then revalidate the effective root
+/// and refuse to commit a stale row, leaving the moved orphan actionable.
 #[tokio::test]
-async fn recovery_started_before_relocation_cannot_be_stranded() {
+async fn recovery_releases_the_writer_fence_before_variant_detection() {
     let env = TestEnv::new();
     let core = env.core().await;
     let old_root = core
@@ -1468,43 +1469,57 @@ async fn recovery_started_before_relocation_cannot_be_stranded() {
         .spawn();
     recovering.wait_for_pause(gmm_lib::core::crash_points::RECOVER_AFTER_LIBRARY_MOVE);
 
-    let relocated = probe(&env)
+    probe(&env)
         .op([
             "set-library-path",
             "--path",
             &new_root.display().to_string(),
         ])
-        .run();
+        .run()
+        .expect_ok("relocation while recovery is outside the writer fence");
     assert!(
-        !relocated.ok,
-        "set_library_path_for_game must be fenced before filesystem work while recovery owns \
-         the writer claim; relocation unexpectedly succeeded: {relocated:?}",
-    );
-    assert!(
-        orphan.is_dir(),
-        "set_library_path_for_game moved recovery's validated directory before taking the \
-         shared fence",
+        !orphan.exists(),
+        "relocation must move the old-root orphan while recovery performs staged detection",
     );
 
     recovering.resume();
-    recovering
-        .wait_for_outcome()
-        .expect_ok("recovery after the competing relocation was refused");
-    let mods = core.list_mods(GameCode::Gimi).await.expect("list");
-    assert_eq!(mods.len(), 1, "the recovery must commit exactly one Mod");
-    assert_eq!(mods[0].library_path, orphan);
+    let recovered = recovering.wait_for_outcome();
     assert!(
-        mods[0].library_path.join("merged.ini").is_file(),
-        "the recovered row must point at the directory recovery validated",
+        !recovered.ok,
+        "recovery must fail closed after relocation changes its effective Library root: \
+         {recovered:?}",
+    );
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list")
+            .is_empty(),
+        "the refused recovery must not commit a stale Mod row",
+    );
+    let moved_orphan = new_root.join(orphan.file_name().expect("orphan name"));
+    assert!(
+        moved_orphan.join("merged.ini").is_file(),
+        "relocation must preserve the refused recovery's orphan bytes",
+    );
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after staged recovery loses the root race");
+    assert!(
+        report
+            .unreferenced
+            .iter()
+            .any(|entry| entry.path == moved_orphan),
+        "the moved orphan must remain visible for retry: {report:?}",
     );
 }
 
-/// A real process death after the recovery row insert must roll back that
-/// still-open transaction. On restart, the directory therefore remains in the
-/// orphan report and the same recovery operation can finish it, including its
-/// Variant rows.
+/// A real process death after the recovery row insert but before the staged
+/// Variant set is persisted must roll back that still-open transaction. On
+/// restart, the directory therefore remains in the orphan report and the same
+/// recovery operation can finish it, including its Variant rows.
 #[tokio::test]
-async fn recovery_crash_before_variant_detection_leaves_a_retryable_orphan() {
+async fn recovery_crash_before_variant_persistence_leaves_a_retryable_orphan() {
     let env = TestEnv::new();
     let core = env.core().await;
     let root = core

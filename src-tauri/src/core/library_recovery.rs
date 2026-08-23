@@ -232,18 +232,19 @@ impl Core {
         display_name: &str,
     ) -> Result<Mod> {
         self.ensure_no_active_session().await?;
-        let mut guarded = self
+        let GuardedLibraryMutation {
+            mut fence,
+            directory: validated_directory,
+        } = self
             .begin_guarded_library_mutation(
                 game,
                 path,
                 LibraryMutation::RecoverUnreferencedLibraryDir,
             )
             .await?;
-        let path = guarded.directory.path().to_path_buf();
+        let path = validated_directory.path().to_path_buf();
 
-        let id = self
-            .recovered_mod_id(&path, &mut guarded.fence.transaction)
-            .await?;
+        let id = self.recovered_mod_id(&path, &mut fence.transaction).await?;
         let library_path = path
             .parent()
             .expect("a validated orphan is a direct child of the Library root")
@@ -259,23 +260,60 @@ impl Core {
                 source,
             })?;
         }
-        self.crash_point(crash_points::RECOVER_AFTER_LIBRARY_MOVE);
-
-        let committed_directory =
+        let staged_directory =
             IdentifiedDirectory::open(&library_path).map_err(|source| Error::Io {
                 path: library_path.clone(),
                 source,
             })?;
-        if committed_directory.identity() != guarded.directory.identity() {
+        if staged_directory.identity() != validated_directory.identity() {
             return Err(Error::NotAnUnreferencedLibraryDir {
                 path: library_path,
                 reason: "the directory changed after it was validated".to_string(),
             });
         }
 
+        // The rename and identity proof are bounded. Release the global writer
+        // fence before recursively traversing an unbounded Variant tree, while
+        // retaining the directory identity that the final transaction must
+        // re-prove.
+        fence.commit().await?;
+        self.crash_point(crash_points::RECOVER_AFTER_LIBRARY_MOVE);
+        let detected_variants = variants::detect_variants(&library_path)?;
+
+        // Reacquire the fence and repeat the full orphan validation. This
+        // re-resolves the effective Library root, proves the path is still its
+        // direct child, rejects any Mod or reinstall ownership acquired while
+        // detection ran, and opens the current filesystem object for an
+        // identity comparison with the staged object above.
+        let GuardedLibraryMutation {
+            mut fence,
+            directory: revalidated_directory,
+        } = self
+            .begin_guarded_library_mutation(
+                game,
+                &library_path,
+                LibraryMutation::RecoverUnreferencedLibraryDir,
+            )
+            .await?;
+        if revalidated_directory.identity() != staged_directory.identity() {
+            return Err(Error::NotAnUnreferencedLibraryDir {
+                path: library_path,
+                reason: "the directory changed while Variant detection ran".to_string(),
+            });
+        }
+        let revalidated_id = self
+            .recovered_mod_id(&library_path, &mut fence.transaction)
+            .await?;
+        if revalidated_id != id {
+            return Err(Error::NotAnUnreferencedLibraryDir {
+                path: library_path,
+                reason: "the recovered Mod ID changed while Variant detection ran".to_string(),
+            });
+        }
+
         let base = super::sanitize_dir_name(display_name);
         let junction_dir_name =
-            unique_junction_dir_name(&mut guarded.fence.transaction, game, &base).await?;
+            unique_junction_dir_name(&mut fence.transaction, game, &base).await?;
         let created_at = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO mods (
@@ -291,18 +329,16 @@ impl Core {
         .bind(library_path.to_string_lossy().as_ref())
         .bind(&junction_dir_name)
         .bind(&created_at)
-        .execute(&mut *guarded.fence.transaction)
+        .execute(&mut *fence.transaction)
         .await?;
 
-        // Detection can fail on filesystem access, and a process can die at
-        // this exact seam. Keep the row, Variant rows, and active selection in
-        // one transaction so either failure leaves the directory unreferenced
-        // and therefore visible to the same audit/recovery affordance.
+        // A process can die at this exact seam. Keep the row, pre-detected
+        // Variant rows, and active selection in one transaction so process
+        // death leaves the directory unreferenced and visible to recovery.
         self.crash_point(crash_points::RECOVER_AFTER_ROW_INSERT);
-        let detected_variants = variants::detect_variants(&library_path)?;
-        self.record_detected_variants(&id, detected_variants, &mut guarded.fence.transaction)
+        self.record_detected_variants(&id, detected_variants, &mut fence.transaction)
             .await?;
-        guarded.fence.commit().await?;
+        fence.commit().await?;
 
         Ok(Mod {
             id,

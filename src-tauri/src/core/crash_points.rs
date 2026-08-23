@@ -156,9 +156,10 @@ pub const RELOCATE_AFTER_FENCE_COMMIT: &str = "relocate.after_fence_commit";
 pub const RECOVER_AFTER_LIBRARY_MOVE: &str = "recover.after_library_move";
 
 /// `recover_unreferenced_library_dir`: the Mod row has been inserted into the
-/// still-open transaction, and Variant detection has not started. A process
-/// death rolls the transaction back, leaving the directory visible as an
-/// orphan that recovery can complete on a later attempt.
+/// still-open transaction, and the Variants detected outside the writer fence
+/// have not been persisted. A process death rolls the transaction back,
+/// leaving the directory visible as an orphan that recovery can complete on a
+/// later attempt.
 pub const RECOVER_AFTER_ROW_INSERT: &str = "recover.after_row_insert";
 
 /// `delete_unreferenced_library_dir`: the durable ownership intent exists,
