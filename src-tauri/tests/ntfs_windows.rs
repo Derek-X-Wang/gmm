@@ -18,14 +18,18 @@
 
 #![cfg(windows)]
 
-use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::ffi::OsStr;
+use std::fs::{self, OpenOptions};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
 use gmm_lib::core::{Core, GameCode};
 use tempfile::TempDir;
-use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+use windows_sys::Win32::Storage::FileSystem::{
+    SetFileShortNameW, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
+};
 
 async fn core_with_library(library_root: PathBuf, tmp: &Path) -> Core {
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.display());
@@ -37,32 +41,30 @@ fn make_mod_dir(dir: &Path, marker: &str) {
     fs::write(dir.join("merged.ini"), format!("; {marker}\nhash = 1234\n")).expect("ini");
 }
 
-fn short_file_name(path: &Path) -> Option<OsString> {
-    let wide: Vec<u16> = path
-        .as_os_str()
+fn set_short_name(path: &Path, short_name: &str) {
+    let directory = OpenOptions::new()
+        .access_mode(DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .expect("open Mod directory with DELETE access for SetFileShortNameW");
+    let short_wide: Vec<u16> = OsStr::new(short_name)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let needed = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
-    if needed == 0 {
-        return None;
-    }
-    let mut short = vec![0u16; needed as usize];
-    let written = unsafe { GetShortPathNameW(wide.as_ptr(), short.as_mut_ptr(), needed) };
-    if written == 0 || written >= needed {
-        return None;
-    }
-    short.truncate(written as usize);
-    PathBuf::from(OsString::from_wide(&short))
-        .file_name()
-        .map(OsStr::to_os_string)
+
+    let ok = unsafe { SetFileShortNameW(directory.as_raw_handle(), short_wide.as_ptr()) };
+    assert_ne!(
+        ok,
+        0,
+        "SetFileShortNameW could not create the mandatory 8.3 Mod alias: {}",
+        std::io::Error::last_os_error(),
+    );
 }
 
-/// NTFS can expose an 8.3 name for the same directory. Use only the short
-/// final component so the old textual parent check cannot refuse this for an
-/// unrelated reason. GitHub-hosted volumes do not promise 8.3 generation;
-/// when the volume supplies no distinct alias the test records that fact and
-/// the alternate-case test remains the mandatory Windows identity oracle.
+/// NTFS can expose an 8.3 name for the same directory. Assign a distinct alias
+/// explicitly so a volume that cannot exercise the contract fails this test
+/// instead of silently reporting success. Use only the short final component
+/// so the old textual parent check cannot refuse it for an unrelated reason.
 #[tokio::test]
 async fn short_name_alias_of_a_referenced_directory_cannot_be_deleted() {
     let tmp = TempDir::new().expect("tmp");
@@ -74,26 +76,13 @@ async fn short_name_alias_of_a_referenced_directory_cannot_be_deleted() {
         .await
         .expect("adopt");
 
-    let Some(short_name) = short_file_name(&adopted.library_path) else {
-        eprintln!("8.3 alias unavailable: GetShortPathNameW returned no name for this volume");
-        return;
-    };
-    if short_name
-        == adopted
-            .library_path
-            .file_name()
-            .expect("Mod directory name")
-    {
-        eprintln!(
-            "8.3 alias unavailable: this volume returned the long ULID unchanged (8dot3 generation disabled)"
-        );
-        return;
-    }
+    const SHORT_NAME: &str = "GMMMOD~1";
+    set_short_name(&adopted.library_path, SHORT_NAME);
     let alias = adopted
         .library_path
         .parent()
         .expect("Library root")
-        .join(short_name);
+        .join(SHORT_NAME);
     assert!(alias.is_dir(), "precondition: short name resolves the Mod");
 
     let deleted = core

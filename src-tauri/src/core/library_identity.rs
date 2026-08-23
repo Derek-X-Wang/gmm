@@ -2,8 +2,10 @@
 //!
 //! Paths are user-facing names, not ownership evidence. In particular,
 //! Windows can name one NTFS directory with alternate casing or an 8.3 alias.
-//! This module opens the directory without following reparse points and keeps
-//! the handle alive alongside the volume/file identity learned from it.
+//! On Windows this module opens the directory itself without following a
+//! reparse point. On non-Windows, `File::open` follows symlinks; callers that
+//! require link refusal check `symlink_metadata` before opening the handle.
+//! The handle stays alive alongside the volume/file identity learned from it.
 
 use std::fs::File;
 use std::io;
@@ -20,7 +22,8 @@ pub(super) struct IdentifiedDirectory {
     path: PathBuf,
     identity: DirectoryIdentity,
     // Keeping the handle is intentional: validation must return the evidence
-    // it established rather than discarding it before the filesystem act.
+    // it established rather than discarding it before the filesystem act. It
+    // is not an exclusion lock: the Windows handle shares READ/WRITE/DELETE.
     _handle: File,
 }
 

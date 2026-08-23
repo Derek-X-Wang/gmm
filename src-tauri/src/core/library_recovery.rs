@@ -78,25 +78,24 @@ impl Core {
     /// remains hidden from audit and cannot be recovered as a Mod.
     pub async fn finish_interrupted_library_deletes(&self) -> Result<usize> {
         let mut roots = Vec::new();
-        for game in [
-            GameCode::Gimi,
-            GameCode::Srmi,
-            GameCode::Zzmi,
-            GameCode::Wwmi,
-            GameCode::Himi,
-            GameCode::Efmi,
-        ] {
-            roots.push(self.resolved_library_root_for(game).await?);
+        for profile in super::games::GAME_PROFILES {
+            roots.push(self.resolved_library_root_for(profile.code).await?);
         }
 
-        tokio::task::spawn_blocking(move || purge_delete_quarantines(&roots))
+        // Serialize cleanup with the pre-commit half of delete. In particular,
+        // an intent without a quarantine is known to be stranded only while no
+        // delete can be between writing that intent and performing its rename.
+        let transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let removed = tokio::task::spawn_blocking(move || purge_delete_quarantines(&roots))
             .await
             .map_err(|join_error| Error::Io {
                 path: PathBuf::from("<Library delete quarantines>"),
                 source: io::Error::other(format!(
                     "Library quarantine cleanup worker failed: {join_error}"
                 )),
-            })?
+            })??;
+        transaction.commit().await?;
+        Ok(removed)
     }
 
     /// Re-prove that `path` is a directory this game's Library owns and no
@@ -227,6 +226,7 @@ impl Core {
             &intent,
             guarded.directory.identity().durable_key().as_bytes(),
         )?;
+        self.crash_point(crash_points::DELETE_AFTER_INTENT_WRITE);
         if let Err(source) = fs::rename(&path, &quarantine) {
             let _ = fs::remove_file(&intent);
             return Err(Error::Io {
@@ -238,6 +238,10 @@ impl Core {
             path: quarantine.clone(),
             source,
         })?;
+        // The open handle is an identity snapshot, not a lock. On Windows it
+        // deliberately shares read, write, and delete access, so another actor
+        // can replace `path` before this path-based rename. Re-open the object
+        // that actually moved and prove it is still the one validation saw.
         if quarantined.identity() != guarded.directory.identity() {
             let _ = fs::rename(&quarantine, &path);
             let _ = fs::remove_file(&intent);
@@ -503,6 +507,16 @@ fn purge_delete_quarantines(roots: &[PathBuf]) -> Result<usize> {
             let intent = entry.path();
             let quarantine = root.join(format!("{DELETE_QUARANTINE_PREFIX}{quarantine_name}"));
             if !quarantine.exists() {
+                match fs::remove_file(&intent) {
+                    Ok(()) => {}
+                    Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(Error::Io {
+                            path: intent,
+                            source,
+                        })
+                    }
+                }
                 continue;
             }
             if !is_owned_delete_quarantine(&quarantine)? {

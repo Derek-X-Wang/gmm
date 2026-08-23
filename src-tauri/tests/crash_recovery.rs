@@ -723,6 +723,68 @@ async fn recovery_crashing_after_the_rename_leaves_the_folder_recoverable_again(
 // delete_unreferenced_library_dir
 // ---------------------------------------------------------------------
 
+/// A crash after the durable intent but before the same-volume rename leaves
+/// the user's directory untouched. Startup removes only the stranded marker,
+/// so the ordinary Library audit can still offer recovery or deletion.
+#[tokio::test]
+async fn delete_crashing_after_intent_write_keeps_the_orphan_and_cleans_the_intent() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    std::fs::create_dir_all(&orphan).expect("orphan");
+    std::fs::write(orphan.join("precious.buf"), b"keep me").expect("orphan bytes");
+    let orphan_s = orphan.display().to_string();
+
+    env.crash_during(
+        crash_points::DELETE_AFTER_INTENT_WRITE,
+        &["delete-library-dir", "--path", &orphan_s],
+    );
+    assert_eq!(
+        std::fs::read(orphan.join("precious.buf")).expect("orphan survives pre-rename crash"),
+        b"keep me",
+    );
+    assert!(
+        std::fs::read_dir(&root)
+            .expect("root after crash")
+            .any(|entry| entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".intent")),
+        "the crash seam must leave the durable intent before restart",
+    );
+
+    let restarted = env.restart().await;
+    assert!(
+        std::fs::read_dir(&root)
+            .expect("root after restart")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".intent")),
+        "startup must remove an intent whose quarantine rename never happened",
+    );
+    assert_eq!(
+        std::fs::read(orphan.join("precious.buf")).expect("startup preserves orphan"),
+        b"keep me",
+    );
+    assert!(
+        restarted
+            .audit_library(GameCode::Gimi)
+            .await
+            .expect("audit after restart")
+            .unreferenced
+            .iter()
+            .any(|entry| entry.path == orphan),
+        "the intact orphan remains available for explicit user action",
+    );
+}
+
 /// Delete first atomically removes the proven orphan from the user-visible
 /// Library namespace. A crash before recursive purge leaves a reserved
 /// quarantine, and constructing the Core on restart must finish that purge.
@@ -792,6 +854,65 @@ async fn delete_crashing_after_quarantine_is_finished_on_restart() {
             .unreferenced
             .is_empty(),
         "the completed delete leaves neither a Mod row nor an orphan",
+    );
+}
+
+/// A quarantined delete remains owned after its SQLite claim commits and
+/// before recursive removal finishes. Recovery must not rename those bytes
+/// back into the Mod namespace while the delete worker may still be walking
+/// them.
+#[tokio::test]
+async fn recover_refuses_a_live_interrupted_delete_quarantine() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    std::fs::create_dir_all(orphan.join("nested")).expect("orphan tree");
+    std::fs::write(orphan.join("nested/precious.buf"), b"still being deleted")
+        .expect("orphan bytes");
+    let orphan_s = orphan.display().to_string();
+
+    env.crash_during(
+        crash_points::DELETE_AFTER_QUARANTINE_MOVE,
+        &["delete-library-dir", "--path", &orphan_s],
+    );
+    let quarantine = std::fs::read_dir(&root)
+        .expect("Library root after crash")
+        .filter_map(std::result::Result::ok)
+        .find(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gmm-delete-")
+        })
+        .expect("the crash left a delete quarantine")
+        .path();
+
+    let recovered = core
+        .recover_unreferenced_library_dir(GameCode::Gimi, &quarantine, "Must Stay Quarantined")
+        .await;
+    assert!(
+        matches!(
+            recovered,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
+        ),
+        "recover must not reclaim bytes still owned by a committed delete, got {recovered:?}",
+    );
+    assert_eq!(
+        std::fs::read(quarantine.join("nested/precious.buf"))
+            .expect("refused recovery leaves quarantine bytes in place"),
+        b"still being deleted",
+    );
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list after refusal")
+            .is_empty(),
+        "a refused recovery must not create a Mod row",
     );
 }
 

@@ -34,6 +34,8 @@ The origin of a Mod's files. Possible values v1: `gamebanana` (URL-paste or 1-cl
 ### Library Layout
 On-disk shape: `%AppData%\GMM\library\<game-code>\<mod-id>\<variant-or-root>\…`. Game codes match Model Importer slugs: `gimi`, `srmi`, `zzmi`, `wwmi`, `himi`, `efmi`. Mod IDs are local ULIDs, not GameBanana IDs (a Mod can be re-imported from a different Source). User can override the global Library root and each per-game subpath in Settings.
 
+GMM reserves `.gmm-delete-<token>` directories and their paired `.gmm-delete-<token>.intent` files as interrupted-delete quarantine state in every effective per-game Library root. The intent records the quarantined directory's filesystem identity; startup recursively removes a quarantine only when that identity still matches, and removes a stranded intent without touching an intact pre-rename directory.
+
 ### Importer Origin
 Where a Game's Model Importer comes from: either a GitHub release origin (an `owner`/`repo` pair plus a release-asset match) or a user-supplied local ZIP. Not to be confused with **Source**, which is about a Mod's files; Importer Origin is about the per-game importer package. Resolved through three layers — the user's per-game override, GMM's curated `recommended-importers.json` recommendation, then the compiled-in default — and recorded per install, where `unknown` is a valid value for importers installed outside GMM. A recommendation decides the origin for an install that does not exist yet; an existing install's origin changes only through an Origin Proposal the user accepts, or an override they set. Update never switches origin. Changing a Game's Importer Origin invalidates its install and clears its Importer Pin. See ADR 0005.
 
