@@ -12,6 +12,55 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Static only, on Linux, and independent of the build matrix: script defects
+  # should fail in minutes without waiting for expensive Windows artifacts.
+  script-lint:
+    name: CI scripts parse and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin the analyzer because both its rules and defaults change over time.
+      # The in-repo settings select Warning-or-higher correctness rules; that
+      # threshold catches StrictMode hazards without turning style into a gate.
+      - name: Install pinned PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer `
+            -RequiredVersion 1.25.0 `
+            -Scope CurrentUser `
+            -Force
+
+      - name: Parse and analyze PowerShell scripts
+        run: pwsh -NoProfile -File .github/scripts/lint-ci-scripts.ps1
+
+      - name: Prove PSScriptAnalyzer findings fail the linter
+        run: pwsh -NoProfile -File .github/scripts/test-lint-ci-scripts.ps1
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Parse and lint shell scripts
+        run: |
+          .github/scripts/parse-shell-scripts.sh
+          mapfile -t scripts < <(find .github/scripts -type f -name '*.sh' -print)
+          [ "${#scripts[@]}" -gt 0 ] || { echo "no shell scripts found"; exit 1; }
+          shellcheck "${scripts[@]}"
+
+      - name: Prove Bash parses non-first files
+        run: .github/scripts/test-parse-shell-scripts.sh
+
+      - name: Test dead-origin alerting
+        run: .github/scripts/test-dead-origin-issues.sh
+
+      - name: Lint workflow files
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+
   build:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -21,10 +70,6 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Test dead-origin alerting
-        if: runner.os == 'Linux'
-        run: .github/scripts/test-dead-origin-issues.sh
 
       - uses: pnpm/action-setup@v4
         with:
@@ -261,12 +306,16 @@ jobs:
   # Aggregator: branch protection keys off this single name.
   check:
     name: check
-    needs: [build, installer, updater]
+    needs: [script-lint, build, installer, updater]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Verify all jobs succeeded
         run: |
+          if [ "${{ needs.script-lint.result }}" != "success" ]; then
+            echo "CI script lint did not succeed (result=${{ needs.script-lint.result }})"
+            exit 1
+          fi
           if [ "${{ needs.build.result }}" != "success" ]; then
             echo "matrix build did not all succeed (result=${{ needs.build.result }})"
             exit 1

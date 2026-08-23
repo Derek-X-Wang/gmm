@@ -93,7 +93,7 @@ Write-Section "Locate MSI"
 $msi = Get-ChildItem $BundleDir -Filter *.msi -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if (-not $msi) {
-    throw "no .msi found under $BundleDir — did `tauri build` run?"
+    throw "no .msi found under $BundleDir — did ``tauri build`` run?"
 }
 Write-Host "MSI: $($msi.FullName) ($([math]::Round($msi.Length / 1MB, 2)) MB)"
 
@@ -168,11 +168,11 @@ function Get-DiagnosticEventTimestamp($needle, $previousCount) {
     if ($matchingLines.Count -le $previousCount) { return $null }
 
     try {
-        $event = $matchingLines[$previousCount] | ConvertFrom-Json
-        if ($null -eq $event.timestamp) {
+        $diagnosticEvent = $matchingLines[$previousCount] | ConvertFrom-Json
+        if ($null -eq $diagnosticEvent.timestamp) {
             throw "event has no timestamp"
         }
-        return [System.DateTimeOffset]::Parse([string]$event.timestamp)
+        return [System.DateTimeOffset]::Parse([string]$diagnosticEvent.timestamp)
     } catch {
         throw "could not parse timestamp for diagnostic event '$needle': $_"
     }
