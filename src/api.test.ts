@@ -4,8 +4,13 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-const { adoptFolder, importGamebanana, importZip, recoverUnreferencedLibraryDir } =
-  await import("./api");
+const {
+  adoptFolder,
+  importGamebanana,
+  importZip,
+  recoverUnreferencedLibraryDir,
+  setProxyConfig,
+} = await import("./api");
 
 const RAW_MOD = {
   id: "01MOD",
@@ -60,6 +65,23 @@ it.each([
         game: "gimi",
         path: "C:\\GMM\\orphan",
         name: "Recovered",
+      },
+    },
+  ],
+  [
+    "setProxyConfig",
+    () =>
+      setProxyConfig({
+        url: "http://127.0.0.1:8080",
+        username: "alice",
+        password: null,
+      }),
+    "set_proxy_config",
+    {
+      args: {
+        url: "http://127.0.0.1:8080",
+        username: "alice",
+        password: null,
       },
     },
   ],

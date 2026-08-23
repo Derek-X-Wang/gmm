@@ -131,7 +131,7 @@ impl TestEnv {
         assert!(
             crash_points::ALL.contains(&crash_at),
             "{crash_at:?} is not a known crash point; \
-             add it to crash_points::ALL so it cannot silently never fire",
+             declare it through define_crash_points! so it cannot silently never fire",
         );
 
         let out = Command::new(probe_bin())

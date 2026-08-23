@@ -12,7 +12,7 @@
 //! source-consistency property, not a Windows one, so it should fail on
 //! the fast Linux matrix entry rather than waiting for Windows.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -178,6 +178,169 @@ fn defined_commands() -> BTreeSet<String> {
     out
 }
 
+/// Find the matching closing delimiter, starting immediately after an opening
+/// delimiter. The command signatures and invocation objects we inspect may
+/// contain nested generic/argument objects, so taking the first `)` or `}`
+/// would silently truncate the contract.
+fn matching_delimiter(text: &str, opening: char, closing: char) -> Option<usize> {
+    let mut depth = 1usize;
+    for (index, character) in text.char_indices() {
+        match character {
+            c if c == opening => depth += 1,
+            c if c == closing => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split at commas that are not inside a nested Rust type or object literal.
+fn top_level_fields(text: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut start = 0usize;
+    let mut angle_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (index, character) in text.char_indices() {
+        match character {
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ',' if angle_depth == 0
+                && paren_depth == 0
+                && brace_depth == 0
+                && bracket_depth == 0 =>
+            {
+                fields.push(text[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    fields.push(text[start..].trim());
+    fields
+        .into_iter()
+        .filter(|field| !field.is_empty())
+        .collect()
+}
+
+/// Derive every struct-argument command and its real outer parameter name from
+/// `commands.rs`. Struct names ending in `Args` are the same types Tauri's
+/// generated wrapper deserialises from one outer IPC field.
+fn backend_struct_argument_names() -> BTreeMap<String, String> {
+    let src = read("src-tauri/src/commands.rs");
+    let argument_types: BTreeSet<_> = src
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("pub struct "))
+        .filter_map(|tail| tail.split_whitespace().next())
+        .filter(|name| name.ends_with("Args"))
+        .map(str::to_string)
+        .collect();
+    assert!(!argument_types.is_empty(), "found no public *Args structs");
+
+    let mut found = BTreeMap::new();
+    let mut rest = src.as_str();
+    while let Some(attribute) = rest.find("#[tauri::command]") {
+        rest = &rest[attribute + "#[tauri::command]".len()..];
+        let Some(function) = rest.find("pub async fn ") else {
+            break;
+        };
+        let signature = &rest[function + "pub async fn ".len()..];
+        let Some(open) = signature.find('(') else {
+            continue;
+        };
+        let command = signature[..open].trim();
+        let tail = &signature[open + 1..];
+        let close = matching_delimiter(tail, '(', ')')
+            .unwrap_or_else(|| panic!("unterminated signature for {command}"));
+        let parameters = &tail[..close];
+
+        let struct_parameters: Vec<_> = top_level_fields(parameters)
+            .into_iter()
+            .filter_map(|parameter| parameter.split_once(':'))
+            .map(|(name, ty)| (name.trim(), ty.trim()))
+            .filter(|(_, ty)| argument_types.contains(*ty))
+            .collect();
+        assert!(
+            struct_parameters.len() <= 1,
+            "{command} has multiple *Args parameters; the IPC contract test needs an explicit policy",
+        );
+        if let Some((name, _)) = struct_parameters.first() {
+            found.insert(command.to_string(), (*name).to_string());
+        }
+    }
+    assert!(
+        !found.is_empty(),
+        "found no Tauri commands with *Args parameters"
+    );
+    found
+}
+
+/// Derive outer object keys from the actual frontend `invoke` calls. This is
+/// intentionally not an expected-name table: the test below compares these
+/// real keys directly with the real Rust parameter identifiers.
+fn frontend_invocation_outer_names() -> BTreeMap<String, Vec<String>> {
+    let mut found = BTreeMap::new();
+    for (_file, text) in frontend_sources() {
+        let mut rest = text.as_str();
+        while let Some(invoke) = rest.find("invoke") {
+            rest = &rest[invoke + "invoke".len()..];
+            let after_generic = match rest.strip_prefix('<') {
+                Some(tail) => match end_of_generic(tail) {
+                    Some(end) => &tail[end + 1..],
+                    None => continue,
+                },
+                None => rest,
+            };
+            let Some(tail) = after_generic.strip_prefix('(') else {
+                continue;
+            };
+            let tail = tail.trim_start();
+            let Some(tail) = tail.strip_prefix('"') else {
+                continue;
+            };
+            let Some(name_end) = tail.find('"') else {
+                continue;
+            };
+            let command = &tail[..name_end];
+            let after_name = tail[name_end + 1..].trim_start();
+            let Some(after_comma) = after_name.strip_prefix(',') else {
+                continue;
+            };
+            let after_comma = after_comma.trim_start();
+            let Some(object) = after_comma.strip_prefix('{') else {
+                continue;
+            };
+            let close = matching_delimiter(object, '{', '}')
+                .unwrap_or_else(|| panic!("unterminated invoke argument object for {command}"));
+            let keys = top_level_fields(&object[..close])
+                .into_iter()
+                .map(|field| {
+                    field
+                        .split_once(':')
+                        .map_or(field, |(key, _)| key)
+                        .trim()
+                        .to_string()
+                })
+                .collect();
+            found.insert(command.to_string(), keys);
+        }
+    }
+    found
+}
+
 #[test]
 fn every_invoked_command_is_registered() {
     let invoked = invoked_commands();
@@ -202,6 +365,24 @@ fn every_registered_handler_is_a_real_command() {
         missing.is_empty(),
         "generate_handler![] names functions that aren't #[tauri::command] in commands.rs: {missing:?}",
     );
+}
+
+#[test]
+fn struct_argument_outer_names_match_across_the_real_boundary_sources() {
+    let backend = backend_struct_argument_names();
+    let frontend = frontend_invocation_outer_names();
+
+    for (command, rust_name) in backend {
+        let frontend_names = frontend.get(&command).unwrap_or_else(|| {
+            panic!("{command} has a Rust *Args parameter but no object-shaped frontend invoke")
+        });
+        assert_eq!(
+            frontend_names,
+            &[rust_name.as_str()],
+            "struct-argument IPC outer-name mismatch for {command}: Rust parameter is \
+             {rust_name:?}, frontend invoke keys are {frontend_names:?}",
+        );
+    }
 }
 
 /// A command defined and registered but never invoked is either dead

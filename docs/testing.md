@@ -92,10 +92,13 @@ capabilities — historically painful (see issue #26 body).
 
 The backend half routes the **same Args + return types** the command body
 uses through `serde_json` and calls the Core method directly. Because that
-cannot see how the frontend called `invoke`, `src/api.test.ts` separately
-asserts each struct-argument command's exact command name and outer argument
-envelope. Together the tests catch drift on either side of the boundary; they
-still skip Tauri's runtime, registration, and ACL enforcement.
+cannot see how the frontend called `invoke`, `src/api.test.ts` asserts each
+current `*Args` command's real frontend envelope, including `ProxyArgs`.
+`tests/ipc_contract.rs` then parses the actual frontend outer key and actual
+Rust parameter identifier and compares them directly, with no expected-name
+table. Renaming `args` to `request` on only one side therefore fails the
+host-runnable contract test. These tests still skip Tauri's runtime and ACL
+enforcement; registration is covered separately in `tests/ipc_contract.rs`.
 
 ```rust
 use gmm_lib::commands::AdoptArgs;
@@ -112,8 +115,10 @@ fn adopt_args_deserialises_from_camel_case_json() {
 }
 ```
 
-When adding a new command, extend `tests/commands_ipc.rs` with the backend
-shape assertions and `src/api.test.ts` with the frontend envelope assertion:
+When adding a new `*Args` command, extend `tests/commands_ipc.rs` with the
+backend shape assertions and `src/api.test.ts` with the frontend envelope
+assertion. The cross-source outer-name check discovers the command from its
+real declarations and needs no list update:
 
 1. **Args deserialise.** Build a `serde_json::json!({ … })` value
    matching the JS-side shape and `from_value` it into the Args
