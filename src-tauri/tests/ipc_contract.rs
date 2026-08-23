@@ -61,6 +61,27 @@ fn frontend_sources() -> Vec<(String, String)> {
     out
 }
 
+/// Index of the `>` closing a generic argument list whose opening `<` has
+/// already been consumed, honouring nesting.
+fn end_of_generic(tail: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (index, character) in tail.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            // A generic argument list never spans a statement.
+            ';' | '{' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Pull the command name out of `invoke("x")` and `invoke<T>("x")`.
 fn invoked_commands() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
@@ -68,9 +89,13 @@ fn invoked_commands() -> BTreeSet<String> {
         let mut rest = text.as_str();
         while let Some(idx) = rest.find("invoke") {
             rest = &rest[idx + "invoke".len()..];
-            // Skip an optional turbofish-style generic argument.
+            // Skip an optional turbofish-style generic argument. The
+            // argument can itself be generic (`invoke<Partial<Foo>>`), so
+            // match angle brackets by depth rather than taking the first
+            // `>` — stopping early leaves `>(` and silently drops the call,
+            // which would make an invoked command look unreachable.
             let after_generic = match rest.strip_prefix('<') {
-                Some(tail) => match tail.find('>') {
+                Some(tail) => match end_of_generic(tail) {
                     Some(end) => &tail[end + 1..],
                     None => continue,
                 },
@@ -203,6 +228,19 @@ fn no_unreachable_commands() {
         "these commands are registered but never invoked from the frontend: {unused:?}\n\
          Either wire them up, delete them, or add them to KNOWN_UNUSED with a reason.",
     );
+}
+
+/// The scanner above is the only thing standing between a renamed or
+/// unwired command and a silent break, so its own blind spots matter.
+/// A generic argument that is itself generic used to stop the scan at the
+/// inner `>`, dropping the call entirely — the command then looked
+/// unreachable, and an unregistered one would have looked fine.
+#[test]
+fn the_scanner_reads_a_nested_generic_invoke() {
+    assert_eq!(end_of_generic("Partial<MoveReport>>(\"x\")"), Some(19));
+    assert_eq!(end_of_generic("MoveReport>(\"x\")"), Some(10));
+    // An unterminated generic must not swallow the rest of the file.
+    assert_eq!(end_of_generic("Broken(\"x\");\nnext()"), None);
 }
 
 /// The IPC readiness marker (issue #54) is only worth anything while

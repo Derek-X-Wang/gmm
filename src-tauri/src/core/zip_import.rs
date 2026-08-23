@@ -51,11 +51,12 @@ impl Default for ImportZipOptions {
     }
 }
 
-/// Extract `zip_path` into `target_dir`. `target_dir` must not already
-/// exist (this function creates it). On any error the caller is
-/// responsible for removing `target_dir`; we leave it in whatever state we
-/// reached. See [`Core::import_zip`](crate::core::Core::import_zip) for
-/// the cleanup-on-failure orchestration.
+/// Extract `zip_path` into `target_dir`. `target_dir` must be absent or an
+/// empty directory reserved by the caller (this function creates it when
+/// needed). On any error the caller is responsible for removing `target_dir`;
+/// we leave it in whatever state we reached. See
+/// [`Core::import_zip`](crate::core::Core::import_zip) for the
+/// cleanup-on-failure orchestration.
 pub fn extract(zip_path: &Path, target_dir: &Path, opts: ImportZipOptions) -> Result<()> {
     let file = File::open(zip_path).map_err(|source| Error::Io {
         path: zip_path.to_path_buf(),

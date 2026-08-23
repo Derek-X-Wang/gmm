@@ -920,14 +920,20 @@ async fn recover_refuses_a_live_interrupted_delete_quarantine() {
 // Coverage
 // ---------------------------------------------------------------------
 
-/// Every crash point must be exercised by some test in this file.
+/// Every crash point must be exercised by a crash-recovery or deterministic
+/// concurrency test. Relocation's snapshot point is a rendezvous seam rather
+/// than a process-abort seam, so its coverage belongs in `concurrency.rs`.
 ///
 /// Without this, adding a point to `crash_points::ALL` and forgetting to
 /// cover it looks exactly like covering it — the constant compiles, the
 /// suite is green, and the new durable step has no crash test at all.
 #[test]
 fn every_crash_point_is_covered_by_a_test() {
-    let source = include_str!("crash_recovery.rs");
+    let source = format!(
+        "{}\n{}",
+        include_str!("crash_recovery.rs"),
+        include_str!("concurrency.rs"),
+    );
     let uncovered: Vec<_> = crash_points::ALL
         .iter()
         .filter(|point| {

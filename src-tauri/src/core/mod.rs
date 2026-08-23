@@ -18,6 +18,7 @@ pub mod instance_lock;
 pub mod junction;
 pub mod library_audit;
 mod library_identity;
+mod library_mutation;
 pub mod library_recovery;
 pub mod mod_updates;
 pub mod mods;
@@ -31,7 +32,6 @@ pub mod variants;
 pub mod volume;
 pub mod zip_import;
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -263,19 +263,22 @@ impl Core {
     /// affected games are dropped + rebuilt via the standard reconcile
     /// path. `new_root = None` resets the override to the default.
     pub async fn set_library_root(&self, new_root: Option<&Path>) -> Result<MoveReport> {
-        self.ensure_no_active_session().await?;
-        let previous = self.resolved_library_root().await?;
+        let mut fence = self
+            .begin_library_mutation(library_mutation::LibraryMutation::SetLibraryRoot)
+            .await?;
+        let previous = self.resolved_library_root_in_mutation(&mut fence).await?;
         let next = new_root
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.default_library_root.clone());
 
         if previous == next {
             put_setting(
-                &self.pool,
+                &mut *fence.transaction,
                 keys::library_root(),
                 new_root.map(|p| p.to_string_lossy().to_string()).as_deref(),
             )
             .await?;
+            fence.commit().await?;
             return Ok(MoveReport::default());
         }
 
@@ -283,15 +286,20 @@ impl Core {
 
         // Move every game's subtree from previous to next. Per-game
         // overrides are unaffected — they're absolute and live elsewhere.
-        let report = self
-            .move_root(&previous, &next, /* per_game */ None)
+        let (mut report, previously_enabled) = self
+            .move_root(&previous, &next, /* per_game */ None, &mut fence)
             .await?;
         put_setting(
-            &self.pool,
+            &mut *fence.transaction,
             keys::library_root(),
             new_root.map(|p| p.to_string_lossy().to_string()).as_deref(),
         )
         .await?;
+        report.failed_junction_restores = self
+            .restore_relocated_junctions(previously_enabled, &mut fence)
+            .await;
+        fence.commit().await?;
+        self.crash_point(crash_points::RELOCATE_AFTER_FENCE_COMMIT);
         Ok(report)
     }
 
@@ -303,8 +311,12 @@ impl Core {
         game: GameCode,
         new_path: Option<&Path>,
     ) -> Result<MoveReport> {
-        self.ensure_no_active_session().await?;
-        let previous = self.resolved_library_root_for(game).await?;
+        let mut fence = self
+            .begin_library_mutation(library_mutation::LibraryMutation::SetLibraryPathForGame)
+            .await?;
+        let previous = self
+            .resolved_library_root_for_in_mutation(game, &mut fence)
+            .await?;
         let next = new_path.map(Path::to_path_buf).unwrap_or_else(|| {
             // When clearing, the effective path becomes
             // `resolved_root().join(game)`. We compute it eagerly
@@ -315,7 +327,10 @@ impl Core {
             PathBuf::new()
         });
 
-        let fallback = self.resolved_library_root().await?.join(game.as_str());
+        let fallback = self
+            .resolved_library_root_in_mutation(&mut fence)
+            .await?
+            .join(game.as_str());
         let next_effective = if next.as_os_str().is_empty() {
             fallback
         } else {
@@ -324,25 +339,31 @@ impl Core {
 
         if previous == next_effective {
             put_setting(
-                &self.pool,
+                &mut *fence.transaction,
                 &keys::library_root_for_game(game),
                 new_path.map(|p| p.to_string_lossy().to_string()).as_deref(),
             )
             .await?;
+            fence.commit().await?;
             return Ok(MoveReport::default());
         }
 
         volume::require_ntfs(&next_effective)?;
 
-        let report = self
-            .move_root(&previous, &next_effective, Some(game))
+        let (mut report, previously_enabled) = self
+            .move_root(&previous, &next_effective, Some(game), &mut fence)
             .await?;
         put_setting(
-            &self.pool,
+            &mut *fence.transaction,
             &keys::library_root_for_game(game),
             new_path.map(|p| p.to_string_lossy().to_string()).as_deref(),
         )
         .await?;
+        report.failed_junction_restores = self
+            .restore_relocated_junctions(previously_enabled, &mut fence)
+            .await;
+        fence.commit().await?;
+        self.crash_point(crash_points::RELOCATE_AFTER_FENCE_COMMIT);
         Ok(report)
     }
 
@@ -355,7 +376,8 @@ impl Core {
         previous: &Path,
         next: &Path,
         per_game: Option<GameCode>,
-    ) -> Result<MoveReport> {
+        fence: &mut library_mutation::LibraryMutationFence,
+    ) -> Result<(MoveReport, Vec<(String, GameCode)>)> {
         // Snapshot mods that need their library_path rewritten. For the
         // global case we include every mod across every game; for the
         // per-game case only that game.
@@ -365,15 +387,16 @@ impl Core {
                     "SELECT id, game_code, library_path, enabled FROM mods WHERE game_code = ?",
                 )
                 .bind(game.as_str())
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *fence.transaction)
                 .await?
             }
             None => {
                 sqlx::query("SELECT id, game_code, library_path, enabled FROM mods")
-                    .fetch_all(&self.pool)
+                    .fetch_all(&mut *fence.transaction)
                     .await?
             }
         };
+        self.crash_point(crash_points::RELOCATE_AFTER_MOD_SNAPSHOT);
 
         // Disable affected mods first to drop their junctions. We don't
         // need the persisted enabled=0 flip — we'll re-enable in the
@@ -387,12 +410,18 @@ impl Core {
             let id: String = row.try_get("id")?;
             let game_code: String = row.try_get("game_code")?;
             let game = GameCode::from_str(&game_code)?;
-            let install = self.game_install_path(game).await?;
+            let game_row = sqlx::query("SELECT install_path FROM games WHERE code = ?")
+                .bind(game.as_str())
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+            let install = game_row
+                .try_get::<Option<String>, _>("install_path")?
+                .map(PathBuf::from);
             if let Some(install) = install {
                 let mods_dir = install.join("Mods");
                 let junction_row = sqlx::query("SELECT junction_dir_name FROM mods WHERE id = ?")
                     .bind(&id)
-                    .fetch_one(&self.pool)
+                    .fetch_one(&mut *fence.transaction)
                     .await?;
                 let junction_dir_name: String = junction_row.try_get("junction_dir_name")?;
                 let link = mods_dir.join(junction_dir_name);
@@ -453,33 +482,83 @@ impl Core {
             sqlx::query("UPDATE mods SET library_path = ? WHERE id = ?")
                 .bind(&rewritten)
                 .bind(&id)
-                .execute(&self.pool)
+                .execute(&mut *fence.transaction)
                 .await?;
             report.relocated.push(id);
         }
 
-        // Re-enable previously-enabled mods (recreates junctions
-        // against the rewritten library_path).
+        Ok((report, previously_enabled))
+    }
+
+    /// Restore every previously-enabled Mod's junction while the writer fence
+    /// still excludes Game Session claims. The rows remain enabled throughout;
+    /// persisting a temporary disabled state would let a session claim strand
+    /// the remaining Mods as disabled.
+    async fn restore_relocated_junctions(
+        &self,
+        previously_enabled: Vec<(String, GameCode)>,
+        fence: &mut library_mutation::LibraryMutationFence,
+    ) -> Vec<JunctionRestoreFailure> {
+        let mut failures = Vec::new();
         for (id, game) in previously_enabled {
-            let install = self.game_install_path(game).await?;
-            if let Some(install) = install {
-                let mods_dir = install.join("Mods");
-                std::fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
-                    path: mods_dir.clone(),
-                    source,
-                })?;
-                // `set_enabled(false)` was effectively done by the
-                // junction::remove above without persisting; flip the
-                // bit through the proper path now so junctions land.
-                sqlx::query("UPDATE mods SET enabled = 0 WHERE id = ?")
-                    .bind(&id)
-                    .execute(&self.pool)
-                    .await?;
-                self.set_enabled(&id, true, &mods_dir).await?;
+            if let Err(error) = self.restore_relocated_junction(&id, game, fence).await {
+                failures.push(JunctionRestoreFailure {
+                    mod_id: id,
+                    game,
+                    error: error.to_string(),
+                });
             }
         }
 
-        Ok(report)
+        failures
+    }
+
+    async fn restore_relocated_junction(
+        &self,
+        id: &str,
+        game: GameCode,
+        fence: &mut library_mutation::LibraryMutationFence,
+    ) -> Result<()> {
+        let game_row = sqlx::query("SELECT install_path FROM games WHERE code = ?")
+            .bind(game.as_str())
+            .fetch_one(&mut *fence.transaction)
+            .await?;
+        let install = game_row
+            .try_get::<Option<String>, _>("install_path")?
+            .map(PathBuf::from);
+        let Some(install) = install else {
+            return Ok(());
+        };
+        let mods_dir = install.join("Mods");
+        std::fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
+            path: mods_dir.clone(),
+            source,
+        })?;
+        let row = sqlx::query(
+            "SELECT junction_dir_name, library_path, active_variant_id
+             FROM mods WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *fence.transaction)
+        .await?;
+        let junction_dir_name: String = row.try_get("junction_dir_name")?;
+        let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+        let active_variant_id: Option<String> = row.try_get("active_variant_id")?;
+        let target = if let Some(active_variant_id) = active_variant_id {
+            let variant = sqlx::query("SELECT subpath FROM mod_variants WHERE id = ?")
+                .bind(active_variant_id)
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+            library_path.join(variant.try_get::<String, _>("subpath")?)
+        } else {
+            library_path
+        };
+        let link = mods_dir.join(junction_dir_name);
+        volume::require_ntfs_pair(&mods_dir, &target)?;
+        junction::create(&link, &target)?;
+        self.crash_point(crash_points::RELOCATE_AFTER_JUNCTION_RESTORE);
+
+        Ok(())
     }
 
     /// Adopt an already-extracted folder into the Library as a Mod with
@@ -491,15 +570,48 @@ impl Core {
         source_path: &Path,
         display_name: &str,
     ) -> Result<Mod> {
-        self.ensure_no_active_session().await?;
+        let root = self
+            .snapshot_library_root_for_mutation(
+                game,
+                library_mutation::LibraryMutation::AdoptFolder,
+            )
+            .await?;
         let id = Ulid::new().to_string();
-        let library_path = self.resolved_library_root_for(game).await?.join(&id);
+        let staged = root.create_staged_directory(&id)?;
+        let library_path = staged.path().to_path_buf();
 
-        copy_dir_recursive(source_path, &library_path)?;
+        if let Err(error) = copy_dir_recursive(source_path, &library_path) {
+            self.cleanup_staged_library_dir(
+                &root,
+                staged,
+                library_mutation::LibraryMutation::AdoptFolder,
+            )
+            .await;
+            return Err(error);
+        }
         self.crash_point(crash_points::ADOPT_AFTER_LIBRARY_COPY);
 
+        let mut fence = match self
+            .revalidate_library_root_for_mutation(
+                &root,
+                library_mutation::LibraryMutation::AdoptFolder,
+            )
+            .await
+        {
+            Ok(fence) => fence,
+            Err(error) => {
+                self.cleanup_staged_library_dir(
+                    &root,
+                    staged,
+                    library_mutation::LibraryMutation::AdoptFolder,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         let base = sanitize_dir_name(display_name);
-        let junction_dir_name = self.pick_unique_junction_dir_name(game, &base).await?;
+        let junction_dir_name =
+            library_mutation::unique_junction_dir_name(&mut fence.transaction, game, &base).await?;
 
         let created_at = Utc::now().to_rfc3339();
         sqlx::query(
@@ -516,8 +628,9 @@ impl Core {
         .bind(library_path.to_string_lossy().as_ref())
         .bind(&junction_dir_name)
         .bind(&created_at)
-        .execute(&self.pool)
+        .execute(&mut *fence.transaction)
         .await?;
+        fence.commit().await?;
         self.crash_point(crash_points::ADOPT_AFTER_ROW_INSERT);
 
         self.detect_and_record_variants(&id, &library_path).await?;
@@ -693,6 +806,10 @@ impl Core {
         mod_id: &str,
         endpoints: &gamebanana::Endpoints,
     ) -> Result<()> {
+        library_mutation::record_library_mutation_exemption(
+            library_mutation::LibraryMutation::ReinstallGamebananaMod,
+            166,
+        );
         self.ensure_no_active_session().await?;
         let row = sqlx::query(
             "SELECT game_code, gamebanana_id, library_path, junction_dir_name, enabled
@@ -2223,9 +2340,9 @@ impl Core {
     /// junk files, single-root-directory shape, and size/entry caps. See
     /// [`crate::core::zip_import`] for the extraction details.
     ///
-    /// On any failure the partially-extracted Library path is removed so
-    /// the user is never left with a half-imported Mod row pointing at
-    /// half-extracted bytes.
+    /// On failure, cleanup removes the staged Library directory only after
+    /// re-proving its identity and that no Mod row owns it. If either fact is
+    /// uncertain, the bytes are retained for the orphan audit to surface.
     pub async fn import_zip(
         &self,
         game: GameCode,
@@ -2233,21 +2350,48 @@ impl Core {
         display_name: &str,
         opts: ImportZipOptions,
     ) -> Result<Mod> {
-        self.ensure_no_active_session().await?;
+        let root = self
+            .snapshot_library_root_for_mutation(game, library_mutation::LibraryMutation::ImportZip)
+            .await?;
         let id = Ulid::new().to_string();
-        let library_path = self.resolved_library_root_for(game).await?.join(&id);
+        let staged = root.create_staged_directory(&id)?;
+        let library_path = staged.path().to_path_buf();
 
         if let Err(e) = zip_import::extract(zip_path, &library_path, opts) {
             // Best-effort cleanup. We swallow remove_dir_all errors so the
             // user sees the original extraction failure, not a noisy
             // cleanup follow-up.
-            let _ = std::fs::remove_dir_all(&library_path);
+            self.cleanup_staged_library_dir(
+                &root,
+                staged,
+                library_mutation::LibraryMutation::ImportZip,
+            )
+            .await;
             return Err(e);
         }
         self.crash_point(crash_points::IMPORT_ZIP_AFTER_EXTRACT);
 
+        let mut fence = match self
+            .revalidate_library_root_for_mutation(
+                &root,
+                library_mutation::LibraryMutation::ImportZip,
+            )
+            .await
+        {
+            Ok(fence) => fence,
+            Err(error) => {
+                self.cleanup_staged_library_dir(
+                    &root,
+                    staged,
+                    library_mutation::LibraryMutation::ImportZip,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         let base = sanitize_dir_name(display_name);
-        let junction_dir_name = self.pick_unique_junction_dir_name(game, &base).await?;
+        let junction_dir_name =
+            library_mutation::unique_junction_dir_name(&mut fence.transaction, game, &base).await?;
 
         let created_at = Utc::now().to_rfc3339();
         sqlx::query(
@@ -2264,8 +2408,9 @@ impl Core {
         .bind(library_path.to_string_lossy().as_ref())
         .bind(&junction_dir_name)
         .bind(&created_at)
-        .execute(&self.pool)
+        .execute(&mut *fence.transaction)
         .await?;
+        fence.commit().await?;
         self.crash_point(crash_points::IMPORT_ZIP_AFTER_ROW_INSERT);
 
         self.detect_and_record_variants(&id, &library_path).await?;
@@ -2722,33 +2867,6 @@ impl Core {
         })
     }
 
-    /// Find an unused junction directory name for the given game, deduping
-    /// collisions by appending ` (2)`, ` (3)`, ... If `base` is already
-    /// unique we return it unchanged.
-    async fn pick_unique_junction_dir_name(&self, game: GameCode, base: &str) -> Result<String> {
-        let rows = sqlx::query("SELECT junction_dir_name FROM mods WHERE game_code = ?")
-            .bind(game.as_str())
-            .fetch_all(&self.pool)
-            .await?;
-
-        let existing: HashSet<String> = rows
-            .iter()
-            .filter_map(|r| r.try_get::<String, _>("junction_dir_name").ok())
-            .collect();
-
-        if !existing.contains(base) {
-            return Ok(base.to_string());
-        }
-
-        for n in 2..=u32::MAX {
-            let candidate = format!("{base} ({n})");
-            if !existing.contains(&candidate) {
-                return Ok(candidate);
-            }
-        }
-        unreachable!("u32::MAX collisions on one display name is not a real scenario")
-    }
-
     /// Read the persisted active GameSession, if any.
     pub async fn session_info(&self) -> Result<Option<SessionInfo>> {
         let row = sqlx::query("SELECT game_code, pid, started_at FROM active_session WHERE id = 1")
@@ -2907,7 +3025,7 @@ impl Core {
 /// accept under `<Game>/Mods/`: strip reserved characters, trim trailing
 /// dots/spaces, and prefix any DOS device name (CON, PRN, AUX, NUL,
 /// COM1..9, LPT1..9) so it stops being reserved. Collision dedup happens
-/// at the Core layer (see `pick_unique_junction_dir_name`).
+/// through the shared Library-mutation transaction.
 pub(crate) fn sanitize_dir_name(display: &str) -> String {
     let stripped: String = display
         .chars()
@@ -2957,6 +3075,17 @@ pub struct MoveReport {
     /// Top-level directories we moved (one per game, or a single entry
     /// for the per-game case).
     pub moved_directories: Vec<PathBuf>,
+    /// Previously-enabled Mods whose Junction could not be recreated. The
+    /// authoritative Library move still committed; Rebuild Junctions retries
+    /// these reconstructible projections from the committed rows.
+    pub failed_junction_restores: Vec<JunctionRestoreFailure>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct JunctionRestoreFailure {
+    pub mod_id: String,
+    pub game: GameCode,
+    pub error: String,
 }
 
 /// Move `from` to `to`. Prefer atomic rename; fall back to recursive

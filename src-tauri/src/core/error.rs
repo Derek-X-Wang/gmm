@@ -241,6 +241,16 @@ pub enum Error {
     NotAnUnreferencedLibraryDir { path: PathBuf, reason: String },
 
     #[error(
+        "{mutation} stopped because the Library root changed from {previous:?} to {current:?} \
+         while files were being prepared. No Mod row was committed."
+    )]
+    LibraryRootChangedDuringMutation {
+        mutation: &'static str,
+        previous: PathBuf,
+        current: PathBuf,
+    },
+
+    #[error(
         "{game} is running (game session active since {since}); close the game before changing mods."
     )]
     SessionActive { game: String, since: String },
