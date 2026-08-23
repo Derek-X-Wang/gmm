@@ -175,7 +175,7 @@ function ReclamationNotice({ reclamation }: { reclamation: DeletedLibraryDir | n
       <p className="muted small">
         GMM removed {reclamation.path} from the Library, but could not reclaim its disk
         space now. Its bytes remain at {outcome.path}. GMM will retry during a later
-        startup while that directory remains at its reserved name.
+        startup while it can still verify that directory at its reserved name.
       </p>
     );
   }
@@ -183,9 +183,9 @@ function ReclamationNotice({ reclamation }: { reclamation: DeletedLibraryDir | n
     return (
       <p className="error" role="alert">
         GMM removed {reclamation.path} from the Library, but could not confirm whether its
-        disk space was reclaimed. GMM no longer knows where that folder&apos;s bytes are. If
-        GMM can again verify the original directory at its reserved name, a later startup
-        will retry reclamation.
+        disk space was reclaimed. GMM does not know whether any of that folder&apos;s bytes
+        remain or, if they do, where they are. If GMM can again verify the original
+        directory at its reserved name, a later startup will retry reclamation.
       </p>
     );
   }

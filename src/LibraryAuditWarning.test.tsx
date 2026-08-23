@@ -187,7 +187,7 @@ it("says deferred bytes remain at the reserved path and later startups will retr
   expect(notice).toBeInTheDocument();
   expect(notice).toHaveTextContent(quarantine);
   expect(notice).toHaveTextContent(/could not reclaim its disk space now/i);
-  expect(notice).toHaveTextContent(/remains at its reserved name/i);
+  expect(notice).toHaveTextContent(/can still verify that directory at its reserved name/i);
 });
 
 it("announces ownership loss without presenting the reserved path as a cleanup target", async () => {
@@ -211,7 +211,7 @@ it("announces ownership loss without presenting the reserved path as a cleanup t
   await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
   expect(notice).toHaveTextContent(FIRST);
   expect(notice).toHaveTextContent(/could not confirm whether its disk space was reclaimed/i);
-  expect(notice).toHaveTextContent(/no longer knows where that folder's bytes are/i);
+  expect(notice).toHaveTextContent(/does not know whether any of that folder's bytes remain/i);
   expect(notice).toHaveTextContent(/verify the original directory at its reserved name/i);
   expect(notice).not.toHaveTextContent(quarantine);
 });

@@ -361,7 +361,7 @@ impl Core {
                     path = %path.display(),
                     quarantine = %quarantine_path.display(),
                     error = %error,
-                    "Library delete succeeded but GMM could not reclaim the owned bytes now; later startups will retry while the directory remains at its reserved name",
+                    "Library delete succeeded but GMM could not reclaim the owned bytes now; later startups will retry while GMM can still verify that directory at its reserved name",
                 );
                 (
                     None,
