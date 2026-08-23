@@ -720,6 +720,82 @@ async fn recovery_crashing_after_the_rename_leaves_the_folder_recoverable_again(
 }
 
 // ---------------------------------------------------------------------
+// delete_unreferenced_library_dir
+// ---------------------------------------------------------------------
+
+/// Delete first atomically removes the proven orphan from the user-visible
+/// Library namespace. A crash before recursive purge leaves a reserved
+/// quarantine, and constructing the Core on restart must finish that purge.
+/// This proves both the durable state and the real startup wiring: removing
+/// cleanup from `Core::new` makes the quarantine assertion fail.
+#[tokio::test]
+async fn delete_crashing_after_quarantine_is_finished_on_restart() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    std::fs::create_dir_all(orphan.join("nested")).expect("orphan tree");
+    std::fs::write(orphan.join("nested/precious.buf"), b"delete me").expect("orphan bytes");
+    let orphan_s = orphan.display().to_string();
+
+    env.crash_during(
+        crash_points::DELETE_AFTER_QUARANTINE_MOVE,
+        &["delete-library-dir", "--path", &orphan_s],
+    );
+
+    assert!(
+        !orphan.exists(),
+        "the atomic quarantine rename committed before the crash",
+    );
+    let quarantines: Vec<_> = std::fs::read_dir(&root)
+        .expect("Library root after crash")
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gmm-delete-")
+        })
+        .collect();
+    assert_eq!(
+        quarantines.len(),
+        1,
+        "the crash must leave exactly one resumable delete quarantine",
+    );
+    assert_eq!(
+        std::fs::read(quarantines[0].path().join("nested/precious.buf"))
+            .expect("quarantined bytes"),
+        b"delete me",
+        "the crash point fires before recursive purge begins",
+    );
+
+    let restarted = env.restart().await;
+    assert!(
+        std::fs::read_dir(&root)
+            .expect("Library root after restart")
+            .all(|entry| !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gmm-delete-")),
+        "Core startup must finish every interrupted delete quarantine",
+    );
+    assert!(
+        restarted
+            .audit_library(GameCode::Gimi)
+            .await
+            .expect("audit after cleanup")
+            .unreferenced
+            .is_empty(),
+        "the completed delete leaves neither a Mod row nor an orphan",
+    );
+}
+
+// ---------------------------------------------------------------------
 // Coverage
 // ---------------------------------------------------------------------
 

@@ -40,6 +40,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gmm_lib::core::{Core, GameCode};
 use tempfile::TempDir;
+use ulid::Ulid;
 
 // ---------------------------------------------------------------------
 // Probe process harness
@@ -374,6 +375,56 @@ fn a_second_gmm_process_is_refused_the_instance_lock() {
 // ---------------------------------------------------------------------
 // 2. The pairings, with the gate deliberately bypassed
 // ---------------------------------------------------------------------
+
+/// Recover and delete are two claims on the same Library directory. They
+/// rendezvous in separate OS processes with the instance gate deliberately
+/// bypassed; the large tree keeps delete between validation and removal long
+/// enough for recover to exercise the old validate/act window. Exactly one
+/// claim may succeed, and its database/filesystem outcome must be complete.
+#[tokio::test]
+async fn concurrent_recover_and_delete_of_one_library_directory_have_one_winner() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let orphan = root.join(Ulid::new().to_string());
+    std::fs::create_dir_all(&orphan).expect("orphan");
+    std::fs::write(orphan.join("merged.ini"), b"hash=race\n").expect("marker");
+    for n in 0..2_000 {
+        std::fs::write(orphan.join(format!("texture-{n:04}.buf")), b"x").expect("race ballast");
+    }
+    let orphan_s = orphan.display().to_string();
+
+    let at = rendezvous_in(Duration::from_millis(1500));
+    let mut recover = probe(&env)
+        .at(at)
+        .op(["recover", "--path", &orphan_s, "--name", "Race Winner"])
+        .spawn();
+    let mut delete = probe(&env)
+        .at(at)
+        .op(["delete-library-dir", "--path", &orphan_s])
+        .spawn();
+    let (recovered, deleted) = (recover.wait_for_outcome(), delete.wait_for_outcome());
+
+    assert_ne!(
+        recovered.ok, deleted.ok,
+        "exactly one guarded mutation may claim the directory, got {recovered:?} / {deleted:?}",
+    );
+    let mods = core.list_mods(GameCode::Gimi).await.expect("list");
+    if recovered.ok {
+        assert_eq!(mods.len(), 1, "the recovery winner records one Mod");
+        assert_eq!(mods[0].library_path, orphan);
+        assert_eq!(
+            std::fs::read(mods[0].library_path.join("merged.ini")).expect("recovered bytes"),
+            b"hash=race\n",
+        );
+    } else {
+        assert!(mods.is_empty(), "the delete winner records no Mod row");
+        assert!(!orphan.exists(), "the delete winner removes the directory");
+    }
+}
 
 /// Two processes enable the same Mod at the same instant.
 ///

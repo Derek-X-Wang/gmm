@@ -182,6 +182,14 @@ async fn run(args: &Args) -> Result<(), String> {
                 .map_err(|e| e.to_string())
         }
 
+        "delete-library-dir" => {
+            let path = PathBuf::from(args.req("--path")?);
+            core.delete_unreferenced_library_dir(args.game()?, &path)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
         "reconcile" => {
             let mods_dir = PathBuf::from(args.req("--mods-dir")?);
             core.reconcile_junctions(args.game()?, &mods_dir)

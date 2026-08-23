@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sqlx::Row;
 
+use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
 use super::{Core, Error, GameCode, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -41,13 +42,17 @@ impl Core {
             .bind(game.as_str())
             .fetch_all(&self.pool)
             .await?;
-        let referenced = rows
-            .into_iter()
-            .map(|row| row.try_get::<String, _>("library_path"))
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(PathBuf::from)
-            .collect::<HashSet<_>>();
+        let mut referenced = HashSet::new();
+        for row in rows {
+            let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+            match IdentifiedDirectory::open(&path) {
+                Ok(directory) => {
+                    referenced.insert(directory.identity().clone());
+                }
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => return Err(Error::Io { path, source }),
+            }
+        }
 
         let join_error_path = root.clone();
         tokio::task::spawn_blocking(move || scan_game_root(game, &root, &referenced))
@@ -62,7 +67,7 @@ impl Core {
 fn scan_game_root(
     game: GameCode,
     root: &Path,
-    referenced: &HashSet<PathBuf>,
+    referenced: &HashSet<DirectoryIdentity>,
 ) -> Result<LibraryAuditReport> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
@@ -88,14 +93,21 @@ fn scan_game_root(
             source,
         })?;
         let path = entry.path();
+        if super::library_recovery::is_owned_delete_quarantine(&path)? {
+            continue;
+        }
         let metadata = fs::symlink_metadata(&path).map_err(|source| Error::Io {
             path: path.clone(),
             source,
         })?;
-        if is_link_or_reparse_point(&metadata)
-            || !metadata.file_type().is_dir()
-            || referenced.contains(&path)
-        {
+        if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
+            continue;
+        }
+        let directory = IdentifiedDirectory::open(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if referenced.contains(directory.identity()) {
             continue;
         }
 
