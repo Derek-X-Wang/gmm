@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -25,7 +25,15 @@ function formatBytes(bytes: number): string {
 }
 
 /** Which folder, if any, has an open recover form or delete confirmation. */
-type OpenAction = { path: string; kind: "recover" | "delete" } | null;
+type OpenAction = {
+  path: string;
+  kind: "recover" | "delete";
+  trigger: HTMLButtonElement;
+} | null;
+
+type ActionFeedback =
+  | { kind: "recovered"; directoryName: string; name: string }
+  | { kind: "deleted"; deleted: DeletedLibraryDir };
 
 /**
  * The Settings report for Library directories with no Mod row, and the
@@ -41,11 +49,15 @@ type OpenAction = { path: string; kind: "recover" | "delete" } | null;
 export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState<OpenAction>(null);
-  const [reclamation, setReclamation] = useState<DeletedLibraryDir | null>(null);
+  const [feedback, setFeedback] = useState<ActionFeedback | null>(null);
+  const feedbackRef = useRef<HTMLParagraphElement>(null);
   useEffect(() => {
     setOpen(null);
-    setReclamation(null);
+    setFeedback(null);
   }, [game]);
+  useEffect(() => {
+    if (feedback) feedbackRef.current?.focus();
+  }, [feedback]);
 
   const audit = useQuery({
     queryKey: ["libraryAudit", game],
@@ -63,22 +75,38 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
     mutationFn: (path: string) => revealUnreferencedLibraryDir(game, path),
   });
   const recover = useMutation({
-    mutationFn: (args: { path: string; name: string }) =>
+    mutationFn: (args: { path: string; directoryName: string; name: string }) =>
       recoverUnreferencedLibraryDir(game, args.path, args.name),
-    onSuccess: () => {
-      setReclamation(null);
+    onSuccess: (recovered, args) => {
+      setFeedback({
+        kind: "recovered",
+        directoryName: args.directoryName,
+        name: recovered.name,
+      });
       refresh();
     },
   });
   const remove = useMutation({
     mutationFn: (path: string) => deleteUnreferencedLibraryDir(game, path),
     onSuccess: (deleted) => {
-      setReclamation(
-        deleted.reclamation && deleted.reclamation.status !== "reclaimed" ? deleted : null,
-      );
+      setFeedback({ kind: "deleted", deleted });
       refresh();
     },
   });
+
+  const beginAction = (
+    path: string,
+    kind: "recover" | "delete",
+    trigger: HTMLButtonElement,
+  ) => {
+    setFeedback(null);
+    setOpen({ path, kind, trigger });
+  };
+  const cancelAction = () => {
+    const trigger = open?.trigger;
+    setOpen(null);
+    trigger?.focus();
+  };
 
   const report = audit.data;
   if (!report) return null;
@@ -87,9 +115,9 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const busy = reveal.isPending || recover.isPending || remove.isPending;
   const count = report.unreferenced.length;
   if (count === 0) {
-    return reclamation ? (
+    return feedback ? (
       <section className="library-audit-warning" aria-label="Unreferenced Library folders">
-        <ReclamationNotice reclamation={reclamation} />
+        <ActionNotice feedback={feedback} focusRef={feedbackRef} />
       </section>
     ) : null;
   }
@@ -100,7 +128,7 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   // confirmation the user is interacting with.
   return (
     <section className="library-audit-warning" aria-label="Unreferenced Library folders">
-      <ReclamationNotice reclamation={reclamation} />
+      <ActionNotice feedback={feedback} focusRef={feedbackRef} />
       {failure ? (
         <p className="error" role="alert">
           {String(failure)}
@@ -133,14 +161,18 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => setOpen({ path: directory.path, kind: "recover" })}
+                onClick={(event) =>
+                  beginAction(directory.path, "recover", event.currentTarget)
+                }
               >
                 Recover…
               </button>
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => setOpen({ path: directory.path, kind: "delete" })}
+                onClick={(event) =>
+                  beginAction(directory.path, "delete", event.currentTarget)
+                }
               >
                 Delete…
               </button>
@@ -148,15 +180,21 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
             {open?.path === directory.path && open.kind === "recover" ? (
               <RecoverForm
                 pending={recover.isPending}
-                onCancel={() => setOpen(null)}
-                onRecover={(name) => recover.mutate({ path: directory.path, name })}
+                onCancel={cancelAction}
+                onRecover={(name) =>
+                  recover.mutate({
+                    path: directory.path,
+                    directoryName: directory.directoryName,
+                    name,
+                  })
+                }
               />
             ) : null}
             {open?.path === directory.path && open.kind === "delete" ? (
               <DeleteConfirmation
                 directory={directory}
                 pending={remove.isPending}
-                onCancel={() => setOpen(null)}
+                onCancel={cancelAction}
                 onDelete={() => remove.mutate(directory.path)}
               />
             ) : null}
@@ -167,22 +205,49 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   );
 }
 
-function ReclamationNotice({ reclamation }: { reclamation: DeletedLibraryDir | null }) {
-  if (!reclamation) return null;
-  const outcome = reclamation.reclamation;
-  if (outcome?.status === "deferred") {
+function ActionNotice({
+  feedback,
+  focusRef,
+}: {
+  feedback: ActionFeedback | null;
+  focusRef: RefObject<HTMLParagraphElement | null>;
+}) {
+  if (!feedback) return null;
+  if (feedback.kind === "recovered") {
     return (
-      <p className="muted small">
-        GMM removed {reclamation.path} from the Library, but could not reclaim its disk
+      <p ref={focusRef} className="muted small" role="status" tabIndex={-1}>
+        Recovered <code>{feedback.directoryName}</code> as {feedback.name}.
+      </p>
+    );
+  }
+
+  const { deleted } = feedback;
+  const outcome = deleted.reclamation;
+  if (outcome.status === "reclaimed") {
+    return (
+      <p ref={focusRef} className="muted small" role="status" tabIndex={-1}>
+        Deleted <code>{deleted.directoryName}</code>
+        {deleted.sizeBytes === null ? (
+          <>. Its disk space was reclaimed, but the freed size is unknown.</>
+        ) : (
+          <> and freed {formatBytes(deleted.sizeBytes)}.</>
+        )}
+      </p>
+    );
+  }
+  if (outcome.status === "deferred") {
+    return (
+      <p ref={focusRef} className="muted small" role="status" tabIndex={-1}>
+        GMM removed {deleted.path} from the Library, but could not reclaim its disk
         space now. Its bytes remain at {outcome.path}. GMM will retry during a later
         startup while it can still verify that directory at its reserved name.
       </p>
     );
   }
-  if (outcome?.status === "ownershipLost") {
+  if (outcome.status === "ownershipLost") {
     return (
-      <p className="error" role="alert">
-        GMM removed {reclamation.path} from the Library, but could not confirm whether its
+      <p ref={focusRef} className="error" role="alert" tabIndex={-1}>
+        GMM removed {deleted.path} from the Library, but could not confirm whether its
         disk space was reclaimed. GMM does not know whether any of that folder&apos;s bytes
         remain or, if they do, where they are. If GMM can again verify the original
         directory at its reserved name, a later startup will retry reclamation.
@@ -251,14 +316,22 @@ function DeleteConfirmation({
   onCancel: () => void;
   onDelete: () => void;
 }) {
+  const descriptionId = useId();
   return (
-    <div className="row" role="alertdialog" aria-modal="false" aria-label="Confirm delete">
-      <p>
-        Permanently delete <code>{directory.directoryName}</code>
-        {directory.sizeBytes === null ? null : (
-          <> and the {formatBytes(directory.sizeBytes)} inside it</>
+    <div
+      className="row"
+      role="group"
+      aria-label="Confirm delete"
+      aria-describedby={descriptionId}
+    >
+      <p id={descriptionId}>
+        Permanently delete <code>{directory.directoryName}</code>?{" "}
+        {directory.sizeBytes === null ? (
+          <>Its size is unknown. </>
+        ) : (
+          <>This will delete the {formatBytes(directory.sizeBytes)} inside it. </>
         )}
-        ? This cannot be undone.
+        This cannot be undone.
       </p>
       <button type="button" onClick={onDelete} disabled={pending}>
         Delete

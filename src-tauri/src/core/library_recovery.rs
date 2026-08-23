@@ -213,7 +213,9 @@ impl Core {
     ///
     /// Equivalent to [`Core::adopt_folder`] in every respect except that
     /// the bytes are already in place. Gated on there being no active Game
-    /// Session, like every other Library mutation.
+    /// Session for consistency with other Library mutations. An orphan has
+    /// no Mod row or Junction, so junction safety is not the reason for this
+    /// deliberately consistent gate.
     pub async fn recover_unreferenced_library_dir(
         &self,
         game: GameCode,
@@ -306,7 +308,9 @@ impl Core {
     ///
     /// One explicitly named directory, never a set: the caller passes the
     /// single path the user confirmed. Gated on there being no active Game
-    /// Session, like every other Library mutation.
+    /// Session for consistency with other Library mutations. An orphan has
+    /// no Mod row or Junction, so junction safety is not the reason for this
+    /// deliberately consistent gate.
     pub async fn delete_unreferenced_library_dir(
         &self,
         game: GameCode,
