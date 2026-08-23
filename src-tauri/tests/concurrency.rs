@@ -1004,8 +1004,9 @@ async fn failed_adopt_cleanup_preserves_a_replacement_directory() {
 /// Identity handles are evidence, not exclusion locks. Even after cleanup has
 /// checked both identity and database ownership under the writer fence, an
 /// external actor can rename that object away and put new bytes at the same
-/// pathname. Cleanup must anchor deletion to the reserved quarantine name it
-/// creates, then re-check which object the rename actually moved.
+/// pathname. Cleanup must move the candidate to the reserved quarantine name
+/// it creates, then re-check which object the rename actually moved. The later
+/// path-based recursive purge remains tracked separately in #172.
 ///
 /// Mutation oracle: replacing the quarantine rename with direct
 /// `remove_dir_all(path)` deletes `replacement-marker` after this seam swaps
@@ -1514,11 +1515,13 @@ async fn startup_cleanup_cannot_strand_a_delete_paused_before_quarantine_rename(
 
 /// Explicit Library delete has committed its durable quarantine and released
 /// the identity proof before recursive purge. A replacement at the reserved
-/// pathname must survive, the caller must see the mismatch, and the retained
-/// intent must remain retryable by startup.
+/// pathname must survive, the accepted delete must still report success, and
+/// the retained intent must remain retryable by startup.
 ///
 /// Mutation oracle: removing `open_owned_delete_quarantine` from the shared
-/// purge turns the operation into success and fires the refusal assertion.
+/// purge deletes the replacement and fires the replacement-survival assertion.
+/// Propagating its identity-refusal error from the explicit delete path fires
+/// the successful-delete assertion.
 #[tokio::test]
 async fn explicit_delete_purge_refuses_a_replaced_quarantine_and_startup_retries() {
     let env = TestEnv::new();
@@ -1556,12 +1559,8 @@ async fn explicit_delete_purge_refuses_a_replaced_quarantine_and_startup_retries
     deleting.resume();
     let deleted = deleting.wait_for_outcome();
     assert!(
-        !deleted.ok,
-        "explicit Library delete purge accepted a replacement at its proven quarantine pathname",
-    );
-    assert!(
-        deleted.error.to_lowercase().contains("identity"),
-        "explicit Library delete reported the quarantine swap for the wrong reason: {}",
+        deleted.ok,
+        "the Library delete was already committed and must stay successful when byte reclamation defers: {}",
         deleted.error,
     );
     assert!(

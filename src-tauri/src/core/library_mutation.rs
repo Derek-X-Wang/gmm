@@ -307,9 +307,9 @@ impl Core {
                         self.crash_point(super::crash_points::STAGED_CLEANUP_AFTER_QUARANTINE_MOVE);
                         // Windows keeps a removed directory name visible until
                         // every open handle closes, even when the handles share
-                        // DELETE. The identity proof is now anchored to the
-                        // reserved name GMM itself created, so release the old
-                        // handles before purging that quarantine.
+                        // DELETE. The intent now records the object moved to
+                        // GMM's reserved name, so release the old handles before
+                        // the path-based purge; #172 tracks anchoring removal.
                         drop(current);
                         drop(staged);
                         quarantined = Some(directory);

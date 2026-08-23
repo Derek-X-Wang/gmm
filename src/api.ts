@@ -189,6 +189,7 @@ export interface DeletedLibraryDir {
   directoryName: string;
   path: string;
   sizeBytes: number | null;
+  reclamationDeferred: boolean;
 }
 
 /** Open the file manager on an unreferenced Library folder. */

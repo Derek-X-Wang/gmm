@@ -53,15 +53,17 @@ use super::{crash_points, Core, Error, GameCode, Mod, Result, Source};
 pub(super) const DELETE_QUARANTINE_PREFIX: &str = ".gmm-delete-";
 const DELETE_INTENT_SUFFIX: &str = ".intent";
 
-/// What a delete actually removed. `size_bytes` is measured immediately
-/// before the removal rather than taken from the report the user clicked,
-/// so the number GMM reports back is the number it really freed.
+/// What an accepted delete removed from the visible Library. `size_bytes` is
+/// measured only after the quarantine identity is proved and is omitted when
+/// reclamation is deferred. The traversal and final removal are still
+/// path-based pending #172, so the size is not object-anchored accounting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeletedLibraryDir {
     pub directory_name: String,
     pub path: PathBuf,
     pub size_bytes: Option<u64>,
+    pub reclamation_deferred: bool,
 }
 
 /// The indivisible proof for one destructive Library claim: the SQLite
@@ -82,19 +84,30 @@ pub(super) struct QuarantinedLibraryDirectory {
 
 impl QuarantinedLibraryDirectory {
     pub(super) fn purge(self, measure_size: bool) -> Result<Option<u64>> {
-        let size = measure_size
-            .then(|| directory_size_without_links(&self.path).ok())
-            .flatten();
         let verified = open_owned_delete_quarantine(&self.path)?.ok_or_else(|| {
             Error::DeleteQuarantineIdentityChanged {
                 path: self.path.clone(),
             }
         })?;
+        let size = measure_size
+            .then(|| directory_size_without_links(&self.path).ok())
+            .flatten();
+        let verified_after_measurement =
+            open_owned_delete_quarantine(&self.path)?.ok_or_else(|| {
+                Error::DeleteQuarantineIdentityChanged {
+                    path: self.path.clone(),
+                }
+            })?;
         // Windows keeps a directory name visible while an open handle refers
-        // to it even when that handle shares DELETE access. The durable
-        // identity was re-proved at the last possible point; release that
-        // handle before the path-based recursive removal.
+        // to it even when that handle shares DELETE access. Measurement is
+        // path-based, so prove the reserved name both before and after it and
+        // release both handles before recursive removal.
         drop(verified);
+        drop(verified_after_measurement);
+        // The final recursive removal still re-resolves `self.path`; a swap
+        // after the proof can therefore remove a replacement. #172 tracks
+        // handle-anchored recursive deletion. This check narrows that window
+        // but does not claim the removal itself is anchored to either handle.
         fs::remove_dir_all(&self.path)
             .and_then(|()| fs::remove_file(&self.intent).map(|()| size))
             .map_err(|source| Error::Io {
@@ -290,17 +303,33 @@ impl Core {
         drop(guarded.directory);
         self.crash_point(crash_points::DELETE_BEFORE_QUARANTINE_PURGE);
 
-        let size_bytes = tokio::task::spawn_blocking(move || quarantine.purge(true))
+        let purge_result = tokio::task::spawn_blocking(move || quarantine.purge(true))
             .await
             .map_err(|join_error| Error::Io {
                 path: path.clone(),
                 source: io::Error::other(format!("Library delete worker failed: {join_error}")),
-            })??;
+            })?;
+        let (size_bytes, reclamation_deferred) = match purge_result {
+            Ok(size_bytes) => (size_bytes, false),
+            Err(Error::DeleteQuarantineIdentityChanged {
+                path: quarantine_path,
+            }) => {
+                tracing::warn!(
+                    target: "gmm::library",
+                    path = %path.display(),
+                    quarantine = %quarantine_path.display(),
+                    "Library delete succeeded but byte reclamation was deferred; startup will retry",
+                );
+                (None, true)
+            }
+            Err(error) => return Err(error),
+        };
 
         Ok(DeletedLibraryDir {
             directory_name,
             path,
             size_bytes,
+            reclamation_deferred,
         })
     }
 

@@ -270,6 +270,7 @@ fn deleted_library_dir_response_uses_camel_case() {
         directory_name: "01ORPHAN".into(),
         path: "/library/gimi/01ORPHAN".into(),
         size_bytes: Some(42),
+        reclamation_deferred: true,
     });
     let object = value.as_object().expect("deleted object");
     assert_eq!(
@@ -277,6 +278,10 @@ fn deleted_library_dir_response_uses_camel_case() {
         Some("01ORPHAN"),
     );
     assert_eq!(object.get("sizeBytes").and_then(Value::as_u64), Some(42));
+    assert_eq!(
+        object.get("reclamationDeferred").and_then(Value::as_bool),
+        Some(true),
+    );
     assert!(object.contains_key("path"));
 }
 
