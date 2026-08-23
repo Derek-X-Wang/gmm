@@ -45,10 +45,13 @@ jobs:
 
       - name: Parse and lint shell scripts
         run: |
+          .github/scripts/parse-shell-scripts.sh
           mapfile -t scripts < <(find .github/scripts -type f -name '*.sh' -print)
           [ "${#scripts[@]}" -gt 0 ] || { echo "no shell scripts found"; exit 1; }
-          bash -n "${scripts[@]}"
           shellcheck "${scripts[@]}"
+
+      - name: Prove Bash parses non-first files
+        run: .github/scripts/test-parse-shell-scripts.sh
 
       - name: Test dead-origin alerting
         run: .github/scripts/test-dead-origin-issues.sh
