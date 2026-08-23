@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -6,6 +6,7 @@ import {
   deleteUnreferencedLibraryDir,
   recoverUnreferencedLibraryDir,
   revealUnreferencedLibraryDir,
+  type DeletedLibraryDir,
   type GameCode,
   type UnreferencedLibraryDir,
 } from "./api";
@@ -40,6 +41,11 @@ type OpenAction = { path: string; kind: "recover" | "delete" } | null;
 export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState<OpenAction>(null);
+  const [reclamation, setReclamation] = useState<DeletedLibraryDir | null>(null);
+  useEffect(() => {
+    setOpen(null);
+    setReclamation(null);
+  }, [game]);
 
   const audit = useQuery({
     queryKey: ["libraryAudit", game],
@@ -59,19 +65,34 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const recover = useMutation({
     mutationFn: (args: { path: string; name: string }) =>
       recoverUnreferencedLibraryDir(game, args.path, args.name),
-    onSuccess: refresh,
+    onSuccess: () => {
+      setReclamation(null);
+      refresh();
+    },
   });
   const remove = useMutation({
     mutationFn: (path: string) => deleteUnreferencedLibraryDir(game, path),
-    onSuccess: refresh,
+    onSuccess: (deleted) => {
+      setReclamation(
+        deleted.reclamation && deleted.reclamation.status !== "reclaimed" ? deleted : null,
+      );
+      refresh();
+    },
   });
 
   const report = audit.data;
-  if (!report || report.unreferenced.length === 0) return null;
+  if (!report) return null;
 
   const failure = reveal.error ?? recover.error ?? remove.error;
   const busy = reveal.isPending || recover.isPending || remove.isPending;
   const count = report.unreferenced.length;
+  if (count === 0) {
+    return reclamation ? (
+      <section className="library-audit-warning" aria-label="Unreferenced Library folders">
+        <ReclamationNotice reclamation={reclamation} />
+      </section>
+    ) : null;
+  }
 
   // A region, not the `role="status"` live region #70 used: that was right
   // for a passive report, but a live region re-announces its whole contents
@@ -79,6 +100,12 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   // confirmation the user is interacting with.
   return (
     <section className="library-audit-warning" aria-label="Unreferenced Library folders">
+      <ReclamationNotice reclamation={reclamation} />
+      {failure ? (
+        <p className="error" role="alert">
+          {String(failure)}
+        </p>
+      ) : null}
       <strong>
         {count} unreferenced Library {count === 1 ? "folder" : "folders"} using{" "}
         {formatBytes(report.totalBytes)}
@@ -88,7 +115,6 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
         before you decide: recovering adds it to your Library as a Mod without moving or
         copying anything, and deleting is permanent.
       </p>
-      {failure ? <p className="error" role="alert">{String(failure)}</p> : null}
       <ul>
         {report.unreferenced.map((directory) => (
           <li key={directory.path}>
@@ -139,6 +165,31 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
       </ul>
     </section>
   );
+}
+
+function ReclamationNotice({ reclamation }: { reclamation: DeletedLibraryDir | null }) {
+  if (!reclamation) return null;
+  const outcome = reclamation.reclamation;
+  if (outcome?.status === "deferred") {
+    return (
+      <p className="muted small">
+        GMM removed {reclamation.path} from the Library, but could not reclaim its disk
+        space now. Its bytes remain at {outcome.path}. GMM will retry during a later
+        startup while it can still verify that directory at its reserved name.
+      </p>
+    );
+  }
+  if (outcome?.status === "ownershipLost") {
+    return (
+      <p className="error" role="alert">
+        GMM removed {reclamation.path} from the Library, but could not confirm whether its
+        disk space was reclaimed. GMM does not know whether any of that folder&apos;s bytes
+        remain or, if they do, where they are. If GMM can again verify the original
+        directory at its reserved name, a later startup will retry reclamation.
+      </p>
+    );
+  }
+  return null;
 }
 
 /**

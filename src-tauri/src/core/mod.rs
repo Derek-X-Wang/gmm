@@ -43,7 +43,7 @@ use ulid::Ulid;
 pub use error::{Error, Result};
 pub use games::GameCode;
 pub use library_audit::{LibraryAuditReport, UnreferencedLibraryDir};
-pub use library_recovery::DeletedLibraryDir;
+pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{Mod, Source};
 pub use session::SessionInfo;
 pub use zip_import::ImportZipOptions;

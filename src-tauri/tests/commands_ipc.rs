@@ -23,21 +23,22 @@
 
 use std::fs::{self, File};
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 use gmm_lib::commands::{
     list_supported_games, AdoptArgs, GameBananaImportArgs, ImportZipArgs, LibraryPaths,
     RecoverLibraryDirArgs, NO_INSTALL_PATH_FOR_ENABLE_MSG,
 };
-use gmm_lib::core::av;
 use gmm_lib::core::conflicts::ConflictReport;
 use gmm_lib::core::games::GAME_PROFILES;
 use gmm_lib::core::importer::AssetPattern;
 use gmm_lib::core::reconcile::ReconcileResult;
 use gmm_lib::core::updates::UpdateStatus;
 use gmm_lib::core::variants::Variant;
+use gmm_lib::core::{av, crash_points};
 use gmm_lib::core::{
-    Core, DeletedLibraryDir, GameCode, ImportZipOptions, LibraryAuditReport, Mod, Source,
-    UnreferencedLibraryDir,
+    Core, DeletedLibraryDir, GameCode, ImportZipOptions, LibraryAuditReport,
+    LibraryReclamationOutcome, Mod, Source, UnreferencedLibraryDir,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -269,15 +270,206 @@ fn deleted_library_dir_response_uses_camel_case() {
     let value = to_json(&DeletedLibraryDir {
         directory_name: "01ORPHAN".into(),
         path: "/library/gimi/01ORPHAN".into(),
-        size_bytes: Some(42),
+        size_bytes: None,
+        reclamation: LibraryReclamationOutcome::Deferred {
+            path: "/library/gimi/.gmm-delete-01QUARANTINE".into(),
+        },
     });
     let object = value.as_object().expect("deleted object");
     assert_eq!(
         object.get("directoryName").and_then(Value::as_str),
         Some("01ORPHAN"),
     );
-    assert_eq!(object.get("sizeBytes").and_then(Value::as_u64), Some(42));
+    assert!(object.get("sizeBytes").is_some_and(Value::is_null));
+    let reclamation = object
+        .get("reclamation")
+        .and_then(Value::as_object)
+        .expect("tagged reclamation outcome");
+    assert_eq!(
+        reclamation.get("status").and_then(Value::as_str),
+        Some("deferred"),
+    );
+    assert_eq!(
+        reclamation.get("path").and_then(Value::as_str),
+        Some("/library/gimi/.gmm-delete-01QUARANTINE"),
+    );
     assert!(object.contains_key("path"));
+}
+
+#[tokio::test]
+async fn delete_response_reports_owned_but_unreclaimed_quarantine_as_deferred() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    fs::create_dir(&orphan).expect("orphan");
+    fs::write(orphan.join("proven-marker"), b"proven bytes").expect("orphan bytes");
+
+    let observed_quarantine = Arc::new(Mutex::new(None));
+    let hook_quarantine = Arc::clone(&observed_quarantine);
+    let hook_root = root.clone();
+    #[cfg(windows)]
+    let removal_blocker = Arc::new(Mutex::new(None::<File>));
+    #[cfg(windows)]
+    let hook_removal_blocker = Arc::clone(&removal_blocker);
+    let blocking = core.with_crash_hook(Arc::new(move |point| {
+        if point != crash_points::DELETE_BEFORE_QUARANTINE_PURGE {
+            return;
+        }
+        let quarantine = fs::read_dir(&hook_root)
+            .expect("Library root at pre-purge seam")
+            .filter_map(std::result::Result::ok)
+            .find(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gmm-delete-")
+            })
+            .expect("delete quarantine at pre-purge seam")
+            .path();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mut permissions = fs::metadata(&quarantine)
+                .expect("quarantine metadata")
+                .permissions();
+            permissions.set_mode(0o555);
+            fs::set_permissions(&quarantine, permissions)
+                .expect("make quarantine contents undeletable");
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+            let blocker = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(quarantine.join("proven-marker"))
+                .expect("open quarantine file without delete sharing");
+            *hook_removal_blocker.lock().expect("blocker lock") = Some(blocker);
+        }
+        *hook_quarantine.lock().expect("quarantine lock") = Some(quarantine);
+    }));
+
+    let deleted = blocking
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("the visible Library delete is already committed");
+    let value = to_json(&deleted);
+    let object = value.as_object().expect("deleted object");
+    let quarantine = observed_quarantine
+        .lock()
+        .expect("quarantine lock")
+        .clone()
+        .expect("hook observed quarantine");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut permissions = fs::metadata(&quarantine)
+            .expect("quarantine metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&quarantine, permissions).expect("restore quarantine permissions");
+    }
+    #[cfg(windows)]
+    drop(removal_blocker.lock().expect("blocker lock").take());
+
+    assert!(object.get("sizeBytes").is_some_and(Value::is_null));
+    let reclamation = object
+        .get("reclamation")
+        .and_then(Value::as_object)
+        .expect("tagged reclamation outcome");
+    assert_eq!(
+        reclamation.get("status").and_then(Value::as_str),
+        Some("deferred"),
+        "an owned quarantine that could not be removed must remain retryable",
+    );
+    assert_eq!(
+        reclamation.get("path").and_then(Value::as_str),
+        Some(quarantine.to_string_lossy().as_ref()),
+    );
+    assert!(quarantine.join("proven-marker").is_file());
+}
+
+#[tokio::test]
+async fn delete_response_reports_identity_changed_reclamation_as_ownership_lost() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    fs::create_dir(&orphan).expect("orphan");
+    fs::write(orphan.join("proven-marker"), b"proven bytes").expect("orphan bytes");
+
+    let moved_original = root.join("moved-original");
+    let observed_quarantine = Arc::new(Mutex::new(None));
+    let hook_quarantine = Arc::clone(&observed_quarantine);
+    let hook_root = root.clone();
+    let hook_moved_original = moved_original.clone();
+    let swapping = core.with_crash_hook(Arc::new(move |point| {
+        if point != crash_points::DELETE_BEFORE_QUARANTINE_PURGE {
+            return;
+        }
+        let quarantine = fs::read_dir(&hook_root)
+            .expect("Library root at pre-purge seam")
+            .filter_map(std::result::Result::ok)
+            .find(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gmm-delete-")
+            })
+            .expect("delete quarantine at pre-purge seam")
+            .path();
+        fs::rename(&quarantine, &hook_moved_original).expect("move owned quarantine aside");
+        fs::create_dir(&quarantine).expect("replacement quarantine");
+        fs::write(quarantine.join("replacement-marker"), b"replacement")
+            .expect("replacement bytes");
+        *hook_quarantine.lock().expect("quarantine lock") = Some(quarantine);
+    }));
+
+    let deleted = swapping
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("the visible Library delete is already committed");
+    let value = to_json(&deleted);
+    let object = value.as_object().expect("deleted object");
+    let quarantine = observed_quarantine
+        .lock()
+        .expect("quarantine lock")
+        .clone()
+        .expect("hook observed quarantine");
+
+    assert!(object.get("sizeBytes").is_some_and(Value::is_null));
+    let reclamation = object
+        .get("reclamation")
+        .and_then(Value::as_object)
+        .expect("tagged reclamation outcome");
+    assert_eq!(
+        reclamation.get("status").and_then(Value::as_str),
+        Some("ownershipLost"),
+        "an identity mismatch cannot honestly claim the reserved path still holds GMM's bytes",
+    );
+    assert!(
+        !reclamation.contains_key("path"),
+        "ownership loss must not present the replacement quarantine as a cleanup target",
+    );
+    assert!(moved_original.join("proven-marker").is_file());
+    assert!(quarantine.join("replacement-marker").is_file());
 }
 
 #[test]
