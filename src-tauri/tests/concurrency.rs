@@ -1696,6 +1696,130 @@ async fn reinstall_crash_after_metadata_commit_keeps_the_complete_new_mod() {
     assert_reinstall_committed(&env, &imported, "crash after metadata commit").await;
 }
 
+/// A non-empty destination forces `move_subtree` past rename and through its
+/// recursive copy/delete fallback. Copying gives both live and staged trees new
+/// filesystem identities, so relocation must refuse before touching bytes
+/// while the reinstall witness exists. Once reinstall commits, retrying the
+/// exact same relocation is safe, and a fresh startup must find no witness or
+/// reserved swap state left to retry forever.
+///
+/// Mutation oracle: removing the active-witness guard from `move_root` lets the
+/// first relocation copy the in-flight stage; the explicit refusal assertion
+/// fires because relocation incorrectly succeeds.
+#[tokio::test]
+async fn copy_based_relocation_waits_for_reinstall_then_startup_settles() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let id = 166_004_u64;
+    let (imported, _old_active_variant_id) = seed_enabled_gamebanana_mod(&env, &core, id).await;
+    let update_zip = env._tmp.path().join("update-before-copy-relocation.zip");
+    write_reinstall_zip(&update_zip, b"[TextureOverrideNew]\nhash=new\n");
+    let update_bytes = std::fs::read(&update_zip).expect("update ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/new.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Crash Safe Mod v2",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "new.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(update_bytes)
+        .create_async()
+        .await;
+
+    let mut reinstalling = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::REINSTALL_AFTER_WITNESS_COMMIT)
+        .op([
+            "reinstall",
+            "--mod-id",
+            &imported.id,
+            "--api-base",
+            &server.url(),
+        ])
+        .spawn();
+    reinstalling.wait_for_pause(gmm_lib::core::crash_points::REINSTALL_AFTER_WITNESS_COMMIT);
+
+    let new_root = env._tmp.path().join("copy-relocated-gimi");
+    std::fs::create_dir_all(&new_root).expect("pre-populated relocation destination");
+    std::fs::write(new_root.join("forces-copy-fallback"), b"keep").expect("copy-fallback sentinel");
+    let relocation = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&new_root))
+        .await
+        .expect_err("copy-based Library relocation during reinstall must be refused");
+    assert!(
+        relocation.to_string().contains("Let the reinstall finish"),
+        "relocation must tell the user how to proceed, got: {relocation}",
+    );
+    assert!(
+        imported.library_path.is_dir(),
+        "refused relocation must not touch the installed Mod",
+    );
+
+    reinstalling.resume();
+    reinstalling
+        .wait_for_outcome()
+        .expect_ok("reinstall after competing relocation was refused");
+
+    let report = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&new_root))
+        .await
+        .expect("retry copy-based relocation after reinstall settles");
+    assert_eq!(report.relocated, vec![imported.id.clone()]);
+    assert_eq!(
+        std::fs::read(new_root.join("forces-copy-fallback")).expect("fallback sentinel"),
+        b"keep",
+        "the non-empty destination must survive, proving rename could not replace it",
+    );
+
+    drop(core);
+    let restarted = env.core().await;
+    let listed = restarted
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list after copy relocation startup");
+    let relocated = listed
+        .iter()
+        .find(|candidate| candidate.id == imported.id)
+        .expect("relocated Mod row");
+    assert_eq!(relocated.library_path, new_root.join(&imported.id));
+    assert_eq!(
+        std::fs::read(relocated.library_path.join("merged.ini"))
+            .expect("replacement bytes after copy relocation startup"),
+        b"[TextureOverrideNew]\nhash=new\n",
+    );
+    assert_eq!(relocated.version.as_deref(), Some("2.0.0"));
+    assert_eq!(
+        std::fs::read(env.game_mods.join("Crash Safe Mod/merged.ini"))
+            .expect("working Junction after copy relocation startup"),
+        b"[TextureOverrideNew]\nhash=new\n",
+    );
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after copy relocation startup");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&pool)
+        .await
+        .expect("count settled reinstall witnesses");
+    assert_eq!(
+        witnesses, 0,
+        "startup after copy relocation must have no reinstall witness left to retry",
+    );
+}
+
 fn write_single_file_mod_zip(path: &Path) {
     let file = std::fs::File::create(path).expect("create zip");
     let mut archive = zip::ZipWriter::new(file);

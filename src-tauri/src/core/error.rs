@@ -251,6 +251,12 @@ pub enum Error {
     },
 
     #[error(
+        "GMM cannot relocate this Library while Mod {mod_id} is being reinstalled. \
+         Let the reinstall finish, then try the Library move again. No Library bytes were moved."
+    )]
+    LibraryRelocationBlockedByReinstall { mod_id: String },
+
+    #[error(
         "GMM found interrupted reinstall state for Mod {mod_id} that it could not safely resolve: \
          {reason}. GMM left every directory it could not prove untouched."
     )]

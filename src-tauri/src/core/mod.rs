@@ -378,6 +378,24 @@ impl Core {
         per_game: Option<GameCode>,
         fence: &mut library_mutation::LibraryMutationFence,
     ) -> Result<(MoveReport, Vec<(String, GameCode)>)> {
+        // A same-volume rename preserves the filesystem identities recorded by
+        // an in-flight reinstall witness, but the cross-volume copy fallback
+        // does not. Refuse every relocation that would carry such a witness;
+        // the reinstall will settle normally and the user can retry the move.
+        // This check is under the same writer fence as witness creation, so it
+        // happens before any Junction or Library byte is touched.
+        let active_reinstalls = sqlx::query("SELECT mod_id, library_path FROM reinstall_swaps")
+            .fetch_all(&mut *fence.transaction)
+            .await?;
+        for reinstall in active_reinstalls {
+            let library_path = PathBuf::from(reinstall.try_get::<String, _>("library_path")?);
+            if library_path.starts_with(previous) {
+                return Err(Error::LibraryRelocationBlockedByReinstall {
+                    mod_id: reinstall.try_get("mod_id")?,
+                });
+            }
+        }
+
         // Snapshot mods that need their library_path rewritten. For the
         // global case we include every mod across every game; for the
         // per-game case only that game.
@@ -975,6 +993,7 @@ impl Core {
                 }),
             };
         }
+        self.crash_point(crash_points::REINSTALL_AFTER_WITNESS_COMMIT);
 
         // 3. Extraction and inspection are unbounded and therefore outside
         //    the writer fence. Any failure invokes the same deterministic

@@ -93,3 +93,35 @@ async fn audit_reports_only_unreferenced_directories_without_changing_them() {
         4096,
     );
 }
+
+/// Reinstall creates its reserved stage before committing the witness. A hard
+/// process death in that narrow window can leave only that empty directory:
+/// extraction has not started, no row claims it, and a future reinstall uses a
+/// fresh token. It is harmless internal residue, not a user Mod the audit
+/// should offer to recover.
+#[tokio::test]
+async fn audit_ignores_an_unwitnessed_empty_reinstall_stage() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let game_root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    fs::create_dir_all(&game_root).expect("game root directory");
+    let stage = game_root.join(".gmm-reinstall-01JCRASHBEFOREWITNESS0000");
+    fs::create_dir(&stage).expect("empty unwitnessed reinstall stage");
+
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit with unwitnessed reinstall stage");
+
+    assert!(
+        report.unreferenced.is_empty(),
+        "an empty reserved reinstall stage is not user-facing orphan data: {report:?}",
+    );
+    assert!(
+        stage.is_dir(),
+        "the read-only audit must not mutate the stage"
+    );
+}

@@ -96,6 +96,17 @@ fn scan_game_root(
         if super::library_recovery::is_owned_delete_quarantine(&path)? {
             continue;
         }
+        // A process can die after creating reinstall's empty reserved stage
+        // but before its witness transaction commits. With no witness it can
+        // never contain extracted user bytes, a future reinstall uses a fresh
+        // token, and treating it as a recoverable Mod would mislead the user.
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(super::library_mutation::REINSTALL_STAGING_PREFIX)
+        {
+            continue;
+        }
         let metadata = fs::symlink_metadata(&path).map_err(|source| Error::Io {
             path: path.clone(),
             source,

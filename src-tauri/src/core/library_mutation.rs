@@ -226,11 +226,11 @@ impl Core {
         Ok(rolled_back)
     }
 
-    /// A root relocation may win while extraction runs outside the writer
-    /// fence. Relocation moves the whole per-game subtree, including the live
-    /// and staged identities, and rewrites `mods.library_path`. Rebase only
-    /// those three sibling names from the current row/root; the recorded
-    /// identities remain the ownership proof.
+    /// Current relocation refuses to move a subtree with an active witness,
+    /// because its cross-volume copy fallback cannot preserve identity. Keep
+    /// rebasing as a recovery boundary for a witness already carried to a new
+    /// root: only the three sibling names change, while the recorded identities
+    /// remain the ownership proof and still fail closed if a copy changed them.
     async fn rebase_reinstall_swap_witness(
         &self,
         mut witness: ReinstallSwapWitness,

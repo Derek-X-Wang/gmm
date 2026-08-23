@@ -73,6 +73,11 @@ pub const IMPORT_ZIP_AFTER_EXTRACT: &str = "import_zip.after_extract";
 /// `import_zip`: the row exists, Variants have not been detected yet.
 pub const IMPORT_ZIP_AFTER_ROW_INSERT: &str = "import_zip.after_row_insert";
 
+/// `reinstall_gamebanana_mod`: the empty same-root stage and its durable
+/// witness committed, and extraction has not started. Tests pause here to
+/// interleave a Library relocation with the in-flight reinstall.
+pub const REINSTALL_AFTER_WITNESS_COMMIT: &str = "reinstall.after_witness_commit";
+
 /// `reinstall_gamebanana_mod`: the complete old tree has moved into its
 /// intent-backed quarantine, while the complete staged tree has not yet taken
 /// the live Mod name. The durable swap witness requires startup to restore old.
@@ -154,6 +159,7 @@ pub const ALL: &[&str] = &[
     ADOPT_AFTER_ROW_INSERT,
     IMPORT_ZIP_AFTER_EXTRACT,
     IMPORT_ZIP_AFTER_ROW_INSERT,
+    REINSTALL_AFTER_WITNESS_COMMIT,
     REINSTALL_AFTER_OLD_QUARANTINE_MOVE,
     REINSTALL_AFTER_REPLACEMENT_MOVE,
     REINSTALL_AFTER_METADATA_COMMIT,
