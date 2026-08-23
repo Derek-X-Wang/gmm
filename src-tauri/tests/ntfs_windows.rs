@@ -18,11 +18,18 @@
 
 #![cfg(windows)]
 
-use std::fs;
+use std::ffi::OsStr;
+use std::fs::{self, OpenOptions};
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
 use gmm_lib::core::{Core, GameCode};
 use tempfile::TempDir;
+use windows_sys::Win32::Storage::FileSystem::{
+    SetFileShortNameW, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
+};
 
 async fn core_with_library(library_root: PathBuf, tmp: &Path) -> Core {
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.display());
@@ -32,6 +39,66 @@ async fn core_with_library(library_root: PathBuf, tmp: &Path) -> Core {
 fn make_mod_dir(dir: &Path, marker: &str) {
     fs::create_dir_all(dir).expect("mod dir");
     fs::write(dir.join("merged.ini"), format!("; {marker}\nhash = 1234\n")).expect("ini");
+}
+
+fn set_short_name(path: &Path, short_name: &str) {
+    let directory = OpenOptions::new()
+        .access_mode(DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .expect("open Mod directory with DELETE access for SetFileShortNameW");
+    let short_wide: Vec<u16> = OsStr::new(short_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let ok = unsafe { SetFileShortNameW(directory.as_raw_handle(), short_wide.as_ptr()) };
+    assert_ne!(
+        ok,
+        0,
+        "SetFileShortNameW could not create the mandatory 8.3 Mod alias: {}",
+        std::io::Error::last_os_error(),
+    );
+}
+
+/// NTFS can expose an 8.3 name for the same directory. Assign a distinct alias
+/// explicitly so a volume that cannot exercise the contract fails this test
+/// instead of silently reporting success. Use only the short final component
+/// so the old textual parent check cannot refuse it for an unrelated reason.
+#[tokio::test]
+async fn short_name_alias_of_a_referenced_directory_cannot_be_deleted() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = core_with_library(tmp.path().join("library"), tmp.path()).await;
+    let fixture = tmp.path().join("src/short-name-alias");
+    make_mod_dir(&fixture, "8.3 alias");
+    let adopted = core
+        .adopt_folder(GameCode::Gimi, &fixture, "Short Name Alias")
+        .await
+        .expect("adopt");
+
+    const SHORT_NAME: &str = "GMMMOD~1";
+    set_short_name(&adopted.library_path, SHORT_NAME);
+    let alias = adopted
+        .library_path
+        .parent()
+        .expect("Library root")
+        .join(SHORT_NAME);
+    assert!(alias.is_dir(), "precondition: short name resolves the Mod");
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &alias)
+        .await;
+    assert!(
+        matches!(
+            deleted,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
+        ),
+        "delete must identify the 8.3 alias as the adopted Mod, got {deleted:?}",
+    );
+    assert!(
+        adopted.library_path.join("merged.ini").is_file(),
+        "a refused short-name delete must leave the Mod bytes intact",
+    );
 }
 
 /// GameBanana titles are routinely non-ASCII. If sanitisation mangles

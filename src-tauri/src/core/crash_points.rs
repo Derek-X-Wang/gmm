@@ -80,6 +80,16 @@ pub const IMPORT_ZIP_AFTER_ROW_INSERT: &str = "import_zip.after_row_insert";
 /// second time by the same feature, which is why the rename goes first.
 pub const RECOVER_AFTER_LIBRARY_MOVE: &str = "recover.after_library_move";
 
+/// `delete_unreferenced_library_dir`: the durable ownership intent exists,
+/// while the proven orphan is still at its original path. A restart may
+/// remove the stranded intent, but must leave the directory intact.
+pub const DELETE_AFTER_INTENT_WRITE: &str = "delete.after_intent_write";
+
+/// `delete_unreferenced_library_dir`: the proven orphan has atomically moved
+/// into GMM's reserved quarantine and can no longer be recovered as a Mod.
+/// A restart finishes purging that quarantine.
+pub const DELETE_AFTER_QUARANTINE_MOVE: &str = "delete.after_quarantine_move";
+
 /// Every point, so a test can enumerate them and so adding one without
 /// covering it is visible in review.
 pub const ALL: &[&str] = &[
@@ -92,4 +102,6 @@ pub const ALL: &[&str] = &[
     IMPORT_ZIP_AFTER_EXTRACT,
     IMPORT_ZIP_AFTER_ROW_INSERT,
     RECOVER_AFTER_LIBRARY_MOVE,
+    DELETE_AFTER_INTENT_WRITE,
+    DELETE_AFTER_QUARANTINE_MOVE,
 ];

@@ -17,6 +17,7 @@ pub mod importer_origin;
 pub mod instance_lock;
 pub mod junction;
 pub mod library_audit;
+mod library_identity;
 pub mod library_recovery;
 pub mod mod_updates;
 pub mod mods;
@@ -87,11 +88,19 @@ impl Core {
         let pool = SqlitePool::connect_with(opts).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
 
-        Ok(Self {
+        let core = Self {
             pool,
             default_library_root,
             crash_hook: None,
-        })
+        };
+        if let Err(error) = core.finish_interrupted_library_deletes().await {
+            tracing::warn!(
+                target: "gmm::library",
+                error = %error,
+                "could not finish interrupted Library deletes at startup",
+            );
+        }
+        Ok(core)
     }
 
     /// Install a failure-injection hook (issue #59). Test-only: nothing

@@ -269,6 +269,250 @@ async fn both_actions_refuse_a_directory_a_mod_row_now_references() {
     );
 }
 
+/// Windows path spelling is not directory identity. NTFS resolves the
+/// lowercase spelling below to the same directory, so neither destructive
+/// action may treat it as an orphan merely because SQLite stores uppercase
+/// ULIDs. This test also runs on the Windows CI leg; the dynamic skip only
+/// keeps case-sensitive Unix development hosts useful.
+#[tokio::test]
+async fn alternate_case_spelling_of_a_referenced_directory_is_not_an_orphan() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+
+    let source = tmp.path().join("case-alias-source");
+    fs::create_dir_all(&source).expect("source dir");
+    fs::write(source.join("merged.ini"), b"hash=case\n").expect("source file");
+    let adopted = core
+        .adopt_folder(GameCode::Gimi, &source, "Case Alias")
+        .await
+        .expect("adopt");
+
+    let lowercase_name = adopted.id.to_ascii_lowercase();
+    assert_ne!(lowercase_name, adopted.id, "ULID fixture needs a letter");
+    let alias = adopted
+        .library_path
+        .parent()
+        .expect("Library root")
+        .join(lowercase_name);
+    if !alias.is_dir() {
+        #[cfg(windows)]
+        panic!("Windows must resolve an alternate-case spelling of an NTFS directory");
+        #[cfg(not(windows))]
+        {
+            eprintln!("skipping case-alias behavior on a case-sensitive filesystem");
+            return;
+        }
+    }
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &alias)
+        .await;
+    assert!(
+        matches!(
+            deleted,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
+        ),
+        "delete must recognize that the alias is the adopted Mod, got {deleted:?}",
+    );
+    assert_eq!(
+        fs::read(adopted.library_path.join("merged.ini")).expect("Mod bytes survive"),
+        b"hash=case\n",
+    );
+
+    let recovered = core
+        .recover_unreferenced_library_dir(GameCode::Gimi, &alias, "Duplicate Case Alias")
+        .await;
+    assert!(
+        matches!(
+            recovered,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
+        ),
+        "recover must not create a second row over the same directory, got {recovered:?}",
+    );
+    assert_eq!(
+        core.list_mods(GameCode::Gimi).await.expect("list").len(),
+        1,
+        "case-insensitive ULID identity must leave exactly the adopted row",
+    );
+
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit referenced directory");
+    assert!(
+        report.unreferenced.is_empty(),
+        "the audit must use the same identity rule as the guard: {report:?}",
+    );
+
+    // Reopen the same Library through alternate casing. `read_dir` builds
+    // reported child paths from this spelling while the row retains the
+    // original one, so textual audit identity would falsely report the Mod.
+    let alternate_library_root = tmp.path().join("LiBrArY");
+    assert!(
+        alternate_library_root.is_dir(),
+        "precondition: the alternate root spelling resolves"
+    );
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let reopened = Core::new(alternate_library_root, &db_url)
+        .await
+        .expect("reopen through alternate Library spelling");
+    assert!(
+        reopened
+            .audit_library(GameCode::Gimi)
+            .await
+            .expect("audit through alternate root spelling")
+            .unreferenced
+            .is_empty(),
+        "the audit and destructive guard must agree on filesystem identity",
+    );
+}
+
+/// On case-sensitive Linux this reaches SQLite's `COLLATE NOCASE` check and
+/// is the oracle for case-insensitive Mod-ID uniqueness. On Windows and
+/// case-insensitive macOS, filesystem identity rejects the alias earlier.
+#[tokio::test]
+async fn recover_refuses_an_existing_mod_id_ignoring_ulid_case() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let source = tmp.path().join("ulid-case-source");
+    fs::create_dir_all(&source).expect("source dir");
+    fs::write(source.join("merged.ini"), b"hash=id-case\n").expect("source file");
+    let adopted = core
+        .adopt_folder(GameCode::Gimi, &source, "ULID Case")
+        .await
+        .expect("adopt");
+    let case_variant = adopted
+        .library_path
+        .parent()
+        .expect("Library root")
+        .join(adopted.id.to_ascii_lowercase());
+
+    if !case_variant.is_dir() {
+        // On a case-sensitive host this is a second directory, which proves
+        // ID uniqueness independently of the filesystem-alias guard.
+        fs::create_dir_all(&case_variant).expect("case-variant orphan");
+        fs::write(case_variant.join("merged.ini"), b"hash=other\n").expect("orphan file");
+    }
+    let recovered = core
+        .recover_unreferenced_library_dir(GameCode::Gimi, &case_variant, "Duplicate ULID")
+        .await;
+    assert!(
+        matches!(
+            recovered,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
+        ),
+        "recover must refuse an existing ULID under different ASCII case, got {recovered:?}",
+    );
+    assert_eq!(core.list_mods(GameCode::Gimi).await.expect("list").len(), 1);
+}
+
+#[tokio::test]
+async fn actions_refuse_relative_and_parent_traversal_spellings() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    let orphan = root.join("01DIRECTCHILD");
+    fs::create_dir_all(&orphan).expect("orphan");
+    fs::write(orphan.join("keep.buf"), b"keep").expect("orphan bytes");
+    let traversal = root.join("unused").join("..").join("01DIRECTCHILD");
+    let relative = PathBuf::from("01DIRECTCHILD");
+
+    for candidate in [&traversal, &relative] {
+        let deleted = core
+            .delete_unreferenced_library_dir(GameCode::Gimi, candidate)
+            .await;
+        assert!(
+            matches!(
+                deleted,
+                Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
+            ),
+            "delete must refuse {candidate:?}, got {deleted:?}",
+        );
+        let recovered = core
+            .recover_unreferenced_library_dir(GameCode::Gimi, candidate, "No Traversal")
+            .await;
+        assert!(
+            matches!(
+                recovered,
+                Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
+            ),
+            "recover must refuse {candidate:?}, got {recovered:?}",
+        );
+    }
+    assert_eq!(
+        fs::read(orphan.join("keep.buf")).expect("bytes survive"),
+        b"keep"
+    );
+}
+
+#[tokio::test]
+async fn a_delete_like_name_without_an_intent_is_never_auto_purged() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    let user_dir = root.join(format!(".gmm-delete-{}", Ulid::new()));
+    fs::create_dir_all(&user_dir).expect("user directory");
+    fs::write(user_dir.join("precious.buf"), b"not GMM's quarantine").expect("user bytes");
+    drop(core);
+
+    let restarted = fresh_core(&tmp).await;
+    assert_eq!(
+        fs::read(user_dir.join("precious.buf")).expect("user bytes survive startup"),
+        b"not GMM's quarantine",
+        "a reserved-looking name alone is not proof that GMM owns a delete",
+    );
+    assert!(
+        restarted
+            .audit_library(GameCode::Gimi)
+            .await
+            .expect("audit user directory")
+            .unreferenced
+            .iter()
+            .any(|entry| entry.path == user_dir),
+        "an unowned reserved-looking directory stays visible for user action",
+    );
+}
+
+#[tokio::test]
+async fn a_delete_quarantine_with_a_mismatched_identity_intent_is_never_auto_purged() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    let token = Ulid::new();
+    let user_dir = root.join(format!(".gmm-delete-{token}"));
+    let intent = root.join(format!(".gmm-delete-{token}.intent"));
+    fs::create_dir_all(&user_dir).expect("user directory");
+    fs::write(user_dir.join("precious.buf"), b"not the intended directory").expect("user bytes");
+    fs::write(&intent, b"0000000000000000:0000000000000000").expect("mismatched identity intent");
+    drop(core);
+
+    let restarted = fresh_core(&tmp).await;
+    assert_eq!(
+        fs::read(user_dir.join("precious.buf")).expect("mismatched directory survives startup"),
+        b"not the intended directory",
+        "an intent only owns the filesystem object whose durable identity it records",
+    );
+    assert!(
+        restarted
+            .audit_library(GameCode::Gimi)
+            .await
+            .expect("audit mismatched quarantine")
+            .unreferenced
+            .iter()
+            .any(|entry| entry.path == user_dir),
+        "a mismatched quarantine remains visible rather than being silently destroyed",
+    );
+}
+
 /// Both actions resolve the Library root *now*, so nothing outside it can
 /// be reached by handing GMM a path from somewhere else.
 #[tokio::test]
@@ -430,6 +674,64 @@ async fn delete_removes_exactly_the_chosen_folder_and_reports_what_it_freed() {
         "only the deleted folder leaves the report: {report:?}",
     );
     assert_eq!(report.unreferenced[0].path, spared);
+}
+
+#[tokio::test]
+async fn delete_refuses_a_different_directory_swapped_in_before_quarantine_rename() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    let orphan = root.join(Ulid::new().to_string());
+    let replacement = root.join("replacement-before-rename");
+    let saved_original = root.join("validated-directory-moved-away");
+    fs::create_dir_all(&orphan).expect("orphan");
+    fs::write(orphan.join("precious.buf"), b"validated bytes").expect("orphan bytes");
+    fs::create_dir_all(&replacement).expect("replacement");
+    fs::write(replacement.join("decoy.buf"), b"swapped bytes").expect("replacement bytes");
+
+    let swap_from = orphan.clone();
+    let swap_to = saved_original.clone();
+    let replacement_from = replacement.clone();
+    let replacement_to = orphan.clone();
+    let swapping = core.clone().with_crash_hook(Arc::new(move |point| {
+        if point == crash_points::DELETE_AFTER_INTENT_WRITE {
+            fs::rename(&swap_from, &swap_to).expect("move validated directory away");
+            fs::rename(&replacement_from, &replacement_to)
+                .expect("swap a different directory into the validated path");
+        }
+    }));
+
+    let deleted = swapping
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await;
+    assert!(
+        matches!(
+            deleted,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
+        ),
+        "delete must reject the object that replaced its validated directory, got {deleted:?}",
+    );
+    assert_eq!(
+        fs::read(saved_original.join("precious.buf")).expect("validated bytes survive"),
+        b"validated bytes",
+    );
+    assert_eq!(
+        fs::read(orphan.join("decoy.buf")).expect("replacement restored after refusal"),
+        b"swapped bytes",
+    );
+    assert!(
+        fs::read_dir(&root).expect("game root").all(|entry| {
+            !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gmm-delete-")
+        }),
+        "a refused swap must roll back its quarantine and ownership intent",
+    );
 }
 
 /// Every other Library mutation refuses during a Game Session. These two
