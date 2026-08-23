@@ -171,15 +171,16 @@ impl Core {
     pub(super) async fn cleanup_staged_library_dir(
         &self,
         snapshot: &LibraryRootSnapshot,
-        staged: &StagedLibraryDirectory,
+        staged: StagedLibraryDirectory,
         mutation: LibraryMutation,
     ) {
+        let staged_path = staged.path().to_path_buf();
         let mut fence = match self.begin_library_mutation(mutation).await {
             Ok(fence) => fence,
             Err(error) => {
                 tracing::warn!(
                     target: "gmm::library",
-                    path = %staged.path().display(),
+                    path = %staged_path.display(),
                     error = %error,
                     "could not fence staged Library cleanup; leaving bytes for orphan audit",
                 );
@@ -194,23 +195,23 @@ impl Core {
             Err(error) => {
                 tracing::warn!(
                     target: "gmm::library",
-                    path = %staged.path().display(),
+                    path = %staged_path.display(),
                     error = %error,
                     "could not resolve the current Library root during staged cleanup; leaving bytes for orphan audit",
                 );
                 return;
             }
         };
-        let directory_name = staged
-            .path()
+        let directory_name = staged_path
             .file_name()
             .expect("a staged Library directory has a final component");
         let current_path = current_root.join(directory_name);
-        let mut candidates = vec![staged.path().to_path_buf()];
-        if current_path != staged.path() {
+        let mut candidates = vec![staged_path.clone()];
+        if current_path != staged_path {
             candidates.push(current_path);
         }
 
+        let mut deletion_candidate = None;
         for path in candidates {
             let current = match IdentifiedDirectory::open(&path) {
                 Ok(directory) => directory,
@@ -233,6 +234,12 @@ impl Core {
                 );
                 continue;
             }
+            deletion_candidate = Some((path, current));
+            break;
+        }
+
+        if let Some((path, current)) = deletion_candidate {
+            let mut ownership_unknown = false;
             let referenced_paths = match sqlx::query("SELECT library_path FROM mods")
                 .fetch_all(&mut *fence.transaction)
                 .await
@@ -245,11 +252,11 @@ impl Core {
                         error = %error,
                         "could not prove a staged Library directory is unowned; leaving it for orphan audit",
                     );
-                    continue;
+                    ownership_unknown = true;
+                    Vec::new()
                 }
             };
             let mut owned = false;
-            let mut ownership_unknown = false;
             for row in referenced_paths {
                 let referenced = match row.try_get::<String, _>("library_path") {
                     Ok(referenced) => PathBuf::from(referenced),
@@ -285,22 +292,27 @@ impl Core {
                 }
             }
             if ownership_unknown {
-                continue;
-            }
-            if owned {
+                // Uncertainty must preserve the bytes for orphan audit.
+            } else if owned {
                 tracing::warn!(
                     target: "gmm::library",
                     path = %path.display(),
                     "staged Library cleanup candidate is now owned by a Mod; leaving it intact",
                 );
-                continue;
+            } else {
+                // Windows keeps a removed directory name visible until every
+                // open handle closes, even when the handles share DELETE.
+                // Release both identity handles only after the last identity
+                // and ownership checks, immediately before the fenced remove.
+                drop(current);
+                drop(staged);
+                remove_staged_dir(&path);
             }
-            remove_staged_dir(&path);
         }
         if let Err(error) = fence.commit().await {
             tracing::warn!(
                 target: "gmm::library",
-                path = %staged.path().display(),
+                path = %staged_path.display(),
                 error = %error,
                 "could not commit the staged Library cleanup fence",
             );

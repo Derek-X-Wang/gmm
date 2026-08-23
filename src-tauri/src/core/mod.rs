@@ -561,7 +561,7 @@ impl Core {
         if let Err(error) = copy_dir_recursive(source_path, &library_path) {
             self.cleanup_staged_library_dir(
                 &root,
-                &staged,
+                staged,
                 library_mutation::LibraryMutation::AdoptFolder,
             )
             .await;
@@ -580,7 +580,7 @@ impl Core {
             Err(error) => {
                 self.cleanup_staged_library_dir(
                     &root,
-                    &staged,
+                    staged,
                     library_mutation::LibraryMutation::AdoptFolder,
                 )
                 .await;
@@ -2341,7 +2341,7 @@ impl Core {
             // cleanup follow-up.
             self.cleanup_staged_library_dir(
                 &root,
-                &staged,
+                staged,
                 library_mutation::LibraryMutation::ImportZip,
             )
             .await;
@@ -2360,7 +2360,7 @@ impl Core {
             Err(error) => {
                 self.cleanup_staged_library_dir(
                     &root,
-                    &staged,
+                    staged,
                     library_mutation::LibraryMutation::ImportZip,
                 )
                 .await;
