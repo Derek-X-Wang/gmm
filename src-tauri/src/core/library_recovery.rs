@@ -93,8 +93,8 @@ struct GuardedLibraryMutation {
 /// quarantine. Startup cleanup can finish the same purge if this process stops
 /// before removing it.
 pub(super) struct QuarantinedLibraryDirectory {
-    path: PathBuf,
-    intent: PathBuf,
+    pub(super) path: PathBuf,
+    pub(super) intent: PathBuf,
 }
 
 pub(super) enum QuarantinePurgeOutcome {
@@ -162,9 +162,22 @@ impl Core {
     /// directory on that startup. A later startup retries only if GMM can
     /// again verify the original directory at its reserved name.
     pub async fn finish_interrupted_library_deletes(&self) -> Result<usize> {
-        // Serialize root resolution and cleanup with every relocation and
-        // ownership mutation. An old root snapshot is not safe evidence once
-        // another mutation can change the configured root.
+        // Reinstall rollback is the correctness phase. Commit its witness
+        // deletion before attempting ordinary quarantine reclamation: a later
+        // purge failure must not roll the witness back into existence and make
+        // startup misclassify successful rollback as failed reinstall recovery.
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::FinishInterruptedDeletes)
+            .await?;
+        self.rollback_interrupted_reinstall_swaps(&mut fence)
+            .await?;
+        fence.commit().await?;
+
+        // Serialize cleanup with the pre-commit half of delete. In particular,
+        // an intent without a quarantine is known to be stranded only while no
+        // delete can be between writing that intent and performing its rename.
+        // Resolve roots under this second fence too: an old root snapshot is
+        // not safe evidence once another mutation can relocate the Library.
         let mut fence = self
             .begin_library_mutation(LibraryMutation::FinishInterruptedDeletes)
             .await?;
@@ -175,10 +188,6 @@ impl Core {
                     .await?,
             );
         }
-
-        // Serialize cleanup with the pre-commit half of delete. In particular,
-        // an intent without a quarantine is known to be stranded only while no
-        // delete can be between writing that intent and performing its rename.
         let removed = tokio::task::spawn_blocking(move || purge_delete_quarantines(&roots))
             .await
             .map_err(|join_error| Error::Io {
@@ -404,10 +413,30 @@ impl Core {
         after_intent_write: Option<&str>,
         after_quarantine_move: Option<&str>,
     ) -> Result<QuarantinedLibraryDirectory> {
+        self.quarantine_library_directory_with_token(
+            path,
+            directory,
+            Ulid::new(),
+            after_intent_write,
+            after_quarantine_move,
+        )
+    }
+
+    /// Quarantine one identified directory under a caller-selected token.
+    /// Reinstall records the derived reserved path in SQLite before its first
+    /// filesystem rename, so startup can distinguish rollback from committed
+    /// byte reclamation without inventing a parallel ownership protocol.
+    pub(super) fn quarantine_library_directory_with_token(
+        &self,
+        path: &Path,
+        directory: &IdentifiedDirectory,
+        token: Ulid,
+        after_intent_write: Option<&str>,
+        after_quarantine_move: Option<&str>,
+    ) -> Result<QuarantinedLibraryDirectory> {
         let root = path
             .parent()
             .expect("a validated Library directory is a direct child of its root");
-        let token = Ulid::new();
         let quarantine = root.join(format!("{DELETE_QUARANTINE_PREFIX}{token}"));
         let intent = root.join(format!(
             "{DELETE_QUARANTINE_PREFIX}{token}{DELETE_INTENT_SUFFIX}"
@@ -579,10 +608,24 @@ impl Core {
         // Across every game, not just this one: a per-game Library root
         // override can point two games at the same directory, and a row
         // from either one makes these bytes somebody's Mod.
-        let rows = sqlx::query("SELECT library_path FROM mods")
-            .fetch_all(executor)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT library_path, NULL AS staged_identity FROM mods
+             UNION ALL
+             SELECT staged_path AS library_path, staged_identity FROM reinstall_swaps",
+        )
+        .fetch_all(executor)
+        .await?;
         for row in rows {
+            if let Some(staged_identity) = row.try_get::<Option<String>, _>("staged_identity")? {
+                if staged_identity == directory.identity().durable_key() {
+                    return Err(Error::NotAnUnreferencedLibraryDir {
+                        path,
+                        reason: "it is an active reinstall staging directory owned by GMM"
+                            .to_string(),
+                    });
+                }
+                continue;
+            }
             let referenced = PathBuf::from(row.try_get::<String, _>("library_path")?);
             let referenced = match IdentifiedDirectory::open(&referenced) {
                 Ok(referenced) => referenced,

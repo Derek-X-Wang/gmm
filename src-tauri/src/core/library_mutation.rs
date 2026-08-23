@@ -9,13 +9,19 @@
 //! are unchanged before inserting a row. Recovery/delete keep their bounded
 //! filesystem ownership acts inside one claim.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use sqlx::{Row, Sqlite};
+use ulid::Ulid;
 
 use super::library_identity::IdentifiedDirectory;
 use super::settings::{get as get_setting, keys};
-use super::{Core, Error, GameCode, Result};
+use super::{junction, volume, Core, Error, GameCode, Result};
+
+pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryMutation {
@@ -42,16 +48,6 @@ impl LibraryMutation {
             Self::ReinstallGamebananaMod => "reinstall_gamebanana_mod_with_endpoints",
         }
     }
-}
-
-/// Source marker for the architecture inventory in `tests/concurrency.rs`.
-/// The assertions are only a debug-build sanity check; release builds get no
-/// runtime enforcement from this function, and a new filesystem primitive or
-/// module can escape the inventory. #166 owns staging-and-swap for the existing
-/// destructive reinstall path; #164 must not partially implement it.
-pub(super) fn record_library_mutation_exemption(mutation: LibraryMutation, issue: u32) {
-    debug_assert_eq!(mutation, LibraryMutation::ReinstallGamebananaMod);
-    debug_assert_eq!(issue, 166);
 }
 
 pub(super) struct LibraryMutationFence {
@@ -102,6 +98,68 @@ pub(super) struct StagedLibraryDirectory {
     directory: IdentifiedDirectory,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ReinstallSwapWitness {
+    pub(super) token: Ulid,
+    pub(super) mod_id: String,
+    pub(super) game: GameCode,
+    pub(super) library_path: PathBuf,
+    pub(super) staged_path: PathBuf,
+    pub(super) quarantine_path: PathBuf,
+    pub(super) old_identity: String,
+    pub(super) staged_identity: String,
+}
+
+impl ReinstallSwapWitness {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
+        let token_raw: String = row.try_get("token")?;
+        let token =
+            Ulid::from_string(&token_raw).map_err(|_| Error::ReinstallRecoveryUncertain {
+                mod_id: row
+                    .try_get("mod_id")
+                    .unwrap_or_else(|_| "<unknown>".to_string()),
+                reason: format!("the swap token {token_raw:?} is not a ULID"),
+            })?;
+        let game_raw: String = row.try_get("game_code")?;
+        Ok(Self {
+            token,
+            mod_id: row.try_get("mod_id")?,
+            game: GameCode::from_str(&game_raw)?,
+            library_path: PathBuf::from(row.try_get::<String, _>("library_path")?),
+            staged_path: PathBuf::from(row.try_get::<String, _>("staged_path")?),
+            quarantine_path: PathBuf::from(row.try_get::<String, _>("quarantine_path")?),
+            old_identity: row.try_get("old_identity")?,
+            staged_identity: row.try_get("staged_identity")?,
+        })
+    }
+
+    fn validate_paths(&self) -> Result<()> {
+        let Some(root) = self.library_path.parent() else {
+            return self.uncertain("the recorded live path has no Library root");
+        };
+        let expected_stage = root.join(format!("{REINSTALL_STAGING_PREFIX}{}", self.token));
+        let expected_quarantine = root.join(format!(
+            "{}{}",
+            super::library_recovery::DELETE_QUARANTINE_PREFIX,
+            self.token
+        ));
+        if self.library_path.file_name().and_then(|name| name.to_str()) != Some(&self.mod_id)
+            || self.staged_path != expected_stage
+            || self.quarantine_path != expected_quarantine
+        {
+            return self.uncertain("the recorded swap paths do not match the Mod ID and token");
+        }
+        Ok(())
+    }
+
+    fn uncertain<T>(&self, reason: impl Into<String>) -> Result<T> {
+        Err(Error::ReinstallRecoveryUncertain {
+            mod_id: self.mod_id.clone(),
+            reason: reason.into(),
+        })
+    }
+}
+
 impl StagedLibraryDirectory {
     pub(super) fn path(&self) -> &Path {
         self.directory.path()
@@ -119,6 +177,272 @@ impl Core {
                 .await?;
         }
         Ok(LibraryMutationFence { transaction })
+    }
+
+    pub(super) async fn reinstall_swap_witness(
+        &self,
+        token: Ulid,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<ReinstallSwapWitness> {
+        let row = sqlx::query(
+            "SELECT token, mod_id, game_code, library_path, staged_path,
+                    quarantine_path, old_identity, staged_identity
+             FROM reinstall_swaps WHERE token = ?",
+        )
+        .bind(token.to_string())
+        .fetch_one(&mut *fence.transaction)
+        .await?;
+        let witness = ReinstallSwapWitness::from_row(&row)?;
+        witness.validate_paths()?;
+        self.rebase_reinstall_swap_witness(witness, fence).await
+    }
+
+    /// Roll back every reinstall whose durable witness is still present.
+    /// Witness presence is the only decision: even if the complete new tree
+    /// already occupies the live name, startup restores the old tree. A
+    /// successful reinstall deletes the witness in the same SQLite transaction
+    /// that commits its metadata and Variant rows, so an absent witness means
+    /// the live replacement wins and the old delete quarantine can be purged.
+    pub(super) async fn rollback_interrupted_reinstall_swaps(
+        &self,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<usize> {
+        let rows = sqlx::query(
+            "SELECT token, mod_id, game_code, library_path, staged_path,
+                    quarantine_path, old_identity, staged_identity
+             FROM reinstall_swaps ORDER BY created_at, token",
+        )
+        .fetch_all(&mut *fence.transaction)
+        .await?;
+        let mut rolled_back = 0;
+        for row in rows {
+            let witness = ReinstallSwapWitness::from_row(&row)?;
+            witness.validate_paths()?;
+            let witness = self.rebase_reinstall_swap_witness(witness, fence).await?;
+            self.rollback_reinstall_swap_in_mutation(&witness, fence)
+                .await?;
+            rolled_back += 1;
+        }
+        Ok(rolled_back)
+    }
+
+    /// Current relocation refuses to move a subtree with an active witness,
+    /// because its cross-volume copy fallback cannot preserve identity. Keep
+    /// rebasing as a recovery boundary for a witness already carried to a new
+    /// root: only the three sibling names change, while the recorded identities
+    /// remain the ownership proof and still fail closed if a copy changed them.
+    async fn rebase_reinstall_swap_witness(
+        &self,
+        mut witness: ReinstallSwapWitness,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<ReinstallSwapWitness> {
+        let current_library_path: String =
+            sqlx::query_scalar("SELECT library_path FROM mods WHERE id = ? AND game_code = ?")
+                .bind(&witness.mod_id)
+                .bind(witness.game.as_str())
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+        let current_library_path = PathBuf::from(current_library_path);
+        let current_root = self
+            .resolved_library_root_for_in_mutation(witness.game, fence)
+            .await?;
+        if current_library_path.parent() != Some(current_root.as_path())
+            || current_library_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(&witness.mod_id)
+        {
+            return witness.uncertain(
+                "the current Mod row is not a direct child of its effective Library root",
+            );
+        }
+        witness.library_path = current_library_path;
+        witness.staged_path =
+            current_root.join(format!("{REINSTALL_STAGING_PREFIX}{}", witness.token));
+        witness.quarantine_path = current_root.join(format!(
+            "{}{}",
+            super::library_recovery::DELETE_QUARANTINE_PREFIX,
+            witness.token
+        ));
+        witness.validate_paths()?;
+        Ok(witness)
+    }
+
+    pub(super) async fn rollback_reinstall_swap(&self, token: Ulid) -> Result<()> {
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::FinishInterruptedDeletes)
+            .await?;
+        let witness = self.reinstall_swap_witness(token, &mut fence).await?;
+        self.rollback_reinstall_swap_in_mutation(&witness, &mut fence)
+            .await?;
+        fence.commit().await?;
+        // The rollback moved the staged replacement into the ordinary shared
+        // delete quarantine. Finish it now; startup repeats the same verified
+        // purge if this process stops first.
+        self.finish_interrupted_library_deletes().await?;
+        Ok(())
+    }
+
+    async fn rollback_reinstall_swap_in_mutation(
+        &self,
+        witness: &ReinstallSwapWitness,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<()> {
+        let live = identified_if_exists(&witness.library_path)?;
+        let staged = identified_if_exists(&witness.staged_path)?;
+        let quarantine = identified_if_exists(&witness.quarantine_path)?;
+
+        reject_unexpected_identity(
+            witness,
+            "live",
+            live.as_ref(),
+            &[&witness.old_identity, &witness.staged_identity],
+        )?;
+        reject_unexpected_identity(
+            witness,
+            "staged",
+            staged.as_ref(),
+            &[&witness.staged_identity],
+        )?;
+        reject_unexpected_identity(
+            witness,
+            "quarantine",
+            quarantine.as_ref(),
+            &[&witness.old_identity],
+        )?;
+
+        let old_is_live = live
+            .as_ref()
+            .is_some_and(|directory| directory.identity().durable_key() == witness.old_identity);
+        let old_is_quarantined = quarantine
+            .as_ref()
+            .is_some_and(|directory| directory.identity().durable_key() == witness.old_identity);
+        if old_is_live == old_is_quarantined {
+            return witness.uncertain(if old_is_live {
+                "the old directory appears at both its live and quarantine names"
+            } else {
+                "the old directory is at neither its live nor quarantine name"
+            });
+        }
+
+        // Release directory handles before Windows renames the names they
+        // identify. The identities remain recorded in the witness.
+        drop(live);
+        drop(staged);
+        drop(quarantine);
+
+        if old_is_quarantined {
+            if let Some(current_live) = identified_if_exists(&witness.library_path)? {
+                if current_live.identity().durable_key() != witness.staged_identity {
+                    return witness
+                        .uncertain("the live name no longer identifies the staged replacement");
+                }
+                if witness.staged_path.exists() {
+                    return witness
+                        .uncertain("both the live and staging names contain replacement bytes");
+                }
+                drop(current_live);
+                fs::rename(&witness.library_path, &witness.staged_path).map_err(|source| {
+                    Error::Io {
+                        path: witness.library_path.clone(),
+                        source,
+                    }
+                })?;
+            }
+            fs::rename(&witness.quarantine_path, &witness.library_path).map_err(|source| {
+                Error::Io {
+                    path: witness.quarantine_path.clone(),
+                    source,
+                }
+            })?;
+        }
+
+        // Once the old object is back at the live name, the swap quarantine's
+        // ownership intent is stranded and must not be allowed to classify a
+        // later replacement at that reserved name.
+        let swap_intent = witness.quarantine_path.with_file_name(format!(
+            "{}{}.intent",
+            super::library_recovery::DELETE_QUARANTINE_PREFIX,
+            witness.token
+        ));
+        match fs::remove_file(&swap_intent) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: swap_intent,
+                    source,
+                })
+            }
+        }
+
+        if let Some(replacement) = identified_if_exists(&witness.staged_path)? {
+            if replacement.identity().durable_key() != witness.staged_identity {
+                return witness.uncertain("the staging name changed identity during rollback");
+            }
+            let staged_quarantine =
+                self.quarantine_library_directory(&witness.staged_path, &replacement, None, None)?;
+            drop(replacement);
+            drop(staged_quarantine);
+        }
+
+        self.restore_reinstall_junction_in_mutation(witness, fence)
+            .await?;
+        sqlx::query("DELETE FROM reinstall_swaps WHERE token = ?")
+            .bind(witness.token.to_string())
+            .execute(&mut *fence.transaction)
+            .await?;
+        Ok(())
+    }
+
+    async fn restore_reinstall_junction_in_mutation(
+        &self,
+        witness: &ReinstallSwapWitness,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<()> {
+        let row = sqlx::query(
+            "SELECT m.enabled, m.junction_dir_name, m.active_variant_id,
+                    g.install_path
+             FROM mods m JOIN games g ON g.code = m.game_code
+             WHERE m.id = ? AND m.game_code = ?",
+        )
+        .bind(&witness.mod_id)
+        .bind(witness.game.as_str())
+        .fetch_one(&mut *fence.transaction)
+        .await?;
+        let Some(install) = row
+            .try_get::<Option<String>, _>("install_path")?
+            .map(PathBuf::from)
+        else {
+            return Ok(());
+        };
+        let mods_dir = install.join("Mods");
+        let link = mods_dir.join(row.try_get::<String, _>("junction_dir_name")?);
+        if super::link_exists(&link) {
+            junction::remove(&link)?;
+        }
+        if row.try_get::<i64, _>("enabled")? == 0 {
+            return Ok(());
+        }
+        let target = if let Some(active_variant_id) =
+            row.try_get::<Option<String>, _>("active_variant_id")?
+        {
+            let subpath: String =
+                sqlx::query_scalar("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
+                    .bind(active_variant_id)
+                    .bind(&witness.mod_id)
+                    .fetch_one(&mut *fence.transaction)
+                    .await?;
+            witness.library_path.join(subpath)
+        } else {
+            witness.library_path.clone()
+        };
+        fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
+            path: mods_dir.clone(),
+            source,
+        })?;
+        volume::require_ntfs_pair(&mods_dir, &target)?;
+        junction::create(&link, &target)
     }
 
     pub(super) async fn snapshot_library_root_for_mutation(
@@ -402,6 +726,35 @@ impl Core {
         }
         Ok(())
     }
+}
+
+fn identified_if_exists(path: &Path) -> Result<Option<IdentifiedDirectory>> {
+    match IdentifiedDirectory::open(path) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn reject_unexpected_identity(
+    witness: &ReinstallSwapWitness,
+    name: &str,
+    directory: Option<&IdentifiedDirectory>,
+    expected: &[&String],
+) -> Result<()> {
+    let Some(directory) = directory else {
+        return Ok(());
+    };
+    let actual = directory.identity().durable_key();
+    if expected.iter().any(|expected| actual == expected.as_str()) {
+        return Ok(());
+    }
+    witness.uncertain(format!(
+        "the recorded {name} path identifies an unrelated directory"
+    ))
 }
 
 pub(super) async fn unique_junction_dir_name(

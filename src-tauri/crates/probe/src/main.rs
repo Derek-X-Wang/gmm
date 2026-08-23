@@ -187,6 +187,17 @@ async fn run(args: &Args) -> Result<(), String> {
             .map_err(|e| e.to_string())
         }
 
+        "reinstall" => {
+            let mod_id = args.req("--mod-id")?;
+            let api_base = args.req("--api-base")?;
+            core.reinstall_gamebanana_mod_with_endpoints(
+                &mod_id,
+                &gmm_lib::core::gamebanana::Endpoints { api_base },
+            )
+            .await
+            .map_err(|e| e.to_string())
+        }
+
         // Recovering an unreferenced Library directory (#72). Only the
         // fallback path — a directory whose name is not a usable ULID —
         // has a filesystem step to be interrupted; the ULID case moves

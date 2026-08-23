@@ -291,6 +291,122 @@ async fn every_schema_version_migrates_and_keeps_the_users_data() {
     }
 }
 
+/// Migration 7 is recovery infrastructure, so a populated old fixture cannot
+/// seed it before migration. Exercise its actual schema contract after
+/// upgrading the schema-6 corpus member: the shape is inspectable, only one
+/// active reinstall may own a Mod, and deleting that Mod retires the witness.
+#[tokio::test]
+async fn migration_7_enforces_the_reinstall_witness_contract() {
+    let (_, fixture) = corpus()
+        .into_iter()
+        .find(|(version, _)| *version == 6)
+        .expect("schema-6 fixture");
+    let tmp = TempDir::new().expect("tmp");
+    let db = stage(&fixture, &tmp);
+    let core = open_core(&db, &tmp).await;
+    drop(core);
+    let pool = raw_pool(&db).await;
+
+    let columns = sqlx::query("PRAGMA table_info(reinstall_swaps)")
+        .fetch_all(&pool)
+        .await
+        .expect("inspect reinstall_swaps columns");
+    let column_names: Vec<String> = columns
+        .iter()
+        .map(|row| row.try_get("name").expect("column name"))
+        .collect();
+    assert_eq!(
+        column_names,
+        [
+            "token",
+            "mod_id",
+            "game_code",
+            "library_path",
+            "staged_path",
+            "quarantine_path",
+            "old_identity",
+            "staged_identity",
+            "created_at",
+        ],
+        "migration 7 must create every reinstall witness column in the expected order",
+    );
+
+    let foreign_keys = sqlx::query("PRAGMA foreign_key_list(reinstall_swaps)")
+        .fetch_all(&pool)
+        .await
+        .expect("inspect reinstall_swaps foreign keys");
+    let foreign_keys: Vec<(String, String, String, String)> = foreign_keys
+        .iter()
+        .map(|row| {
+            (
+                row.try_get("table").expect("foreign table"),
+                row.try_get("from").expect("foreign from"),
+                row.try_get("to").expect("foreign to"),
+                row.try_get("on_delete").expect("foreign on_delete"),
+            )
+        })
+        .collect();
+    assert!(
+        foreign_keys.contains(&(
+            "mods".to_string(),
+            "mod_id".to_string(),
+            "id".to_string(),
+            "CASCADE".to_string(),
+        )),
+        "migration 7 must declare mod_id -> mods(id) ON DELETE CASCADE: {foreign_keys:?}",
+    );
+    assert!(
+        foreign_keys.contains(&(
+            "games".to_string(),
+            "game_code".to_string(),
+            "code".to_string(),
+            "NO ACTION".to_string(),
+        )),
+        "migration 7 must declare game_code -> games(code): {foreign_keys:?}",
+    );
+
+    let insert = |token: &'static str| {
+        sqlx::query(
+            "INSERT INTO reinstall_swaps (
+                token, mod_id, game_code, library_path, staged_path,
+                quarantine_path, old_identity, staged_identity, created_at
+             ) VALUES (?, ?, 'gimi', ?, ?, ?, 'old-id', 'staged-id', ?)",
+        )
+        .bind(token)
+        .bind(SEED_MODS[1].id)
+        .bind(r"D:\gmm-library\gimi\01JCORPUS0000000000000002")
+        .bind(format!(r"D:\gmm-library\gimi\.gmm-reinstall-{token}"))
+        .bind(format!(r"D:\gmm-library\gimi\.gmm-delete-{token}"))
+        .bind("2026-08-23T00:00:00Z")
+    };
+    insert("01JMIGRATIONWITNESS0000001")
+        .execute(&pool)
+        .await
+        .expect("insert first active reinstall witness");
+    let duplicate = insert("01JMIGRATIONWITNESS0000002").execute(&pool).await;
+    assert!(
+        duplicate.is_err(),
+        "UNIQUE(mod_id) must reject a second active reinstall for one Mod",
+    );
+
+    sqlx::query("DELETE FROM mods WHERE id = ?")
+        .bind(SEED_MODS[1].id)
+        .execute(&pool)
+        .await
+        .expect("delete witnessed Mod");
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps WHERE mod_id = ?")
+            .bind(SEED_MODS[1].id)
+            .fetch_one(&pool)
+            .await
+            .expect("count cascaded reinstall witnesses");
+    assert_eq!(
+        remaining, 0,
+        "ON DELETE CASCADE must retire the reinstall witness when its Mod is deleted",
+    );
+    pool.close().await;
+}
+
 /// Startup runs the migrator every time, not just on upgrade. Opening
 /// an already-current database must change nothing.
 #[tokio::test]

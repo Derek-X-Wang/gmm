@@ -654,6 +654,245 @@ impl TestEnv {
     }
 }
 
+fn write_reinstall_zip(path: &Path, body: &[u8]) {
+    let file = std::fs::File::create(path).expect("create reinstall ZIP");
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file("merged.ini", zip::write::SimpleFileOptions::default())
+        .expect("start reinstall ZIP entry");
+    archive.write_all(body).expect("write reinstall ZIP body");
+    archive.finish().expect("finish reinstall ZIP");
+}
+
+#[cfg(unix)]
+fn durable_directory_key(path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path).expect("directory metadata for recovery witness");
+    format!("{:016x}:{:016x}", metadata.dev(), metadata.ino())
+}
+
+#[cfg(windows)]
+fn durable_directory_key(path: &Path) -> String {
+    use std::fs::OpenOptions;
+    use std::mem::MaybeUninit;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let directory = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .expect("open directory for recovery witness identity");
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    let ok = unsafe { GetFileInformationByHandle(directory.as_raw_handle(), info.as_mut_ptr()) };
+    assert_ne!(
+        ok,
+        0,
+        "read directory identity for recovery witness: {}",
+        std::io::Error::last_os_error(),
+    );
+    let info = unsafe { info.assume_init() };
+    let file = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    format!("{:016x}:{:016x}", info.dwVolumeSerialNumber, file)
+}
+
+async fn seed_enabled_gamebanana_mod(
+    env: &TestEnv,
+    core: &Core,
+    gamebanana_id: u64,
+) -> (gmm_lib::core::Mod, String) {
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("record game install path");
+    let zip_path = env._tmp.path().join(format!("{gamebanana_id}-old.zip"));
+    let file = std::fs::File::create(&zip_path).expect("create old Variant ZIP");
+    let mut archive = zip::ZipWriter::new(file);
+    for (path, body) in [
+        (
+            "Blue/merged.ini",
+            b"[TextureOverrideBlue]\nhash=old-blue\n".as_slice(),
+        ),
+        (
+            "Red/merged.ini",
+            b"[TextureOverrideRed]\nhash=old-red\n".as_slice(),
+        ),
+    ] {
+        archive
+            .start_file(path, zip::write::SimpleFileOptions::default())
+            .expect("start old Variant entry");
+        archive.write_all(body).expect("write old Variant entry");
+    }
+    archive.finish().expect("finish old Variant ZIP");
+    let zip_bytes = std::fs::read(&zip_path).expect("old ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{gamebanana_id}");
+    let file_path = format!("/file/{gamebanana_id}/old.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {gamebanana_id},
+                "_sName": "Crash Safe Mod",
+                "_sProfileUrl": "https://gamebanana.com/mods/{gamebanana_id}",
+                "_sVersion": "1.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "old.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(zip_bytes)
+        .create_async()
+        .await;
+    let imported = core
+        .import_gamebanana_with_endpoints(
+            GameCode::Gimi,
+            &format!("https://gamebanana.com/mods/{gamebanana_id}"),
+            &gmm_lib::core::gamebanana::Endpoints {
+                api_base: server.url(),
+            },
+        )
+        .await
+        .expect("seed GameBanana Mod");
+    let variants = core
+        .list_variants(&imported.id)
+        .await
+        .expect("seeded Variants");
+    let red = variants
+        .iter()
+        .find(|variant| variant.name == "Red")
+        .expect("Red Variant");
+    core.set_active_variant(&imported.id, &red.id, &env.game_mods)
+        .await
+        .expect("select Red Variant before reinstall");
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("enable seeded GameBanana Mod");
+    (imported, red.id.clone())
+}
+
+async fn assert_reinstall_rolled_back(
+    env: &TestEnv,
+    imported: &gmm_lib::core::Mod,
+    old_active_variant_id: &str,
+    context: &str,
+) {
+    let recovered = env.core().await;
+    let original = std::fs::read(imported.library_path.join("Red/merged.ini"))
+        .expect("old Library bytes after startup recovery");
+    assert_eq!(
+        original, b"[TextureOverrideRed]\nhash=old-red\n",
+        "{context}: startup must restore the complete old Library tree",
+    );
+    let listed = recovered
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list recovered Mod");
+    let found = listed
+        .iter()
+        .find(|candidate| candidate.id == imported.id)
+        .expect("recovered Mod row");
+    assert!(found.enabled, "{context}: enabled state must roll back");
+    assert_eq!(found.name, "Crash Safe Mod", "{context}: metadata rollback");
+    assert_eq!(found.version.as_deref(), Some("1.0.0"));
+    assert_eq!(
+        recovered
+            .active_variant_id(&imported.id)
+            .await
+            .expect("active Variant after recovery")
+            .as_deref(),
+        Some(old_active_variant_id),
+        "{context}: active Variant must roll back exactly",
+    );
+    assert_eq!(
+        std::fs::read(env.game_mods.join("Crash Safe Mod/merged.ini"))
+            .expect("working Junction after startup recovery"),
+        original,
+        "{context}: Junction must again resolve to the old tree",
+    );
+    let root = imported.library_path.parent().expect("game Library root");
+    assert!(
+        std::fs::read_dir(root)
+            .expect("Library root after reinstall recovery")
+            .all(|entry| {
+                let name = entry.expect("Library entry").file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with(".gmm-reinstall-") && !name.starts_with(".gmm-delete-")
+            }),
+        "{context}: recovery must leave neither staging nor quarantine state",
+    );
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB to inspect reinstall witness");
+    let swaps: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&pool)
+        .await
+        .expect("count reinstall witnesses");
+    assert_eq!(swaps, 0, "{context}: rollback must retire its witness");
+}
+
+async fn assert_reinstall_committed(env: &TestEnv, imported: &gmm_lib::core::Mod, context: &str) {
+    let recovered = env.core().await;
+    let installed = std::fs::read(imported.library_path.join("merged.ini"))
+        .expect("new Library bytes after committed reinstall restart");
+    assert_eq!(
+        installed, b"[TextureOverrideNew]\nhash=new\n",
+        "{context}: committed replacement must remain live",
+    );
+    let listed = recovered
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list committed Mod");
+    let found = listed
+        .iter()
+        .find(|candidate| candidate.id == imported.id)
+        .expect("committed Mod row");
+    assert!(found.enabled, "{context}: enabled state remains true");
+    assert_eq!(found.name, "Crash Safe Mod v2");
+    assert_eq!(found.version.as_deref(), Some("2.0.0"));
+    assert_eq!(
+        recovered
+            .active_variant_id(&imported.id)
+            .await
+            .expect("active Variant after committed reinstall"),
+        None,
+        "{context}: committed single-root replacement clears the old active Variant",
+    );
+    assert_eq!(
+        std::fs::read(env.game_mods.join("Crash Safe Mod/merged.ini"))
+            .expect("working Junction after committed reinstall restart"),
+        installed,
+        "{context}: Junction must resolve to the committed replacement",
+    );
+    let root = imported.library_path.parent().expect("game Library root");
+    assert!(
+        std::fs::read_dir(root)
+            .expect("Library root after committed reinstall recovery")
+            .all(|entry| {
+                let name = entry.expect("Library entry").file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with(".gmm-reinstall-") && !name.starts_with(".gmm-delete-")
+            }),
+        "{context}: startup must reclaim the committed swap's old quarantine",
+    );
+}
+
 /// A rendezvous instant far enough out that both children are past
 /// process start-up and Core init by the time it arrives.
 fn rendezvous_in(d: Duration) -> u128 {
@@ -1316,6 +1555,469 @@ async fn recovery_revalidates_the_directory_identity_before_commit() {
     );
 }
 
+/// The first rename has hidden the old tree under the shared durable
+/// quarantine, but the replacement has not taken the live name. A real process
+/// death must leave the witness for ordinary startup to restore bytes, row
+/// state, and Junction without choosing between candidates.
+///
+/// Mutation oracle: deleting the `reinstall_swaps` insert makes startup treat
+/// the old tree as an ordinary delete quarantine; the old-byte assertion fails.
+#[tokio::test]
+async fn reinstall_crash_after_old_quarantine_rolls_back_the_whole_mod() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let id = 166_001_u64;
+    let (imported, old_active_variant_id) = seed_enabled_gamebanana_mod(&env, &core, id).await;
+    let update_zip = env._tmp.path().join("update-after-old-quarantine.zip");
+    write_reinstall_zip(&update_zip, b"[TextureOverrideNew]\nhash=new\n");
+    let update_bytes = std::fs::read(&update_zip).expect("update ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/new.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Crash Safe Mod v2",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "new.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(update_bytes)
+        .create_async()
+        .await;
+
+    let mut reinstalling = probe(&env)
+        .crashing_at(gmm_lib::core::crash_points::REINSTALL_AFTER_OLD_QUARANTINE_MOVE)
+        .op([
+            "reinstall",
+            "--mod-id",
+            &imported.id,
+            "--api-base",
+            &server.url(),
+        ])
+        .spawn();
+    reinstalling.wait_for_crash();
+    assert_reinstall_rolled_back(
+        &env,
+        &imported,
+        &old_active_variant_id,
+        "crash after old quarantine",
+    )
+    .await;
+}
+
+/// The complete replacement already occupies the live Mod name, but the
+/// metadata transaction did not commit. Witness presence still means rollback;
+/// startup must move the new tree aside, restore old, and rebuild the Junction.
+///
+/// Mutation oracle: ignoring witness presence when a live tree exists leaves
+/// the new bytes installed and fires the old-byte assertion.
+#[tokio::test]
+async fn reinstall_crash_after_replacement_move_still_rolls_back_the_whole_mod() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let id = 166_002_u64;
+    let (imported, old_active_variant_id) = seed_enabled_gamebanana_mod(&env, &core, id).await;
+    let update_zip = env._tmp.path().join("update-after-replacement-move.zip");
+    write_reinstall_zip(&update_zip, b"[TextureOverrideNew]\nhash=new\n");
+    let update_bytes = std::fs::read(&update_zip).expect("update ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/new.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Crash Safe Mod v2",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "new.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(update_bytes)
+        .create_async()
+        .await;
+
+    let mut reinstalling = probe(&env)
+        .crashing_at(gmm_lib::core::crash_points::REINSTALL_AFTER_REPLACEMENT_MOVE)
+        .op([
+            "reinstall",
+            "--mod-id",
+            &imported.id,
+            "--api-base",
+            &server.url(),
+        ])
+        .spawn();
+    reinstalling.wait_for_crash();
+    assert_reinstall_rolled_back(
+        &env,
+        &imported,
+        &old_active_variant_id,
+        "crash after replacement move",
+    )
+    .await;
+}
+
+/// Once metadata/Variants and witness deletion commit in one SQLite
+/// transaction, the new tree is authoritative. A crash before old-byte purge
+/// must not roll back; ordinary startup only finishes the verified quarantine.
+///
+/// Mutation oracle: moving witness deletion out of the metadata transaction
+/// leaves it present at this crash point, so startup restores old and the
+/// new-byte assertion fails.
+#[tokio::test]
+async fn reinstall_crash_after_metadata_commit_keeps_the_complete_new_mod() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let id = 166_003_u64;
+    let (imported, _old_active_variant_id) = seed_enabled_gamebanana_mod(&env, &core, id).await;
+    let update_zip = env._tmp.path().join("update-after-metadata-commit.zip");
+    write_reinstall_zip(&update_zip, b"[TextureOverrideNew]\nhash=new\n");
+    let update_bytes = std::fs::read(&update_zip).expect("update ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/new.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Crash Safe Mod v2",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "new.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(update_bytes)
+        .create_async()
+        .await;
+
+    let mut reinstalling = probe(&env)
+        .crashing_at(gmm_lib::core::crash_points::REINSTALL_AFTER_METADATA_COMMIT)
+        .op([
+            "reinstall",
+            "--mod-id",
+            &imported.id,
+            "--api-base",
+            &server.url(),
+        ])
+        .spawn();
+    reinstalling.wait_for_crash();
+    assert_reinstall_committed(&env, &imported, "crash after metadata commit").await;
+}
+
+/// A non-empty destination forces `move_subtree` past rename and through its
+/// recursive copy/delete fallback. Copying gives both live and staged trees new
+/// filesystem identities, so relocation must refuse before touching bytes
+/// while the reinstall witness exists. Once reinstall commits, retrying the
+/// exact same relocation is safe, and a fresh startup must find no witness or
+/// reserved swap state left to retry forever.
+///
+/// Mutation oracle: removing the active-witness guard from `move_root` lets the
+/// first relocation copy the in-flight stage; the explicit refusal assertion
+/// fires because relocation incorrectly succeeds.
+#[tokio::test]
+async fn copy_based_relocation_waits_for_reinstall_then_startup_settles() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let id = 166_004_u64;
+    let (imported, _old_active_variant_id) = seed_enabled_gamebanana_mod(&env, &core, id).await;
+    let update_zip = env._tmp.path().join("update-before-copy-relocation.zip");
+    write_reinstall_zip(&update_zip, b"[TextureOverrideNew]\nhash=new\n");
+    let update_bytes = std::fs::read(&update_zip).expect("update ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/new.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Crash Safe Mod v2",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "new.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(update_bytes)
+        .create_async()
+        .await;
+
+    let mut reinstalling = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::REINSTALL_AFTER_WITNESS_COMMIT)
+        .op([
+            "reinstall",
+            "--mod-id",
+            &imported.id,
+            "--api-base",
+            &server.url(),
+        ])
+        .spawn();
+    reinstalling.wait_for_pause(gmm_lib::core::crash_points::REINSTALL_AFTER_WITNESS_COMMIT);
+
+    let new_root = env._tmp.path().join("copy-relocated-gimi");
+    std::fs::create_dir_all(&new_root).expect("pre-populated relocation destination");
+    std::fs::write(new_root.join("forces-copy-fallback"), b"keep").expect("copy-fallback sentinel");
+    let relocation = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&new_root))
+        .await
+        .expect_err("copy-based Library relocation during reinstall must be refused");
+    assert!(
+        relocation.to_string().contains("Let the reinstall finish"),
+        "relocation must tell the user how to proceed, got: {relocation}",
+    );
+    assert!(
+        imported.library_path.is_dir(),
+        "refused relocation must not touch the installed Mod",
+    );
+
+    reinstalling.resume();
+    reinstalling
+        .wait_for_outcome()
+        .expect_ok("reinstall after competing relocation was refused");
+
+    let report = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&new_root))
+        .await
+        .expect("retry copy-based relocation after reinstall settles");
+    assert_eq!(report.relocated, vec![imported.id.clone()]);
+    assert_eq!(
+        std::fs::read(new_root.join("forces-copy-fallback")).expect("fallback sentinel"),
+        b"keep",
+        "the non-empty destination must survive, proving rename could not replace it",
+    );
+
+    drop(core);
+    let restarted = env.core().await;
+    let listed = restarted
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list after copy relocation startup");
+    let relocated = listed
+        .iter()
+        .find(|candidate| candidate.id == imported.id)
+        .expect("relocated Mod row");
+    assert_eq!(relocated.library_path, new_root.join(&imported.id));
+    assert_eq!(
+        std::fs::read(relocated.library_path.join("merged.ini"))
+            .expect("replacement bytes after copy relocation startup"),
+        b"[TextureOverrideNew]\nhash=new\n",
+    );
+    assert_eq!(relocated.version.as_deref(), Some("2.0.0"));
+    assert_eq!(
+        std::fs::read(env.game_mods.join("Crash Safe Mod/merged.ini"))
+            .expect("working Junction after copy relocation startup"),
+        b"[TextureOverrideNew]\nhash=new\n",
+    );
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after copy relocation startup");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&pool)
+        .await
+        .expect("count settled reinstall witnesses");
+    assert_eq!(
+        witnesses, 0,
+        "startup after copy relocation must have no reinstall witness left to retry",
+    );
+}
+
+/// A failed startup rollback is not an active reinstall. GMM must surface it
+/// before normal operation starts, retry it on the next launch, and never tell
+/// the user to wait for work that is no longer running.
+///
+/// Mutation oracle: restoring Core's old log-and-swallow startup behaviour
+/// makes `expect_err` fail because the first restart incorrectly succeeds.
+#[tokio::test]
+async fn failed_reinstall_recovery_stops_startup_until_the_obstruction_is_fixed() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Stale Reinstall Recovery").await;
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let held_stage = root.join(format!(".held-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("original reinstall stage");
+    std::fs::write(stage.join("replacement.ini"), b"staged replacement")
+        .expect("staged replacement bytes");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for recovery witness");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert recoverable reinstall witness");
+    pool.close().await;
+    drop(core);
+
+    // Simulate an external actor replacing the reserved stage after the
+    // witness committed. Recovery must not delete the unowned replacement.
+    std::fs::rename(&stage, &held_stage).expect("hold witnessed stage aside");
+    std::fs::create_dir(&stage).expect("replacement at reserved stage name");
+    std::fs::write(stage.join("unknown.ini"), b"unowned bytes").expect("unowned replacement bytes");
+
+    let startup = match Core::new(env.library.clone(), &env.db_url).await {
+        Ok(_) => panic!("failed reinstall recovery must stop startup"),
+        Err(error) => error,
+    };
+    let message = startup.to_string();
+    assert!(
+        message.contains("interrupted reinstall recovery") && message.contains("restart GMM"),
+        "startup must explain the failed recovery and a truthful retry action, got: {message}",
+    );
+    assert!(
+        !message.contains("Let the reinstall finish"),
+        "a failed recovery must not claim a reinstall is still running: {message}",
+    );
+    assert_eq!(
+        std::fs::read(stage.join("unknown.ini")).expect("unowned bytes after refused startup"),
+        b"unowned bytes",
+        "terminal startup recovery must leave an unproved directory untouched",
+    );
+
+    // Undo the external substitution and restart. Recovery retries from the
+    // same witness and retires it without any database editing.
+    std::fs::remove_dir_all(&stage).expect("remove external replacement");
+    std::fs::rename(&held_stage, &stage).expect("restore witnessed stage identity");
+    let restarted = env.core().await;
+    assert!(
+        imported.library_path.join("merged.ini").is_file(),
+        "successful retry must keep the original Mod bytes",
+    );
+    drop(restarted);
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after recovered startup");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&pool)
+        .await
+        .expect("count recovery witnesses after retry");
+    assert_eq!(
+        witnesses, 0,
+        "the successful startup retry must retire the witness",
+    );
+}
+
+/// Reinstall rollback and ordinary delete-quarantine reclamation are separate
+/// startup phases. If rollback succeeds but a later root cannot be inspected,
+/// the committed witness deletion must survive so routine cleanup remains
+/// best-effort and does not prevent the whole application from starting.
+#[tokio::test]
+async fn purge_failure_after_successful_reinstall_rollback_does_not_stop_startup() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Recovered Before Purge Failure").await;
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("reinstall stage");
+    std::fs::write(stage.join("replacement.ini"), b"staged replacement")
+        .expect("staged replacement bytes");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for reinstall witness");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("commit recoverable reinstall witness");
+    pool.close().await;
+    drop(core);
+
+    // `read_dir` on a regular file fails on every supported platform. Use an
+    // otherwise-unused game root so rollback itself succeeds before ordinary
+    // quarantine scanning reaches this routine cleanup failure.
+    let unreadable_root = env.library.join(GameCode::Srmi.as_str());
+    std::fs::write(&unreadable_root, b"not a directory").expect("failing purge root");
+
+    let restarted = Core::new(env.library.clone(), &env.db_url)
+        .await
+        .expect("ordinary purge failure after successful reinstall rollback must not stop startup");
+    assert_eq!(
+        std::fs::read(imported.library_path.join("merged.ini"))
+            .expect("installed bytes after successful rollback"),
+        b"[TextureOverride]\nhash=42\n",
+        "startup must keep the restored installed Mod bytes",
+    );
+    drop(restarted);
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after best-effort purge failure");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&pool)
+        .await
+        .expect("count witnesses after best-effort purge failure");
+    assert_eq!(
+        witnesses, 0,
+        "successful rollback must stay committed when ordinary purge later fails",
+    );
+}
+
 fn write_single_file_mod_zip(path: &Path) {
     let file = std::fs::File::create(path).expect("create zip");
     let mut archive = zip::ZipWriter::new(file);
@@ -1401,9 +2103,10 @@ fn current_known_library_content_mutations_declare_their_fence_policy() {
         (
             "reinstall_gamebanana_mod_with_endpoints",
             &[
-                "record_library_mutation_exemption",
+                "begin_library_mutation",
                 "LibraryMutation::ReinstallGamebananaMod",
-                "166",
+                "reinstall_swaps",
+                "quarantine_library_directory_with_token",
             ],
         ),
     ];

@@ -54,13 +54,28 @@ impl Core {
             }
         }
 
+        // A committed witness owns the exact staged filesystem object while
+        // extraction runs outside the writer fence. Identity, not its reserved
+        // name, is what makes that live stage safe to suppress.
+        let witness_rows =
+            sqlx::query("SELECT staged_identity FROM reinstall_swaps WHERE game_code = ?")
+                .bind(game.as_str())
+                .fetch_all(&self.pool)
+                .await?;
+        let mut active_reinstall_stages = HashSet::new();
+        for row in witness_rows {
+            active_reinstall_stages.insert(row.try_get::<String, _>("staged_identity")?);
+        }
+
         let join_error_path = root.clone();
-        tokio::task::spawn_blocking(move || scan_game_root(game, &root, &referenced))
-            .await
-            .map_err(|join_error| Error::Io {
-                path: join_error_path,
-                source: io::Error::other(format!("Library audit worker failed: {join_error}")),
-            })?
+        tokio::task::spawn_blocking(move || {
+            scan_game_root(game, &root, &referenced, &active_reinstall_stages)
+        })
+        .await
+        .map_err(|join_error| Error::Io {
+            path: join_error_path,
+            source: io::Error::other(format!("Library audit worker failed: {join_error}")),
+        })?
     }
 }
 
@@ -68,6 +83,7 @@ fn scan_game_root(
     game: GameCode,
     root: &Path,
     referenced: &HashSet<DirectoryIdentity>,
+    active_reinstall_stages: &HashSet<String>,
 ) -> Result<LibraryAuditReport> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
@@ -107,6 +123,22 @@ fn scan_game_root(
             path: path.clone(),
             source,
         })?;
+        if active_reinstall_stages.contains(&directory.identity().durable_key()) {
+            continue;
+        }
+        // A process can die after creating reinstall's reserved stage but
+        // before its witness transaction commits. Only a directory proven
+        // empty is harmless internal residue. A reserved name containing any
+        // entry (or one we cannot inspect) remains visible because names alone
+        // are not ownership evidence for user bytes.
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(super::library_mutation::REINSTALL_STAGING_PREFIX)
+            && fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_none())
+        {
+            continue;
+        }
         if referenced.contains(directory.identity()) {
             continue;
         }
