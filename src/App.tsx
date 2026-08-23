@@ -19,6 +19,7 @@ import {
   SESSION_STARTED_EVENT,
   type AvGuidance,
   type GameSummary,
+  type MoveReport,
   type OnboardingStatus,
   type SessionInfo,
   applyModUpdate,
@@ -763,12 +764,7 @@ function LibraryPathsPanel() {
         </button>
       </div>
       {setRoot.isError ? <p className="error">{String(setRoot.error)}</p> : null}
-      {setRoot.data?.failed_junction_restores.length ? (
-        <p className="error">
-          The Library moved, but {setRoot.data.failed_junction_restores.length} enabled Mod
-          Junction(s) could not be restored. Use Rebuild Junctions on the affected game cards.
-        </p>
-      ) : null}
+      <JunctionRestoreFailures failures={setRoot.data?.failed_junction_restores} />
 
       <h3 className="muted small">Per-game overrides</h3>
       {games.map((game) => {
@@ -796,13 +792,43 @@ function LibraryPathsPanel() {
         );
       })}
       {setPerGame.isError ? <p className="error">{String(setPerGame.error)}</p> : null}
-      {setPerGame.data?.failed_junction_restores.length ? (
-        <p className="error">
-          The Library moved, but {setPerGame.data.failed_junction_restores.length} enabled Mod
-          Junction(s) could not be restored. Use Rebuild Junctions on the affected game card.
-        </p>
-      ) : null}
+      <JunctionRestoreFailures failures={setPerGame.data?.failed_junction_restores} />
     </section>
+  );
+}
+
+/**
+ * Reports Mods whose links into the game folder could not be recreated after
+ * a Library move. The move itself succeeded — rows, settings and bytes agree —
+ * so these Mods are still enabled and their files are safe; only the link is
+ * missing, which means the game will not load them until it is rebuilt.
+ *
+ * Rebuild is a retry, not a guaranteed repair: a permissions problem, a
+ * non-NTFS target or something already sitting at the link path needs fixing
+ * first. So the per-Mod reason is shown rather than hidden behind a count.
+ */
+function JunctionRestoreFailures({
+  failures,
+}: {
+  failures?: MoveReport["failed_junction_restores"];
+}) {
+  if (!failures?.length) return null;
+  return (
+    <div className="error">
+      <p>
+        The Library moved, but {failures.length} enabled Mod
+        {failures.length === 1 ? "" : "s"} could not be linked back into the
+        game folder. Their files are safe. Use “Rebuild junctions” on the game
+        card below; if it keeps failing, the reason is shown here.
+      </p>
+      <ul>
+        {failures.map((failure) => (
+          <li key={`${failure.game}:${failure.mod_id}`} className="small">
+            <code>{failure.game}</code> {failure.mod_id}: {failure.error}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

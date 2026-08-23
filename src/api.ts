@@ -223,15 +223,31 @@ export async function deleteUnreferencedLibraryDir(
   return invoke<DeletedLibraryDir>("delete_unreferenced_library_dir", { game, path });
 }
 
+/**
+ * A relocation that could not restore every Junction still succeeded: the
+ * rows, the settings and the bytes agree. Normalise the failure list at the
+ * boundary so callers never have to guard an absent field — a payload
+ * without it means "nothing failed", not "unknown".
+ */
+const fromRawMoveReport = (r: Partial<MoveReport>): MoveReport => ({
+  relocated: r.relocated ?? [],
+  moved_directories: r.moved_directories ?? [],
+  failed_junction_restores: r.failed_junction_restores ?? [],
+});
+
 export async function setLibraryRoot(path: string | null): Promise<MoveReport> {
-  return invoke<MoveReport>("set_library_root", { path });
+  return fromRawMoveReport(
+    await invoke<Partial<MoveReport>>("set_library_root", { path }),
+  );
 }
 
 export async function setLibraryPathForGame(
   game: GameCode,
   path: string | null,
 ): Promise<MoveReport> {
-  return invoke<MoveReport>("set_library_path_for_game", { game, path });
+  return fromRawMoveReport(
+    await invoke<Partial<MoveReport>>("set_library_path_for_game", { game, path }),
+  );
 }
 
 export interface LatestRelease {
