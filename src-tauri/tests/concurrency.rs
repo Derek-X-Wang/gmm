@@ -33,9 +33,9 @@
 //! which reports exactly the two failure modes by name, plus a direct
 //! scan of `<Game>/Mods/` for the inverse case reconcile does not cover.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gmm_lib::core::{Core, GameCode};
@@ -113,6 +113,8 @@ struct Probe {
     library: PathBuf,
     take_lock: bool,
     at: Option<u128>,
+    pause_at: Option<&'static str>,
+    crash_at: Option<&'static str>,
     args: Vec<String>,
 }
 
@@ -123,6 +125,8 @@ fn probe(env: &TestEnv) -> Probe {
         library: env.library.clone(),
         take_lock: false,
         at: None,
+        pause_at: None,
+        crash_at: None,
         args: Vec::new(),
     }
 }
@@ -145,6 +149,19 @@ impl Probe {
         self
     }
 
+    /// Stop at one of the production crash-point seams until the parent
+    /// explicitly releases the child. Unlike a rendezvous timestamp, this
+    /// proves the mutation has reached the exact durable step under test.
+    fn pausing_at(mut self, point: &'static str) -> Self {
+        self.pause_at = Some(point);
+        self
+    }
+
+    fn crashing_at(mut self, point: &'static str) -> Self {
+        self.crash_at = Some(point);
+        self
+    }
+
     fn op<const N: usize>(mut self, args: [&str; N]) -> Self {
         self.args = args.iter().map(|s| s.to_string()).collect();
         self
@@ -164,8 +181,16 @@ impl Probe {
         if let Some(at) = self.at {
             cmd.arg("--at").arg(at.to_string());
         }
+        if let Some(point) = self.pause_at {
+            cmd.arg("--pause-at").arg(point);
+        }
+        if let Some(point) = self.crash_at {
+            cmd.arg("--crash-at").arg(point);
+        }
         cmd.args(&self.args);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         cmd
     }
 
@@ -186,9 +211,11 @@ impl Probe {
     /// while the test does something else.
     fn spawn(self) -> RunningProbe {
         let mut child = self.command().spawn().expect("spawn probe");
+        let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         RunningProbe {
             child,
+            stdin: Some(stdin),
             stdout: BufReader::new(stdout),
         }
     }
@@ -196,6 +223,7 @@ impl Probe {
 
 struct RunningProbe {
     child: Child,
+    stdin: Option<ChildStdin>,
     stdout: BufReader<std::process::ChildStdout>,
 }
 
@@ -214,11 +242,50 @@ impl RunningProbe {
         ProbeOutcome::parse(line.trim())
     }
 
+    fn wait_for_pause(&mut self, expected: &str) {
+        let mut line = String::new();
+        self.stdout
+            .read_line(&mut line)
+            .expect("read probe pause line");
+        assert!(
+            !line.trim().is_empty(),
+            "probe closed stdout before pausing at {expected}"
+        );
+        let event: serde_json::Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|error| panic!("probe printed non-JSON pause {line:?}: {error}"));
+        assert_eq!(
+            event["pausedAt"].as_str(),
+            Some(expected),
+            "probe paused at the wrong crash point: {event}",
+        );
+    }
+
+    fn resume(&mut self) {
+        let stdin = self.stdin.as_mut().expect("probe stdin still open");
+        writeln!(stdin, "resume").expect("release paused probe");
+        stdin.flush().expect("flush probe release");
+    }
+
+    fn wait_for_crash(&mut self) {
+        self.stdin.take();
+        let status = self.child.wait().expect("wait for crashed probe");
+        assert!(!status.success(), "probe completed instead of crashing");
+    }
+
     /// Kill without letting the process unwind — the point is to prove
     /// the *kernel* releases the lock, not that a Drop impl does.
     fn kill(&mut self) {
+        self.stdin.take();
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl Drop for RunningProbe {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            self.kill();
+        }
     }
 }
 
@@ -424,6 +491,105 @@ async fn concurrent_recover_and_delete_of_one_library_directory_have_one_winner(
         assert!(mods.is_empty(), "the delete winner records no Mod row");
         assert!(!orphan.exists(), "the delete winner removes the directory");
     }
+}
+
+/// Startup cleanup must not classify an intent as stranded while the delete
+/// that owns it is paused immediately before its quarantine rename.
+///
+/// The delete's `BEGIN IMMEDIATE` remains held while a second process performs
+/// a real `Core::new`. SQLite's bounded busy timeout makes that startup attempt
+/// return without a timing guess: the guarded cleaner cannot enter its purge,
+/// so it leaves the intent intact. The delete is then released and killed at
+/// the next durable crash point; restart must still recognize and purge the
+/// owned quarantine.
+///
+/// Mutation oracle: removing or weakening the cleaner's transaction lets the
+/// concurrent startup remove the intent, and the assertion before release goes
+/// red with an in-flight intent missing.
+#[tokio::test]
+async fn startup_cleanup_cannot_strand_a_delete_paused_before_quarantine_rename() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let orphan = root.join(Ulid::new().to_string());
+    std::fs::create_dir_all(orphan.join("nested")).expect("orphan tree");
+    std::fs::write(orphan.join("nested/precious.buf"), b"delete me").expect("orphan bytes");
+    let orphan_s = orphan.display().to_string();
+
+    let mut deleting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::DELETE_AFTER_INTENT_WRITE)
+        .crashing_at(gmm_lib::core::crash_points::DELETE_AFTER_QUARANTINE_MOVE)
+        .op(["delete-library-dir", "--path", &orphan_s])
+        .spawn();
+    deleting.wait_for_pause(gmm_lib::core::crash_points::DELETE_AFTER_INTENT_WRITE);
+
+    // This is a second process doing the real startup path, not a direct call
+    // to the purge helper. It waits for SQLite's configured busy timeout and
+    // then starts successfully after logging that cleanup could not take the
+    // writer claim held by `deleting`.
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("startup overlapping an in-flight Library delete");
+
+    let intents: Vec<_> = std::fs::read_dir(&root)
+        .expect("Library root while delete is paused")
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".intent"))
+        .collect();
+    assert_eq!(
+        intents.len(),
+        1,
+        "startup cleanup must not remove the in-flight delete intent before its quarantine rename",
+    );
+
+    deleting.resume();
+    deleting.wait_for_crash();
+    assert!(
+        !orphan.exists(),
+        "the delete reached its post-quarantine crash point",
+    );
+
+    let quarantines: Vec<_> = std::fs::read_dir(&root)
+        .expect("Library root after delete crash")
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gmm-delete-")
+        })
+        .collect();
+    assert_eq!(
+        quarantines.len(),
+        1,
+        "the crash must leave one resumable quarantine",
+    );
+    let quarantine_name = quarantines[0].file_name();
+    let intent = root.join(format!("{}.intent", quarantine_name.to_string_lossy()));
+    assert!(
+        intent.exists(),
+        "the crashed quarantine must retain its durable ownership intent",
+    );
+
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("restart finishing the interrupted Library delete");
+    assert!(
+        std::fs::read_dir(&root)
+            .expect("Library root after recovery startup")
+            .all(|entry| !entry
+                .expect("Library entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gmm-delete-")),
+        "restart must purge the owned quarantine and its intent",
+    );
 }
 
 /// Two processes enable the same Mod at the same instant.

@@ -113,9 +113,24 @@ async fn run(args: &Args) -> Result<(), String> {
     // is to model a process that stopped existing, not one that shut
     // down badly. sqlx has no chance to close the pool cleanly, which is
     // exactly the situation the recovery path has to survive.
-    if let Some(point) = args.get("--crash-at").cloned() {
+    let crash_at = args.get("--crash-at").cloned();
+    let pause_at = args.get("--pause-at").cloned();
+    if crash_at.is_some() || pause_at.is_some() {
         core = core.with_crash_hook(std::sync::Arc::new(move |reached: &str| {
-            if reached == point {
+            if pause_at.as_deref() == Some(reached) {
+                let line = serde_json::json!({ "pausedAt": reached });
+                let mut stdout = std::io::stdout();
+                let _ = writeln!(stdout, "{line}");
+                let _ = stdout.flush();
+
+                // The parent closes or writes to stdin to release this exact
+                // crash-point rendezvous. This is deliberately event-driven:
+                // concurrency tests must not guess that the child reached the
+                // vulnerable window after an arbitrary sleep.
+                let mut release = String::new();
+                let _ = std::io::stdin().read_line(&mut release);
+            }
+            if crash_at.as_deref() == Some(reached) {
                 std::process::abort();
             }
         }));
