@@ -18,6 +18,7 @@ use sqlx::{Row, Sqlite};
 use ulid::Ulid;
 
 use super::library_identity::IdentifiedDirectory;
+use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::settings::{get as get_setting, keys};
 use super::{junction, volume, Core, Error, GameCode, Result};
 
@@ -564,12 +565,8 @@ impl Core {
 
         let mut quarantined = None;
         if let Some((path, current)) = deletion_candidate {
-            let mut ownership_unknown = false;
-            let referenced_paths = match sqlx::query("SELECT library_path FROM mods")
-                .fetch_all(&mut *fence.transaction)
-                .await
-            {
-                Ok(referenced_paths) => referenced_paths,
+            let ownership = match LibraryOwnershipSnapshot::load(&mut *fence.transaction).await {
+                Ok(ownership) => Some(ownership),
                 Err(error) => {
                     tracing::warn!(
                         target: "gmm::library",
@@ -577,74 +574,52 @@ impl Core {
                         error = %error,
                         "could not prove a staged Library directory is unowned; leaving it for orphan audit",
                     );
-                    ownership_unknown = true;
-                    Vec::new()
+                    None
                 }
             };
-            let mut owned = false;
-            for row in referenced_paths {
-                let referenced = match row.try_get::<String, _>("library_path") {
-                    Ok(referenced) => PathBuf::from(referenced),
-                    Err(error) => {
-                        tracing::warn!(
+            match ownership
+                .as_ref()
+                .and_then(|ownership| ownership.owner_of(current.identity()))
+            {
+                Some(owner) => {
+                    let owner = match owner {
+                        LibraryDirectoryOwner::Mod => "a Mod",
+                        LibraryDirectoryOwner::ActiveReinstallStage => "an active reinstall stage",
+                    };
+                    tracing::warn!(
+                        target: "gmm::library",
+                        path = %path.display(),
+                        owner,
+                        "staged Library cleanup candidate is now owned; leaving it intact",
+                    );
+                }
+                None if ownership.is_some() => {
+                    self.crash_point(super::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE);
+                    match self.quarantine_library_directory(&path, &current, None, None) {
+                        Ok(directory) => {
+                            self.crash_point(
+                                super::crash_points::STAGED_CLEANUP_AFTER_QUARANTINE_MOVE,
+                            );
+                            // Windows keeps a removed directory name visible until
+                            // every open handle closes, even when the handles share
+                            // DELETE. The intent now records the object moved to
+                            // GMM's reserved name, so release the old handles before
+                            // the path-based purge; #172 tracks anchoring removal.
+                            drop(current);
+                            drop(staged);
+                            quarantined = Some(directory);
+                        }
+                        Err(error) => tracing::warn!(
                             target: "gmm::library",
                             path = %path.display(),
                             error = %error,
-                            "could not read a Mod's Library path during staged cleanup; leaving the candidate for orphan audit",
-                        );
-                        ownership_unknown = true;
-                        break;
-                    }
-                };
-                match IdentifiedDirectory::open(&referenced) {
-                    Ok(referenced) if referenced.identity() == current.identity() => {
-                        owned = true;
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(source) => {
-                        tracing::warn!(
-                            target: "gmm::library",
-                            path = %path.display(),
-                            referenced_path = %referenced.display(),
-                            error = %source,
-                            "could not prove a Mod row does not own the staged cleanup candidate; leaving it for orphan audit",
-                        );
-                        ownership_unknown = true;
-                        break;
+                            "could not quarantine a staged Library cleanup candidate; leaving bytes for orphan audit",
+                        ),
                     }
                 }
-            }
-            if ownership_unknown {
-                // Uncertainty must preserve the bytes for orphan audit.
-            } else if owned {
-                tracing::warn!(
-                    target: "gmm::library",
-                    path = %path.display(),
-                    "staged Library cleanup candidate is now owned by a Mod; leaving it intact",
-                );
-            } else {
-                self.crash_point(super::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE);
-                match self.quarantine_library_directory(&path, &current, None, None) {
-                    Ok(directory) => {
-                        self.crash_point(super::crash_points::STAGED_CLEANUP_AFTER_QUARANTINE_MOVE);
-                        // Windows keeps a removed directory name visible until
-                        // every open handle closes, even when the handles share
-                        // DELETE. The intent now records the object moved to
-                        // GMM's reserved name, so release the old handles before
-                        // the path-based purge; #172 tracks anchoring removal.
-                        drop(current);
-                        drop(staged);
-                        quarantined = Some(directory);
-                    }
-                    Err(error) => tracing::warn!(
-                        target: "gmm::library",
-                        path = %path.display(),
-                        error = %error,
-                        "could not quarantine a staged Library cleanup candidate; leaving bytes for orphan audit",
-                    ),
-                }
+                // Snapshot errors mean ownership is uncertain, so preserve the
+                // bytes for the read-only orphan audit.
+                None => {}
             }
         }
         if let Err(error) = fence.commit().await {
