@@ -72,6 +72,28 @@ struct GuardedLibraryMutation {
     directory: IdentifiedDirectory,
 }
 
+/// A directory GMM atomically renamed into its reserved, intent-backed delete
+/// quarantine. Startup cleanup can finish the same purge if this process stops
+/// before removing it.
+pub(super) struct QuarantinedLibraryDirectory {
+    path: PathBuf,
+    intent: PathBuf,
+}
+
+impl QuarantinedLibraryDirectory {
+    pub(super) fn purge(self, measure_size: bool) -> Result<Option<u64>> {
+        let size = measure_size
+            .then(|| directory_size_without_links(&self.path).ok())
+            .flatten();
+        fs::remove_dir_all(&self.path)
+            .and_then(|()| fs::remove_file(&self.intent).map(|()| size))
+            .map_err(|source| Error::Io {
+                path: self.path,
+                source,
+            })
+    }
+}
+
 impl Core {
     /// Finish delete quarantines left by a process that stopped after the
     /// atomic rename and before recursive purge. `Core::new` runs this on
@@ -243,9 +265,47 @@ impl Core {
             .to_string_lossy()
             .into_owned();
 
+        let quarantine = self.quarantine_library_directory(
+            &path,
+            &guarded.directory,
+            Some(crash_points::DELETE_AFTER_INTENT_WRITE),
+            Some(crash_points::DELETE_AFTER_QUARANTINE_MOVE),
+        )?;
+
+        if let Err(error) = guarded.fence.commit().await {
+            let _ = fs::rename(&quarantine.path, &path);
+            let _ = fs::remove_file(&quarantine.intent);
+            return Err(error);
+        }
+
+        let size_bytes = tokio::task::spawn_blocking(move || quarantine.purge(true))
+            .await
+            .map_err(|join_error| Error::Io {
+                path: path.clone(),
+                source: io::Error::other(format!("Library delete worker failed: {join_error}")),
+            })??;
+
+        Ok(DeletedLibraryDir {
+            directory_name,
+            path,
+            size_bytes,
+        })
+    }
+
+    /// Move a proven-unowned directory into the same durable quarantine used
+    /// by explicit orphan deletion. The two optional crash points preserve the
+    /// delete path's existing instrumentation; staged cleanup uses the same
+    /// protocol without pretending it is an explicit delete operation.
+    pub(super) fn quarantine_library_directory(
+        &self,
+        path: &Path,
+        directory: &IdentifiedDirectory,
+        after_intent_write: Option<&str>,
+        after_quarantine_move: Option<&str>,
+    ) -> Result<QuarantinedLibraryDirectory> {
         let root = path
             .parent()
-            .expect("a validated orphan is a direct child of the Library root");
+            .expect("a validated Library directory is a direct child of its root");
         let token = Ulid::new();
         let quarantine = root.join(format!("{DELETE_QUARANTINE_PREFIX}{token}"));
         let intent = root.join(format!(
@@ -257,13 +317,15 @@ impl Core {
         write_delete_intent(
             &intent_tmp,
             &intent,
-            guarded.directory.identity().durable_key().as_bytes(),
+            directory.identity().durable_key().as_bytes(),
         )?;
-        self.crash_point(crash_points::DELETE_AFTER_INTENT_WRITE);
-        if let Err(source) = fs::rename(&path, &quarantine) {
+        if let Some(point) = after_intent_write {
+            self.crash_point(point);
+        }
+        if let Err(source) = fs::rename(path, &quarantine) {
             let _ = fs::remove_file(&intent);
             return Err(Error::Io {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 source,
             });
         }
@@ -275,43 +337,20 @@ impl Core {
         // deliberately shares read, write, and delete access, so another actor
         // can replace `path` before this path-based rename. Re-open the object
         // that actually moved and prove it is still the one validation saw.
-        if quarantined.identity() != guarded.directory.identity() {
-            let _ = fs::rename(&quarantine, &path);
+        if quarantined.identity() != directory.identity() {
+            let _ = fs::rename(&quarantine, path);
             let _ = fs::remove_file(&intent);
             return Err(Error::NotAnUnreferencedLibraryDir {
-                path,
+                path: path.to_path_buf(),
                 reason: "the directory changed while it was being quarantined".to_string(),
             });
         }
-        self.crash_point(crash_points::DELETE_AFTER_QUARANTINE_MOVE);
-
-        if let Err(error) = guarded.fence.commit().await {
-            let _ = fs::rename(&quarantine, &path);
-            let _ = fs::remove_file(&intent);
-            return Err(error);
+        if let Some(point) = after_quarantine_move {
+            self.crash_point(point);
         }
-
-        let removed = quarantine;
-        let removed_intent = intent;
-        let size_bytes = tokio::task::spawn_blocking(move || {
-            let size = directory_size_without_links(&removed).ok();
-            fs::remove_dir_all(&removed)
-                .and_then(|()| fs::remove_file(&removed_intent).map(|()| size))
-                .map_err(|source| Error::Io {
-                    path: removed,
-                    source,
-                })
-        })
-        .await
-        .map_err(|join_error| Error::Io {
-            path: path.clone(),
-            source: io::Error::other(format!("Library delete worker failed: {join_error}")),
-        })??;
-
-        Ok(DeletedLibraryDir {
-            directory_name,
-            path,
-            size_bytes,
+        Ok(QuarantinedLibraryDirectory {
+            path: quarantine,
+            intent,
         })
     }
 

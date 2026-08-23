@@ -763,6 +763,12 @@ function LibraryPathsPanel() {
         </button>
       </div>
       {setRoot.isError ? <p className="error">{String(setRoot.error)}</p> : null}
+      {setRoot.data?.failed_junction_restores.length ? (
+        <p className="error">
+          The Library moved, but {setRoot.data.failed_junction_restores.length} enabled Mod
+          Junction(s) could not be restored. Use Rebuild Junctions on the affected game cards.
+        </p>
+      ) : null}
 
       <h3 className="muted small">Per-game overrides</h3>
       {games.map((game) => {
@@ -790,6 +796,12 @@ function LibraryPathsPanel() {
         );
       })}
       {setPerGame.isError ? <p className="error">{String(setPerGame.error)}</p> : null}
+      {setPerGame.data?.failed_junction_restores.length ? (
+        <p className="error">
+          The Library moved, but {setPerGame.data.failed_junction_restores.length} enabled Mod
+          Junction(s) could not be restored. Use Rebuild Junctions on the affected game card.
+        </p>
+      ) : null}
     </section>
   );
 }

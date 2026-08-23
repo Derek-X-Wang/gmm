@@ -238,6 +238,7 @@ impl Core {
             break;
         }
 
+        let mut quarantined = None;
         if let Some((path, current)) = deletion_candidate {
             let mut ownership_unknown = false;
             let referenced_paths = match sqlx::query("SELECT library_path FROM mods")
@@ -300,13 +301,26 @@ impl Core {
                     "staged Library cleanup candidate is now owned by a Mod; leaving it intact",
                 );
             } else {
-                // Windows keeps a removed directory name visible until every
-                // open handle closes, even when the handles share DELETE.
-                // Release both identity handles only after the last identity
-                // and ownership checks, immediately before the fenced remove.
-                drop(current);
-                drop(staged);
-                remove_staged_dir(&path);
+                self.crash_point(super::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE);
+                match self.quarantine_library_directory(&path, &current, None, None) {
+                    Ok(directory) => {
+                        self.crash_point(super::crash_points::STAGED_CLEANUP_AFTER_QUARANTINE_MOVE);
+                        // Windows keeps a removed directory name visible until
+                        // every open handle closes, even when the handles share
+                        // DELETE. The identity proof is now anchored to the
+                        // reserved name GMM itself created, so release the old
+                        // handles before purging that quarantine.
+                        drop(current);
+                        drop(staged);
+                        quarantined = Some(directory);
+                    }
+                    Err(error) => tracing::warn!(
+                        target: "gmm::library",
+                        path = %path.display(),
+                        error = %error,
+                        "could not quarantine a staged Library cleanup candidate; leaving bytes for orphan audit",
+                    ),
+                }
             }
         }
         if let Err(error) = fence.commit().await {
@@ -316,6 +330,16 @@ impl Core {
                 error = %error,
                 "could not commit the staged Library cleanup fence",
             );
+        }
+        if let Some(quarantined) = quarantined {
+            if let Err(error) = quarantined.purge(false) {
+                tracing::warn!(
+                    target: "gmm::library",
+                    path = %staged_path.display(),
+                    error = %error,
+                    "could not purge a staged Library cleanup quarantine; startup will retry",
+                );
+            }
         }
     }
 
@@ -359,19 +383,6 @@ impl Core {
             });
         }
         Ok(())
-    }
-}
-
-fn remove_staged_dir(path: &Path) {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => {}
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => tracing::warn!(
-            target: "gmm::library",
-            path = %path.display(),
-            error = %source,
-            "could not remove a staged Library directory after root revalidation failed",
-        ),
     }
 }
 

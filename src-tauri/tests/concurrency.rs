@@ -1001,6 +1001,150 @@ async fn failed_adopt_cleanup_preserves_a_replacement_directory() {
     );
 }
 
+/// Identity handles are evidence, not exclusion locks. Even after cleanup has
+/// checked both identity and database ownership under the writer fence, an
+/// external actor can rename that object away and put new bytes at the same
+/// pathname. Cleanup must anchor deletion to the reserved quarantine name it
+/// creates, then re-check which object the rename actually moved.
+///
+/// Mutation oracle: replacing the quarantine rename with direct
+/// `remove_dir_all(path)` deletes `replacement-marker` after this seam swaps
+/// it into the validated pathname, and the replacement-survival assertion
+/// goes red.
+#[tokio::test]
+async fn staged_cleanup_quarantine_preserves_a_post_validation_replacement() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let missing_source = env._tmp.path().join("missing-adopt-source");
+    let saved_original = root.join("validated-staged-moved-away");
+    let swapped_path = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let hook_swapped_path = std::sync::Arc::clone(&swapped_path);
+    let hook_root = root.clone();
+    let hook_saved_original = saved_original.clone();
+    let cleaning = core
+        .clone()
+        .with_crash_hook(std::sync::Arc::new(move |point| {
+            if point == gmm_lib::core::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE {
+                let staged = std::fs::read_dir(&hook_root)
+                    .expect("Library root at staged-cleanup seam")
+                    .filter_map(std::result::Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.is_dir()
+                            && path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| Ulid::from_string(name).is_ok())
+                    })
+                    .expect("staged ULID directory before quarantine move");
+                std::fs::write(staged.join("original-marker"), b"validated bytes")
+                    .expect("mark validated directory");
+                std::fs::rename(&staged, &hook_saved_original)
+                    .expect("move the validated directory away after proof");
+                std::fs::create_dir(&staged).expect("replacement directory");
+                std::fs::write(staged.join("replacement-marker"), b"replacement bytes")
+                    .expect("mark replacement directory");
+                *hook_swapped_path.lock().expect("record swapped path") = Some(staged);
+            }
+        }));
+
+    let adopted = cleaning
+        .adopt_folder(GameCode::Gimi, &missing_source, "Must Fail Copy")
+        .await;
+    assert!(
+        adopted.is_err(),
+        "the missing source must fail the staged adopt"
+    );
+    let staged = swapped_path
+        .lock()
+        .expect("read swapped path")
+        .clone()
+        .expect("cleanup reached the post-validation seam");
+    assert_eq!(
+        std::fs::read(staged.join("replacement-marker")).expect("replacement survives"),
+        b"replacement bytes",
+        "staged cleanup must not delete bytes swapped into the validated pathname",
+    );
+    assert_eq!(
+        std::fs::read(saved_original.join("original-marker")).expect("original survives aside"),
+        b"validated bytes",
+    );
+}
+
+/// Staged cleanup uses the exact same intent-backed quarantine as explicit
+/// orphan deletion. If the process dies after the rename, ordinary Core
+/// startup must recognize and finish it without a staged-cleanup special case.
+///
+/// Mutation oracle: removing the shared intent before this crash point makes
+/// the durable-intent assertion fail, and startup can no longer prove it owns
+/// the stranded quarantine.
+#[tokio::test]
+async fn startup_finishes_an_interrupted_staged_cleanup_quarantine() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let missing_source = env._tmp.path().join("missing-crashing-adopt-source");
+
+    let mut cleaning = probe(&env)
+        .crashing_at(gmm_lib::core::crash_points::STAGED_CLEANUP_AFTER_QUARANTINE_MOVE)
+        .op([
+            "adopt",
+            "--from",
+            &missing_source.display().to_string(),
+            "--name",
+            "Crash During Cleanup",
+        ])
+        .spawn();
+    cleaning.wait_for_crash();
+
+    let quarantines: Vec<_> = std::fs::read_dir(&root)
+        .expect("Library root after cleanup crash")
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gmm-delete-")
+        })
+        .collect();
+    assert_eq!(
+        quarantines.len(),
+        1,
+        "the crash must leave one resumable staged-cleanup quarantine",
+    );
+    let quarantine_name = quarantines[0].file_name();
+    let intent = root.join(format!("{}.intent", quarantine_name.to_string_lossy()));
+    assert!(
+        intent.exists(),
+        "staged cleanup quarantine must retain the shared durable ownership intent",
+    );
+
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("startup finishing interrupted staged cleanup");
+    assert!(
+        std::fs::read_dir(&root)
+            .expect("Library root after restart")
+            .all(|entry| {
+                !entry
+                    .expect("Library entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gmm-delete-")
+            }),
+        "the ordinary startup delete-quarantine recovery must finish staged cleanup",
+    );
+}
+
 /// ZIP import has the same filesystem-first shape as adopt. Extraction may be
 /// unbounded, so the fence is reacquired only for identity revalidation and
 /// commit; a relocation winner makes import fail without a stale row. Cleanup
@@ -1100,6 +1244,100 @@ async fn session_claim_after_relocation_commit_cannot_disable_a_relocated_mod() 
         "the relocated Mod's junction must already be restored before the session claim",
     );
     core.end_session().await.expect("end session");
+}
+
+/// Junctions are reconstructible projections of committed Mod rows. If one
+/// restore fails after an earlier Mod was restored, relocation must therefore
+/// commit the moved paths and report the partial restore instead of rolling
+/// the transaction back around an already-completed filesystem move.
+///
+/// The repeated crash-point seam fires after the first successful Junction
+/// restore. The hook places an ordinary directory at the other Mod's link
+/// path, deterministically forcing that later `junction::create` to fail.
+///
+/// Mutation oracle: propagating the per-Mod restore error (`?`) out of
+/// relocation rolls back the rewritten rows after the bytes moved. The
+/// `row must name its relocated bytes` assertion then fails on the old path.
+#[tokio::test]
+async fn partial_junction_restore_keeps_relocated_rows_and_bytes_in_agreement() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("set install path");
+    let first = env.seed_mod(&core, "Relocation Restore First").await;
+    let second = env.seed_mod(&core, "Relocation Restore Second").await;
+    core.set_enabled(&first.id, true, &env.game_mods)
+        .await
+        .expect("enable first Mod");
+    core.set_enabled(&second.id, true, &env.game_mods)
+        .await
+        .expect("enable second Mod");
+
+    let first_link = env.game_mods.join("Relocation Restore First");
+    let second_link = env.game_mods.join("Relocation Restore Second");
+    let injected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_injected = std::sync::Arc::clone(&injected);
+    let hook_first_link = first_link.clone();
+    let hook_second_link = second_link.clone();
+    let relocating = core
+        .clone()
+        .with_crash_hook(std::sync::Arc::new(move |point| {
+            if point == gmm_lib::core::crash_points::RELOCATE_AFTER_JUNCTION_RESTORE
+                && !hook_injected.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let blocked = if hook_first_link.join("merged.ini").is_file() {
+                    &hook_second_link
+                } else {
+                    &hook_first_link
+                };
+                std::fs::create_dir(blocked).expect("block the later Junction restore");
+            }
+        }));
+
+    let new_root = env._tmp.path().join("relocated-partial-restore");
+    let result = relocating
+        .set_library_path_for_game(GameCode::Gimi, Some(&new_root))
+        .await;
+
+    assert!(
+        injected.load(std::sync::atomic::Ordering::SeqCst),
+        "the test must reach the post-first-restore crash-point seam",
+    );
+    let mods = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list after move");
+    assert_eq!(mods.len(), 2, "both seeded Mods remain recorded");
+    for seeded in [&first, &second] {
+        let row = mods
+            .iter()
+            .find(|candidate| candidate.id == seeded.id)
+            .expect("seeded Mod row after relocation");
+        assert_eq!(
+            row.library_path,
+            new_root.join(&seeded.id),
+            "row must name its relocated bytes after a partial Junction restore",
+        );
+        assert!(
+            row.library_path.join("merged.ini").is_file(),
+            "the filesystem must contain the bytes at the path committed in the row",
+        );
+    }
+
+    let report = result.expect("Junction restore failure is a reportable partial outcome");
+    assert_eq!(
+        report.failed_junction_restores.len(),
+        1,
+        "exactly the obstructed Junction restore must be reported",
+    );
+    assert!(
+        first_link.join("merged.ini").is_file() ^ second_link.join("merged.ini").is_file(),
+        "one Junction restored before the injected failure and one remains for Rebuild Junctions",
+    );
 }
 
 /// Startup cleanup must not classify an intent as stranded while the delete

@@ -158,6 +158,11 @@ export interface LibraryPaths {
 export interface MoveReport {
   relocated: string[];
   moved_directories: string[];
+  failed_junction_restores: Array<{
+    mod_id: string;
+    game: GameCode;
+    error: string;
+  }>;
 }
 
 export async function getLibraryPaths(): Promise<LibraryPaths> {

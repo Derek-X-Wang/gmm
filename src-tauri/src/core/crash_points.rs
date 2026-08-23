@@ -73,10 +73,26 @@ pub const IMPORT_ZIP_AFTER_EXTRACT: &str = "import_zip.after_extract";
 /// `import_zip`: the row exists, Variants have not been detected yet.
 pub const IMPORT_ZIP_AFTER_ROW_INSERT: &str = "import_zip.after_row_insert";
 
+/// Failed adopt/ZIP cleanup: identity and database ownership have been
+/// re-proved under the writer fence, immediately before the staged directory
+/// is renamed into the durable delete quarantine.
+pub const STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE: &str = "staged_cleanup.before_quarantine_move";
+
+/// Failed adopt/ZIP cleanup: the proven staged directory has moved into the
+/// durable delete quarantine and still carries the writer fence. A restart
+/// must finish the purge if the process stops here.
+pub const STAGED_CLEANUP_AFTER_QUARANTINE_MOVE: &str = "staged_cleanup.after_quarantine_move";
+
 /// `set_library_path_for_game` / `set_library_root`: the Mod rows whose
 /// paths need rewriting have been snapshotted, but no Library bytes have
 /// moved yet. A concurrent row committer must not enter after this snapshot.
 pub const RELOCATE_AFTER_MOD_SNAPSHOT: &str = "relocate.after_mod_snapshot";
+
+/// `set_library_path_for_game` / `set_library_root`: one previously-enabled
+/// Mod's Junction has been restored while the relocation writer fence is
+/// still held. Tests use the repeated point to inject a later restore failure
+/// without a timing rendezvous.
+pub const RELOCATE_AFTER_JUNCTION_RESTORE: &str = "relocate.after_junction_restore";
 
 /// `set_library_path_for_game` / `set_library_root`: the Library move,
 /// rewritten rows, and junction restoration have committed. A Game Session
@@ -112,7 +128,10 @@ pub const ALL: &[&str] = &[
     ADOPT_AFTER_ROW_INSERT,
     IMPORT_ZIP_AFTER_EXTRACT,
     IMPORT_ZIP_AFTER_ROW_INSERT,
+    STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE,
+    STAGED_CLEANUP_AFTER_QUARANTINE_MOVE,
     RELOCATE_AFTER_MOD_SNAPSHOT,
+    RELOCATE_AFTER_JUNCTION_RESTORE,
     RELOCATE_AFTER_FENCE_COMMIT,
     RECOVER_AFTER_LIBRARY_MOVE,
     DELETE_AFTER_INTENT_WRITE,

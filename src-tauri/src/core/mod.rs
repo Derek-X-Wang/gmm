@@ -286,7 +286,7 @@ impl Core {
 
         // Move every game's subtree from previous to next. Per-game
         // overrides are unaffected — they're absolute and live elsewhere.
-        let (report, previously_enabled) = self
+        let (mut report, previously_enabled) = self
             .move_root(&previous, &next, /* per_game */ None, &mut fence)
             .await?;
         put_setting(
@@ -295,8 +295,9 @@ impl Core {
             new_root.map(|p| p.to_string_lossy().to_string()).as_deref(),
         )
         .await?;
-        self.restore_relocated_junctions(previously_enabled, &mut fence)
-            .await?;
+        report.failed_junction_restores = self
+            .restore_relocated_junctions(previously_enabled, &mut fence)
+            .await;
         fence.commit().await?;
         self.crash_point(crash_points::RELOCATE_AFTER_FENCE_COMMIT);
         Ok(report)
@@ -349,7 +350,7 @@ impl Core {
 
         volume::require_ntfs(&next_effective)?;
 
-        let (report, previously_enabled) = self
+        let (mut report, previously_enabled) = self
             .move_root(&previous, &next_effective, Some(game), &mut fence)
             .await?;
         put_setting(
@@ -358,8 +359,9 @@ impl Core {
             new_path.map(|p| p.to_string_lossy().to_string()).as_deref(),
         )
         .await?;
-        self.restore_relocated_junctions(previously_enabled, &mut fence)
-            .await?;
+        report.failed_junction_restores = self
+            .restore_relocated_junctions(previously_enabled, &mut fence)
+            .await;
         fence.commit().await?;
         self.crash_point(crash_points::RELOCATE_AFTER_FENCE_COMMIT);
         Ok(report)
@@ -496,45 +498,65 @@ impl Core {
         &self,
         previously_enabled: Vec<(String, GameCode)>,
         fence: &mut library_mutation::LibraryMutationFence,
-    ) -> Result<()> {
+    ) -> Vec<JunctionRestoreFailure> {
+        let mut failures = Vec::new();
         for (id, game) in previously_enabled {
-            let game_row = sqlx::query("SELECT install_path FROM games WHERE code = ?")
-                .bind(game.as_str())
-                .fetch_one(&mut *fence.transaction)
-                .await?;
-            let install = game_row
-                .try_get::<Option<String>, _>("install_path")?
-                .map(PathBuf::from);
-            if let Some(install) = install {
-                let mods_dir = install.join("Mods");
-                std::fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
-                    path: mods_dir.clone(),
-                    source,
-                })?;
-                let row = sqlx::query(
-                    "SELECT junction_dir_name, library_path, active_variant_id
-                     FROM mods WHERE id = ?",
-                )
-                .bind(&id)
-                .fetch_one(&mut *fence.transaction)
-                .await?;
-                let junction_dir_name: String = row.try_get("junction_dir_name")?;
-                let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
-                let active_variant_id: Option<String> = row.try_get("active_variant_id")?;
-                let target = if let Some(active_variant_id) = active_variant_id {
-                    let variant = sqlx::query("SELECT subpath FROM mod_variants WHERE id = ?")
-                        .bind(active_variant_id)
-                        .fetch_one(&mut *fence.transaction)
-                        .await?;
-                    library_path.join(variant.try_get::<String, _>("subpath")?)
-                } else {
-                    library_path
-                };
-                let link = mods_dir.join(junction_dir_name);
-                volume::require_ntfs_pair(&mods_dir, &target)?;
-                junction::create(&link, &target)?;
+            if let Err(error) = self.restore_relocated_junction(&id, game, fence).await {
+                failures.push(JunctionRestoreFailure {
+                    mod_id: id,
+                    game,
+                    error: error.to_string(),
+                });
             }
         }
+
+        failures
+    }
+
+    async fn restore_relocated_junction(
+        &self,
+        id: &str,
+        game: GameCode,
+        fence: &mut library_mutation::LibraryMutationFence,
+    ) -> Result<()> {
+        let game_row = sqlx::query("SELECT install_path FROM games WHERE code = ?")
+            .bind(game.as_str())
+            .fetch_one(&mut *fence.transaction)
+            .await?;
+        let install = game_row
+            .try_get::<Option<String>, _>("install_path")?
+            .map(PathBuf::from);
+        let Some(install) = install else {
+            return Ok(());
+        };
+        let mods_dir = install.join("Mods");
+        std::fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
+            path: mods_dir.clone(),
+            source,
+        })?;
+        let row = sqlx::query(
+            "SELECT junction_dir_name, library_path, active_variant_id
+             FROM mods WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *fence.transaction)
+        .await?;
+        let junction_dir_name: String = row.try_get("junction_dir_name")?;
+        let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+        let active_variant_id: Option<String> = row.try_get("active_variant_id")?;
+        let target = if let Some(active_variant_id) = active_variant_id {
+            let variant = sqlx::query("SELECT subpath FROM mod_variants WHERE id = ?")
+                .bind(active_variant_id)
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+            library_path.join(variant.try_get::<String, _>("subpath")?)
+        } else {
+            library_path
+        };
+        let link = mods_dir.join(junction_dir_name);
+        volume::require_ntfs_pair(&mods_dir, &target)?;
+        junction::create(&link, &target)?;
+        self.crash_point(crash_points::RELOCATE_AFTER_JUNCTION_RESTORE);
 
         Ok(())
     }
@@ -2318,9 +2340,9 @@ impl Core {
     /// junk files, single-root-directory shape, and size/entry caps. See
     /// [`crate::core::zip_import`] for the extraction details.
     ///
-    /// On any failure the partially-extracted Library path is removed so
-    /// the user is never left with a half-imported Mod row pointing at
-    /// half-extracted bytes.
+    /// On failure, cleanup removes the staged Library directory only after
+    /// re-proving its identity and that no Mod row owns it. If either fact is
+    /// uncertain, the bytes are retained for the orphan audit to surface.
     pub async fn import_zip(
         &self,
         game: GameCode,
@@ -3053,6 +3075,17 @@ pub struct MoveReport {
     /// Top-level directories we moved (one per game, or a single entry
     /// for the per-game case).
     pub moved_directories: Vec<PathBuf>,
+    /// Previously-enabled Mods whose Junction could not be recreated. The
+    /// authoritative Library move still committed; Rebuild Junctions retries
+    /// these reconstructible projections from the committed rows.
+    pub failed_junction_restores: Vec<JunctionRestoreFailure>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct JunctionRestoreFailure {
+    pub mod_id: String,
+    pub game: GameCode,
+    pub error: String,
 }
 
 /// Move `from` to `to`. Prefer atomic rename; fall back to recursive
