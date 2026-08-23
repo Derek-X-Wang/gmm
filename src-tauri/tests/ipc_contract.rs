@@ -295,3 +295,91 @@ mod ipc_readiness_marker {
         }
     }
 }
+
+/// The packaged startup smoke holds the manifest endpoint open and proves
+/// both that this launch started the refresh and that IPC became ready
+/// without waiting for the response. Keep the Rust marker and the script's
+/// literal/counting contract in lockstep.
+mod manifest_refresh_started_marker {
+    use super::read;
+    use gmm_lib::core::diagnostics::MANIFEST_REFRESH_STARTED_MARKER;
+    use gmm_lib::core::recommended_importers::MANIFEST_URL_OVERRIDE_ENV;
+
+    #[test]
+    fn installer_smoke_counts_the_same_marker_for_this_launch() {
+        let script = read(".github/scripts/installer-smoke.ps1");
+        assert!(
+            script.contains(MANIFEST_REFRESH_STARTED_MARKER),
+            "installer-smoke.ps1 must count the marker literal \
+             '{MANIFEST_REFRESH_STARTED_MARKER}'",
+        );
+        assert!(
+            script.contains("Get-DiagnosticMarkerCount"),
+            "installer-smoke.ps1 must compare marker counts so an old log line \
+             cannot satisfy the current launch",
+        );
+        assert!(
+            script.contains(MANIFEST_URL_OVERRIDE_ENV),
+            "installer-smoke.ps1 must set {MANIFEST_URL_OVERRIDE_ENV} to the \
+             endpoint it deliberately holds open",
+        );
+        assert!(
+            script.contains("Get-DiagnosticEventTimestamp"),
+            "installer-smoke.ps1 must compare structured log timestamps rather \
+             than impose a machine-speed deadline",
+        );
+        assert!(
+            script.contains("$ipcReadyAt -ge $manifestRefreshFinishedAt"),
+            "installer-smoke.ps1 must require IPC readiness before the held-open \
+             refresh reaches its own terminal event",
+        );
+        assert!(
+            !script.contains("$manifestRequestAcceptedAt.AddSeconds("),
+            "the startup guard must not depend on an arbitrary wall-clock margin",
+        );
+        assert!(
+            script.contains("startup work blocked Tauri past the deadline"),
+            "the ordinary readiness timeout must name blocking startup work as a \
+             possible cause rather than diagnosing only frontend/IPC failures",
+        );
+    }
+
+    #[test]
+    fn startup_reads_the_override_only_through_the_loopback_guard() {
+        let lib = read("src-tauri/src/lib.rs");
+        assert!(
+            lib.contains("recommended_importers::loopback_manifest_url_override();"),
+            "startup must obtain the test URL through the no-argument accessor that \
+             reads and validates the environment value together",
+        );
+        assert!(
+            !lib.contains("MANIFEST_URL_OVERRIDE_ENV"),
+            "lib.rs must not name the manifest override environment variable \
+             directly, where the loopback-only validator could be bypassed",
+        );
+        assert!(
+            lib.contains("refresh_recommended_importers_from_loopback_override(&url)"),
+            "the validated URL must use the refresh path that refuses redirects, \
+             not the shipped URL path that deliberately follows them",
+        );
+    }
+
+    #[test]
+    fn startup_refresh_emits_the_marker_at_the_kickoff_site() {
+        let lib = read("src-tauri/src/lib.rs");
+        let marker_call = "diagnostics::record_manifest_refresh_started();";
+        let marker_end = lib
+            .find(marker_call)
+            .map(|start| start + marker_call.len())
+            .expect("startup refresh marker call not found in lib.rs");
+        let refresh_start = lib[marker_end..]
+            .find("let refresh = match")
+            .map(|offset| marker_end + offset)
+            .expect("startup refresh selection not found after its marker call");
+        assert!(
+            lib[marker_end..refresh_start].trim().is_empty(),
+            "the startup refresh must emit its diagnostic marker immediately \
+             before choosing and polling the refresh future",
+        );
+    }
+}

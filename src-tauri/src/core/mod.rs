@@ -62,6 +62,12 @@ pub struct Core {
     crash_hook: Option<CrashHook>,
 }
 
+#[derive(Clone, Copy)]
+enum ManifestRedirects {
+    FollowShippedUrl,
+    RefuseLoopbackOverride,
+}
+
 /// Callback invoked at each named point in a durable mutation. See
 /// [`crash_points`].
 pub type CrashHook = Arc<dyn Fn(&str) + Send + Sync>;
@@ -1597,10 +1603,35 @@ impl Core {
     ///
     /// Production always passes the constant; tests use this to drive
     /// every outcome without depending on GitHub being reachable — the
-    /// same seam [`Core::check_loader_update_from`] provides.
+    /// same seam [`Core::check_loader_update_from`] provides. This path
+    /// deliberately follows up to ten redirects because raw-content hosting
+    /// may redirect; the loopback override has its own refusing entry point.
     pub async fn refresh_recommended_importers_from(
         &self,
         url: &str,
+    ) -> Result<recommended_importers::Refreshed> {
+        self.refresh_recommended_importers_with_redirects(url, ManifestRedirects::FollowShippedUrl)
+            .await
+    }
+
+    /// Refresh through the packaged startup smoke's URL after it has passed
+    /// the numeric-loopback validator. Redirects are refused so a local
+    /// response cannot escape that validation by naming an internet target.
+    pub async fn refresh_recommended_importers_from_loopback_override(
+        &self,
+        url: &str,
+    ) -> Result<recommended_importers::Refreshed> {
+        self.refresh_recommended_importers_with_redirects(
+            url,
+            ManifestRedirects::RefuseLoopbackOverride,
+        )
+        .await
+    }
+
+    async fn refresh_recommended_importers_with_redirects(
+        &self,
+        url: &str,
+        redirects: ManifestRedirects,
     ) -> Result<recommended_importers::Refreshed> {
         // A **precondition on the fetch**, not a filter on its result
         // (#95). A user running their own importer gets no startup
@@ -1610,9 +1641,17 @@ impl Core {
         if !self.importer_recommendations_enabled().await? {
             return Ok(recommended_importers::Refreshed::Disabled);
         }
+        let redirect_policy = match redirects {
+            // Keep redirects for the permanent raw-content URL: its hosting
+            // may legitimately redirect, and refusing that would make a
+            // provider detail take the recommendation layer offline.
+            ManifestRedirects::FollowShippedUrl => reqwest::redirect::Policy::limited(10),
+            ManifestRedirects::RefuseLoopbackOverride => reqwest::redirect::Policy::none(),
+        };
         let client = self
             .http_client_builder()
             .await?
+            .redirect(redirect_policy)
             .timeout(recommended_importers::FETCH_TIMEOUT)
             .build()
             .map_err(|e| Error::Network(format!("client build: {e}")))?;

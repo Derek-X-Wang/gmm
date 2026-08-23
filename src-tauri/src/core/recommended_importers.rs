@@ -46,6 +46,71 @@ pub const MANIFEST_PATH: &str = "manifest/recommended-importers.json";
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/Derek-X-Wang/gmm/main/manifest/recommended-importers.json";
 
+/// Process-local override used by the packaged startup smoke to hold a
+/// refresh request open and prove startup does not wait for the network.
+/// Ordinary launches leave it unset and always use [`MANIFEST_URL`]. The
+/// value is accepted only after [`loopback_manifest_url_override`] proves it
+/// names a numeric loopback host, so release builds cannot be redirected to
+/// another internet origin by their environment.
+pub const MANIFEST_URL_OVERRIDE_ENV: &str = "GMM_RECOMMENDED_IMPORTERS_URL";
+
+/// Read the packaged-smoke URL seam and accept it only for HTTP(S) URLs whose
+/// host is a numeric loopback address. Keeping the environment read inside
+/// this accessor prevents callers from accidentally bypassing validation.
+pub fn loopback_manifest_url_override() -> Option<String> {
+    validate_loopback_manifest_url_override(std::env::var(MANIFEST_URL_OVERRIDE_ENV).ok())
+}
+
+/// Requiring an address rather than a hostname avoids trusting host-file or
+/// DNS resolution for this release-build seam.
+fn validate_loopback_manifest_url_override(candidate: Option<String>) -> Option<String> {
+    let candidate = candidate?;
+    let url = reqwest::Url::parse(&candidate).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse::<std::net::IpAddr>()
+        .ok()?;
+    host.is_loopback().then_some(candidate)
+}
+
+#[cfg(test)]
+mod loopback_override_tests {
+    use super::{validate_loopback_manifest_url_override, MANIFEST_URL};
+
+    #[test]
+    fn packaged_smoke_override_cannot_redirect_releases_to_the_internet() {
+        for loopback in [
+            "http://127.0.0.1:48123/recommended-importers.json",
+            "http://[::1]:48123/recommended-importers.json",
+        ] {
+            assert_eq!(
+                validate_loopback_manifest_url_override(Some(loopback.to_string())).as_deref(),
+                Some(loopback),
+            );
+        }
+
+        for rejected in [
+            MANIFEST_URL,
+            "http://localhost:48123/recommended-importers.json",
+            "file:///tmp/recommended-importers.json",
+            "not a URL",
+        ] {
+            assert_eq!(
+                validate_loopback_manifest_url_override(Some(rejected.to_string())),
+                None,
+                "the release-build seam must reject {rejected}",
+            );
+        }
+        assert_eq!(validate_loopback_manifest_url_override(None), None);
+    }
+}
+
 /// The only `schemaVersion` this build understands.
 ///
 /// A higher version means the manifest was written for a newer GMM.
