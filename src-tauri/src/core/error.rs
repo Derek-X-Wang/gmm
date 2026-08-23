@@ -241,12 +241,6 @@ pub enum Error {
     NotAnUnreferencedLibraryDir { path: PathBuf, reason: String },
 
     #[error(
-        "Library delete quarantine {path:?} changed identity before purge; refusing to remove it. \
-         Its intent and bytes remain for startup to retry."
-    )]
-    DeleteQuarantineIdentityChanged { path: PathBuf },
-
-    #[error(
         "{mutation} stopped because the Library root changed from {previous:?} to {current:?} \
          while files were being prepared. No Mod row was committed."
     )]

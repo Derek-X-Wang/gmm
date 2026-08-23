@@ -20,23 +20,27 @@ const { LibraryAuditWarning } = await import("./LibraryAuditWarning");
 
 const FIRST = "C:\\Users\\me\\AppData\\Roaming\\GMM\\library\\gimi\\01FIRST";
 const SECOND = "D:\\GMM Library\\gimi\\01SECOND";
+const AUDIT_REPORT = {
+  game: "gimi",
+  unreferenced: [
+    { directoryName: "01FIRST", path: FIRST, sizeBytes: 400 * 1024 * 1024 },
+    { directoryName: "01SECOND", path: SECOND, sizeBytes: 12 * 1024 * 1024 },
+  ],
+  totalBytes: 412 * 1024 * 1024,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
-  auditLibrary.mockResolvedValue({
-    game: "gimi",
-    unreferenced: [
-      { directoryName: "01FIRST", path: FIRST, sizeBytes: 400 * 1024 * 1024 },
-      { directoryName: "01SECOND", path: SECOND, sizeBytes: 12 * 1024 * 1024 },
-    ],
-    totalBytes: 412 * 1024 * 1024,
-  });
+  auditLibrary.mockResolvedValue(AUDIT_REPORT);
   revealUnreferencedLibraryDir.mockResolvedValue(undefined);
   recoverUnreferencedLibraryDir.mockResolvedValue({ id: "01FIRST", name: "Raiden" });
   deleteUnreferencedLibraryDir.mockResolvedValue({
     directoryName: "01FIRST",
     path: FIRST,
     sizeBytes: 400 * 1024 * 1024,
+    reclamationDeferred: false,
+    reclamationFailed: false,
+    reclamationPath: null,
   });
 });
 
@@ -161,4 +165,56 @@ it("surfaces a refused action instead of silently doing nothing", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent(
     /a Mod now references it/i,
   );
+});
+
+it("tells the user where deferred reclamation remains and that startup will retry", async () => {
+  const user = userEvent.setup();
+  const quarantine = "C:\\Users\\me\\AppData\\Roaming\\GMM\\library\\gimi\\.gmm-delete-DEFERRED";
+  auditLibrary
+    .mockResolvedValueOnce(AUDIT_REPORT)
+    .mockResolvedValue({ game: "gimi", unreferenced: [], totalBytes: 0 });
+  deleteUnreferencedLibraryDir.mockResolvedValue({
+    directoryName: "01FIRST",
+    path: FIRST,
+    sizeBytes: null,
+    reclamationDeferred: true,
+    reclamationFailed: false,
+    reclamationPath: quarantine,
+  });
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
+  await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
+
+  const notice = await screen.findByText(/GMM will retry at startup/i);
+  await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
+  expect(notice).toBeInTheDocument();
+  expect(notice).toHaveTextContent(quarantine);
+  expect(notice).toHaveTextContent(/disk space has not been reclaimed/i);
+});
+
+it("tells the user where reclamation failed and that GMM will not retry", async () => {
+  const user = userEvent.setup();
+  const quarantine = "C:\\Users\\me\\AppData\\Roaming\\GMM\\library\\gimi\\.gmm-delete-FAILED";
+  auditLibrary
+    .mockResolvedValueOnce(AUDIT_REPORT)
+    .mockResolvedValue({ game: "gimi", unreferenced: [], totalBytes: 0 });
+  deleteUnreferencedLibraryDir.mockResolvedValue({
+    directoryName: "01FIRST",
+    path: FIRST,
+    sizeBytes: null,
+    reclamationDeferred: false,
+    reclamationFailed: true,
+    reclamationPath: quarantine,
+  });
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
+  await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
+
+  const notice = await screen.findByText(/GMM will not retry/i);
+  await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
+  expect(notice).toBeInTheDocument();
+  expect(notice).toHaveTextContent(quarantine);
+  expect(notice).toHaveTextContent(/disk space was not reclaimed/i);
 });

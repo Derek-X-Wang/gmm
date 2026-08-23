@@ -55,8 +55,11 @@ const DELETE_INTENT_SUFFIX: &str = ".intent";
 
 /// What an accepted delete removed from the visible Library. `size_bytes` is
 /// measured only after the quarantine identity is proved and is omitted when
-/// reclamation is deferred. The traversal and final removal are still
-/// path-based pending #172, so the size is not object-anchored accounting.
+/// byte reclamation is deferred or failed. A deferred response means the
+/// owned quarantine remains at `reclamation_path` for startup; a failed one
+/// means ownership was lost there and GMM will not retry it automatically.
+/// The traversal and final removal are still path-based pending #172, so the
+/// size is not object-anchored accounting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeletedLibraryDir {
@@ -64,6 +67,8 @@ pub struct DeletedLibraryDir {
     pub path: PathBuf,
     pub size_bytes: Option<u64>,
     pub reclamation_deferred: bool,
+    pub reclamation_failed: bool,
+    pub reclamation_path: Option<PathBuf>,
 }
 
 /// The indivisible proof for one destructive Library claim: the SQLite
@@ -82,22 +87,23 @@ pub(super) struct QuarantinedLibraryDirectory {
     intent: PathBuf,
 }
 
+pub(super) enum QuarantinePurgeOutcome {
+    Reclaimed(Option<u64>),
+    Deferred { path: PathBuf, error: String },
+    Failed { path: PathBuf },
+}
+
 impl QuarantinedLibraryDirectory {
-    pub(super) fn purge(self, measure_size: bool) -> Result<Option<u64>> {
-        let verified = open_owned_delete_quarantine(&self.path)?.ok_or_else(|| {
-            Error::DeleteQuarantineIdentityChanged {
-                path: self.path.clone(),
-            }
-        })?;
+    pub(super) fn purge(self, measure_size: bool) -> Result<QuarantinePurgeOutcome> {
+        let Some(verified) = open_owned_delete_quarantine(&self.path)? else {
+            return Ok(QuarantinePurgeOutcome::Failed { path: self.path });
+        };
         let size = measure_size
             .then(|| directory_size_without_links(&self.path).ok())
             .flatten();
-        let verified_after_measurement =
-            open_owned_delete_quarantine(&self.path)?.ok_or_else(|| {
-                Error::DeleteQuarantineIdentityChanged {
-                    path: self.path.clone(),
-                }
-            })?;
+        let Some(verified_after_measurement) = open_owned_delete_quarantine(&self.path)? else {
+            return Ok(QuarantinePurgeOutcome::Failed { path: self.path });
+        };
         // Windows keeps a directory name visible while an open handle refers
         // to it even when that handle shares DELETE access. Measurement is
         // path-based, so prove the reserved name both before and after it and
@@ -108,20 +114,41 @@ impl QuarantinedLibraryDirectory {
         // after the proof can therefore remove a replacement. #172 tracks
         // handle-anchored recursive deletion. This check narrows that window
         // but does not claim the removal itself is anchored to either handle.
-        fs::remove_dir_all(&self.path)
-            .and_then(|()| fs::remove_file(&self.intent).map(|()| size))
-            .map_err(|source| Error::Io {
-                path: self.path,
-                source,
-            })
+        match fs::remove_dir_all(&self.path) {
+            Ok(()) => {
+                if let Err(source) = fs::remove_file(&self.intent) {
+                    if source.kind() != io::ErrorKind::NotFound {
+                        tracing::warn!(
+                            target: "gmm::library",
+                            intent = %self.intent.display(),
+                            error = %source,
+                            "Library bytes were reclaimed but delete-intent cleanup will wait for startup",
+                        );
+                    }
+                }
+                Ok(QuarantinePurgeOutcome::Reclaimed(size))
+            }
+            Err(source) => {
+                let error = source.to_string();
+                if open_owned_delete_quarantine(&self.path)?.is_some() {
+                    Ok(QuarantinePurgeOutcome::Deferred {
+                        path: self.path,
+                        error,
+                    })
+                } else {
+                    Ok(QuarantinePurgeOutcome::Failed { path: self.path })
+                }
+            }
+        }
     }
 }
 
 impl Core {
     /// Finish delete quarantines left by a process that stopped after the
     /// atomic rename and before recursive purge. `Core::new` runs this on
-    /// every startup; failures are retryable because the reserved directory
-    /// remains hidden from audit and cannot be recovered as a Mod.
+    /// every startup. An owned quarantine that still matches remains hidden
+    /// and retryable; a missing or identity-mismatched path cannot be located
+    /// safely from its pathname and is not promised automatic reclamation.
     pub async fn finish_interrupted_library_deletes(&self) -> Result<usize> {
         // Serialize root resolution and cleanup with every relocation and
         // ownership mutation. An old root snapshot is not safe evidence once
@@ -309,27 +336,45 @@ impl Core {
                 path: path.clone(),
                 source: io::Error::other(format!("Library delete worker failed: {join_error}")),
             })?;
-        let (size_bytes, reclamation_deferred) = match purge_result {
-            Ok(size_bytes) => (size_bytes, false),
-            Err(Error::DeleteQuarantineIdentityChanged {
-                path: quarantine_path,
-            }) => {
-                tracing::warn!(
-                    target: "gmm::library",
-                    path = %path.display(),
-                    quarantine = %quarantine_path.display(),
-                    "Library delete succeeded but byte reclamation was deferred; startup will retry",
-                );
-                (None, true)
-            }
-            Err(error) => return Err(error),
-        };
+        let (size_bytes, reclamation_deferred, reclamation_failed, reclamation_path) =
+            match purge_result {
+                Ok(QuarantinePurgeOutcome::Reclaimed(size_bytes)) => {
+                    (size_bytes, false, false, None)
+                }
+                Ok(QuarantinePurgeOutcome::Deferred {
+                    path: quarantine_path,
+                    error,
+                }) => {
+                    tracing::warn!(
+                        target: "gmm::library",
+                        path = %path.display(),
+                        quarantine = %quarantine_path.display(),
+                        error = %error,
+                        "Library delete succeeded; owned bytes remain quarantined and startup will retry reclamation",
+                    );
+                    (None, true, false, Some(quarantine_path))
+                }
+                Ok(QuarantinePurgeOutcome::Failed {
+                    path: quarantine_path,
+                }) => {
+                    tracing::error!(
+                        target: "gmm::library",
+                        path = %path.display(),
+                        quarantine = %quarantine_path.display(),
+                        "Library delete succeeded but quarantine ownership changed; byte reclamation failed and will not be retried automatically",
+                    );
+                    (None, false, true, Some(quarantine_path))
+                }
+                Err(error) => return Err(error),
+            };
 
         Ok(DeletedLibraryDir {
             directory_name,
             path,
             size_bytes,
             reclamation_deferred,
+            reclamation_failed,
+            reclamation_path,
         })
     }
 
@@ -593,8 +638,18 @@ fn purge_delete_quarantines(roots: &[PathBuf]) -> Result<usize> {
             })
             .purge(false)
             {
-                Ok(_) => removed += 1,
-                Err(Error::DeleteQuarantineIdentityChanged { .. }) => {}
+                Ok(QuarantinePurgeOutcome::Reclaimed(_)) => removed += 1,
+                Ok(QuarantinePurgeOutcome::Deferred { path, error }) => tracing::warn!(
+                    target: "gmm::library",
+                    quarantine = %path.display(),
+                    error = %error,
+                    "owned Library delete quarantine remains; a later startup will retry reclamation",
+                ),
+                Ok(QuarantinePurgeOutcome::Failed { path }) => tracing::error!(
+                    target: "gmm::library",
+                    quarantine = %path.display(),
+                    "Library delete quarantine identity changed; automatic byte reclamation has stopped",
+                ),
                 Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }

@@ -333,13 +333,31 @@ impl Core {
         }
         if let Some(quarantined) = quarantined {
             self.crash_point(super::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE);
-            if let Err(error) = quarantined.purge(false) {
-                tracing::warn!(
+            match quarantined.purge(false) {
+                Ok(super::library_recovery::QuarantinePurgeOutcome::Reclaimed(_)) => {}
+                Ok(super::library_recovery::QuarantinePurgeOutcome::Deferred { path, error }) => {
+                    tracing::warn!(
+                        target: "gmm::library",
+                        path = %staged_path.display(),
+                        quarantine = %path.display(),
+                        error = %error,
+                        "staged Library cleanup bytes remain in an owned quarantine; startup will retry reclamation",
+                    );
+                }
+                Ok(super::library_recovery::QuarantinePurgeOutcome::Failed { path }) => {
+                    tracing::error!(
+                        target: "gmm::library",
+                        path = %staged_path.display(),
+                        quarantine = %path.display(),
+                        "staged Library cleanup quarantine identity changed; automatic byte reclamation has stopped",
+                    );
+                }
+                Err(error) => tracing::warn!(
                     target: "gmm::library",
                     path = %staged_path.display(),
                     error = %error,
-                    "could not purge a staged Library cleanup quarantine; startup will retry",
-                );
+                    "could not inspect or purge a staged Library cleanup quarantine",
+                ),
             }
         }
     }

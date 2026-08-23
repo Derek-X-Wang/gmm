@@ -80,7 +80,7 @@ pub const STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE: &str = "staged_cleanup.before_q
 
 /// Failed adopt/ZIP cleanup: the proven staged directory has moved into the
 /// durable delete quarantine and still carries the writer fence. A restart
-/// must finish the purge if the process stops here.
+/// can finish the purge only while the reserved path still names that object.
 pub const STAGED_CLEANUP_AFTER_QUARANTINE_MOVE: &str = "staged_cleanup.after_quarantine_move";
 
 /// Failed adopt/ZIP cleanup: the durable quarantine is committed and the
@@ -119,7 +119,8 @@ pub const DELETE_AFTER_INTENT_WRITE: &str = "delete.after_intent_write";
 
 /// `delete_unreferenced_library_dir`: the proven orphan has atomically moved
 /// into GMM's reserved quarantine and can no longer be recovered as a Mod.
-/// A restart finishes purging that quarantine.
+/// A restart can finish the purge only while the reserved path still names
+/// that same filesystem object.
 pub const DELETE_AFTER_QUARANTINE_MOVE: &str = "delete.after_quarantine_move";
 
 /// `delete_unreferenced_library_dir`: the durable quarantine is committed and

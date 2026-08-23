@@ -1148,14 +1148,13 @@ async fn startup_finishes_an_interrupted_staged_cleanup_quarantine() {
 
 /// Staged cleanup has released the identity handles that proved the reserved
 /// quarantine and is about to purge it. If an external actor swaps in another
-/// directory at that name, cleanup must leave the replacement and intent for
-/// startup to retry. Once the proven object is restored, a later startup can
-/// finish the same durable intent.
+/// directory at that name, cleanup must leave the replacement and intent.
+/// Startup cannot find the moved original and must not promise to reclaim it.
 ///
 /// Mutation oracle: removing `open_owned_delete_quarantine` from the shared
 /// purge deletes the replacement and fires the replacement-survival assertion.
 #[tokio::test]
-async fn staged_cleanup_purge_refuses_a_replaced_quarantine_and_startup_retries() {
+async fn staged_cleanup_purge_refuses_replacement_without_promising_reclamation() {
     let env = TestEnv::new();
     let core = env.core().await;
     let root = core
@@ -1201,21 +1200,10 @@ async fn staged_cleanup_purge_refuses_a_replaced_quarantine_and_startup_retries(
     probe(&env)
         .op(["migrate"])
         .run()
-        .expect_ok("startup retry while the staged quarantine identity still mismatches");
+        .expect_ok("startup while the staged quarantine identity still mismatches");
     assert!(
-        quarantine.join("replacement-marker").is_file() && intent.is_file(),
-        "startup must leave a mismatched staged quarantine resumable",
-    );
-
-    std::fs::remove_dir_all(&quarantine).expect("remove staged-cleanup replacement in test");
-    std::fs::rename(&proven, &quarantine).expect("restore proven staged quarantine");
-    probe(&env)
-        .op(["migrate"])
-        .run()
-        .expect_ok("startup retry after restoring the proven staged quarantine");
-    assert!(
-        !quarantine.exists() && !intent.exists(),
-        "startup must finish the restored staged-cleanup quarantine and intent",
+        quarantine.join("replacement-marker").is_file() && intent.is_file() && proven.is_dir(),
+        "startup must preserve the mismatch but cannot reclaim the moved staged bytes",
     );
 }
 
@@ -1515,15 +1503,16 @@ async fn startup_cleanup_cannot_strand_a_delete_paused_before_quarantine_rename(
 
 /// Explicit Library delete has committed its durable quarantine and released
 /// the identity proof before recursive purge. A replacement at the reserved
-/// pathname must survive, the accepted delete must still report success, and
-/// the retained intent must remain retryable by startup.
+/// pathname must survive and the accepted delete must still report success.
+/// Startup preserves the mismatch but cannot locate or reclaim the moved
+/// original, so this outcome must not be described as retryable.
 ///
 /// Mutation oracle: removing `open_owned_delete_quarantine` from the shared
 /// purge deletes the replacement and fires the replacement-survival assertion.
-/// Propagating its identity-refusal error from the explicit delete path fires
-/// the successful-delete assertion.
+/// Returning the identity mismatch as a hard command error fires the
+/// successful-delete assertion.
 #[tokio::test]
-async fn explicit_delete_purge_refuses_a_replaced_quarantine_and_startup_retries() {
+async fn explicit_delete_purge_refuses_replacement_without_promising_reclamation() {
     let env = TestEnv::new();
     let core = env.core().await;
     let root = core
@@ -1560,7 +1549,7 @@ async fn explicit_delete_purge_refuses_a_replaced_quarantine_and_startup_retries
     let deleted = deleting.wait_for_outcome();
     assert!(
         deleted.ok,
-        "the Library delete was already committed and must stay successful when byte reclamation defers: {}",
+        "the Library delete was already committed and must stay successful when byte reclamation fails: {}",
         deleted.error,
     );
     assert!(
@@ -1575,21 +1564,12 @@ async fn explicit_delete_purge_refuses_a_replaced_quarantine_and_startup_retries
     probe(&env)
         .op(["migrate"])
         .run()
-        .expect_ok("startup retry while the explicit quarantine identity still mismatches");
+        .expect_ok("startup while the explicit quarantine identity still mismatches");
     assert!(
-        quarantine.join("replacement-marker").is_file() && intent.is_file(),
-        "startup must leave a mismatched explicit-delete quarantine resumable",
-    );
-
-    std::fs::remove_dir_all(&quarantine).expect("remove explicit-delete replacement in test");
-    std::fs::rename(&proven, &quarantine).expect("restore proven explicit quarantine");
-    probe(&env)
-        .op(["migrate"])
-        .run()
-        .expect_ok("startup retry after restoring the proven explicit quarantine");
-    assert!(
-        !quarantine.exists() && !intent.exists(),
-        "startup must finish the restored explicit-delete quarantine and intent",
+        quarantine.join("replacement-marker").is_file()
+            && intent.is_file()
+            && proven.join("proven-marker").is_file(),
+        "startup must preserve the mismatch but cannot reclaim the moved explicit-delete bytes",
     );
 }
 
