@@ -11,7 +11,7 @@ The per-game configuration installed into a game directory: `d3dx.ini`, `Core/`,
 One of the six supported titles. Each Game has its own Model Importer, its own Library subdirectory, its own GameBanana category, and its own install-path detection logic.
 
 ### Library
-The central on-disk storage for all imported mods, located outside any game folder (default `%AppData%\GMM\library\<game>\<mod-id>\`). Source of truth for the user's mod collection. Backed up / portable independent of game installs.
+The central on-disk storage for all imported mods, located outside any game folder (default `%AppData%\GMM\library\<game>\<mod-id>\`). Source of truth for the user's mod collection. Backed up / portable independent of game installs. Enable/disable never changes these bytes, but GMM can permanently delete one explicitly confirmed unreferenced Library folder through the recovery audit.
 
 ### Mod
 The unit of enable/disable. Owns: id (local), optional source (GameBanana submission), Game, display name, author, version, enabled flag, optional active variant. When enabled, exactly one NTFS Junction is created from `<Game>/Mods/<sanitized-name>/` to the Mod's effective Library path.
@@ -32,7 +32,7 @@ Mods that depend on or modify another Mod. **Out of scope for v1.**
 The origin of a Mod's files. Possible values v1: `gamebanana` (URL-paste or 1-click import in future), `local` (user-supplied ZIP via drop-zone), `manual` (user constructed in-place outside GMM and adopted). Source determines update-check behaviour and provenance UI.
 
 ### Library Layout
-On-disk shape: `%AppData%\GMM\library\<game-code>\<mod-id>\<variant-or-root>\…`. Game codes match Model Importer slugs: `gimi`, `srmi`, `zzmi`, `wwmi`, `himi`, `efmi`. Mod IDs are local ULIDs, not GameBanana IDs (a Mod can be re-imported from a different Source). User can override the global Library root and each per-game subpath in Settings.
+On-disk shape: `%AppData%\GMM\library\<game-code>\<mod-id>\<variant-or-root>\…`. Game codes match Model Importer slugs: `gimi`, `srmi`, `zzmi`, `wwmi`, `himi`, `efmi`. Mod IDs are local ULIDs, not GameBanana IDs (a Mod can be re-imported from a different Source). A Mod's Library path final component **is its Mod ID**. Recovery preserves a valid orphan directory ULID as the recovered Mod ID, and refuses recovery if another Mod already claims that valid ID. Only when the final component is not a valid ULID does recovery generate a fresh ULID and rename the directory so the invariant still holds. User can override the global Library root and each per-game subpath in Settings.
 
 GMM reserves `.gmm-delete-<token>` directories and their paired `.gmm-delete-<token>.intent` files as interrupted-delete quarantine state in every effective per-game Library root. The intent records the quarantined directory's filesystem identity; startup recursively removes a quarantine only when that identity still matches, and removes a stranded intent without touching an intact pre-rename directory.
 
