@@ -406,7 +406,7 @@ impl Core {
             .await?;
         for reinstall in active_reinstalls {
             let library_path = PathBuf::from(reinstall.try_get::<String, _>("library_path")?);
-            if path_within(&library_path, previous) {
+            if library_path.starts_with(previous) {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
                     mod_id: reinstall.try_get("mod_id")?,
                 });
