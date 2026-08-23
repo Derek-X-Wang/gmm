@@ -20,23 +20,25 @@ const { LibraryAuditWarning } = await import("./LibraryAuditWarning");
 
 const FIRST = "C:\\Users\\me\\AppData\\Roaming\\GMM\\library\\gimi\\01FIRST";
 const SECOND = "D:\\GMM Library\\gimi\\01SECOND";
+const AUDIT_REPORT = {
+  game: "gimi",
+  unreferenced: [
+    { directoryName: "01FIRST", path: FIRST, sizeBytes: 400 * 1024 * 1024 },
+    { directoryName: "01SECOND", path: SECOND, sizeBytes: 12 * 1024 * 1024 },
+  ],
+  totalBytes: 412 * 1024 * 1024,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
-  auditLibrary.mockResolvedValue({
-    game: "gimi",
-    unreferenced: [
-      { directoryName: "01FIRST", path: FIRST, sizeBytes: 400 * 1024 * 1024 },
-      { directoryName: "01SECOND", path: SECOND, sizeBytes: 12 * 1024 * 1024 },
-    ],
-    totalBytes: 412 * 1024 * 1024,
-  });
+  auditLibrary.mockResolvedValue(AUDIT_REPORT);
   revealUnreferencedLibraryDir.mockResolvedValue(undefined);
   recoverUnreferencedLibraryDir.mockResolvedValue({ id: "01FIRST", name: "Raiden" });
   deleteUnreferencedLibraryDir.mockResolvedValue({
     directoryName: "01FIRST",
     path: FIRST,
     sizeBytes: 400 * 1024 * 1024,
+    reclamation: { status: "reclaimed" },
   });
 });
 
@@ -161,4 +163,55 @@ it("surfaces a refused action instead of silently doing nothing", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent(
     /a Mod now references it/i,
   );
+});
+
+it("says deferred bytes remain at the reserved path and later startups will retry", async () => {
+  const user = userEvent.setup();
+  const quarantine = "C:\\Users\\me\\AppData\\Roaming\\GMM\\library\\gimi\\.gmm-delete-DEFERRED";
+  auditLibrary
+    .mockResolvedValueOnce(AUDIT_REPORT)
+    .mockResolvedValue({ game: "gimi", unreferenced: [], totalBytes: 0 });
+  deleteUnreferencedLibraryDir.mockResolvedValue({
+    directoryName: "01FIRST",
+    path: FIRST,
+    sizeBytes: null,
+    reclamation: { status: "deferred", path: quarantine },
+  });
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
+  await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
+
+  const notice = await screen.findByText(/GMM will retry during a later startup/i);
+  await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
+  expect(notice).toBeInTheDocument();
+  expect(notice).toHaveTextContent(quarantine);
+  expect(notice).toHaveTextContent(/could not reclaim its disk space now/i);
+  expect(notice).toHaveTextContent(/can still verify that directory at its reserved name/i);
+});
+
+it("announces ownership loss without presenting the reserved path as a cleanup target", async () => {
+  const user = userEvent.setup();
+  const quarantine = "C:\\Users\\me\\AppData\\Roaming\\GMM\\library\\gimi\\.gmm-delete-FAILED";
+  auditLibrary
+    .mockResolvedValueOnce(AUDIT_REPORT)
+    .mockResolvedValue({ game: "gimi", unreferenced: [], totalBytes: 0 });
+  deleteUnreferencedLibraryDir.mockResolvedValue({
+    directoryName: "01FIRST",
+    path: FIRST,
+    sizeBytes: null,
+    reclamation: { status: "ownershipLost" },
+  });
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
+  await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
+
+  const notice = await screen.findByRole("alert");
+  await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
+  expect(notice).toHaveTextContent(FIRST);
+  expect(notice).toHaveTextContent(/could not confirm whether its disk space was reclaimed/i);
+  expect(notice).toHaveTextContent(/does not know whether any of that folder's bytes remain/i);
+  expect(notice).toHaveTextContent(/verify the original directory at its reserved name/i);
+  expect(notice).not.toHaveTextContent(quarantine);
 });

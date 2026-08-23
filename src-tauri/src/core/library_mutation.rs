@@ -307,9 +307,9 @@ impl Core {
                         self.crash_point(super::crash_points::STAGED_CLEANUP_AFTER_QUARANTINE_MOVE);
                         // Windows keeps a removed directory name visible until
                         // every open handle closes, even when the handles share
-                        // DELETE. The identity proof is now anchored to the
-                        // reserved name GMM itself created, so release the old
-                        // handles before purging that quarantine.
+                        // DELETE. The intent now records the object moved to
+                        // GMM's reserved name, so release the old handles before
+                        // the path-based purge; #172 tracks anchoring removal.
                         drop(current);
                         drop(staged);
                         quarantined = Some(directory);
@@ -332,13 +332,31 @@ impl Core {
             );
         }
         if let Some(quarantined) = quarantined {
-            if let Err(error) = quarantined.purge(false) {
-                tracing::warn!(
+            self.crash_point(super::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE);
+            match quarantined.purge(false) {
+                Ok(super::library_recovery::QuarantinePurgeOutcome::Reclaimed(_)) => {}
+                Ok(super::library_recovery::QuarantinePurgeOutcome::Deferred { path, error }) => {
+                    tracing::warn!(
+                        target: "gmm::library",
+                        path = %staged_path.display(),
+                        quarantine = %path.display(),
+                        error = %error,
+                        "GMM could not reclaim the staged Library cleanup bytes now; later startups will retry while the directory remains at its reserved name",
+                    );
+                }
+                Ok(super::library_recovery::QuarantinePurgeOutcome::OwnershipLost) => {
+                    tracing::error!(
+                        target: "gmm::library",
+                        path = %staged_path.display(),
+                        "GMM cannot locate the staged Library cleanup quarantine or determine whether its bytes were reclaimed; a later startup will retry only if GMM can again verify the original directory at its reserved name",
+                    );
+                }
+                Err(error) => tracing::warn!(
                     target: "gmm::library",
                     path = %staged_path.display(),
                     error = %error,
-                    "could not purge a staged Library cleanup quarantine; startup will retry",
-                );
+                    "could not inspect or purge a staged Library cleanup quarantine",
+                ),
             }
         }
     }

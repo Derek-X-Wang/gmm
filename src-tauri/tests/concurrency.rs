@@ -1650,8 +1650,9 @@ async fn failed_adopt_cleanup_preserves_a_replacement_directory() {
 /// Identity handles are evidence, not exclusion locks. Even after cleanup has
 /// checked both identity and database ownership under the writer fence, an
 /// external actor can rename that object away and put new bytes at the same
-/// pathname. Cleanup must anchor deletion to the reserved quarantine name it
-/// creates, then re-check which object the rename actually moved.
+/// pathname. Cleanup must move the candidate to the reserved quarantine name
+/// it creates, then re-check which object the rename actually moved. The later
+/// path-based recursive purge remains tracked separately in #172.
 ///
 /// Mutation oracle: replacing the quarantine rename with direct
 /// `remove_dir_all(path)` deletes `replacement-marker` after this seam swaps
@@ -1788,6 +1789,67 @@ async fn startup_finishes_an_interrupted_staged_cleanup_quarantine() {
                     .starts_with(".gmm-delete-")
             }),
         "the ordinary startup delete-quarantine recovery must finish staged cleanup",
+    );
+}
+
+/// Staged cleanup has released the identity handles that proved the reserved
+/// quarantine and is about to purge it. If an external actor swaps in another
+/// directory at that name, cleanup must leave the replacement and intent.
+/// Startup cannot find the moved original and must not promise to reclaim it.
+///
+/// Mutation oracle: removing `open_owned_delete_quarantine` from the shared
+/// purge deletes the replacement and fires the replacement-survival assertion.
+#[tokio::test]
+async fn staged_cleanup_purge_refuses_replacement_without_promising_reclamation() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let missing_source = env._tmp.path().join("missing-staged-purge-source");
+
+    let mut cleaning = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE)
+        .op([
+            "adopt",
+            "--from",
+            &missing_source.display().to_string(),
+            "--name",
+            "Swap During Staged Purge",
+        ])
+        .spawn();
+    cleaning.wait_for_pause(gmm_lib::core::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE);
+
+    let (quarantine, intent) = single_delete_quarantine(&root, "paused staged cleanup");
+    let proven = root.join("staged-proven-quarantine-held-aside");
+    std::fs::rename(&quarantine, &proven).expect("move proven staged quarantine aside");
+    std::fs::create_dir(&quarantine).expect("create staged-cleanup replacement");
+    std::fs::write(quarantine.join("replacement-marker"), b"staged replacement")
+        .expect("write staged-cleanup replacement marker");
+
+    cleaning.resume();
+    let adopted = cleaning.wait_for_outcome();
+    assert!(
+        !adopted.ok,
+        "the adopt with a missing source must still report its original failure",
+    );
+    assert!(
+        quarantine.is_dir(),
+        "staged cleanup purge deleted the replacement placed at its proven quarantine pathname",
+    );
+    assert!(
+        intent.is_file(),
+        "staged cleanup purge removed the intent after refusing the replacement",
+    );
+
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("startup while the staged quarantine identity still mismatches");
+    assert!(
+        quarantine.join("replacement-marker").is_file() && intent.is_file() && proven.is_dir(),
+        "startup must preserve the mismatch but cannot reclaim the moved staged bytes",
     );
 }
 
@@ -2083,6 +2145,111 @@ async fn startup_cleanup_cannot_strand_a_delete_paused_before_quarantine_rename(
                 .starts_with(".gmm-delete-")),
         "restart must purge the owned quarantine and its intent",
     );
+}
+
+/// Explicit Library delete has committed its durable quarantine and released
+/// the identity proof before recursive purge. A replacement at the reserved
+/// pathname must survive and the accepted delete must still report success.
+/// Startup preserves the mismatch but cannot locate or reclaim the moved
+/// original, so this outcome must not be described as retryable.
+///
+/// Mutation oracle: removing `open_owned_delete_quarantine` from the shared
+/// purge deletes the replacement and fires the replacement-survival assertion.
+/// Returning the identity mismatch as a hard command error fires the
+/// successful-delete assertion.
+#[tokio::test]
+async fn explicit_delete_purge_refuses_replacement_without_promising_reclamation() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    std::fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(Ulid::new().to_string());
+    std::fs::create_dir(&orphan).expect("orphan");
+    std::fs::write(orphan.join("proven-marker"), b"explicit proven bytes")
+        .expect("write explicit-delete marker");
+
+    let mut deleting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::DELETE_BEFORE_QUARANTINE_PURGE)
+        .op([
+            "delete-library-dir",
+            "--path",
+            &orphan.display().to_string(),
+        ])
+        .spawn();
+    deleting.wait_for_pause(gmm_lib::core::crash_points::DELETE_BEFORE_QUARANTINE_PURGE);
+
+    let (quarantine, intent) = single_delete_quarantine(&root, "paused explicit delete");
+    let proven = root.join("explicit-proven-quarantine-held-aside");
+    std::fs::rename(&quarantine, &proven).expect("move proven explicit quarantine aside");
+    std::fs::create_dir(&quarantine).expect("create explicit-delete replacement");
+    std::fs::write(
+        quarantine.join("replacement-marker"),
+        b"explicit replacement",
+    )
+    .expect("write explicit-delete replacement marker");
+
+    deleting.resume();
+    let deleted = deleting.wait_for_outcome();
+    assert!(
+        deleted.ok,
+        "the Library delete was already committed and must stay successful when byte reclamation fails: {}",
+        deleted.error,
+    );
+    assert!(
+        quarantine.join("replacement-marker").is_file(),
+        "explicit Library delete purge removed the replacement after its identity changed",
+    );
+    assert!(
+        intent.is_file(),
+        "explicit Library delete purge removed the intent after refusing the replacement",
+    );
+
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("startup while the explicit quarantine identity still mismatches");
+    assert!(
+        quarantine.join("replacement-marker").is_file()
+            && intent.is_file()
+            && proven.join("proven-marker").is_file(),
+        "startup must preserve the mismatch but cannot reclaim the moved explicit-delete bytes",
+    );
+}
+
+fn single_delete_quarantine(root: &Path, context: &str) -> (PathBuf, PathBuf) {
+    let quarantines: Vec<_> = std::fs::read_dir(root)
+        .unwrap_or_else(|error| panic!("read Library root during {context}: {error}"))
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gmm-delete-")
+        })
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        quarantines.len(),
+        1,
+        "{context} must expose exactly one delete quarantine, got {quarantines:?}",
+    );
+    let quarantine = quarantines.into_iter().next().expect("one quarantine");
+    let intent = quarantine.with_file_name(format!(
+        "{}.intent",
+        quarantine
+            .file_name()
+            .expect("quarantine name")
+            .to_string_lossy()
+    ));
+    assert!(
+        intent.is_file(),
+        "{context} must retain the durable delete intent",
+    );
+    (quarantine, intent)
 }
 
 /// Two processes enable the same Mod at the same instant.
