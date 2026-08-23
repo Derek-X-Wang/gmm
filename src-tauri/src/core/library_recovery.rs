@@ -85,6 +85,16 @@ impl QuarantinedLibraryDirectory {
         let size = measure_size
             .then(|| directory_size_without_links(&self.path).ok())
             .flatten();
+        let verified = open_owned_delete_quarantine(&self.path)?.ok_or_else(|| {
+            Error::DeleteQuarantineIdentityChanged {
+                path: self.path.clone(),
+            }
+        })?;
+        // Windows keeps a directory name visible while an open handle refers
+        // to it even when that handle shares DELETE access. The durable
+        // identity was re-proved at the last possible point; release that
+        // handle before the path-based recursive removal.
+        drop(verified);
         fs::remove_dir_all(&self.path)
             .and_then(|()| fs::remove_file(&self.intent).map(|()| size))
             .map_err(|source| Error::Io {
@@ -277,6 +287,8 @@ impl Core {
             let _ = fs::remove_file(&quarantine.intent);
             return Err(error);
         }
+        drop(guarded.directory);
+        self.crash_point(crash_points::DELETE_BEFORE_QUARANTINE_PURGE);
 
         let size_bytes = tokio::task::spawn_blocking(move || quarantine.purge(true))
             .await
@@ -546,40 +558,16 @@ fn purge_delete_quarantines(roots: &[PathBuf]) -> Result<usize> {
                 }
                 continue;
             }
-            if !is_owned_delete_quarantine(&quarantine)? {
-                continue;
-            }
-            let metadata = match fs::symlink_metadata(&quarantine) {
-                Ok(metadata) => metadata,
-                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-                Err(source) => {
-                    return Err(Error::Io {
-                        path: quarantine,
-                        source,
-                    })
-                }
-            };
-            if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
-                continue;
-            }
-            match fs::remove_dir_all(&quarantine) {
-                Ok(()) => match fs::remove_file(&intent) {
-                    Ok(()) => removed += 1,
-                    Err(source) if source.kind() == io::ErrorKind::NotFound => removed += 1,
-                    Err(source) => {
-                        return Err(Error::Io {
-                            path: intent,
-                            source,
-                        })
-                    }
-                },
-                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(Error::Io {
-                        path: quarantine,
-                        source,
-                    })
-                }
+            match (QuarantinedLibraryDirectory {
+                path: quarantine,
+                intent,
+            })
+            .purge(false)
+            {
+                Ok(_) => removed += 1,
+                Err(Error::DeleteQuarantineIdentityChanged { .. }) => {}
+                Err(Error::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
         }
     }
@@ -610,21 +598,25 @@ fn write_delete_intent(tmp: &Path, intent: &Path, contents: &[u8]) -> Result<()>
 }
 
 pub(super) fn is_owned_delete_quarantine(path: &Path) -> Result<bool> {
+    Ok(open_owned_delete_quarantine(path)?.is_some())
+}
+
+fn open_owned_delete_quarantine(path: &Path) -> Result<Option<IdentifiedDirectory>> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(token) = name.strip_prefix(DELETE_QUARANTINE_PREFIX) else {
-        return Ok(false);
+        return Ok(None);
     };
     if token.ends_with(DELETE_INTENT_SUFFIX) || Ulid::from_string(token).is_err() {
-        return Ok(false);
+        return Ok(None);
     }
     let intent = path.with_file_name(format!(
         "{DELETE_QUARANTINE_PREFIX}{token}{DELETE_INTENT_SUFFIX}"
     ));
     let expected = match fs::read_to_string(&intent) {
         Ok(expected) => expected,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(Error::Io {
                 path: intent,
@@ -632,9 +624,9 @@ pub(super) fn is_owned_delete_quarantine(path: &Path) -> Result<bool> {
             })
         }
     };
-    let directory = match IdentifiedDirectory::open(path) {
-        Ok(directory) => directory,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(false),
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(Error::Io {
                 path: path.to_path_buf(),
@@ -642,7 +634,20 @@ pub(super) fn is_owned_delete_quarantine(path: &Path) -> Result<bool> {
             })
         }
     };
-    Ok(directory.identity().durable_key() == expected)
+    if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
+        return Ok(None);
+    }
+    let directory = match IdentifiedDirectory::open(path) {
+        Ok(directory) => directory,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    Ok((directory.identity().durable_key() == expected).then_some(directory))
 }
 
 /// Drop `.` components and reject anything relative or containing `..`.

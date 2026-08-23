@@ -1145,6 +1145,79 @@ async fn startup_finishes_an_interrupted_staged_cleanup_quarantine() {
     );
 }
 
+/// Staged cleanup has released the identity handles that proved the reserved
+/// quarantine and is about to purge it. If an external actor swaps in another
+/// directory at that name, cleanup must leave the replacement and intent for
+/// startup to retry. Once the proven object is restored, a later startup can
+/// finish the same durable intent.
+///
+/// Mutation oracle: removing `open_owned_delete_quarantine` from the shared
+/// purge deletes the replacement and fires the replacement-survival assertion.
+#[tokio::test]
+async fn staged_cleanup_purge_refuses_a_replaced_quarantine_and_startup_retries() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let missing_source = env._tmp.path().join("missing-staged-purge-source");
+
+    let mut cleaning = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE)
+        .op([
+            "adopt",
+            "--from",
+            &missing_source.display().to_string(),
+            "--name",
+            "Swap During Staged Purge",
+        ])
+        .spawn();
+    cleaning.wait_for_pause(gmm_lib::core::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE);
+
+    let (quarantine, intent) = single_delete_quarantine(&root, "paused staged cleanup");
+    let proven = root.join("staged-proven-quarantine-held-aside");
+    std::fs::rename(&quarantine, &proven).expect("move proven staged quarantine aside");
+    std::fs::create_dir(&quarantine).expect("create staged-cleanup replacement");
+    std::fs::write(quarantine.join("replacement-marker"), b"staged replacement")
+        .expect("write staged-cleanup replacement marker");
+
+    cleaning.resume();
+    let adopted = cleaning.wait_for_outcome();
+    assert!(
+        !adopted.ok,
+        "the adopt with a missing source must still report its original failure",
+    );
+    assert!(
+        quarantine.is_dir(),
+        "staged cleanup purge deleted the replacement placed at its proven quarantine pathname",
+    );
+    assert!(
+        intent.is_file(),
+        "staged cleanup purge removed the intent after refusing the replacement",
+    );
+
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("startup retry while the staged quarantine identity still mismatches");
+    assert!(
+        quarantine.join("replacement-marker").is_file() && intent.is_file(),
+        "startup must leave a mismatched staged quarantine resumable",
+    );
+
+    std::fs::remove_dir_all(&quarantine).expect("remove staged-cleanup replacement in test");
+    std::fs::rename(&proven, &quarantine).expect("restore proven staged quarantine");
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("startup retry after restoring the proven staged quarantine");
+    assert!(
+        !quarantine.exists() && !intent.exists(),
+        "startup must finish the restored staged-cleanup quarantine and intent",
+    );
+}
+
 /// ZIP import has the same filesystem-first shape as adopt. Extraction may be
 /// unbounded, so the fence is reacquired only for identity revalidation and
 /// commit; a relocation winner makes import fail without a stale row. Cleanup
@@ -1437,6 +1510,121 @@ async fn startup_cleanup_cannot_strand_a_delete_paused_before_quarantine_rename(
                 .starts_with(".gmm-delete-")),
         "restart must purge the owned quarantine and its intent",
     );
+}
+
+/// Explicit Library delete has committed its durable quarantine and released
+/// the identity proof before recursive purge. A replacement at the reserved
+/// pathname must survive, the caller must see the mismatch, and the retained
+/// intent must remain retryable by startup.
+///
+/// Mutation oracle: removing `open_owned_delete_quarantine` from the shared
+/// purge turns the operation into success and fires the refusal assertion.
+#[tokio::test]
+async fn explicit_delete_purge_refuses_a_replaced_quarantine_and_startup_retries() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    std::fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(Ulid::new().to_string());
+    std::fs::create_dir(&orphan).expect("orphan");
+    std::fs::write(orphan.join("proven-marker"), b"explicit proven bytes")
+        .expect("write explicit-delete marker");
+
+    let mut deleting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::DELETE_BEFORE_QUARANTINE_PURGE)
+        .op([
+            "delete-library-dir",
+            "--path",
+            &orphan.display().to_string(),
+        ])
+        .spawn();
+    deleting.wait_for_pause(gmm_lib::core::crash_points::DELETE_BEFORE_QUARANTINE_PURGE);
+
+    let (quarantine, intent) = single_delete_quarantine(&root, "paused explicit delete");
+    let proven = root.join("explicit-proven-quarantine-held-aside");
+    std::fs::rename(&quarantine, &proven).expect("move proven explicit quarantine aside");
+    std::fs::create_dir(&quarantine).expect("create explicit-delete replacement");
+    std::fs::write(
+        quarantine.join("replacement-marker"),
+        b"explicit replacement",
+    )
+    .expect("write explicit-delete replacement marker");
+
+    deleting.resume();
+    let deleted = deleting.wait_for_outcome();
+    assert!(
+        !deleted.ok,
+        "explicit Library delete purge accepted a replacement at its proven quarantine pathname",
+    );
+    assert!(
+        deleted.error.to_lowercase().contains("identity"),
+        "explicit Library delete reported the quarantine swap for the wrong reason: {}",
+        deleted.error,
+    );
+    assert!(
+        quarantine.join("replacement-marker").is_file(),
+        "explicit Library delete purge removed the replacement after its identity changed",
+    );
+    assert!(
+        intent.is_file(),
+        "explicit Library delete purge removed the intent after refusing the replacement",
+    );
+
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("startup retry while the explicit quarantine identity still mismatches");
+    assert!(
+        quarantine.join("replacement-marker").is_file() && intent.is_file(),
+        "startup must leave a mismatched explicit-delete quarantine resumable",
+    );
+
+    std::fs::remove_dir_all(&quarantine).expect("remove explicit-delete replacement in test");
+    std::fs::rename(&proven, &quarantine).expect("restore proven explicit quarantine");
+    probe(&env)
+        .op(["migrate"])
+        .run()
+        .expect_ok("startup retry after restoring the proven explicit quarantine");
+    assert!(
+        !quarantine.exists() && !intent.exists(),
+        "startup must finish the restored explicit-delete quarantine and intent",
+    );
+}
+
+fn single_delete_quarantine(root: &Path, context: &str) -> (PathBuf, PathBuf) {
+    let quarantines: Vec<_> = std::fs::read_dir(root)
+        .unwrap_or_else(|error| panic!("read Library root during {context}: {error}"))
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gmm-delete-")
+        })
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        quarantines.len(),
+        1,
+        "{context} must expose exactly one delete quarantine, got {quarantines:?}",
+    );
+    let quarantine = quarantines.into_iter().next().expect("one quarantine");
+    let intent = quarantine.with_file_name(format!(
+        "{}.intent",
+        quarantine
+            .file_name()
+            .expect("quarantine name")
+            .to_string_lossy()
+    ));
+    assert!(
+        intent.is_file(),
+        "{context} must retain the durable delete intent",
+    );
+    (quarantine, intent)
 }
 
 /// Two processes enable the same Mod at the same instant.

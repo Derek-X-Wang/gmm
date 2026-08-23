@@ -332,6 +332,7 @@ impl Core {
             );
         }
         if let Some(quarantined) = quarantined {
+            self.crash_point(super::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE);
             if let Err(error) = quarantined.purge(false) {
                 tracing::warn!(
                     target: "gmm::library",

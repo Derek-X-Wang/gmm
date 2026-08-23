@@ -83,6 +83,11 @@ pub const STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE: &str = "staged_cleanup.before_q
 /// must finish the purge if the process stops here.
 pub const STAGED_CLEANUP_AFTER_QUARANTINE_MOVE: &str = "staged_cleanup.after_quarantine_move";
 
+/// Failed adopt/ZIP cleanup: the durable quarantine is committed and the
+/// identity handles used to prove it have been released, immediately before
+/// the shared purge re-opens the reserved path.
+pub const STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE: &str = "staged_cleanup.before_quarantine_purge";
+
 /// `set_library_path_for_game` / `set_library_root`: the Mod rows whose
 /// paths need rewriting have been snapshotted, but no Library bytes have
 /// moved yet. A concurrent row committer must not enter after this snapshot.
@@ -117,6 +122,11 @@ pub const DELETE_AFTER_INTENT_WRITE: &str = "delete.after_intent_write";
 /// A restart finishes purging that quarantine.
 pub const DELETE_AFTER_QUARANTINE_MOVE: &str = "delete.after_quarantine_move";
 
+/// `delete_unreferenced_library_dir`: the durable quarantine is committed and
+/// the identity handle that proved it has been released, immediately before
+/// the shared purge re-opens the reserved path.
+pub const DELETE_BEFORE_QUARANTINE_PURGE: &str = "delete.before_quarantine_purge";
+
 /// Every point, so a test can enumerate them and so adding one without
 /// covering it is visible in review.
 pub const ALL: &[&str] = &[
@@ -130,10 +140,12 @@ pub const ALL: &[&str] = &[
     IMPORT_ZIP_AFTER_ROW_INSERT,
     STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE,
     STAGED_CLEANUP_AFTER_QUARANTINE_MOVE,
+    STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE,
     RELOCATE_AFTER_MOD_SNAPSHOT,
     RELOCATE_AFTER_JUNCTION_RESTORE,
     RELOCATE_AFTER_FENCE_COMMIT,
     RECOVER_AFTER_LIBRARY_MOVE,
     DELETE_AFTER_INTENT_WRITE,
     DELETE_AFTER_QUARANTINE_MOVE,
+    DELETE_BEFORE_QUARANTINE_PURGE,
 ];
