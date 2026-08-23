@@ -48,7 +48,7 @@ use ulid::Ulid;
 use super::library_audit::{directory_size_without_links, is_link_or_reparse_point};
 use super::library_identity::IdentifiedDirectory;
 use super::library_mutation::{unique_junction_dir_name, LibraryMutation, LibraryMutationFence};
-use super::{crash_points, Core, Error, GameCode, Mod, Result, Source};
+use super::{crash_points, variants, Core, Error, GameCode, Mod, Result, Source};
 
 pub(super) const DELETE_QUARANTINE_PREFIX: &str = ".gmm-delete-";
 const DELETE_INTENT_SUFFIX: &str = ".intent";
@@ -294,9 +294,15 @@ impl Core {
         .execute(&mut *guarded.fence.transaction)
         .await?;
 
+        // Detection can fail on filesystem access, and a process can die at
+        // this exact seam. Keep the row, Variant rows, and active selection in
+        // one transaction so either failure leaves the directory unreferenced
+        // and therefore visible to the same audit/recovery affordance.
+        self.crash_point(crash_points::RECOVER_AFTER_ROW_INSERT);
+        let detected_variants = variants::detect_variants(&library_path)?;
+        self.record_detected_variants(&id, detected_variants, &mut guarded.fence.transaction)
+            .await?;
         guarded.fence.commit().await?;
-
-        self.detect_and_record_variants(&id, &library_path).await?;
 
         Ok(Mod {
             id,

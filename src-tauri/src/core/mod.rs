@@ -2751,6 +2751,23 @@ impl Core {
     /// concrete target. No-op when the heuristic finds 0 or 1 candidate.
     async fn detect_and_record_variants(&self, mod_id: &str, library_path: &Path) -> Result<()> {
         let detected = variants::detect_variants(library_path)?;
+        let mut transaction = self.pool.begin().await?;
+        self.record_detected_variants(mod_id, detected, &mut transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Persist an already-detected Variant set and its initial active choice
+    /// in the caller's transaction. Recovery shares this with ordinary adopt
+    /// and import so all three paths record the same shape while recovery can
+    /// include detection in its existing Mod-row transaction.
+    async fn record_detected_variants(
+        &self,
+        mod_id: &str,
+        detected: Vec<variants::DetectedVariant>,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ) -> Result<()> {
         if detected.is_empty() {
             return Ok(());
         }
@@ -2763,7 +2780,7 @@ impl Core {
                 .bind(mod_id)
                 .bind(&v.name)
                 .bind(v.subpath.to_string_lossy().as_ref())
-                .execute(&self.pool)
+                .execute(&mut **transaction)
                 .await?;
             if first_variant_id.is_none() {
                 first_variant_id = Some(variant_id);
@@ -2773,7 +2790,7 @@ impl Core {
         sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
             .bind(&first_variant_id)
             .bind(mod_id)
-            .execute(&self.pool)
+            .execute(&mut **transaction)
             .await?;
         Ok(())
     }

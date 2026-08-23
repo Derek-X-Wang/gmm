@@ -1499,6 +1499,74 @@ async fn recovery_started_before_relocation_cannot_be_stranded() {
     );
 }
 
+/// A real process death after the recovery row insert must roll back that
+/// still-open transaction. On restart, the directory therefore remains in the
+/// orphan report and the same recovery operation can finish it, including its
+/// Variant rows.
+#[tokio::test]
+async fn recovery_crash_before_variant_detection_leaves_a_retryable_orphan() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let orphan = root.join(Ulid::new().to_string());
+    for variant in ["Blue", "Red"] {
+        let dir = orphan.join(variant);
+        std::fs::create_dir_all(&dir).expect("Variant directory");
+        std::fs::write(dir.join("merged.ini"), format!("hash={variant}\n")).expect("Variant INI");
+    }
+
+    let mut recovering = probe(&env)
+        .crashing_at(gmm_lib::core::crash_points::RECOVER_AFTER_ROW_INSERT)
+        .op([
+            "recover",
+            "--path",
+            &orphan.display().to_string(),
+            "--name",
+            "Crash-Retry Variants",
+        ])
+        .spawn();
+    recovering.wait_for_crash();
+    drop(core);
+
+    let restarted = env.core().await;
+    assert!(
+        restarted
+            .list_mods(GameCode::Gimi)
+            .await
+            .expect("list after recovery crash")
+            .is_empty(),
+        "the uncommitted recovery row must roll back when the process dies",
+    );
+    let report = restarted
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after recovery crash");
+    assert!(
+        report.unreferenced.iter().any(|entry| entry.path == orphan),
+        "the rolled-back recovery directory must remain visible for user action: {report:?}",
+    );
+
+    let recovered = restarted
+        .recover_unreferenced_library_dir(GameCode::Gimi, &orphan, "Crash-Retry Variants")
+        .await
+        .expect("retry recovery after process death");
+    let variants = restarted
+        .list_variants(&recovered.id)
+        .await
+        .expect("Variants after retry");
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Blue", "Red"],
+        "the retry must finish the same Variant detection that the crash interrupted",
+    );
+}
+
 /// The SQLite fence serializes GMM callers, but an external filesystem actor
 /// can still rename and replace the pathname recovery validated. The final
 /// identity check must fail closed instead of committing the replacement.
