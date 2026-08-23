@@ -324,6 +324,7 @@ impl Probe {
             cleanup_timeout: self.cleanup_timeout,
             force_reap_timeout: self.force_reap_timeout,
             cleanup_attempted: false,
+            cleanup_deadline: None,
         }
     }
 }
@@ -341,6 +342,7 @@ struct RunningProbe {
     cleanup_timeout: Duration,
     force_reap_timeout: bool,
     cleanup_attempted: bool,
+    cleanup_deadline: Option<Instant>,
 }
 
 impl RunningProbe {
@@ -393,7 +395,16 @@ impl RunningProbe {
     }
 
     fn fail_after_kill(&mut self, message: String, expected_crash_point: Option<&str>) -> ! {
-        let cleanup_deadline = Instant::now() + self.cleanup_timeout;
+        let cleanup_deadline = self.begin_cleanup();
+        self.fail_after_kill_until(message, expected_crash_point, cleanup_deadline)
+    }
+
+    fn fail_after_kill_until(
+        &mut self,
+        message: String,
+        expected_crash_point: Option<&str>,
+        cleanup_deadline: Instant,
+    ) -> ! {
         let status = self
             .kill_and_reap_until(cleanup_deadline)
             .map(|status| status.to_string())
@@ -415,11 +426,22 @@ impl RunningProbe {
     }
 
     fn finish_stdout(&mut self) -> Result<Vec<String>, String> {
-        self.finish_stdout_until(Instant::now() + self.cleanup_timeout)
+        let cleanup_deadline = self.begin_cleanup();
+        self.finish_stdout_until(cleanup_deadline)
     }
 
     fn finish_stderr(&mut self) -> String {
-        self.finish_stderr_until(Instant::now() + self.cleanup_timeout)
+        let cleanup_deadline = self.begin_cleanup();
+        self.finish_stderr_until(cleanup_deadline)
+    }
+
+    fn begin_cleanup(&mut self) -> Instant {
+        if let Some(deadline) = self.cleanup_deadline {
+            return deadline;
+        }
+        let deadline = Instant::now() + self.cleanup_timeout;
+        self.cleanup_deadline = Some(deadline);
+        deadline
     }
 
     fn finish_stdout_until(&mut self, deadline: Instant) -> Result<Vec<String>, String> {
@@ -444,7 +466,8 @@ impl RunningProbe {
     }
 
     fn kill_and_reap(&mut self) -> Result<ExitStatus, String> {
-        self.kill_and_reap_until(Instant::now() + self.cleanup_timeout)
+        let cleanup_deadline = self.begin_cleanup();
+        self.kill_and_reap_until(cleanup_deadline)
     }
 
     fn kill_and_reap_until(&mut self, deadline: Instant) -> Result<ExitStatus, String> {
@@ -570,7 +593,7 @@ fn finish_reader<T>(
 
 impl Drop for RunningProbe {
     fn drop(&mut self) {
-        let cleanup_deadline = Instant::now() + self.cleanup_timeout;
+        let cleanup_deadline = self.begin_cleanup();
         if !self.cleanup_attempted && self.child.try_wait().ok().flatten().is_none() {
             let _ = self.kill_and_reap_until(cleanup_deadline);
         } else {
@@ -918,6 +941,107 @@ fn drop_bounds_both_reader_joins() {
              elapsed {elapsed:?}",
         );
     }
+}
+
+#[test]
+fn both_stalled_readers_share_one_cleanup_deadline() {
+    let env = TestEnv::new();
+    let cleanup_timeout = Duration::from_secs(1);
+    let mut running = probe(&env)
+        .with_cleanup_timeout(cleanup_timeout)
+        .with_stdout_reader_delay(Duration::from_secs(5))
+        .with_stderr_reader_delay(Duration::from_secs(5))
+        .op(["hold-lock", "--ms", "0"])
+        .spawn();
+    running.wait_for_exit("finish", None);
+
+    let (elapsed, message) = catch_probe_failure(|| {
+        let _ = running.finish_stdout().unwrap_or_else(|error| {
+            running.fail_after_kill(
+                format!("failed while waiting for probe stdout reader to finish: {error}"),
+                None,
+            )
+        });
+    });
+
+    assert!(
+        elapsed < cleanup_timeout + Duration::from_millis(500),
+        "both-reader cleanup exceeded its single shared deadline: elapsed {elapsed:?}; \
+         failure: {message}",
+    );
+    assert!(
+        message.contains("probe stdout reader did not finish")
+            && message.contains("probe stderr reader did not finish"),
+        "both-reader cleanup did not report both stalled readers: {message}",
+    );
+
+    // Also cover the successful-stdout path: stdout consumes most of the
+    // budget, then `Drop` gets only the remainder for stderr.
+    let cleanup_timeout = Duration::from_secs(2);
+    let mut running = probe(&env)
+        .with_cleanup_timeout(cleanup_timeout)
+        .with_stdout_reader_delay(Duration::from_millis(1500))
+        .with_stderr_reader_delay(Duration::from_secs(5))
+        .op(["hold-lock", "--ms", "0"])
+        .spawn();
+    running.wait_for_exit("finish", None);
+
+    let started = Instant::now();
+    running
+        .finish_stdout()
+        .expect("stdout reader should finish within the shared cleanup deadline");
+    drop(running);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < cleanup_timeout + Duration::from_millis(750),
+        "Drop renewed the cleanup deadline after stdout used part of it: \
+         elapsed {elapsed:?}",
+    );
+}
+
+#[test]
+fn drop_bounds_and_kills_a_live_unreaped_child_during_unwinding() {
+    let env = TestEnv::new();
+    let mut running = probe(&env)
+        .honouring_the_lock()
+        .with_cleanup_timeout(Duration::from_millis(250))
+        .forcing_reap_timeout()
+        .op(["hold-lock", "--ms", "3000"])
+        .spawn();
+    running
+        .wait_for_outcome()
+        .expect_ok("the live child taking the instance lock before Drop");
+
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let started = Instant::now();
+    std::thread::spawn(move || {
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _running = running;
+            panic!("live-child Drop unwind sentinel");
+        }))
+        .expect_err("the sentinel panic should unwind through RunningProbe::drop");
+        let message = failure
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| failure.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_else(|| "<non-string panic>".to_string());
+        let _ = finished_tx.send((started.elapsed(), message));
+    });
+
+    let (elapsed, message) = finished_rx.recv_timeout(Duration::from_secs(2)).expect(
+        "live-child Drop did not finish within its bounded cleanup deadline during unwinding",
+    );
+    assert_eq!(message, "live-child Drop unwind sentinel");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "live-child Drop exceeded its cleanup deadline during unwinding: elapsed {elapsed:?}",
+    );
+
+    probe(&env)
+        .honouring_the_lock()
+        .op(["hold-lock", "--ms", "0"])
+        .run()
+        .expect_ok("a fresh process after live-child Drop");
 }
 
 #[test]
