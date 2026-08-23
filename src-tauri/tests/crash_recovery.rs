@@ -435,6 +435,82 @@ fn build_mod_zip(zip_path: &Path) {
     zw.finish().expect("finish zip");
 }
 
+async fn import_gamebanana_fixture(env: &TestEnv, core: &Core, id: u64) -> gmm_lib::core::Mod {
+    let archive = env.tmp.path().join("coverage-gamebanana-v1.zip");
+    build_mod_zip(&archive);
+    let archive_bytes = std::fs::read(&archive).expect("coverage GameBanana ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/mod.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Coverage GameBanana Mod",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "1.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "mod.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(archive_bytes)
+        .create_async()
+        .await;
+    let endpoints = gmm_lib::core::gamebanana::Endpoints {
+        api_base: server.url(),
+    };
+
+    core.import_gamebanana_with_endpoints(GameCode::Gimi, &id.to_string(), &endpoints)
+        .await
+        .expect("coverage GameBanana import")
+}
+
+async fn reinstall_gamebanana_fixture(env: &TestEnv, core: &Core, id: u64, mod_id: &str) {
+    let archive = env.tmp.path().join("coverage-gamebanana-v2.zip");
+    build_mod_zip(&archive);
+    let archive_bytes = std::fs::read(&archive).expect("coverage reinstall ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/mod.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Coverage GameBanana Mod v2",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "mod.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(archive_bytes)
+        .create_async()
+        .await;
+    let endpoints = gmm_lib::core::gamebanana::Endpoints {
+        api_base: server.url(),
+    };
+
+    core.reinstall_gamebanana_mod_with_endpoints(mod_id, &endpoints)
+        .await
+        .expect("coverage GameBanana reinstall");
+}
+
 /// Crash after the archive is extracted into the Library, before the row
 /// insert. Same orphan shape as `adopt`, reached by the other import
 /// path — worth its own case because `import_zip` has a cleanup branch
@@ -991,6 +1067,15 @@ async fn every_crash_point_is_exercised_by_an_operation() {
     )
     .await
     .expect("coverage ZIP import");
+
+    // A successful GameBanana reinstall drives all four durable swap seams:
+    // witness commit, old-tree quarantine, replacement move, and metadata
+    // commit. PR #176 added these after this inventory test was introduced.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let gamebanana_id = 157_178;
+    let imported = import_gamebanana_fixture(&env, &core, gamebanana_id).await;
+    reinstall_gamebanana_fixture(&env, &core, gamebanana_id, &imported.id).await;
 
     // A missing source creates a staged destination and then forces the
     // identity-checked quarantine cleanup path.
