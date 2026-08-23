@@ -7,7 +7,7 @@ Windows box to know whether a change works.
 | Layer | Where it runs | What it proves |
 |---|---|---|
 | 1. Core integration | any host | business logic against a temp SQLite + Library |
-| 2. IPC contract | any host | Tauri command wire shapes (serde) |
+| 2. IPC contract | any host | Backend serde shapes plus frontend `invoke` envelopes |
 | 3. Frontend component | any host (jsdom) | React state machines + gating |
 | 4. Windows-gated Rust | Windows CI | junctions, registry, loader FFI, full vertical |
 | 5. Installer smoke | Windows CI | the MSI a user actually downloads |
@@ -90,9 +90,12 @@ Driving that wrapper through `tauri::test::get_ipc_response` requires
 synthesising a `Context<MockRuntime>` that carries the real ACL
 capabilities — historically painful (see issue #26 body).
 
-Pragmatic alternative: route the **same Args + return types** the
-command body uses through `serde_json` and call the Core method
-directly. The wire shape is identical; we just skip the runtime.
+The backend half routes the **same Args + return types** the command body
+uses through `serde_json` and calls the Core method directly. Because that
+cannot see how the frontend called `invoke`, `src/api.test.ts` separately
+asserts each struct-argument command's exact command name and outer argument
+envelope. Together the tests catch drift on either side of the boundary; they
+still skip Tauri's runtime, registration, and ACL enforcement.
 
 ```rust
 use gmm_lib::commands::AdoptArgs;
@@ -109,13 +112,16 @@ fn adopt_args_deserialises_from_camel_case_json() {
 }
 ```
 
-When adding a new command, extend `tests/commands_ipc.rs` with two
-assertions per shape:
+When adding a new command, extend `tests/commands_ipc.rs` with the backend
+shape assertions and `src/api.test.ts` with the frontend envelope assertion:
 
 1. **Args deserialise.** Build a `serde_json::json!({ … })` value
    matching the JS-side shape and `from_value` it into the Args
    struct.
-2. **Return serialises.** Run the Core method through whatever setup
+2. **Frontend invokes the real envelope.** Mock `@tauri-apps/api/core`, call
+   the exported API function, and assert the exact command name plus outer
+   object passed to `invoke`.
+3. **Return serialises.** Run the Core method through whatever setup
    makes sense, `to_value` the result, and assert the JSON keys are
    the camelCase / snake_case the frontend expects.
 

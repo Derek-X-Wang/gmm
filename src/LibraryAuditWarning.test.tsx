@@ -220,13 +220,25 @@ it("announces the real freed size and keeps focus after the last delete", async 
   expect(document.activeElement).not.toBe(document.body);
 });
 
-it("offers no way to delete every folder at once", async () => {
+it("one confirmed delete removes only the selected folder", async () => {
+  const user = userEvent.setup();
+  auditLibrary
+    .mockResolvedValueOnce(AUDIT_REPORT)
+    .mockResolvedValue({
+      game: "gimi",
+      unreferenced: [AUDIT_REPORT.unreferenced[1]],
+      totalBytes: AUDIT_REPORT.unreferenced[1].sizeBytes,
+    });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
-  await screen.findByRole("region", { name: /unreferenced library folders/i });
 
-  for (const button of screen.getAllByRole("button")) {
-    expect(button.textContent ?? "").not.toMatch(/all|every|\b2 folders\b/i);
-  }
+  await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
+  await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
+
+  await waitFor(() =>
+    expect(deleteUnreferencedLibraryDir.mock.calls).toEqual([["gimi", FIRST]]),
+  );
+  await waitFor(() => expect(screen.queryByText(FIRST)).not.toBeInTheDocument());
+  expect(screen.getByText(SECOND)).toBeInTheDocument();
 });
 
 it("surfaces a refused action instead of silently doing nothing", async () => {

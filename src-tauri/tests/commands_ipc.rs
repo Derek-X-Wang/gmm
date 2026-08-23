@@ -4,19 +4,19 @@
 //! *or* an equivalent path through serde. Going through Tauri's real
 //! mock runtime requires building a `Context<MockRuntime>` that
 //! carries the project's ACL capabilities; the issue body documents
-//! that route as the harder path. The cheaper route — and the one
+//! that route as the harder path. The cheaper backend route — and the one
 //! this file takes — is to round-trip the **same Args and return
 //! types** the `#[tauri::command]` macro consumes through `serde_json`,
-//! and call the Core method body directly. The wire shape that lands
-//! on the JS side is identical (Tauri uses serde for both directions);
-//! we just skip the runtime that wraps it.
+//! and call the Core method body directly. `src/api.test.ts` covers the
+//! other half by asserting the frontend's real command name and outer
+//! `invoke` envelope; neither suite claims to drive Tauri's runtime.
 //!
 //! See `docs/testing.md` for the pattern + how to extend this file
 //! when a new command lands.
 //!
 //! **Scope caveat.** These tests round-trip the Args/return types
-//! through serde and call Core directly. They prove the *wire shapes*
-//! match what the frontend sends and expects — they do not exercise
+//! through serde and call Core directly. Alongside `src/api.test.ts`, they
+//! prove both halves agree on the wire shapes — they do not exercise
 //! Tauri's IPC layer, command registration, or capability enforcement.
 //! `tests/ipc_contract.rs` covers registration; nothing covers ACL
 //! enforcement yet.
@@ -293,7 +293,10 @@ fn deleted_library_dir_response_uses_camel_case() {
         reclamation.get("path").and_then(Value::as_str),
         Some("/library/gimi/.gmm-delete-01QUARANTINE"),
     );
-    assert!(object.contains_key("path"));
+    assert_eq!(
+        object.get("path").and_then(Value::as_str),
+        Some("/library/gimi/01ORPHAN"),
+    );
 }
 
 #[tokio::test]
