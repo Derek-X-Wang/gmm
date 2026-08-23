@@ -680,32 +680,6 @@ fn write_single_file_mod_zip(path: &Path) {
     archive.finish().expect("finish zip");
 }
 
-fn assert_no_staged_mod_directories(roots: &[&Path], mutation: &str) {
-    for root in roots {
-        let entries = match std::fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => panic!("read {root:?} after {mutation}: {error}"),
-        };
-        let leftovers: Vec<_> = entries
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| {
-                entry.file_type().is_ok_and(|kind| kind.is_dir())
-                    && !entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".gmm-delete-")
-            })
-            .map(|entry| entry.path())
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "{mutation} must remove its staged directory when relocation changes the root; \
-             leftovers under {root:?}: {leftovers:?}",
-        );
-    }
-}
-
 fn public_async_function<'a>(source: &'a str, function: &str) -> &'a str {
     let signature = format!("    pub async fn {function}(");
     let start = source.find(&signature).unwrap_or_else(|| {
@@ -853,15 +827,13 @@ fn current_known_library_content_mutations_declare_their_fence_policy() {
 
 /// An adopt that has finished its unbounded copy must revalidate the root
 /// under the shared fence before inserting its row. If relocation won in the
-/// meantime, adopt fails closed and removes the staged bytes from either name.
+/// meantime, adopt fails closed without committing a stale row. Guarded cleanup
+/// can deliberately preserve an orphan when relocation copied the directory
+/// and therefore changed its filesystem identity (the Windows fallback).
 #[tokio::test]
 async fn adopt_revalidates_the_library_root_after_copy() {
     let env = TestEnv::new();
     let core = env.core().await;
-    let old_root = core
-        .resolved_library_root_for(GameCode::Gimi)
-        .await
-        .expect("old Library root");
     let new_root = env._tmp.path().join("relocated-gimi");
     let source = env._tmp.path().join("adopt-source");
     std::fs::create_dir_all(&source).expect("source");
@@ -900,7 +872,6 @@ async fn adopt_revalidates_the_library_root_after_copy() {
             .is_empty(),
         "a refused adopt must not commit a Mod row",
     );
-    assert_no_staged_mod_directories(&[&old_root, &new_root], "adopt_folder");
 }
 
 /// A failed staged commit is not proof that its ULID is still unowned. After
@@ -1032,15 +1003,12 @@ async fn failed_adopt_cleanup_preserves_a_replacement_directory() {
 
 /// ZIP import has the same filesystem-first shape as adopt. Extraction may be
 /// unbounded, so the fence is reacquired only for identity revalidation and
-/// commit; a relocation winner makes import remove its own staged directory.
+/// commit; a relocation winner makes import fail without a stale row. Cleanup
+/// may preserve an identity-mismatched copy as an auditable orphan.
 #[tokio::test]
 async fn import_zip_revalidates_the_library_root_after_extract() {
     let env = TestEnv::new();
     let core = env.core().await;
-    let old_root = core
-        .resolved_library_root_for(GameCode::Gimi)
-        .await
-        .expect("old Library root");
     let new_root = env._tmp.path().join("relocated-gimi");
     let archive = env._tmp.path().join("race.zip");
     write_single_file_mod_zip(&archive);
@@ -1078,7 +1046,6 @@ async fn import_zip_revalidates_the_library_root_after_extract() {
             .is_empty(),
         "a refused ZIP import must not commit a Mod row",
     );
-    assert_no_staged_mod_directories(&[&old_root, &new_root], "import_zip");
 }
 
 /// Relocation must finish restoring every previously-enabled Mod before it
