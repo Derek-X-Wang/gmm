@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -220,12 +220,92 @@ it("announces the real freed size and keeps focus after the last delete", async 
   expect(document.activeElement).not.toBe(document.body);
 });
 
-it("offers no way to delete every folder at once", async () => {
+it("one confirmed delete removes only the selected folder", async () => {
+  const user = userEvent.setup();
+  auditLibrary
+    .mockResolvedValueOnce(AUDIT_REPORT)
+    .mockResolvedValue({
+      game: "gimi",
+      unreferenced: [AUDIT_REPORT.unreferenced[1]],
+      totalBytes: AUDIT_REPORT.unreferenced[1].sizeBytes,
+    });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
-  await screen.findByRole("region", { name: /unreferenced library folders/i });
 
-  for (const button of screen.getAllByRole("button")) {
-    expect(button.textContent ?? "").not.toMatch(/all|every|\b2 folders\b/i);
+  await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
+  await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
+
+  await waitFor(() =>
+    expect(deleteUnreferencedLibraryDir.mock.calls).toEqual([["gimi", FIRST]]),
+  );
+  await waitFor(() => expect(screen.queryByText(FIRST)).not.toBeInTheDocument());
+  expect(screen.getByText(SECOND)).toBeInTheDocument();
+});
+
+it("no control exposed across the panel can delete two folders in one confirmation", async () => {
+  /**
+   * Exercise every button initially present anywhere in the panel, then every
+   * new button one click reveals. This catches an immediate bulk control and a
+   * one-step confirmation regardless of its label or which row/panel section
+   * owns it. It deliberately does not claim to crawl non-button controls or a
+   * destructive flow that requires more than one confirmation step.
+   */
+  async function renderPanel() {
+    const user = userEvent.setup();
+    const view = renderWithQuery(<LibraryAuditWarning game="gimi" />);
+    const panel = await screen.findByRole("region", {
+      name: /unreferenced library folders/i,
+    });
+    const initialButtons = within(panel).getAllByRole("button");
+    return { user, view, panel, initialButtons };
+  }
+
+  function resetCalls() {
+    auditLibrary.mockClear();
+    revealUnreferencedLibraryDir.mockClear();
+    recoverUnreferencedLibraryDir.mockClear();
+    deleteUnreferencedLibraryDir.mockClear();
+  }
+
+  const discovery = await renderPanel();
+  const initialButtonCount = discovery.initialButtons.length;
+  discovery.view.unmount();
+  discovery.view.client.clear();
+  cleanup();
+
+  for (let first = 0; first < initialButtonCount; first += 1) {
+    resetCalls();
+    const path = await renderPanel();
+    await path.user.click(path.initialButtons[first]);
+    expect(
+      deleteUnreferencedLibraryDir.mock.calls.length,
+      `initial panel button ${first} deleted more than one folder`,
+    ).toBeLessThanOrEqual(1);
+
+    const revealedButtons = within(path.panel)
+      .getAllByRole("button")
+      .filter((button) => !path.initialButtons.includes(button));
+    const revealedButtonCount = revealedButtons.length;
+    path.view.unmount();
+    path.view.client.clear();
+    cleanup();
+
+    for (let confirmation = 0; confirmation < revealedButtonCount; confirmation += 1) {
+      resetCalls();
+      const confirmedPath = await renderPanel();
+      await confirmedPath.user.click(confirmedPath.initialButtons[first]);
+      const confirmationButtons = within(confirmedPath.panel)
+        .getAllByRole("button")
+        .filter((button) => !confirmedPath.initialButtons.includes(button));
+      await confirmedPath.user.click(confirmationButtons[confirmation]);
+
+      expect(
+        deleteUnreferencedLibraryDir.mock.calls.length,
+        `panel button ${first}, confirmation button ${confirmation} deleted more than one folder`,
+      ).toBeLessThanOrEqual(1);
+      confirmedPath.view.unmount();
+      confirmedPath.view.client.clear();
+      cleanup();
+    }
   }
 });
 

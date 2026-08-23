@@ -4,20 +4,21 @@
 //! *or* an equivalent path through serde. Going through Tauri's real
 //! mock runtime requires building a `Context<MockRuntime>` that
 //! carries the project's ACL capabilities; the issue body documents
-//! that route as the harder path. The cheaper route — and the one
+//! that route as the harder path. The cheaper backend route — and the one
 //! this file takes — is to round-trip the **same Args and return
 //! types** the `#[tauri::command]` macro consumes through `serde_json`,
-//! and call the Core method body directly. The wire shape that lands
-//! on the JS side is identical (Tauri uses serde for both directions);
-//! we just skip the runtime that wraps it.
+//! and call the Core method body directly. `src/api.test.ts` covers the
+//! frontend's real command name and outer `invoke` envelope, while
+//! `tests/ipc_contract.rs` directly compares that outer key with the Rust
+//! command parameter identifier; none of these suites drives Tauri's runtime.
 //!
 //! See `docs/testing.md` for the pattern + how to extend this file
 //! when a new command lands.
 //!
 //! **Scope caveat.** These tests round-trip the Args/return types
-//! through serde and call Core directly. They prove the *wire shapes*
-//! match what the frontend sends and expects — they do not exercise
-//! Tauri's IPC layer, command registration, or capability enforcement.
+//! through serde and call Core directly. The cross-source test in
+//! `tests/ipc_contract.rs` binds the outer field name; these tests do not
+//! exercise Tauri's IPC layer or capability enforcement.
 //! `tests/ipc_contract.rs` covers registration; nothing covers ACL
 //! enforcement yet.
 
@@ -26,7 +27,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use gmm_lib::commands::{
-    list_supported_games, AdoptArgs, GameBananaImportArgs, ImportZipArgs, LibraryPaths,
+    list_supported_games, AdoptArgs, GameBananaImportArgs, ImportZipArgs, LibraryPaths, ProxyArgs,
     RecoverLibraryDirArgs, NO_INSTALL_PATH_FOR_ENABLE_MSG,
 };
 use gmm_lib::core::conflicts::ConflictReport;
@@ -98,6 +99,18 @@ fn gamebanana_import_args_deserialises_with_camel_case_url_or_id() {
     let args: GameBananaImportArgs = from_json(v);
     assert_eq!(args.game, GameCode::Gimi);
     assert_eq!(args.url_or_id, "1234567");
+}
+
+#[test]
+fn proxy_args_deserialise_from_the_frontend_shape() {
+    let args: ProxyArgs = from_json(json!({
+        "url": "http://127.0.0.1:8080",
+        "username": "alice",
+        "password": null,
+    }));
+    assert_eq!(args.url.as_deref(), Some("http://127.0.0.1:8080"));
+    assert_eq!(args.username.as_deref(), Some("alice"));
+    assert_eq!(args.password, None);
 }
 
 #[tokio::test]
@@ -293,7 +306,10 @@ fn deleted_library_dir_response_uses_camel_case() {
         reclamation.get("path").and_then(Value::as_str),
         Some("/library/gimi/.gmm-delete-01QUARANTINE"),
     );
-    assert!(object.contains_key("path"));
+    assert_eq!(
+        object.get("path").and_then(Value::as_str),
+        Some("/library/gimi/01ORPHAN"),
+    );
 }
 
 #[tokio::test]

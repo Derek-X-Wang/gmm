@@ -39,6 +39,29 @@
 //! on disk and before the row is updated — the window in which the
 //! Library and the DB disagree.
 
+/// Define every named seam and derive the registry from those same declarations.
+///
+/// Keeping the declarations inside one macro invocation makes registration a
+/// consequence of defining a point: there is no second list for an author to
+/// remember to update.
+macro_rules! define_crash_points {
+    ($(
+        $(#[$attribute:meta])*
+        pub const $name:ident: &str = $value:literal;
+    )*) => {
+        $(
+            $(#[$attribute])*
+            pub const $name: &str = $value;
+        )*
+
+        /// Every declared crash point. Adding a declaration above adds it here
+        /// automatically, so the execution-coverage test cannot overlook it.
+        pub const ALL: &[&str] = &[$($name),*];
+    };
+}
+
+define_crash_points! {
+
 /// `set_enabled(true)`: the Junction now exists, the row still says
 /// disabled. Recoverable — see the Junction, believe the row, remove it.
 pub const SET_ENABLED_AFTER_JUNCTION_CREATE: &str = "set_enabled.after_junction_create";
@@ -147,30 +170,4 @@ pub const DELETE_AFTER_QUARANTINE_MOVE: &str = "delete.after_quarantine_move";
 /// the identity handle that proved it has been released, immediately before
 /// the shared purge re-opens the reserved path.
 pub const DELETE_BEFORE_QUARANTINE_PURGE: &str = "delete.before_quarantine_purge";
-
-/// Every point, so a test can enumerate them and so adding one without
-/// covering it is visible in review.
-pub const ALL: &[&str] = &[
-    SET_ENABLED_AFTER_JUNCTION_CREATE,
-    SET_ENABLED_AFTER_JUNCTION_REMOVE,
-    SET_ACTIVE_VARIANT_AFTER_DB_UPDATE,
-    SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE,
-    ADOPT_AFTER_LIBRARY_COPY,
-    ADOPT_AFTER_ROW_INSERT,
-    IMPORT_ZIP_AFTER_EXTRACT,
-    IMPORT_ZIP_AFTER_ROW_INSERT,
-    REINSTALL_AFTER_WITNESS_COMMIT,
-    REINSTALL_AFTER_OLD_QUARANTINE_MOVE,
-    REINSTALL_AFTER_REPLACEMENT_MOVE,
-    REINSTALL_AFTER_METADATA_COMMIT,
-    STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE,
-    STAGED_CLEANUP_AFTER_QUARANTINE_MOVE,
-    STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE,
-    RELOCATE_AFTER_MOD_SNAPSHOT,
-    RELOCATE_AFTER_JUNCTION_RESTORE,
-    RELOCATE_AFTER_FENCE_COMMIT,
-    RECOVER_AFTER_LIBRARY_MOVE,
-    DELETE_AFTER_INTENT_WRITE,
-    DELETE_AFTER_QUARANTINE_MOVE,
-    DELETE_BEFORE_QUARANTINE_PURGE,
-];
+}

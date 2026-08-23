@@ -60,8 +60,10 @@
 //!   row says — so this is a content bug, not a consistency bug.
 //!   Re-running detection on load would fix it.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use gmm_lib::core::{crash_points, Core, GameCode};
 use tempfile::TempDir;
@@ -129,7 +131,7 @@ impl TestEnv {
         assert!(
             crash_points::ALL.contains(&crash_at),
             "{crash_at:?} is not a known crash point; \
-             add it to crash_points::ALL so it cannot silently never fire",
+             declare it through define_crash_points! so it cannot silently never fire",
         );
 
         let out = Command::new(probe_bin())
@@ -431,6 +433,82 @@ fn build_mod_zip(zip_path: &Path) {
             .expect("write ini");
     }
     zw.finish().expect("finish zip");
+}
+
+async fn import_gamebanana_fixture(env: &TestEnv, core: &Core, id: u64) -> gmm_lib::core::Mod {
+    let archive = env.tmp.path().join("coverage-gamebanana-v1.zip");
+    build_mod_zip(&archive);
+    let archive_bytes = std::fs::read(&archive).expect("coverage GameBanana ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/mod.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Coverage GameBanana Mod",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "1.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "mod.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(archive_bytes)
+        .create_async()
+        .await;
+    let endpoints = gmm_lib::core::gamebanana::Endpoints {
+        api_base: server.url(),
+    };
+
+    core.import_gamebanana_with_endpoints(GameCode::Gimi, &id.to_string(), &endpoints)
+        .await
+        .expect("coverage GameBanana import")
+}
+
+async fn reinstall_gamebanana_fixture(env: &TestEnv, core: &Core, id: u64, mod_id: &str) {
+    let archive = env.tmp.path().join("coverage-gamebanana-v2.zip");
+    build_mod_zip(&archive);
+    let archive_bytes = std::fs::read(&archive).expect("coverage reinstall ZIP bytes");
+    let mut server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/mod.zip");
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Coverage GameBanana Mod v2",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "mod.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(archive_bytes)
+        .create_async()
+        .await;
+    let endpoints = gmm_lib::core::gamebanana::Endpoints {
+        api_base: server.url(),
+    };
+
+    core.reinstall_gamebanana_mod_with_endpoints(mod_id, &endpoints)
+        .await
+        .expect("coverage GameBanana reinstall");
 }
 
 /// Crash after the archive is extracted into the Library, before the row
@@ -920,33 +998,146 @@ async fn recover_refuses_a_live_interrupted_delete_quarantine() {
 // Coverage
 // ---------------------------------------------------------------------
 
-/// Every crash point must be exercised by a crash-recovery or deterministic
-/// concurrency test. Relocation's snapshot point is a rendezvous seam rather
-/// than a process-abort seam, so its coverage belongs in `concurrency.rs`.
-///
-/// Without this, adding a point to `crash_points::ALL` and forgetting to
-/// cover it looks exactly like covering it — the constant compiles, the
-/// suite is green, and the new durable step has no crash test at all.
-#[test]
-fn every_crash_point_is_covered_by_a_test() {
-    let source = format!(
-        "{}\n{}",
-        include_str!("crash_recovery.rs"),
-        include_str!("concurrency.rs"),
-    );
-    let uncovered: Vec<_> = crash_points::ALL
+/// Exercise the ordinary success and cleanup paths with a hook that records
+/// the points the implementation actually reaches. A new entry in `ALL`, or
+/// a point accidentally removed from its mutation, stays red until a real
+/// operation drives that seam; comments, ignored tests, and dead branches do
+/// not affect the observation.
+#[tokio::test]
+async fn every_crash_point_is_exercised_by_an_operation() {
+    let reached = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let observe = |core: Core| {
+        let reached = Arc::clone(&reached);
+        core.with_crash_hook(Arc::new(move |point| {
+            reached
+                .lock()
+                .expect("crash-point observation lock")
+                .insert(point.to_owned());
+        }))
+    };
+
+    // Adopt, enable, switch Variant, and disable cover both filesystem/row
+    // orderings on the common Mod mutation paths.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let source = env.tmp.path().join("coverage-variants");
+    for variant in ["Red", "Blue"] {
+        let directory = source.join(variant);
+        std::fs::create_dir_all(&directory).expect("coverage Variant directory");
+        std::fs::write(directory.join("merged.ini"), format!("; {variant}\n"))
+            .expect("coverage Variant ini");
+    }
+    let adopted = core
+        .adopt_folder(GameCode::Gimi, &source, "Coverage Mod")
+        .await
+        .expect("coverage adopt");
+    core.set_enabled(&adopted.id, true, &env.game_mods)
+        .await
+        .expect("coverage enable");
+    let variants = core
+        .list_variants(&adopted.id)
+        .await
+        .expect("coverage variants");
+    let active = core
+        .active_variant_id(&adopted.id)
+        .await
+        .expect("coverage active Variant")
+        .expect("coverage Mod has an active Variant");
+    let other = variants
         .iter()
-        .filter(|point| {
-            // Match on the constant's Rust name, which is what the
-            // tests actually reference — `set_enabled.after_x` is
-            // declared as `SET_ENABLED_AFTER_X`. Matching the string
-            // literal instead would only ever find `crash_points.rs`.
-            let const_name = point.replace('.', "_").to_uppercase();
-            !source.contains(&const_name)
-        })
+        .find(|variant| variant.id != active)
+        .expect("coverage Mod has a second Variant");
+    core.set_active_variant(&adopted.id, &other.id, &env.game_mods)
+        .await
+        .expect("coverage Variant switch");
+    core.set_enabled(&adopted.id, false, &env.game_mods)
+        .await
+        .expect("coverage disable");
+
+    // ZIP import has distinct durable seams from folder adoption.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let archive = env.tmp.path().join("coverage.zip");
+    build_mod_zip(&archive);
+    core.import_zip(
+        GameCode::Gimi,
+        &archive,
+        "Coverage ZIP",
+        gmm_lib::core::ImportZipOptions::default(),
+    )
+    .await
+    .expect("coverage ZIP import");
+
+    // A successful GameBanana reinstall drives all four durable swap seams:
+    // witness commit, old-tree quarantine, replacement move, and metadata
+    // commit. PR #176 added these after this inventory test was introduced.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let gamebanana_id = 157_178;
+    let imported = import_gamebanana_fixture(&env, &core, gamebanana_id).await;
+    reinstall_gamebanana_fixture(&env, &core, gamebanana_id, &imported.id).await;
+
+    // A missing source creates a staged destination and then forces the
+    // identity-checked quarantine cleanup path.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let missing_source = env.tmp.path().join("missing-coverage-source");
+    assert!(
+        core.adopt_folder(GameCode::Gimi, &missing_source, "Coverage Cleanup")
+            .await
+            .is_err(),
+        "coverage staged adopt must fail and clean up",
+    );
+
+    // Relocating one enabled Mod reaches the snapshot, Junction-restore, and
+    // fence-commit seams.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let relocated = seed_mod(&env, &core, "Coverage Relocation").await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("coverage game install root"),
+    )
+    .await
+    .expect("coverage game install path");
+    core.set_enabled(&relocated.id, true, &env.game_mods)
+        .await
+        .expect("coverage relocation enable");
+    let new_root = env.tmp.path().join("coverage-relocated-library");
+    core.set_library_path_for_game(GameCode::Gimi, Some(&new_root))
+        .await
+        .expect("coverage relocation");
+
+    // Recovery of a non-ULID directory and explicit deletion reach the two
+    // remaining Library-recovery paths.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("coverage Library root");
+    let dropped = root.join("Coverage Dropped Folder");
+    std::fs::create_dir_all(&dropped).expect("coverage dropped directory");
+    std::fs::write(dropped.join("merged.ini"), b"hash=coverage\n").expect("coverage dropped ini");
+    core.recover_unreferenced_library_dir(GameCode::Gimi, &dropped, "Coverage Recovery")
+        .await
+        .expect("coverage recovery");
+
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    std::fs::create_dir_all(&orphan).expect("coverage delete directory");
+    std::fs::write(orphan.join("delete-me"), b"coverage").expect("coverage delete marker");
+    core.delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("coverage delete");
+
+    let reached = reached.lock().expect("crash-point observation lock");
+    let missing: Vec<_> = crash_points::ALL
+        .iter()
+        .copied()
+        .filter(|point| !reached.contains(*point))
         .collect();
     assert!(
-        uncovered.is_empty(),
-        "crash points with no test in this file: {uncovered:?}",
+        missing.is_empty(),
+        "registered crash points no operation actually exercised: {missing:?}",
     );
 }
