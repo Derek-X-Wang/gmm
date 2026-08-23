@@ -255,6 +255,70 @@ async fn a_failed_fetch_and_an_empty_but_valid_manifest_are_not_the_same_value()
     );
 }
 
+#[tokio::test]
+async fn the_loopback_override_does_not_follow_a_redirect_off_loopback() {
+    // Bind the target on every local interface, then address it through this
+    // machine's non-loopback interface. If reqwest follows the redirect, the
+    // target observes a real second request that `.expect(0)` rejects.
+    let route_probe = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind route probe");
+    route_probe
+        .connect("192.0.2.1:80")
+        .expect("select the host's outbound interface");
+    let off_loopback_ip = route_probe.local_addr().expect("route probe address").ip();
+    assert!(
+        !off_loopback_ip.is_loopback() && !off_loopback_ip.is_unspecified(),
+        "the redirect target must exercise a non-loopback interface: {off_loopback_ip}",
+    );
+
+    let mut escaped_target = mockito::Server::new_with_opts_async(mockito::ServerOpts {
+        host: "0.0.0.0",
+        ..Default::default()
+    })
+    .await;
+    let escaped_url = format!(
+        "http://{off_loopback_ip}:{}/escaped-manifest.json",
+        escaped_target.socket_address().port(),
+    );
+    let no_escape = escaped_target
+        .mock("GET", "/escaped-manifest.json")
+        .with_status(200)
+        .with_body(r#"{"schemaVersion": 1, "games": {}}"#)
+        .expect(0)
+        .create_async()
+        .await;
+
+    let mut loopback = mockito::Server::new_async().await;
+    let redirect = loopback
+        .mock("GET", "/recommended-importers.json")
+        .with_status(302)
+        .with_header("location", &escaped_url)
+        .expect(1)
+        .create_async()
+        .await;
+
+    let tmp = TempDir::new().expect("tmp");
+    let outcome = fresh_core(&tmp)
+        .await
+        .refresh_recommended_importers_from_loopback_override(&format!(
+            "{}/recommended-importers.json",
+            loopback.url(),
+        ))
+        .await
+        .expect("refresh");
+
+    redirect.assert_async().await;
+    no_escape.assert_async().await;
+    match outcome {
+        Refreshed::Unreachable(reason) => assert!(
+            reason.contains("302"),
+            "the failed fetch must identify the redirect response: {reason}",
+        ),
+        other => panic!(
+            "a refused redirect is an unreachable fetch, not a successful empty manifest: {other:?}",
+        ),
+    }
+}
+
 /// The three shapes this build cannot make sense of. Each must drop the
 /// whole layer — never apply the readable half, never land on retraction.
 fn unusable_documents() -> Vec<(&'static str, &'static str)> {
@@ -659,35 +723,6 @@ async fn the_refresh_goes_through_the_users_proxy_like_every_other_network_call(
     assert!(
         matches!(outcome, Refreshed::Replaced(_)),
         "the manifest should have arrived through the proxy; got {outcome:?}",
-    );
-}
-
-/// Nothing in the app is reachable from an integration test's `Core`, so
-/// the one thing these tests cannot otherwise assert is that a real
-/// launch ever calls the refresh at all. A feature that is fully tested
-/// and never invoked is exactly the shape of #78, so the wiring is
-/// checked at the source level — the same technique `ipc_contract.rs`
-/// uses for the command registry.
-#[test]
-fn startup_kicks_off_the_refresh_in_the_background() {
-    let lib = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"),
-    )
-    .expect("read lib.rs");
-
-    assert!(
-        lib.contains("refresh_recommended_importers"),
-        "run() must start the once-per-launch manifest refresh, or layer 2 \
-         is permanently whatever the last release cached",
-    );
-
-    let call = lib
-        .find("refresh_recommended_importers")
-        .expect("the call site");
-    let preamble = &lib[..call];
-    assert!(
-        preamble.contains("std::thread::spawn"),
-        "the refresh must run off the startup path — nothing waits on it",
     );
 }
 

@@ -105,13 +105,30 @@ pub fn run() {
     // still in force and still correct — so it is logged and dropped.
     {
         let core_for_manifest = core.clone();
+        let manifest_url_override =
+            crate::core::recommended_importers::loopback_manifest_url_override();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build manifest refresh runtime");
             rt.block_on(async move {
-                match core_for_manifest.refresh_recommended_importers().await {
+                diagnostics::record_manifest_refresh_started();
+                let refresh = match manifest_url_override {
+                    Some(url) => {
+                        core_for_manifest
+                            .refresh_recommended_importers_from_loopback_override(&url)
+                            .await
+                    }
+                    None => core_for_manifest.refresh_recommended_importers().await,
+                };
+                // Expected transport failures, including the held-open smoke
+                // request timing out, are `Ok(Refreshed::Unreachable(..))`.
+                // That makes this terminal `finished` event reachable for
+                // every network outcome; installer-smoke.ps1 relies on it. An
+                // `Err` is an internal refresh failure and deliberately leaves
+                // the smoke to time out while waiting for the terminal event.
+                match refresh {
                     Ok(outcome) => tracing::info!(
                         target: "gmm::recommendations",
                         outcome = ?outcome,

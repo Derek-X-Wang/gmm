@@ -11,9 +11,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use gmm_lib::core::diagnostics::{
-    build_bundle, build_writer, prune_old_logs, record_ipc_ready, SettingsSnapshot,
-    DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS, IPC_READY_COMMAND, IPC_READY_MARKER,
-    LOG_FILE_PREFIX, LOG_FILE_SUFFIX,
+    build_bundle, build_writer, prune_old_logs, record_ipc_ready, record_manifest_refresh_started,
+    SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS, IPC_READY_COMMAND,
+    IPC_READY_MARKER, LOG_FILE_PREFIX, LOG_FILE_SUFFIX, MANIFEST_REFRESH_STARTED_MARKER,
 };
 use tempfile::TempDir;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -203,5 +203,39 @@ fn ipc_ready_marker_lands_in_the_log_file() {
     assert!(
         body.contains(IPC_READY_COMMAND),
         "the marker must name the command that produced it, got:\n{body}",
+    );
+}
+
+/// The packaged startup smoke waits for this marker while holding the
+/// manifest response open. If the event does not survive the JSON layer,
+/// that runtime guard can no longer distinguish a refresh that started
+/// from one that was never wired into startup.
+#[test]
+fn manifest_refresh_started_marker_lands_in_the_log_file() {
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+
+    let (writer, guard) = build_writer(&log_dir).expect("writer");
+    let layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(writer);
+
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        record_manifest_refresh_started();
+    });
+    drop(guard);
+
+    let mut body = String::new();
+    for entry in fs::read_dir(&log_dir).expect("read log_dir") {
+        let path = entry.expect("entry").path();
+        let mut f = fs::File::open(&path).expect("open log");
+        f.read_to_string(&mut body).expect("read log");
+    }
+    assert!(
+        body.contains(MANIFEST_REFRESH_STARTED_MARKER),
+        "log must carry the manifest refresh marker {MANIFEST_REFRESH_STARTED_MARKER}, got:\n{body}",
     );
 }

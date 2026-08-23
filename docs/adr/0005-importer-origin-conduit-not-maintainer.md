@@ -3,6 +3,7 @@
 Date: 2026-08-17
 Status: Accepted
 Amended: 2026-08-21 (#109) — the propose-versus-takes-effect rule, clarified below. The decision is unchanged; the wording that produced the ambiguity is not.
+Amended: 2026-08-22 (#145) — recorded the numeric-loopback-only URL seam used by the packaged startup smoke. Shipped network origins remain fixed.
 
 ## Context
 
@@ -58,6 +59,8 @@ This removes an incoherence rather than adding a rule. Changing origin already *
 
 **The last successfully fetched manifest is authoritative until replaced.** Refresh is a background best-effort once per app start; nothing waits on it and a failure is invisible to the user, because the cache is still in force and still correct. Without a cache, a user's configuration would flap with their network — and in the wrong direction, quietly restoring a package GMM had withdrawn. Silence in the UI is a product choice; a failed fetch must never be collapsed into "recommends nothing" anywhere in the data model, which is the defect that left the Loader update check reporting "up to date" for its entire life (#78).
 
+**The installed-release startup smoke has one numeric-loopback-only manifest URL seam.** The smoke must exercise the actual release bundle while holding a response open to prove this background refresh cannot block startup, so a test-only Cargo feature cannot provide the seam. The environment value is accepted only for an HTTP(S) URL whose host parses as a loopback IP address; hostnames, internet addresses, non-HTTP schemes, and malformed values fall back to the permanent manifest URL. The override client also refuses redirects, treating a redirect response as an unreachable fetch whose cache remains authoritative. This preserves the supply-chain boundary above: no environment supplied by a shortcut, wrapper, or mod-pack installer can redirect a release build to another network origin. The permanent raw-content path deliberately still follows up to ten redirects because its host may legitimately redirect; the environment cannot choose that path or its redirect target.
+
 **Declining a recommendation is scoped to the origin it proposed** — not to the game, and not to origin plus version. Suppressing a whole game would silently strand the one user who most needs a later fix. Version scoping would re-prompt on every upstream release; GIMI shipped two versions on one day. Declines are visible and reversible on the affected game's surface, because dismissing is a one-click reflex.
 
 **Recommendations can be switched off entirely, and off removes the whole layer** — no fetch, no prompts, no consulting the cache, and no retraction of the compiled-in default. Turning off only the UI would leave GMM silently acting on a file the user said not to consult. Recommendations are on by default; this is an opt-out, and it is deliberately distinct from a decline, which is a judgement about one proposal rather than a standing preference.
@@ -72,7 +75,7 @@ Two supporting commitments follow: CI validates the manifest's shape offline on 
 
 - **The user is never stuck.** A dead upstream package becomes a settings change instead of an indefinite wait, and it works on already-shipped builds because the manifest is fetched rather than shipped.
 - **A fresh user on a retracted game gets no default and must supply an origin.** Real friction, accepted deliberately: better than silently installing a package GMM has withdrawn its recommendation from.
-- **`main` can never be renamed and the manifest path can never move.** Every build ever shipped requests exactly one URL, forever. This is a permanent constraint on the repository, not a preference.
+- **`main` can never be renamed and the manifest path can never move.** Outside the numeric-loopback startup-smoke seam, every build ever shipped requests exactly one URL, forever. This is a permanent constraint on the repository, not a preference.
 - **A valid-but-wrong manifest reaches every user immediately.** Raw content is served with a cache measured in minutes, and there is no staged rollout. The review gate on `main` plus offline shape validation are the only things standing between a bad commit and every install; that is why the gate, not the branch, drove the location decision.
 - **A user who opts out and later sits on a dead compiled-in default gets no warning.** They have explicitly taken on managing this themselves, and their own override sits above everything regardless.
 - **The only act that moves an existing install onto a different origin is the user accepting a proposal** — or setting their own override, which is the same explicit act one layer up. Recording an origin *without* installing is deliberately not offered: it would assert an origin and a version for files GMM has never seen, and pin clearing, the update badge and the proposal logic all read that record.
