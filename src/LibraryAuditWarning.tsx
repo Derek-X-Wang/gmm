@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -50,14 +50,11 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState<OpenAction>(null);
   const [feedback, setFeedback] = useState<ActionFeedback | null>(null);
-  const feedbackRef = useRef<HTMLParagraphElement>(null);
+  const reportRef = useRef<HTMLElement>(null);
   useEffect(() => {
     setOpen(null);
     setFeedback(null);
   }, [game]);
-  useEffect(() => {
-    if (feedback) feedbackRef.current?.focus();
-  }, [feedback]);
 
   const audit = useQuery({
     queryKey: ["libraryAudit", game],
@@ -70,6 +67,13 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
     void qc.invalidateQueries({ queryKey: ["libraryAudit", game] });
     void qc.invalidateQueries({ queryKey: ["mods", game] });
   };
+  const publishFeedback = (nextFeedback: ActionFeedback) => {
+    // Keep focus out of the disappearing action controls, but let the
+    // already-mounted live region — not focus — announce the outcome.
+    reportRef.current?.focus();
+    setFeedback(nextFeedback);
+    refresh();
+  };
 
   const reveal = useMutation({
     mutationFn: (path: string) => revealUnreferencedLibraryDir(game, path),
@@ -78,19 +82,17 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
     mutationFn: (args: { path: string; directoryName: string; name: string }) =>
       recoverUnreferencedLibraryDir(game, args.path, args.name),
     onSuccess: (recovered, args) => {
-      setFeedback({
+      publishFeedback({
         kind: "recovered",
         directoryName: args.directoryName,
         name: recovered.name,
       });
-      refresh();
     },
   });
   const remove = useMutation({
     mutationFn: (path: string) => deleteUnreferencedLibraryDir(game, path),
     onSuccess: (deleted) => {
-      setFeedback({ kind: "deleted", deleted });
-      refresh();
+      publishFeedback({ kind: "deleted", deleted });
     },
   });
 
@@ -116,8 +118,13 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const count = report.unreferenced.length;
   if (count === 0) {
     return feedback ? (
-      <section className="library-audit-warning" aria-label="Unreferenced Library folders">
-        <ActionNotice feedback={feedback} focusRef={feedbackRef} />
+      <section
+        ref={reportRef}
+        className="library-audit-warning"
+        aria-label="Unreferenced Library folders"
+        tabIndex={-1}
+      >
+        <ActionNotice feedback={feedback} />
       </section>
     ) : null;
   }
@@ -127,8 +134,13 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   // on every change, and this one now contains a text field and a
   // confirmation the user is interacting with.
   return (
-    <section className="library-audit-warning" aria-label="Unreferenced Library folders">
-      <ActionNotice feedback={feedback} focusRef={feedbackRef} />
+    <section
+      ref={reportRef}
+      className="library-audit-warning"
+      aria-label="Unreferenced Library folders"
+      tabIndex={-1}
+    >
+      <ActionNotice feedback={feedback} />
       {failure ? (
         <p className="error" role="alert">
           {String(failure)}
@@ -205,56 +217,62 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   );
 }
 
-function ActionNotice({
-  feedback,
-  focusRef,
-}: {
-  feedback: ActionFeedback | null;
-  focusRef: RefObject<HTMLParagraphElement | null>;
-}) {
-  if (!feedback) return null;
-  if (feedback.kind === "recovered") {
-    return (
-      <p ref={focusRef} className="muted small" role="status" tabIndex={-1}>
+function ActionNotice({ feedback }: { feedback: ActionFeedback | null }) {
+  let status: ReactNode = null;
+  let alert: ReactNode = null;
+
+  if (feedback?.kind === "recovered") {
+    status = (
+      <>
         Recovered <code>{feedback.directoryName}</code> as {feedback.name}.
-      </p>
+      </>
     );
+  } else if (feedback?.kind === "deleted") {
+    const { deleted } = feedback;
+    const outcome = deleted.reclamation;
+    if (outcome.status === "reclaimed") {
+      status = (
+        <>
+          Deleted <code>{deleted.directoryName}</code>
+          {deleted.sizeBytes === null ? (
+            <>. Its disk space was reclaimed, but the freed size is unknown.</>
+          ) : (
+            <> and freed {formatBytes(deleted.sizeBytes)}.</>
+          )}
+        </>
+      );
+    } else if (outcome.status === "deferred") {
+      status = (
+        <>
+          GMM removed {deleted.path} from the Library, but could not reclaim its disk
+          space now. Its bytes remain at {outcome.path}. GMM will retry during a later
+          startup while it can still verify that directory at its reserved name.
+        </>
+      );
+    } else if (outcome.status === "ownershipLost") {
+      alert = (
+        <>
+          GMM removed {deleted.path} from the Library, but could not confirm whether its
+          disk space was reclaimed. GMM does not know whether any of that folder&apos;s bytes
+          remain or, if they do, where they are. If GMM can again verify the original
+          directory at its reserved name, a later startup will retry reclamation.
+        </>
+      );
+    }
   }
 
-  const { deleted } = feedback;
-  const outcome = deleted.reclamation;
-  if (outcome.status === "reclaimed") {
-    return (
-      <p ref={focusRef} className="muted small" role="status" tabIndex={-1}>
-        Deleted <code>{deleted.directoryName}</code>
-        {deleted.sizeBytes === null ? (
-          <>. Its disk space was reclaimed, but the freed size is unknown.</>
-        ) : (
-          <> and freed {formatBytes(deleted.sizeBytes)}.</>
-        )}
-      </p>
-    );
-  }
-  if (outcome.status === "deferred") {
-    return (
-      <p ref={focusRef} className="muted small" role="status" tabIndex={-1}>
-        GMM removed {deleted.path} from the Library, but could not reclaim its disk
-        space now. Its bytes remain at {outcome.path}. GMM will retry during a later
-        startup while it can still verify that directory at its reserved name.
-      </p>
-    );
-  }
-  if (outcome.status === "ownershipLost") {
-    return (
-      <p ref={focusRef} className="error" role="alert" tabIndex={-1}>
-        GMM removed {deleted.path} from the Library, but could not confirm whether its
-        disk space was reclaimed. GMM does not know whether any of that folder&apos;s bytes
-        remain or, if they do, where they are. If GMM can again verify the original
-        directory at its reserved name, a later startup will retry reclamation.
-      </p>
-    );
-  }
-  return null;
+  // Both regions must exist before their text changes. Mounting a populated
+  // live region is not announced reliably by every screen reader.
+  return (
+    <>
+      <div className="action-notice muted small" role="status">
+        {status}
+      </div>
+      <div className="action-notice error" role="alert">
+        {alert}
+      </div>
+    </>
+  );
 }
 
 /**

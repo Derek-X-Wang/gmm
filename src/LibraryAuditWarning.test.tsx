@@ -174,13 +174,22 @@ it("announces a recovered folder and keeps focus when the panel would unmount", 
   recoverUnreferencedLibraryDir.mockResolvedValue({ id: "01FIRST", name: "Raiden" });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
 
+  // jsdom cannot prove that assistive technology spoke. This instead guards
+  // the required lifecycle: text changes inside a live region that already exists.
+  const status = await screen.findByRole("status");
+  expect(status).toBeEmptyDOMElement();
   await user.click((await folder(FIRST)).getByRole("button", { name: /recover/i }));
   await user.type((await folder(FIRST)).getByLabelText(/name/i), "Raiden");
   await user.click((await folder(FIRST)).getByRole("button", { name: /^recover$/i }));
 
-  const status = await screen.findByRole("status");
-  expect(status).toHaveTextContent("Recovered 01FIRST as Raiden");
-  await waitFor(() => expect(status).toHaveFocus());
+  await waitFor(() => expect(status).toHaveTextContent("Recovered 01FIRST as Raiden"));
+  expect(screen.getByRole("status")).toBe(status);
+  await waitFor(() =>
+    expect(
+      screen.getByRole("region", { name: /unreferenced library folders/i }),
+    ).toHaveFocus(),
+  );
+  expect(status).not.toHaveFocus();
   expect(document.activeElement).not.toBe(document.body);
 });
 
@@ -195,12 +204,19 @@ it("announces the real freed size and keeps focus after the last delete", async 
     .mockResolvedValue({ game: "gimi", unreferenced: [], totalBytes: 0 });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
 
+  const status = await screen.findByRole("status");
+  expect(status).toBeEmptyDOMElement();
   await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
   await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
 
-  const status = await screen.findByRole("status");
-  expect(status).toHaveTextContent("Deleted 01FIRST and freed 400 MB");
-  await waitFor(() => expect(status).toHaveFocus());
+  await waitFor(() => expect(status).toHaveTextContent("Deleted 01FIRST and freed 400 MB"));
+  expect(screen.getByRole("status")).toBe(status);
+  await waitFor(() =>
+    expect(
+      screen.getByRole("region", { name: /unreferenced library folders/i }),
+    ).toHaveFocus(),
+  );
+  expect(status).not.toHaveFocus();
   expect(document.activeElement).not.toBe(document.body);
 });
 
@@ -223,9 +239,9 @@ it("surfaces a refused action instead of silently doing nothing", async () => {
   await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
   await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    /a Mod now references it/i,
-  );
+  const alerts = await screen.findAllByRole("alert");
+  expect(alerts.find((alert) => /a Mod now references it/i.test(alert.textContent ?? "")))
+    .toHaveTextContent(/a Mod now references it/i);
 });
 
 it("says deferred bytes remain at the reserved path and later startups will retry", async () => {
@@ -242,17 +258,24 @@ it("says deferred bytes remain at the reserved path and later startups will retr
   });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
 
+  const notice = await screen.findByRole("status");
+  expect(notice).toBeEmptyDOMElement();
   await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
   await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
 
-  const notice = await screen.findByRole("status");
   await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole("status")).toBe(notice);
   expect(notice).toHaveTextContent(/GMM will retry during a later startup/i);
   expect(notice).toHaveTextContent(quarantine);
   expect(notice).toHaveTextContent(/could not reclaim its disk space now/i);
   expect(notice).toHaveTextContent(/can still verify that directory at its reserved name/i);
   expect(notice).not.toHaveTextContent(/freed/i);
-  await waitFor(() => expect(notice).toHaveFocus());
+  await waitFor(() =>
+    expect(
+      screen.getByRole("region", { name: /unreferenced library folders/i }),
+    ).toHaveFocus(),
+  );
+  expect(notice).not.toHaveFocus();
 });
 
 it("announces ownership loss without presenting the reserved path as a cleanup target", async () => {
@@ -269,17 +292,24 @@ it("announces ownership loss without presenting the reserved path as a cleanup t
   });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
 
+  const notice = await screen.findByRole("alert");
+  expect(notice).toBeEmptyDOMElement();
   await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
   await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
 
-  const notice = await screen.findByRole("alert");
   await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole("alert")).toBe(notice);
   expect(notice).toHaveTextContent(FIRST);
   expect(notice).toHaveTextContent(/could not confirm whether its disk space was reclaimed/i);
   expect(notice).toHaveTextContent(/does not know whether any of that folder's bytes remain/i);
   expect(notice).toHaveTextContent(/verify the original directory at its reserved name/i);
   expect(notice).not.toHaveTextContent(quarantine);
   expect(notice).not.toHaveTextContent(/freed/i);
-  await waitFor(() => expect(notice).toHaveFocus());
+  await waitFor(() =>
+    expect(
+      screen.getByRole("region", { name: /unreferenced library folders/i }),
+    ).toHaveFocus(),
+  );
+  expect(notice).not.toHaveFocus();
   expect(document.activeElement).not.toBe(document.body);
 });

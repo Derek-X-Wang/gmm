@@ -168,6 +168,20 @@ code {
   overflow-wrap: anywhere;
 }
 
+/* Keep empty live regions in the accessibility tree without adding blank
+ * rows to the visible report before an action has feedback to announce. */
+.library-audit-warning .action-notice:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .library-audit-warning li > .row {
   margin: 0.3rem 0 0.6rem;
   flex-wrap: wrap;
