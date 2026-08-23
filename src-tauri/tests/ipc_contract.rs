@@ -246,6 +246,24 @@ fn contains_identifier(text: &str, name: &str) -> bool {
     })
 }
 
+fn argument_type_names(parameter: &str) -> Vec<String> {
+    let Some((_, parameter_type)) = parameter.split_once(':') else {
+        return parameter
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .filter(|identifier| identifier.ends_with("Args"))
+            .map(str::to_string)
+            .collect();
+    };
+
+    parameter_type
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|identifier| identifier.ends_with("Args"))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Inventory every one-line `struct` declaration whose name ends in `Args`,
 /// independently of the exact public form the contract parser supports. This
 /// is the completeness sentinel: changing `pub struct ProxyArgs` to
@@ -310,9 +328,10 @@ fn declared_argument_types(src: &str) -> BTreeMap<String, String> {
 }
 
 /// Derive every struct-argument command and its real outer parameter name from
-/// `commands.rs`. The supported syntax stays deliberately narrow, while the
-/// independent declaration inventory above makes any unsupported form a named
-/// failure instead of silently narrowing coverage.
+/// `commands.rs`. Command parameters are inventoried independently of the
+/// declarations above so moving an `*Args` type to another module cannot make
+/// its command silently disappear. The supported syntax stays deliberately
+/// narrow: unsupported forms fail by name instead of narrowing coverage.
 fn backend_struct_argument_names() -> BTreeMap<String, (String, String)> {
     const ATTRIBUTE: &str = "#[tauri::command]";
 
@@ -333,6 +352,33 @@ fn backend_struct_argument_names() -> BTreeMap<String, (String, String)> {
         rest = &after_attribute[block_end..];
 
         let declaration = block.trim_start();
+        let function = declaration.find("fn ").unwrap_or_else(|| {
+            panic!(
+                "unparsed #[tauri::command] function declaration: {:?}",
+                declaration.lines().next().unwrap_or_default(),
+            )
+        });
+        let discovered_signature = &declaration[function + "fn ".len()..];
+        let discovered_open = discovered_signature.find('(').unwrap_or_else(|| {
+            panic!(
+                "unparsed #[tauri::command] function declaration: {:?}",
+                declaration.lines().next().unwrap_or_default(),
+            )
+        });
+        let discovered_command = discovered_signature[..discovered_open].trim();
+        let discovered_tail = &discovered_signature[discovered_open + 1..];
+        let discovered_close = matching_delimiter(discovered_tail, '(', ')').unwrap_or_else(|| {
+            panic!("unterminated signature for {discovered_command}: {declaration:?}")
+        });
+        for parameter in top_level_fields(&discovered_tail[..discovered_close]) {
+            for argument_type in argument_type_names(parameter) {
+                assert!(
+                    argument_types.contains_key(&argument_type),
+                    "{discovered_command} parameter {parameter:?} uses {argument_type}, but that type is missing from the *Args declaration inventory built from src-tauri/src/commands.rs; move {argument_type} back into commands.rs or teach declared_argument_types where to scan before moving it",
+                );
+            }
+        }
+
         let Some(signature) = declaration.strip_prefix("pub async fn ") else {
             let mentioned: Vec<_> = argument_types
                 .keys()
@@ -359,11 +405,7 @@ fn backend_struct_argument_names() -> BTreeMap<String, (String, String)> {
         let parameters = &tail[..close];
 
         for parameter in top_level_fields(parameters) {
-            let mentioned: Vec<_> = argument_types
-                .keys()
-                .filter(|name| contains_identifier(parameter, name))
-                .cloned()
-                .collect();
+            let mentioned = argument_type_names(parameter);
             if mentioned.is_empty() {
                 continue;
             }
@@ -455,7 +497,7 @@ fn frontend_invocation_outer_names() -> BTreeMap<String, Vec<FrontendInvocation>
                 None => Err("has no argument object".to_string()),
                 Some(after_comma) => match after_comma.trim_start().strip_prefix('{') {
                     None => Err(format!(
-                        "has an unsupported non-object argument: {:?}",
+                        "has an unsupported non-object argument: {:?}; inline the argument envelope as an object at this callsite, or extend frontend_invocation_outer_names to support this form",
                         after_comma.trim_start().lines().next().unwrap_or_default(),
                     )),
                     Some(object) => {

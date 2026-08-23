@@ -122,8 +122,15 @@ list: it inventories every `*Args` struct declaration, requires each type to
 be the unqualified parameter of exactly one `#[tauri::command] pub async fn`,
 and checks every frontend `invoke` callsite it finds for that command. Its
 source parser deliberately supports the repository's current declaration
-style; a different visibility, sync function, qualified type, or wrapped type
-fails by naming the unsupported declaration instead of silently dropping it.
+style: `*Args` declarations must remain in `src-tauri/src/commands.rs`.
+Moving a declaration to another module, using a different visibility or sync
+function, or qualifying or wrapping the Rust type fails with an actionable
+diagnostic instead of silently dropping that command. On the frontend, the
+scanner checks every callsite it recognises: a double-quoted command-name
+literal with an inline object envelope. A recognised callsite with a
+non-inline envelope fails and tells the developer to inline it or extend the
+scanner; other command-name syntax is outside this test's coverage. Supporting
+an excluded form requires extending the scanner alongside the syntax change.
 It does not replace the explicit serde-shape and frontend API assertions below,
 or prove Tauri runtime/ACL behaviour:
 
