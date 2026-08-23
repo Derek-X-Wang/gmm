@@ -78,6 +78,12 @@ pub const IMPORT_ZIP_AFTER_ROW_INSERT: &str = "import_zip.after_row_insert";
 /// moved yet. A concurrent row committer must not enter after this snapshot.
 pub const RELOCATE_AFTER_MOD_SNAPSHOT: &str = "relocate.after_mod_snapshot";
 
+/// `set_library_path_for_game` / `set_library_root`: the Library move,
+/// rewritten rows, and junction restoration have committed. A Game Session
+/// may claim the database after this point without observing a half-restored
+/// relocation.
+pub const RELOCATE_AFTER_FENCE_COMMIT: &str = "relocate.after_fence_commit";
+
 /// `recover_unreferenced_library_dir`: a Library-root directory whose
 /// name was not a usable ULID has been renamed to the fresh one, and no
 /// row references it yet. Leaves the same orphan shape as
@@ -107,6 +113,7 @@ pub const ALL: &[&str] = &[
     IMPORT_ZIP_AFTER_EXTRACT,
     IMPORT_ZIP_AFTER_ROW_INSERT,
     RELOCATE_AFTER_MOD_SNAPSHOT,
+    RELOCATE_AFTER_FENCE_COMMIT,
     RECOVER_AFTER_LIBRARY_MOVE,
     DELETE_AFTER_INTENT_WRITE,
     DELETE_AFTER_QUARANTINE_MOVE,

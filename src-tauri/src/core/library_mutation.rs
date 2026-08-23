@@ -44,9 +44,11 @@ impl LibraryMutation {
     }
 }
 
-/// A deliberate exception is executable documentation, not a comment that a
-/// later refactor can accidentally erase. #166 owns staging-and-swap for the
-/// existing destructive reinstall path; #164 must not partially implement it.
+/// Source marker for the architecture inventory in `tests/concurrency.rs`.
+/// The assertions are only a debug-build sanity check; release builds get no
+/// runtime enforcement from this function, and a new filesystem primitive or
+/// module can escape the inventory. #166 owns staging-and-swap for the existing
+/// destructive reinstall path; #164 must not partially implement it.
 pub(super) fn record_library_mutation_exemption(mutation: LibraryMutation, issue: u32) {
     debug_assert_eq!(mutation, LibraryMutation::ReinstallGamebananaMod);
     debug_assert_eq!(issue, 166);
@@ -73,6 +75,36 @@ pub(super) struct LibraryRootSnapshot {
 impl LibraryRootSnapshot {
     pub(super) fn path(&self) -> &Path {
         self.root.path()
+    }
+
+    /// Create the ULID directory before unbounded copy/extract work and retain
+    /// its filesystem identity until either its row commits or guarded cleanup
+    /// proves the same object is still unowned.
+    pub(super) fn create_staged_directory(
+        &self,
+        directory_name: &str,
+    ) -> Result<StagedLibraryDirectory> {
+        let path = self.path().join(directory_name);
+        std::fs::create_dir(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let directory = IdentifiedDirectory::open(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(StagedLibraryDirectory { directory })
+    }
+}
+
+/// Identity evidence for bytes staged outside the writer fence.
+pub(super) struct StagedLibraryDirectory {
+    directory: IdentifiedDirectory,
+}
+
+impl StagedLibraryDirectory {
+    pub(super) fn path(&self) -> &Path {
+        self.directory.path()
     }
 }
 
@@ -139,19 +171,139 @@ impl Core {
     pub(super) async fn cleanup_staged_library_dir(
         &self,
         snapshot: &LibraryRootSnapshot,
-        directory_name: &str,
+        staged: &StagedLibraryDirectory,
+        mutation: LibraryMutation,
     ) {
-        let old_path = snapshot.path().join(directory_name);
-        remove_staged_dir(&old_path);
-
-        // A relocation may have carried the staged ULID into its new root.
-        // The ULID belongs to this failed operation and no row was committed,
-        // so removing that exact sibling is cleanup, not deletion of a Mod.
-        if let Ok(current_root) = self.resolved_library_root_for(snapshot.game).await {
-            let current_path = current_root.join(directory_name);
-            if current_path != old_path {
-                remove_staged_dir(&current_path);
+        let mut fence = match self.begin_library_mutation(mutation).await {
+            Ok(fence) => fence,
+            Err(error) => {
+                tracing::warn!(
+                    target: "gmm::library",
+                    path = %staged.path().display(),
+                    error = %error,
+                    "could not fence staged Library cleanup; leaving bytes for orphan audit",
+                );
+                return;
             }
+        };
+        let current_root = match self
+            .resolved_library_root_for_in_mutation(snapshot.game, &mut fence)
+            .await
+        {
+            Ok(root) => root,
+            Err(error) => {
+                tracing::warn!(
+                    target: "gmm::library",
+                    path = %staged.path().display(),
+                    error = %error,
+                    "could not resolve the current Library root during staged cleanup; leaving bytes for orphan audit",
+                );
+                return;
+            }
+        };
+        let directory_name = staged
+            .path()
+            .file_name()
+            .expect("a staged Library directory has a final component");
+        let current_path = current_root.join(directory_name);
+        let mut candidates = vec![staged.path().to_path_buf()];
+        if current_path != staged.path() {
+            candidates.push(current_path);
+        }
+
+        for path in candidates {
+            let current = match IdentifiedDirectory::open(&path) {
+                Ok(directory) => directory,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    tracing::warn!(
+                        target: "gmm::library",
+                        path = %path.display(),
+                        error = %source,
+                        "could not identify a staged Library cleanup candidate; leaving it for orphan audit",
+                    );
+                    continue;
+                }
+            };
+            if current.identity() != staged.directory.identity() {
+                tracing::warn!(
+                    target: "gmm::library",
+                    path = %path.display(),
+                    "staged Library cleanup candidate changed identity; leaving it for orphan audit",
+                );
+                continue;
+            }
+            let referenced_paths = match sqlx::query("SELECT library_path FROM mods")
+                .fetch_all(&mut *fence.transaction)
+                .await
+            {
+                Ok(referenced_paths) => referenced_paths,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "gmm::library",
+                        path = %path.display(),
+                        error = %error,
+                        "could not prove a staged Library directory is unowned; leaving it for orphan audit",
+                    );
+                    continue;
+                }
+            };
+            let mut owned = false;
+            let mut ownership_unknown = false;
+            for row in referenced_paths {
+                let referenced = match row.try_get::<String, _>("library_path") {
+                    Ok(referenced) => PathBuf::from(referenced),
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "gmm::library",
+                            path = %path.display(),
+                            error = %error,
+                            "could not read a Mod's Library path during staged cleanup; leaving the candidate for orphan audit",
+                        );
+                        ownership_unknown = true;
+                        break;
+                    }
+                };
+                match IdentifiedDirectory::open(&referenced) {
+                    Ok(referenced) if referenced.identity() == current.identity() => {
+                        owned = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        tracing::warn!(
+                            target: "gmm::library",
+                            path = %path.display(),
+                            referenced_path = %referenced.display(),
+                            error = %source,
+                            "could not prove a Mod row does not own the staged cleanup candidate; leaving it for orphan audit",
+                        );
+                        ownership_unknown = true;
+                        break;
+                    }
+                }
+            }
+            if ownership_unknown {
+                continue;
+            }
+            if owned {
+                tracing::warn!(
+                    target: "gmm::library",
+                    path = %path.display(),
+                    "staged Library cleanup candidate is now owned by a Mod; leaving it intact",
+                );
+                continue;
+            }
+            remove_staged_dir(&path);
+        }
+        if let Err(error) = fence.commit().await {
+            tracing::warn!(
+                target: "gmm::library",
+                path = %staged.path().display(),
+                error = %error,
+                "could not commit the staged Library cleanup fence",
+            );
         }
     }
 

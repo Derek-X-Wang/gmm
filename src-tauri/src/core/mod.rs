@@ -295,8 +295,10 @@ impl Core {
             new_root.map(|p| p.to_string_lossy().to_string()).as_deref(),
         )
         .await?;
+        self.restore_relocated_junctions(previously_enabled, &mut fence)
+            .await?;
         fence.commit().await?;
-        self.restore_relocated_junctions(previously_enabled).await?;
+        self.crash_point(crash_points::RELOCATE_AFTER_FENCE_COMMIT);
         Ok(report)
     }
 
@@ -356,8 +358,10 @@ impl Core {
             new_path.map(|p| p.to_string_lossy().to_string()).as_deref(),
         )
         .await?;
+        self.restore_relocated_junctions(previously_enabled, &mut fence)
+            .await?;
         fence.commit().await?;
-        self.restore_relocated_junctions(previously_enabled).await?;
+        self.crash_point(crash_points::RELOCATE_AFTER_FENCE_COMMIT);
         Ok(report)
     }
 
@@ -484,29 +488,51 @@ impl Core {
         Ok((report, previously_enabled))
     }
 
-    /// Re-enable Mods only after the root path and every rewritten row commit
-    /// together. Junction repair is outside the Library ownership fence: it
-    /// touches the game overlay, not Library-owned bytes.
+    /// Restore every previously-enabled Mod's junction while the writer fence
+    /// still excludes Game Session claims. The rows remain enabled throughout;
+    /// persisting a temporary disabled state would let a session claim strand
+    /// the remaining Mods as disabled.
     async fn restore_relocated_junctions(
         &self,
         previously_enabled: Vec<(String, GameCode)>,
+        fence: &mut library_mutation::LibraryMutationFence,
     ) -> Result<()> {
         for (id, game) in previously_enabled {
-            let install = self.game_install_path(game).await?;
+            let game_row = sqlx::query("SELECT install_path FROM games WHERE code = ?")
+                .bind(game.as_str())
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+            let install = game_row
+                .try_get::<Option<String>, _>("install_path")?
+                .map(PathBuf::from);
             if let Some(install) = install {
                 let mods_dir = install.join("Mods");
                 std::fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
                     path: mods_dir.clone(),
                     source,
                 })?;
-                // `set_enabled(false)` was effectively done by the
-                // junction::remove above without persisting; flip the
-                // bit through the proper path now so junctions land.
-                sqlx::query("UPDATE mods SET enabled = 0 WHERE id = ?")
-                    .bind(&id)
-                    .execute(&self.pool)
-                    .await?;
-                self.set_enabled(&id, true, &mods_dir).await?;
+                let row = sqlx::query(
+                    "SELECT junction_dir_name, library_path, active_variant_id
+                     FROM mods WHERE id = ?",
+                )
+                .bind(&id)
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+                let junction_dir_name: String = row.try_get("junction_dir_name")?;
+                let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+                let active_variant_id: Option<String> = row.try_get("active_variant_id")?;
+                let target = if let Some(active_variant_id) = active_variant_id {
+                    let variant = sqlx::query("SELECT subpath FROM mod_variants WHERE id = ?")
+                        .bind(active_variant_id)
+                        .fetch_one(&mut *fence.transaction)
+                        .await?;
+                    library_path.join(variant.try_get::<String, _>("subpath")?)
+                } else {
+                    library_path
+                };
+                let link = mods_dir.join(junction_dir_name);
+                volume::require_ntfs_pair(&mods_dir, &target)?;
+                junction::create(&link, &target)?;
             }
         }
 
@@ -529,10 +555,16 @@ impl Core {
             )
             .await?;
         let id = Ulid::new().to_string();
-        let library_path = root.path().join(&id);
+        let staged = root.create_staged_directory(&id)?;
+        let library_path = staged.path().to_path_buf();
 
         if let Err(error) = copy_dir_recursive(source_path, &library_path) {
-            self.cleanup_staged_library_dir(&root, &id).await;
+            self.cleanup_staged_library_dir(
+                &root,
+                &staged,
+                library_mutation::LibraryMutation::AdoptFolder,
+            )
+            .await;
             return Err(error);
         }
         self.crash_point(crash_points::ADOPT_AFTER_LIBRARY_COPY);
@@ -546,7 +578,12 @@ impl Core {
         {
             Ok(fence) => fence,
             Err(error) => {
-                self.cleanup_staged_library_dir(&root, &id).await;
+                self.cleanup_staged_library_dir(
+                    &root,
+                    &staged,
+                    library_mutation::LibraryMutation::AdoptFolder,
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -2295,13 +2332,19 @@ impl Core {
             .snapshot_library_root_for_mutation(game, library_mutation::LibraryMutation::ImportZip)
             .await?;
         let id = Ulid::new().to_string();
-        let library_path = root.path().join(&id);
+        let staged = root.create_staged_directory(&id)?;
+        let library_path = staged.path().to_path_buf();
 
         if let Err(e) = zip_import::extract(zip_path, &library_path, opts) {
             // Best-effort cleanup. We swallow remove_dir_all errors so the
             // user sees the original extraction failure, not a noisy
             // cleanup follow-up.
-            self.cleanup_staged_library_dir(&root, &id).await;
+            self.cleanup_staged_library_dir(
+                &root,
+                &staged,
+                library_mutation::LibraryMutation::ImportZip,
+            )
+            .await;
             return Err(e);
         }
         self.crash_point(crash_points::IMPORT_ZIP_AFTER_EXTRACT);
@@ -2315,7 +2358,12 @@ impl Core {
         {
             Ok(fence) => fence,
             Err(error) => {
-                self.cleanup_staged_library_dir(&root, &id).await;
+                self.cleanup_staged_library_dir(
+                    &root,
+                    &staged,
+                    library_mutation::LibraryMutation::ImportZip,
+                )
+                .await;
                 return Err(error);
             }
         };
