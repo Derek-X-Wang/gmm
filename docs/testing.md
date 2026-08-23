@@ -7,7 +7,7 @@ Windows box to know whether a change works.
 | Layer | Where it runs | What it proves |
 |---|---|---|
 | 1. Core integration | any host | business logic against a temp SQLite + Library |
-| 2. IPC contract | any host | Tauri command wire shapes (serde) |
+| 2. IPC contract | any host | Backend serde shapes plus frontend `invoke` envelopes |
 | 3. Frontend component | any host (jsdom) | React state machines + gating |
 | 4. Windows-gated Rust | Windows CI | junctions, registry, loader FFI, full vertical |
 | 5. Installer smoke | Windows CI | the MSI a user actually downloads |
@@ -90,9 +90,15 @@ Driving that wrapper through `tauri::test::get_ipc_response` requires
 synthesising a `Context<MockRuntime>` that carries the real ACL
 capabilities — historically painful (see issue #26 body).
 
-Pragmatic alternative: route the **same Args + return types** the
-command body uses through `serde_json` and call the Core method
-directly. The wire shape is identical; we just skip the runtime.
+The backend half routes the **same Args + return types** the command body
+uses through `serde_json` and calls the Core method directly. Because that
+cannot see how the frontend called `invoke`, `src/api.test.ts` asserts each
+current `*Args` command's real frontend envelope, including `ProxyArgs`.
+`tests/ipc_contract.rs` then parses the actual frontend outer key and actual
+Rust parameter identifier and compares them directly, with no expected-name
+table. Renaming `args` to `request` on only one side therefore fails the
+host-runnable contract test. These tests still skip Tauri's runtime and ACL
+enforcement; registration is covered separately in `tests/ipc_contract.rs`.
 
 ```rust
 use gmm_lib::commands::AdoptArgs;
@@ -109,13 +115,32 @@ fn adopt_args_deserialises_from_camel_case_json() {
 }
 ```
 
-When adding a new command, extend `tests/commands_ipc.rs` with two
-assertions per shape:
+When adding a new `*Args` command, extend `tests/commands_ipc.rs` with the
+backend shape assertions and `src/api.test.ts` with the frontend envelope
+assertion. The cross-source outer-name check has no hand-maintained command
+list: it inventories every `*Args` struct declaration, requires each type to
+be the unqualified parameter of exactly one `#[tauri::command] pub async fn`,
+and checks every frontend `invoke` callsite it finds for that command. Its
+source parser deliberately supports the repository's current declaration
+style: `*Args` declarations must remain in `src-tauri/src/commands.rs`.
+Moving a declaration to another module, using a different visibility or sync
+function, or qualifying or wrapping the Rust type fails with an actionable
+diagnostic instead of silently dropping that command. On the frontend, the
+scanner checks every callsite it recognises: a double-quoted command-name
+literal with an inline object envelope. A recognised callsite with a
+non-inline envelope fails and tells the developer to inline it or extend the
+scanner; other command-name syntax is outside this test's coverage. Supporting
+an excluded form requires extending the scanner alongside the syntax change.
+It does not replace the explicit serde-shape and frontend API assertions below,
+or prove Tauri runtime/ACL behaviour:
 
 1. **Args deserialise.** Build a `serde_json::json!({ … })` value
    matching the JS-side shape and `from_value` it into the Args
    struct.
-2. **Return serialises.** Run the Core method through whatever setup
+2. **Frontend invokes the real envelope.** Mock `@tauri-apps/api/core`, call
+   the exported API function, and assert the exact command name plus outer
+   object passed to `invoke`.
+3. **Return serialises.** Run the Core method through whatever setup
    makes sense, `to_value` the result, and assert the JSON keys are
    the camelCase / snake_case the frontend expects.
 
