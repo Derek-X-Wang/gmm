@@ -19,6 +19,7 @@ pub mod junction;
 pub mod library_audit;
 mod library_identity;
 mod library_mutation;
+mod library_ownership;
 pub mod library_recovery;
 pub mod mod_updates;
 pub mod mods;

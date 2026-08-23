@@ -5,15 +5,14 @@
 //! data but has no database reference. This module finds that shape without
 //! mutating it; inspect/delete/recovery actions belong to issue #72.
 
-use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use sqlx::Row;
 
-use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
+use super::library_identity::IdentifiedDirectory;
+use super::library_ownership::LibraryOwnershipSnapshot;
 use super::{Core, Error, GameCode, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -38,52 +37,22 @@ impl Core {
     /// blocking pool and never follows links.
     pub async fn audit_library(&self, game: GameCode) -> Result<LibraryAuditReport> {
         let root = self.resolved_library_root_for(game).await?;
-        let rows = sqlx::query("SELECT library_path FROM mods WHERE game_code = ?")
-            .bind(game.as_str())
-            .fetch_all(&self.pool)
-            .await?;
-        let mut referenced = HashSet::new();
-        for row in rows {
-            let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
-            match IdentifiedDirectory::open(&path) {
-                Ok(directory) => {
-                    referenced.insert(directory.identity().clone());
-                }
-                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => return Err(Error::Io { path, source }),
-            }
-        }
-
-        // A committed witness owns the exact staged filesystem object while
-        // extraction runs outside the writer fence. Identity, not its reserved
-        // name, is what makes that live stage safe to suppress.
-        let witness_rows =
-            sqlx::query("SELECT staged_identity FROM reinstall_swaps WHERE game_code = ?")
-                .bind(game.as_str())
-                .fetch_all(&self.pool)
-                .await?;
-        let mut active_reinstall_stages = HashSet::new();
-        for row in witness_rows {
-            active_reinstall_stages.insert(row.try_get::<String, _>("staged_identity")?);
-        }
+        let ownership = LibraryOwnershipSnapshot::load(&self.pool).await?;
 
         let join_error_path = root.clone();
-        tokio::task::spawn_blocking(move || {
-            scan_game_root(game, &root, &referenced, &active_reinstall_stages)
-        })
-        .await
-        .map_err(|join_error| Error::Io {
-            path: join_error_path,
-            source: io::Error::other(format!("Library audit worker failed: {join_error}")),
-        })?
+        tokio::task::spawn_blocking(move || scan_game_root(game, &root, &ownership))
+            .await
+            .map_err(|join_error| Error::Io {
+                path: join_error_path,
+                source: io::Error::other(format!("Library audit worker failed: {join_error}")),
+            })?
     }
 }
 
 fn scan_game_root(
     game: GameCode,
     root: &Path,
-    referenced: &HashSet<DirectoryIdentity>,
-    active_reinstall_stages: &HashSet<String>,
+    ownership: &LibraryOwnershipSnapshot,
 ) -> Result<LibraryAuditReport> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
@@ -123,7 +92,7 @@ fn scan_game_root(
             path: path.clone(),
             source,
         })?;
-        if active_reinstall_stages.contains(&directory.identity().durable_key()) {
+        if ownership.owner_of(directory.identity()).is_some() {
             continue;
         }
         // A process can die after creating reinstall's reserved stage but
@@ -139,10 +108,6 @@ fn scan_game_root(
         {
             continue;
         }
-        if referenced.contains(directory.identity()) {
-            continue;
-        }
-
         unreferenced.push(UnreferencedLibraryDir {
             directory_name: entry.file_name().to_string_lossy().into_owned(),
             size_bytes: directory_size_without_links(&path).ok(),

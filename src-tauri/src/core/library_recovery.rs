@@ -42,7 +42,7 @@ use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::{Executor, Row, Sqlite};
+use sqlx::{Executor, Sqlite};
 use ulid::Ulid;
 
 use super::library_audit::{directory_size_without_links, is_link_or_reparse_point};
@@ -605,44 +605,20 @@ impl Core {
             source,
         })?;
 
-        // Across every game, not just this one: a per-game Library root
-        // override can point two games at the same directory, and a row
-        // from either one makes these bytes somebody's Mod.
-        let rows = sqlx::query(
-            "SELECT library_path, NULL AS staged_identity FROM mods
-             UNION ALL
-             SELECT staged_path AS library_path, staged_identity FROM reinstall_swaps",
-        )
-        .fetch_all(executor)
-        .await?;
-        for row in rows {
-            if let Some(staged_identity) = row.try_get::<Option<String>, _>("staged_identity")? {
-                if staged_identity == directory.identity().durable_key() {
-                    return Err(Error::NotAnUnreferencedLibraryDir {
-                        path,
-                        reason: "it is an active reinstall staging directory owned by GMM"
-                            .to_string(),
-                    });
+        let ownership = super::library_ownership::LibraryOwnershipSnapshot::load(executor).await?;
+        if let Some(owner) = ownership.owner_of(directory.identity()) {
+            let reason = match owner {
+                super::library_ownership::LibraryDirectoryOwner::Mod => {
+                    "a Mod now references it — refresh the report"
                 }
-                continue;
-            }
-            let referenced = PathBuf::from(row.try_get::<String, _>("library_path")?);
-            let referenced = match IdentifiedDirectory::open(&referenced) {
-                Ok(referenced) => referenced,
-                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-                Err(source) => {
-                    return Err(Error::Io {
-                        path: referenced,
-                        source,
-                    })
+                super::library_ownership::LibraryDirectoryOwner::ActiveReinstallStage => {
+                    "it is an active reinstall staging directory owned by GMM"
                 }
             };
-            if referenced.identity() == directory.identity() {
-                return Err(Error::NotAnUnreferencedLibraryDir {
-                    path,
-                    reason: "a Mod now references it — refresh the report".to_string(),
-                });
-            }
+            return Err(Error::NotAnUnreferencedLibraryDir {
+                path,
+                reason: reason.to_string(),
+            });
         }
 
         Ok(directory)

@@ -180,6 +180,42 @@ async fn audit_reports_only_unreferenced_directories_without_changing_them() {
     );
 }
 
+#[tokio::test]
+async fn audit_treats_another_games_mod_as_referenced_when_library_roots_are_shared() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let shared_root = tmp.path().join("shared-library-root");
+    core.set_library_path_for_game(GameCode::Gimi, Some(&shared_root))
+        .await
+        .expect("share GIMI Library root");
+    core.set_library_path_for_game(GameCode::Srmi, Some(&shared_root))
+        .await
+        .expect("share SRMI Library root");
+
+    let source = tmp.path().join("shared-root-source");
+    fs::create_dir_all(&source).expect("source directory");
+    fs::write(source.join("merged.ini"), b"owned by GIMI").expect("source bytes");
+    let installed = core
+        .adopt_folder(GameCode::Gimi, &source, "Shared Root Mod")
+        .await
+        .expect("adopt GIMI Mod into shared root");
+
+    let report = core
+        .audit_library(GameCode::Srmi)
+        .await
+        .expect("audit SRMI shared root");
+
+    assert!(
+        report.unreferenced.is_empty(),
+        "a Mod row from either Game owns its directory in a shared Library root: {report:?}",
+    );
+    assert_eq!(
+        fs::read(installed.library_path.join("merged.ini")).expect("installed bytes"),
+        b"owned by GIMI",
+        "the read-only audit must leave the other Game's Mod intact",
+    );
+}
+
 /// Reinstall creates its reserved stage before committing the witness. A hard
 /// process death in that narrow window can leave only that empty directory:
 /// extraction has not started, no row claims it, and a future reinstall uses a
