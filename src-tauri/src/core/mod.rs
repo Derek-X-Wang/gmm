@@ -786,14 +786,11 @@ impl Core {
         Ok(())
     }
 
-    /// Re-run the slice-11 GameBanana ingest against an existing mod
-    /// row. Preserves the mod ID + the user's enabled/junction state
-    /// + active variant if it still exists post-extract.
-    ///
-    /// Mechanics: drop the junction (if enabled), wipe the Library
-    /// subtree, download the latest asset, extract via
-    /// `zip_import::extract`, re-run variant detection, rewrite the
-    /// metadata columns, restore the enabled state.
+    /// Re-run the slice-11 GameBanana ingest against an existing Mod row.
+    /// The replacement is fully extracted and inspected under a durable swap
+    /// witness before the installed Library subtree is touched. The final
+    /// same-volume swap, metadata/Variant rewrite, and Junction retarget are
+    /// fenced; witness deletion is part of that exact metadata transaction.
     pub async fn reinstall_gamebanana_mod(&self, mod_id: &str) -> Result<()> {
         self.reinstall_gamebanana_mod_with_endpoints(mod_id, &gamebanana::Endpoints::default())
             .await
@@ -806,13 +803,9 @@ impl Core {
         mod_id: &str,
         endpoints: &gamebanana::Endpoints,
     ) -> Result<()> {
-        library_mutation::record_library_mutation_exemption(
-            library_mutation::LibraryMutation::ReinstallGamebananaMod,
-            166,
-        );
         self.ensure_no_active_session().await?;
         let row = sqlx::query(
-            "SELECT game_code, gamebanana_id, library_path, junction_dir_name, enabled
+            "SELECT game_code, gamebanana_id
              FROM mods WHERE id = ?",
         )
         .bind(mod_id)
@@ -824,23 +817,9 @@ impl Core {
         let gid = gid.ok_or_else(|| {
             Error::GameBanana(format!("mod {mod_id} has no GameBanana submission ID"))
         })? as u64;
-        let library_path: String = row.try_get("library_path")?;
-        let library_path = PathBuf::from(library_path);
-        let junction_dir_name: String = row.try_get("junction_dir_name")?;
-        let was_enabled = row.try_get::<i64, _>("enabled")? != 0;
 
-        let install = self.game_install_path(game).await?;
-        let mods_dir = install.as_ref().map(|p| p.join("Mods"));
-
-        // 1. Drop the junction if enabled. The set_enabled path also
-        //    updates the persisted flag — we'll flip it back at the end.
-        if was_enabled {
-            if let Some(mods_dir) = mods_dir.as_ref() {
-                self.set_enabled(mod_id, false, mods_dir).await?;
-            }
-        }
-
-        // 2. Resolve metadata + download fresh zip.
+        // 1. Resolve metadata + download the fresh ZIP before creating any
+        //    filesystem recovery state. The installed Mod remains untouched.
         let client = self.http_client().await?;
         let submission = gamebanana::fetch_submission(&client, endpoints, gid).await?;
         let cache = self
@@ -855,59 +834,357 @@ impl Core {
         let zip_path = cache.join(format!("{}-{}", gid, submission.file_name));
         gamebanana::download_to(&client, &submission.file_url, &zip_path).await?;
 
-        // 3. Wipe the existing Library subtree (the source of truth
-        //    is the new ZIP) and extract over it.
-        if library_path.exists() {
-            std::fs::remove_dir_all(&library_path).map_err(|source| Error::Io {
-                path: library_path.clone(),
+        // 2. Under a short writer fence, re-read the Mod, identify the old
+        //    tree, create the staging directory, and commit the durable
+        //    witness. A crash from this point until metadata commit always
+        //    means rollback to the old tree.
+        let token = Ulid::new();
+        let mut preparation = self
+            .begin_library_mutation(library_mutation::LibraryMutation::ReinstallGamebananaMod)
+            .await?;
+        let current = sqlx::query(
+            "SELECT game_code, gamebanana_id, library_path
+             FROM mods WHERE id = ?",
+        )
+        .bind(mod_id)
+        .fetch_one(&mut *preparation.transaction)
+        .await?;
+        let current_game: String = current.try_get("game_code")?;
+        let current_gid: Option<i64> = current.try_get("gamebanana_id")?;
+        if current_game != game.as_str() || current_gid != Some(gid as i64) {
+            return Err(Error::GameBanana(format!(
+                "mod {mod_id} changed while its replacement was downloading; the installed Mod was not touched"
+            )));
+        }
+        let library_path = PathBuf::from(current.try_get::<String, _>("library_path")?);
+        let root = self
+            .resolved_library_root_for_in_mutation(game, &mut preparation)
+            .await?;
+        let root_directory =
+            library_identity::IdentifiedDirectory::open(&root).map_err(|source| Error::Io {
+                path: root.clone(),
                 source,
             })?;
+        let parent = library_path
+            .parent()
+            .ok_or_else(|| Error::ReinstallRecoveryUncertain {
+                mod_id: mod_id.to_string(),
+                reason: "the installed Library path has no parent".to_string(),
+            })?;
+        let parent_directory =
+            library_identity::IdentifiedDirectory::open(parent).map_err(|source| Error::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        if parent_directory.identity() != root_directory.identity()
+            || library_path.file_name().and_then(|name| name.to_str()) != Some(mod_id)
+        {
+            return Err(Error::ReinstallRecoveryUncertain {
+                mod_id: mod_id.to_string(),
+                reason: "the installed Mod is not the expected direct child of its effective Library root".to_string(),
+            });
         }
-        zip_import::extract(&zip_path, &library_path, ImportZipOptions::default())?;
-
-        // 4. Re-run variant detection. Active variant is reset to the
-        //    first alphabetical to match the original ingest behaviour.
-        sqlx::query("DELETE FROM mod_variants WHERE mod_id = ?")
-            .bind(mod_id)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query("UPDATE mods SET active_variant_id = NULL WHERE id = ?")
-            .bind(mod_id)
-            .execute(&self.pool)
-            .await?;
-        self.detect_and_record_variants(mod_id, &library_path)
-            .await?;
-
-        // 5. Rewrite metadata.
-        sqlx::query(
-            "UPDATE mods
-               SET name = ?,
-                   author = ?,
-                   version = ?,
-                   upstream_version = ?,
-                   screenshot_url = ?
-             WHERE id = ?",
-        )
-        .bind(&submission.name)
-        .bind(&submission.author)
-        .bind(&submission.version)
-        .bind(&submission.version)
-        .bind(&submission.screenshot_url)
-        .bind(mod_id)
-        .execute(&self.pool)
-        .await?;
-
-        // 6. Restore the enabled state. set_enabled honours the new
-        //    active variant (slice 5) automatically.
-        if was_enabled {
-            if let Some(mods_dir) = mods_dir.as_ref() {
-                self.set_enabled(mod_id, true, mods_dir).await?;
+        let old_directory =
+            library_identity::IdentifiedDirectory::open(&library_path).map_err(|source| {
+                Error::Io {
+                    path: library_path.clone(),
+                    source,
+                }
+            })?;
+        let staged_path = root.join(format!(
+            "{}{token}",
+            library_mutation::REINSTALL_STAGING_PREFIX
+        ));
+        std::fs::create_dir(&staged_path).map_err(|source| Error::Io {
+            path: staged_path.clone(),
+            source,
+        })?;
+        let staged_directory = match library_identity::IdentifiedDirectory::open(&staged_path) {
+            Ok(directory) => directory,
+            Err(source) => {
+                let _ = std::fs::remove_dir(&staged_path);
+                return Err(Error::Io {
+                    path: staged_path,
+                    source,
+                });
             }
+        };
+        let staged_identity = staged_directory.identity().durable_key();
+        let quarantine_path = root.join(format!(
+            "{}{}",
+            library_recovery::DELETE_QUARANTINE_PREFIX,
+            token
+        ));
+        let witness_insert = sqlx::query(
+            "INSERT INTO reinstall_swaps (
+                token, mod_id, game_code, library_path, staged_path,
+                quarantine_path, old_identity, staged_identity, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(token.to_string())
+        .bind(mod_id)
+        .bind(game.as_str())
+        .bind(library_path.to_string_lossy().as_ref())
+        .bind(staged_path.to_string_lossy().as_ref())
+        .bind(quarantine_path.to_string_lossy().as_ref())
+        .bind(old_directory.identity().durable_key())
+        .bind(&staged_identity)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *preparation.transaction)
+        .await;
+        if let Err(reinstall) = witness_insert {
+            drop(root_directory);
+            drop(parent_directory);
+            drop(old_directory);
+            drop(staged_directory);
+            let _ = preparation.transaction.rollback().await;
+            return match remove_reinstall_stage_if_identity_matches(&staged_path, &staged_identity)
+            {
+                Ok(()) => Err(reinstall.into()),
+                Err(rollback) => Err(Error::ReinstallRollbackFailed {
+                    reinstall: reinstall.to_string(),
+                    rollback: rollback.to_string(),
+                }),
+            };
+        }
+        drop(root_directory);
+        drop(parent_directory);
+        drop(old_directory);
+        drop(staged_directory);
+        if let Err(reinstall) = preparation.commit().await {
+            let witness_exists = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM reinstall_swaps WHERE token = ?",
+            )
+            .bind(token.to_string())
+            .fetch_one(&self.pool)
+            .await;
+            let rollback = match witness_exists {
+                Ok(1) => self.rollback_reinstall_swap(token).await,
+                Ok(0) => remove_reinstall_stage_if_identity_matches(&staged_path, &staged_identity),
+                Ok(count) => Err(Error::ReinstallRecoveryUncertain {
+                    mod_id: mod_id.to_string(),
+                    reason: format!("the swap token matched {count} recovery witnesses"),
+                }),
+                Err(error) => Err(error.into()),
+            };
+            return match rollback {
+                Ok(()) => Err(reinstall),
+                Err(rollback) => Err(Error::ReinstallRollbackFailed {
+                    reinstall: reinstall.to_string(),
+                    rollback: rollback.to_string(),
+                }),
+            };
         }
 
-        // 7. Junction dir name is preserved across the rebuild —
-        //    just sanity-confirm the row still has it.
-        debug_assert!(!junction_dir_name.is_empty());
+        // 3. Extraction and inspection are unbounded and therefore outside
+        //    the writer fence. Any failure invokes the same deterministic
+        //    rollback startup uses; the installed bytes and enabled state have
+        //    not changed yet.
+        if let Err(reinstall) =
+            zip_import::extract(&zip_path, &staged_path, ImportZipOptions::default())
+        {
+            return match self.rollback_reinstall_swap(token).await {
+                Ok(()) => Err(reinstall),
+                Err(rollback) => Err(Error::ReinstallRollbackFailed {
+                    reinstall: reinstall.to_string(),
+                    rollback: rollback.to_string(),
+                }),
+            };
+        }
+        let detected_variants = match variants::detect_variants(&staged_path) {
+            Ok(variants) => variants,
+            Err(reinstall) => {
+                return match self.rollback_reinstall_swap(token).await {
+                    Ok(()) => Err(reinstall),
+                    Err(rollback) => Err(Error::ReinstallRollbackFailed {
+                        reinstall: reinstall.to_string(),
+                        rollback: rollback.to_string(),
+                    }),
+                };
+            }
+        };
+
+        // 4. Reacquire the writer fence and re-prove every name and identity
+        //    before committing the two renames and all user-visible state.
+        let commit_result: Result<library_recovery::QuarantinedLibraryDirectory> = async {
+            let mut commit = self
+                .begin_library_mutation(library_mutation::LibraryMutation::ReinstallGamebananaMod)
+                .await?;
+            let witness = self.reinstall_swap_witness(token, &mut commit).await?;
+            let live = library_identity::IdentifiedDirectory::open(&witness.library_path).map_err(
+                |source| Error::Io {
+                    path: witness.library_path.clone(),
+                    source,
+                },
+            )?;
+            let staged = library_identity::IdentifiedDirectory::open(&witness.staged_path)
+                .map_err(|source| Error::Io {
+                    path: witness.staged_path.clone(),
+                    source,
+                })?;
+            if live.identity().durable_key() != witness.old_identity
+                || staged.identity().durable_key() != witness.staged_identity
+            {
+                return Err(Error::ReinstallRecoveryUncertain {
+                    mod_id: mod_id.to_string(),
+                    reason: "the live or staged directory changed identity before swap commit"
+                        .to_string(),
+                });
+            }
+
+            let state = sqlx::query(
+                "SELECT m.enabled, m.junction_dir_name, g.install_path
+             FROM mods m JOIN games g ON g.code = m.game_code WHERE m.id = ?",
+            )
+            .bind(mod_id)
+            .fetch_one(&mut *commit.transaction)
+            .await?;
+            let enabled = state.try_get::<i64, _>("enabled")? != 0;
+            let junction_dir_name: String = state.try_get("junction_dir_name")?;
+            let mods_dir = state
+                .try_get::<Option<String>, _>("install_path")?
+                .map(PathBuf::from)
+                .map(|install| install.join("Mods"));
+
+            let quarantined = self.quarantine_library_directory_with_token(
+                &witness.library_path,
+                &live,
+                token,
+                None,
+                None,
+            )?;
+            drop(live);
+            self.crash_point(crash_points::REINSTALL_AFTER_OLD_QUARANTINE_MOVE);
+            std::fs::rename(&witness.staged_path, &witness.library_path).map_err(|source| {
+                Error::Io {
+                    path: witness.staged_path.clone(),
+                    source,
+                }
+            })?;
+            drop(staged);
+            let installed = library_identity::IdentifiedDirectory::open(&witness.library_path)
+                .map_err(|source| Error::Io {
+                    path: witness.library_path.clone(),
+                    source,
+                })?;
+            if installed.identity().durable_key() != witness.staged_identity {
+                return Err(Error::ReinstallRecoveryUncertain {
+                    mod_id: mod_id.to_string(),
+                    reason: "the replacement changed identity during its final rename".to_string(),
+                });
+            }
+            drop(installed);
+            self.crash_point(crash_points::REINSTALL_AFTER_REPLACEMENT_MOVE);
+
+            let first_variant_id = detected_variants.first().map(|_| Ulid::new().to_string());
+            let new_target = detected_variants
+                .first()
+                .map(|variant| witness.library_path.join(&variant.subpath))
+                .unwrap_or_else(|| witness.library_path.clone());
+            if enabled {
+                if let Some(mods_dir) = mods_dir.as_ref() {
+                    std::fs::create_dir_all(mods_dir).map_err(|source| Error::Io {
+                        path: mods_dir.clone(),
+                        source,
+                    })?;
+                    let link = mods_dir.join(&junction_dir_name);
+                    if link_exists(&link) {
+                        junction::remove(&link)?;
+                    }
+                    volume::require_ntfs_pair(mods_dir, &new_target)?;
+                    junction::create(&link, &new_target)?;
+                }
+            }
+
+            sqlx::query("UPDATE mods SET active_variant_id = NULL WHERE id = ?")
+                .bind(mod_id)
+                .execute(&mut *commit.transaction)
+                .await?;
+            sqlx::query("DELETE FROM mod_variants WHERE mod_id = ?")
+                .bind(mod_id)
+                .execute(&mut *commit.transaction)
+                .await?;
+            for (index, variant) in detected_variants.iter().enumerate() {
+                let variant_id = if index == 0 {
+                    first_variant_id.clone().expect("first Variant ID")
+                } else {
+                    Ulid::new().to_string()
+                };
+                sqlx::query(
+                    "INSERT INTO mod_variants (id, mod_id, name, subpath) VALUES (?, ?, ?, ?)",
+                )
+                .bind(&variant_id)
+                .bind(mod_id)
+                .bind(&variant.name)
+                .bind(variant.subpath.to_string_lossy().as_ref())
+                .execute(&mut *commit.transaction)
+                .await?;
+            }
+            sqlx::query(
+                "UPDATE mods
+               SET active_variant_id = ?, name = ?, author = ?, version = ?,
+                   upstream_version = ?, screenshot_url = ?
+             WHERE id = ?",
+            )
+            .bind(&first_variant_id)
+            .bind(&submission.name)
+            .bind(&submission.author)
+            .bind(&submission.version)
+            .bind(&submission.version)
+            .bind(&submission.screenshot_url)
+            .bind(mod_id)
+            .execute(&mut *commit.transaction)
+            .await?;
+            sqlx::query("DELETE FROM reinstall_swaps WHERE token = ?")
+                .bind(token.to_string())
+                .execute(&mut *commit.transaction)
+                .await?;
+            commit.commit().await?;
+            Ok(quarantined)
+        }
+        .await;
+        let quarantined = match commit_result {
+            Ok(quarantined) => quarantined,
+            Err(reinstall) => {
+                return match self.rollback_reinstall_swap(token).await {
+                    Ok(()) => Err(reinstall),
+                    Err(rollback) => Err(Error::ReinstallRollbackFailed {
+                        reinstall: reinstall.to_string(),
+                        rollback: rollback.to_string(),
+                    }),
+                };
+            }
+        };
+        self.crash_point(crash_points::REINSTALL_AFTER_METADATA_COMMIT);
+
+        // Metadata commit made the new tree authoritative. The old tree is
+        // now an ordinary owned delete quarantine; reclamation may be deferred
+        // without changing the successful reinstall outcome.
+        match quarantined.purge(false) {
+            Ok(library_recovery::QuarantinePurgeOutcome::Reclaimed(_)) => {}
+            Ok(library_recovery::QuarantinePurgeOutcome::Deferred { path, error }) => {
+                tracing::warn!(
+                    target: "gmm::library",
+                    mod_id,
+                    quarantine = %path.display(),
+                    error = %error,
+                    "the reinstall committed, but GMM could not reclaim the verified old bytes now; startup will retry while it can still prove the quarantine",
+                );
+            }
+            Ok(library_recovery::QuarantinePurgeOutcome::OwnershipLost) => {
+                tracing::error!(
+                    target: "gmm::library",
+                    mod_id,
+                    "the reinstall committed, but GMM cannot establish whether the old quarantined bytes were reclaimed",
+                );
+            }
+            Err(error) => tracing::warn!(
+                target: "gmm::library",
+                mod_id,
+                error = %error,
+                "the reinstall committed, but GMM could not inspect or reclaim the old quarantine",
+            ),
+        }
         Ok(())
     }
 
@@ -3112,6 +3389,34 @@ fn move_subtree(from: &Path, to: &Path, report: &mut MoveReport) -> Result<()> {
     }
     report.moved_directories.push(to.to_path_buf());
     Ok(())
+}
+
+fn remove_reinstall_stage_if_identity_matches(path: &Path, expected: &str) -> Result<()> {
+    let directory = match library_identity::IdentifiedDirectory::open(path) {
+        Ok(directory) => directory,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    if directory.identity().durable_key() != expected {
+        return Err(Error::ReinstallRecoveryUncertain {
+            mod_id: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<unknown>")
+                .to_string(),
+            reason: "the unwitnessed staging path changed identity before cleanup".to_string(),
+        });
+    }
+    drop(directory);
+    std::fs::remove_dir_all(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Does the path exist as a symlink/junction? `Path::exists` follows

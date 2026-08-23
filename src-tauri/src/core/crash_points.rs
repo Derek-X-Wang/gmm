@@ -73,6 +73,21 @@ pub const IMPORT_ZIP_AFTER_EXTRACT: &str = "import_zip.after_extract";
 /// `import_zip`: the row exists, Variants have not been detected yet.
 pub const IMPORT_ZIP_AFTER_ROW_INSERT: &str = "import_zip.after_row_insert";
 
+/// `reinstall_gamebanana_mod`: the complete old tree has moved into its
+/// intent-backed quarantine, while the complete staged tree has not yet taken
+/// the live Mod name. The durable swap witness requires startup to restore old.
+pub const REINSTALL_AFTER_OLD_QUARANTINE_MOVE: &str = "reinstall.after_old_quarantine_move";
+
+/// `reinstall_gamebanana_mod`: the complete replacement occupies the live Mod
+/// name, but metadata/Variants and witness deletion have not committed. The
+/// still-present witness requires startup to put the old tree back.
+pub const REINSTALL_AFTER_REPLACEMENT_MOVE: &str = "reinstall.after_replacement_move";
+
+/// `reinstall_gamebanana_mod`: replacement metadata/Variants and witness
+/// deletion committed atomically. The live replacement wins; startup may
+/// finish purging the old intent-backed quarantine.
+pub const REINSTALL_AFTER_METADATA_COMMIT: &str = "reinstall.after_metadata_commit";
+
 /// Failed adopt/ZIP cleanup: identity and database ownership have been
 /// re-proved under the writer fence, immediately before the staged directory
 /// is renamed into the durable delete quarantine.
@@ -139,6 +154,9 @@ pub const ALL: &[&str] = &[
     ADOPT_AFTER_ROW_INSERT,
     IMPORT_ZIP_AFTER_EXTRACT,
     IMPORT_ZIP_AFTER_ROW_INSERT,
+    REINSTALL_AFTER_OLD_QUARANTINE_MOVE,
+    REINSTALL_AFTER_REPLACEMENT_MOVE,
+    REINSTALL_AFTER_METADATA_COMMIT,
     STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE,
     STAGED_CLEANUP_AFTER_QUARANTINE_MOVE,
     STAGED_CLEANUP_BEFORE_QUARANTINE_PURGE,

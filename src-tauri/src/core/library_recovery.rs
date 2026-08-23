@@ -93,8 +93,8 @@ struct GuardedLibraryMutation {
 /// quarantine. Startup cleanup can finish the same purge if this process stops
 /// before removing it.
 pub(super) struct QuarantinedLibraryDirectory {
-    path: PathBuf,
-    intent: PathBuf,
+    pub(super) path: PathBuf,
+    pub(super) intent: PathBuf,
 }
 
 pub(super) enum QuarantinePurgeOutcome {
@@ -175,6 +175,13 @@ impl Core {
                     .await?,
             );
         }
+
+        // Reinstall swap witnesses take precedence over ordinary delete
+        // quarantine cleanup. Presence means the metadata transaction did not
+        // commit, so restore the old tree and quarantine the staged/new tree
+        // before the generic purge sees either intent-backed directory.
+        self.rollback_interrupted_reinstall_swaps(&mut fence)
+            .await?;
 
         // Serialize cleanup with the pre-commit half of delete. In particular,
         // an intent without a quarantine is known to be stranded only while no
@@ -400,10 +407,30 @@ impl Core {
         after_intent_write: Option<&str>,
         after_quarantine_move: Option<&str>,
     ) -> Result<QuarantinedLibraryDirectory> {
+        self.quarantine_library_directory_with_token(
+            path,
+            directory,
+            Ulid::new(),
+            after_intent_write,
+            after_quarantine_move,
+        )
+    }
+
+    /// Quarantine one identified directory under a caller-selected token.
+    /// Reinstall records the derived reserved path in SQLite before its first
+    /// filesystem rename, so startup can distinguish rollback from committed
+    /// byte reclamation without inventing a parallel ownership protocol.
+    pub(super) fn quarantine_library_directory_with_token(
+        &self,
+        path: &Path,
+        directory: &IdentifiedDirectory,
+        token: Ulid,
+        after_intent_write: Option<&str>,
+        after_quarantine_move: Option<&str>,
+    ) -> Result<QuarantinedLibraryDirectory> {
         let root = path
             .parent()
             .expect("a validated Library directory is a direct child of its root");
-        let token = Ulid::new();
         let quarantine = root.join(format!("{DELETE_QUARANTINE_PREFIX}{token}"));
         let intent = root.join(format!(
             "{DELETE_QUARANTINE_PREFIX}{token}{DELETE_INTENT_SUFFIX}"

@@ -251,6 +251,18 @@ pub enum Error {
     },
 
     #[error(
+        "GMM found interrupted reinstall state for Mod {mod_id} that it could not safely resolve: \
+         {reason}. GMM left every directory it could not prove untouched."
+    )]
+    ReinstallRecoveryUncertain { mod_id: String, reason: String },
+
+    #[error(
+        "the reinstall failed ({reinstall}), and GMM could not complete its verified rollback \
+         ({rollback}). The Mod's final on-disk and Junction state could not be fully established."
+    )]
+    ReinstallRollbackFailed { reinstall: String, rollback: String },
+
+    #[error(
         "{game} is running (game session active since {since}); close the game before changing mods."
     )]
     SessionActive { game: String, since: String },

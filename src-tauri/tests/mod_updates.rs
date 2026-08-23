@@ -398,3 +398,108 @@ async fn reinstall_replaces_library_bytes_and_bumps_version() {
     assert_eq!(listed[0].version.as_deref(), Some("2.0.0"));
     assert!(listed[0].enabled, "previously enabled mod stays enabled");
 }
+
+#[tokio::test]
+async fn failed_reinstall_preserves_installed_bytes_enabled_state_and_junction() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_root = tmp.path().join("library");
+    let game_install = tmp.path().join("Genshin");
+    let game_mods = game_install.join("Mods");
+    std::fs::create_dir_all(&game_mods).expect("mods dir");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_root, &db_url).await.expect("init");
+    core.set_game_install_path(GameCode::Gimi, &game_install)
+        .await
+        .expect("install");
+
+    let mut ingest_server = mockito::Server::new_async().await;
+    let id = 10_166_u64;
+    let imported = ingest(
+        &mut ingest_server,
+        &core,
+        id,
+        "Precious Mod",
+        "1.0.0",
+        b"[TextureOverrideOld]\nhash = 0xORIGINAL\n",
+        &tmp.path().join("original.zip"),
+    )
+    .await;
+    core.set_enabled(&imported.id, true, &game_mods)
+        .await
+        .expect("enable installed Mod");
+    let original_path = imported.library_path.join("merged.ini");
+    let original_bytes = std::fs::read(&original_path).expect("original Library bytes");
+    let link = game_mods.join("Precious Mod");
+    assert_eq!(
+        std::fs::read(link.join("merged.ini")).expect("working Junction before reinstall"),
+        original_bytes,
+    );
+
+    let mut reinstall_server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/corrupt.zip");
+    let _api = reinstall_server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id},
+                "_sName": "Broken Update",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}",
+                "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "corrupt.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = reinstall_server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = reinstall_server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(b"this is not a ZIP archive")
+        .create_async()
+        .await;
+    let endpoints = Endpoints {
+        api_base: reinstall_server.url(),
+    };
+
+    let failed = core
+        .reinstall_gamebanana_mod_with_endpoints(&imported.id, &endpoints)
+        .await;
+    assert!(failed.is_err(), "the corrupt archive must fail extraction");
+    assert_eq!(
+        std::fs::read(&original_path).expect("installed bytes after failure"),
+        original_bytes,
+        "failed extraction must leave the installed Mod bytes unchanged",
+    );
+    let listed = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list after failure");
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].enabled,
+        "failed reinstall must preserve enabled=true"
+    );
+    assert_eq!(listed[0].name, "Precious Mod", "metadata must not change");
+    assert_eq!(listed[0].version.as_deref(), Some("1.0.0"));
+    assert_eq!(
+        std::fs::read(link.join("merged.ini")).expect("working Junction after failure"),
+        original_bytes,
+        "the enabled Mod's Junction must still resolve to the original bytes",
+    );
+    let game_root = imported.library_path.parent().expect("game Library root");
+    assert!(
+        std::fs::read_dir(game_root)
+            .expect("read game Library root")
+            .all(|entry| !entry
+                .expect("Library entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gmm-reinstall-")),
+        "failed reinstall must not leave a staging directory",
+    );
+}
