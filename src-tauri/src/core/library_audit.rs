@@ -96,22 +96,24 @@ fn scan_game_root(
         if super::library_recovery::is_owned_delete_quarantine(&path)? {
             continue;
         }
-        // A process can die after creating reinstall's empty reserved stage
-        // but before its witness transaction commits. With no witness it can
-        // never contain extracted user bytes, a future reinstall uses a fresh
-        // token, and treating it as a recoverable Mod would mislead the user.
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(super::library_mutation::REINSTALL_STAGING_PREFIX)
-        {
-            continue;
-        }
         let metadata = fs::symlink_metadata(&path).map_err(|source| Error::Io {
             path: path.clone(),
             source,
         })?;
         if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
+            continue;
+        }
+        // A process can die after creating reinstall's reserved stage but
+        // before its witness transaction commits. Only a directory proven
+        // empty is harmless internal residue. A reserved name containing any
+        // entry (or one we cannot inspect) remains visible because names alone
+        // are not ownership evidence for user bytes.
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(super::library_mutation::REINSTALL_STAGING_PREFIX)
+            && fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_none())
+        {
             continue;
         }
         let directory = IdentifiedDirectory::open(&path).map_err(|source| Error::Io {

@@ -93,10 +93,26 @@ impl Core {
             default_library_root,
             crash_hook: None,
         };
-        if let Err(error) = core.finish_interrupted_library_deletes().await {
+        if let Err(recovery) = core.finish_interrupted_library_deletes().await {
+            // Ordinary delete-quarantine purge remains best-effort. Reinstall
+            // witnesses are different: they are commit-state, and continuing
+            // would make every relocation mistake failed recovery for running
+            // work. The failed cleanup transaction rolls back, so a witness
+            // still visible here proves reinstall recovery did not settle.
+            let pending_reinstall: Option<String> = sqlx::query_scalar(
+                "SELECT mod_id FROM reinstall_swaps ORDER BY created_at, token LIMIT 1",
+            )
+            .fetch_optional(&core.pool)
+            .await?;
+            if let Some(mod_id) = pending_reinstall {
+                return Err(Error::ReinstallStartupRecoveryFailed {
+                    mod_id,
+                    reason: recovery.to_string(),
+                });
+            }
             tracing::warn!(
                 target: "gmm::library",
-                error = %error,
+                error = %recovery,
                 "could not finish interrupted Library deletes at startup",
             );
         }
@@ -380,8 +396,9 @@ impl Core {
     ) -> Result<(MoveReport, Vec<(String, GameCode)>)> {
         // A same-volume rename preserves the filesystem identities recorded by
         // an in-flight reinstall witness, but the cross-volume copy fallback
-        // does not. Refuse every relocation that would carry such a witness;
-        // the reinstall will settle normally and the user can retry the move.
+        // does not. Refuse every relocation that would carry such a witness.
+        // `path_within` is required because the Mod row can retain an NTFS
+        // alias or differently-cased drive spelling for the same root.
         // This check is under the same writer fence as witness creation, so it
         // happens before any Junction or Library byte is touched.
         let active_reinstalls = sqlx::query("SELECT mod_id, library_path FROM reinstall_swaps")
@@ -389,7 +406,7 @@ impl Core {
             .await?;
         for reinstall in active_reinstalls {
             let library_path = PathBuf::from(reinstall.try_get::<String, _>("library_path")?);
-            if library_path.starts_with(previous) {
+            if path_within(&library_path, previous) {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
                     mod_id: reinstall.try_get("mod_id")?,
                 });

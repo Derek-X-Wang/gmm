@@ -664,6 +664,44 @@ fn write_reinstall_zip(path: &Path, body: &[u8]) {
     archive.finish().expect("finish reinstall ZIP");
 }
 
+#[cfg(unix)]
+fn durable_directory_key(path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path).expect("directory metadata for recovery witness");
+    format!("{:016x}:{:016x}", metadata.dev(), metadata.ino())
+}
+
+#[cfg(windows)]
+fn durable_directory_key(path: &Path) -> String {
+    use std::fs::OpenOptions;
+    use std::mem::MaybeUninit;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let directory = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .expect("open directory for recovery witness identity");
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    let ok = unsafe { GetFileInformationByHandle(directory.as_raw_handle(), info.as_mut_ptr()) };
+    assert_ne!(
+        ok,
+        0,
+        "read directory identity for recovery witness: {}",
+        std::io::Error::last_os_error(),
+    );
+    let info = unsafe { info.assume_init() };
+    let file = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    format!("{:016x}:{:016x}", info.dwVolumeSerialNumber, file)
+}
+
 async fn seed_enabled_gamebanana_mod(
     env: &TestEnv,
     core: &Core,
@@ -1817,6 +1855,97 @@ async fn copy_based_relocation_waits_for_reinstall_then_startup_settles() {
     assert_eq!(
         witnesses, 0,
         "startup after copy relocation must have no reinstall witness left to retry",
+    );
+}
+
+/// A failed startup rollback is not an active reinstall. GMM must surface it
+/// before normal operation starts, retry it on the next launch, and never tell
+/// the user to wait for work that is no longer running.
+///
+/// Mutation oracle: restoring Core's old log-and-swallow startup behaviour
+/// makes `expect_err` fail because the first restart incorrectly succeeds.
+#[tokio::test]
+async fn failed_reinstall_recovery_stops_startup_until_the_obstruction_is_fixed() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Stale Reinstall Recovery").await;
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let held_stage = root.join(format!(".held-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("original reinstall stage");
+    std::fs::write(stage.join("replacement.ini"), b"staged replacement")
+        .expect("staged replacement bytes");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for recovery witness");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert recoverable reinstall witness");
+    pool.close().await;
+    drop(core);
+
+    // Simulate an external actor replacing the reserved stage after the
+    // witness committed. Recovery must not delete the unowned replacement.
+    std::fs::rename(&stage, &held_stage).expect("hold witnessed stage aside");
+    std::fs::create_dir(&stage).expect("replacement at reserved stage name");
+    std::fs::write(stage.join("unknown.ini"), b"unowned bytes").expect("unowned replacement bytes");
+
+    let startup = match Core::new(env.library.clone(), &env.db_url).await {
+        Ok(_) => panic!("failed reinstall recovery must stop startup"),
+        Err(error) => error,
+    };
+    let message = startup.to_string();
+    assert!(
+        message.contains("interrupted reinstall recovery") && message.contains("restart GMM"),
+        "startup must explain the failed recovery and a truthful retry action, got: {message}",
+    );
+    assert!(
+        !message.contains("Let the reinstall finish"),
+        "a failed recovery must not claim a reinstall is still running: {message}",
+    );
+    assert_eq!(
+        std::fs::read(stage.join("unknown.ini")).expect("unowned bytes after refused startup"),
+        b"unowned bytes",
+        "terminal startup recovery must leave an unproved directory untouched",
+    );
+
+    // Undo the external substitution and restart. Recovery retries from the
+    // same witness and retires it without any database editing.
+    std::fs::remove_dir_all(&stage).expect("remove external replacement");
+    std::fs::rename(&held_stage, &stage).expect("restore witnessed stage identity");
+    let restarted = env.core().await;
+    assert!(
+        imported.library_path.join("merged.ini").is_file(),
+        "successful retry must keep the original Mod bytes",
+    );
+    drop(restarted);
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after recovered startup");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&pool)
+        .await
+        .expect("count recovery witnesses after retry");
+    assert_eq!(
+        witnesses, 0,
+        "the successful startup retry must retire the witness",
     );
 }
 

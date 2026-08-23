@@ -56,7 +56,19 @@ pub fn run() {
         }
     };
 
-    let core = build_core(&data_dir).expect("initialise GMM core");
+    let core = match build_core(&data_dir) {
+        Ok(core) => core,
+        Err(error) => {
+            let message = format!("GMM could not start safely: {error}");
+            tracing::error!(
+                target: "gmm::library",
+                error = %error,
+                "refusing to start after core initialization failure",
+            );
+            report_startup_failure(&message);
+            return;
+        }
+    };
 
     // Best-effort startup reconcile across every game whose install
     // path is set. Logs per-game via tracing (NEW-LOG); never fatal.
@@ -245,6 +257,35 @@ fn report_already_running(message: &str) {
 /// stderr reaches a human.
 #[cfg(not(windows))]
 fn report_already_running(message: &str) {
+    eprintln!("GMM: {message}");
+}
+
+/// Surface a fatal pre-window startup error. A release build has no console,
+/// and silently returning here would leave the user retrying operations in a
+/// state GMM deliberately refused to open.
+#[cfg(windows)]
+fn report_startup_failure(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND,
+    };
+
+    let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let caption: Vec<u16> = "GMM".encode_utf16().chain(std::iter::once(0)).collect();
+
+    // SAFETY: both buffers are NUL-terminated and outlive the call; a
+    // null owner HWND is documented as "no owner window".
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn report_startup_failure(message: &str) {
     eprintln!("GMM: {message}");
 }
 

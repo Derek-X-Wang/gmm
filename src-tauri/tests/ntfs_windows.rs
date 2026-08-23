@@ -101,6 +101,81 @@ async fn short_name_alias_of_a_referenced_directory_cannot_be_deleted() {
     );
 }
 
+/// Reinstall witness paths retain the spelling present in the Mod row. NTFS
+/// can spell the same Library root through an 8.3 alias, so relocation must
+/// compare filesystem-resolved paths rather than raw components or it can move
+/// an in-flight witness through the copy fallback.
+#[tokio::test]
+async fn short_name_alias_cannot_bypass_the_reinstall_relocation_guard() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &db_url)
+        .await
+        .expect("core");
+    let fixture = tmp.path().join("src/reinstall-root-alias");
+    make_mod_dir(&fixture, "reinstall root alias");
+    let adopted = core
+        .adopt_folder(GameCode::Gimi, &fixture, "Reinstall Root Alias")
+        .await
+        .expect("adopt");
+    let game_root = adopted.library_path.parent().expect("game Library root");
+
+    const SHORT_ROOT: &str = "GMMROOT";
+    set_short_name(game_root, SHORT_ROOT);
+    let alias_root = game_root.parent().expect("Library root").join(SHORT_ROOT);
+    let aliased_mod_path = alias_root.join(&adopted.id);
+    assert!(
+        aliased_mod_path.is_dir(),
+        "precondition: 8.3 root alias resolves the installed Mod",
+    );
+
+    let token = ulid::Ulid::new().to_string();
+    let staged_path = alias_root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine_path = alias_root.join(format!(".gmm-delete-{token}"));
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open DB for alias witness");
+    sqlx::query("UPDATE mods SET library_path = ? WHERE id = ?")
+        .bind(aliased_mod_path.to_string_lossy().as_ref())
+        .bind(&adopted.id)
+        .execute(&pool)
+        .await
+        .expect("record alias-spelled Mod path");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, 'old-id', 'staged-id', ?)",
+    )
+    .bind(&token)
+    .bind(&adopted.id)
+    .bind(aliased_mod_path.to_string_lossy().as_ref())
+    .bind(staged_path.to_string_lossy().as_ref())
+    .bind(quarantine_path.to_string_lossy().as_ref())
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert alias-spelled reinstall witness");
+    pool.close().await;
+
+    let destination = tmp.path().join("relocated-gimi");
+    fs::create_dir_all(&destination).expect("non-empty relocation destination");
+    fs::write(destination.join("forces-copy-fallback"), b"keep").expect("copy fallback sentinel");
+    let relocation = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&destination))
+        .await
+        .expect_err("an 8.3 alias must not bypass the reinstall relocation guard");
+
+    assert!(
+        relocation.to_string().contains("Let the reinstall finish"),
+        "an active reinstall should retain the retry-later refusal, got: {relocation}",
+    );
+    assert!(
+        adopted.library_path.join("merged.ini").is_file(),
+        "the refused alias-spelled relocation must not touch Library bytes",
+    );
+}
+
 /// GameBanana titles are routinely non-ASCII. If sanitisation mangles
 /// them into an empty or colliding directory name, enabling silently
 /// puts the mod somewhere the game will never look.

@@ -125,3 +125,39 @@ async fn audit_ignores_an_unwitnessed_empty_reinstall_stage() {
         "the read-only audit must not mutate the stage"
     );
 }
+
+/// A reserved name is not ownership evidence. If a reinstall stage contains
+/// bytes, the audit must surface it like any other unreferenced Library
+/// directory rather than hiding the user's only report of stranded data.
+#[tokio::test]
+async fn audit_surfaces_a_non_empty_unwitnessed_reinstall_stage() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let game_root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    fs::create_dir_all(&game_root).expect("game root directory");
+    let stage = game_root.join(".gmm-reinstall-01JSTRANDEDUSERBYTES00000");
+    fs::create_dir(&stage).expect("stranded reinstall stage");
+    fs::write(stage.join("merged.ini"), b"user bytes").expect("stranded stage bytes");
+
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit with non-empty unwitnessed reinstall stage");
+
+    assert_eq!(
+        report.unreferenced.len(),
+        1,
+        "a non-empty reserved reinstall stage must remain visible: {report:?}",
+    );
+    assert_eq!(report.unreferenced[0].path, stage);
+    assert_eq!(report.unreferenced[0].size_bytes, Some(10));
+    assert_eq!(report.total_bytes, 10);
+    assert_eq!(
+        fs::read(stage.join("merged.ini")).expect("stranded stage bytes after audit"),
+        b"user bytes",
+        "the read-only audit must not mutate surfaced bytes",
+    );
+}
