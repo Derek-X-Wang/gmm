@@ -493,6 +493,465 @@ async fn concurrent_recover_and_delete_of_one_library_directory_have_one_winner(
     }
 }
 
+/// Relocation has snapshotted the rows it will rewrite but has not moved the
+/// old root yet. Recovery must not commit a row after that snapshot, because
+/// relocation could never discover and rewrite it.
+#[tokio::test]
+async fn relocation_started_before_recovery_cannot_commit_a_stale_mod_path() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let old_root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("old Library root");
+    let new_root = env._tmp.path().join("relocated-gimi");
+    let orphan = old_root.join(Ulid::new().to_string());
+    std::fs::create_dir_all(&orphan).expect("orphan");
+    std::fs::write(orphan.join("merged.ini"), b"hash=relocate-first\n").expect("marker");
+
+    let mut relocating = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::RELOCATE_AFTER_MOD_SNAPSHOT)
+        .op([
+            "set-library-path",
+            "--path",
+            &new_root.display().to_string(),
+        ])
+        .spawn();
+    relocating.wait_for_pause(gmm_lib::core::crash_points::RELOCATE_AFTER_MOD_SNAPSHOT);
+
+    let recovered = probe(&env)
+        .op([
+            "recover",
+            "--path",
+            &orphan.display().to_string(),
+            "--name",
+            "Must Not Be Stranded",
+        ])
+        .run();
+    assert!(
+        !recovered.ok,
+        "recover_unreferenced_library_dir must not commit after relocation's row snapshot; \
+         it succeeded and would leave a stale library_path: {recovered:?}",
+    );
+
+    relocating.resume();
+    relocating
+        .wait_for_outcome()
+        .expect_ok("the fenced relocation after recovery was refused");
+
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list")
+            .is_empty(),
+        "the refused recovery must not leave a Mod row",
+    );
+    assert!(
+        new_root
+            .join(orphan.file_name().expect("orphan name"))
+            .join("merged.ini")
+            .is_file(),
+        "relocation must still move the orphan's bytes intact",
+    );
+}
+
+/// Recovery has validated the orphan and is paused immediately before its row
+/// insert. Relocation must be refused before touching the filesystem, leaving
+/// the path recovery commits both present and identity-stable.
+#[tokio::test]
+async fn recovery_started_before_relocation_cannot_be_stranded() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let old_root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("old Library root");
+    let new_root = env._tmp.path().join("relocated-gimi");
+    let orphan = old_root.join(Ulid::new().to_string());
+    std::fs::create_dir_all(&orphan).expect("orphan");
+    std::fs::write(orphan.join("merged.ini"), b"hash=recover-first\n").expect("marker");
+
+    let mut recovering = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::RECOVER_AFTER_LIBRARY_MOVE)
+        .op([
+            "recover",
+            "--path",
+            &orphan.display().to_string(),
+            "--name",
+            "Recovery Owns The Path",
+        ])
+        .spawn();
+    recovering.wait_for_pause(gmm_lib::core::crash_points::RECOVER_AFTER_LIBRARY_MOVE);
+
+    let relocated = probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &new_root.display().to_string(),
+        ])
+        .run();
+    assert!(
+        !relocated.ok,
+        "set_library_path_for_game must be fenced before filesystem work while recovery owns \
+         the writer claim; relocation unexpectedly succeeded: {relocated:?}",
+    );
+    assert!(
+        orphan.is_dir(),
+        "set_library_path_for_game moved recovery's validated directory before taking the \
+         shared fence",
+    );
+
+    recovering.resume();
+    recovering
+        .wait_for_outcome()
+        .expect_ok("recovery after the competing relocation was refused");
+    let mods = core.list_mods(GameCode::Gimi).await.expect("list");
+    assert_eq!(mods.len(), 1, "the recovery must commit exactly one Mod");
+    assert_eq!(mods[0].library_path, orphan);
+    assert!(
+        mods[0].library_path.join("merged.ini").is_file(),
+        "the recovered row must point at the directory recovery validated",
+    );
+}
+
+/// The SQLite fence serializes GMM callers, but an external filesystem actor
+/// can still rename and replace the pathname recovery validated. The final
+/// identity check must fail closed instead of committing the replacement.
+#[tokio::test]
+async fn recovery_revalidates_the_directory_identity_before_commit() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("Library root");
+    let orphan = root.join(Ulid::new().to_string());
+    let original = root.join("original-held-aside");
+    std::fs::create_dir_all(&orphan).expect("orphan");
+    std::fs::write(orphan.join("merged.ini"), b"hash=validated\n").expect("marker");
+
+    let mut recovering = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::RECOVER_AFTER_LIBRARY_MOVE)
+        .op([
+            "recover",
+            "--path",
+            &orphan.display().to_string(),
+            "--name",
+            "Must Keep Its Identity",
+        ])
+        .spawn();
+    recovering.wait_for_pause(gmm_lib::core::crash_points::RECOVER_AFTER_LIBRARY_MOVE);
+
+    std::fs::rename(&orphan, &original).expect("move validated directory aside");
+    std::fs::create_dir_all(&orphan).expect("replacement directory");
+    std::fs::write(orphan.join("merged.ini"), b"hash=replacement\n").expect("replacement marker");
+
+    recovering.resume();
+    let recovered = recovering.wait_for_outcome();
+    assert!(
+        !recovered.ok,
+        "recover_unreferenced_library_dir must refuse when its final library_path names a \
+         replacement directory: {recovered:?}",
+    );
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list")
+            .is_empty(),
+        "identity revalidation failure must not commit a Mod row",
+    );
+    assert_eq!(
+        std::fs::read(original.join("merged.ini")).expect("original bytes"),
+        b"hash=validated\n",
+    );
+    assert_eq!(
+        std::fs::read(orphan.join("merged.ini")).expect("replacement bytes"),
+        b"hash=replacement\n",
+    );
+}
+
+fn write_single_file_mod_zip(path: &Path) {
+    let file = std::fs::File::create(path).expect("create zip");
+    let mut archive = zip::ZipWriter::new(file);
+    archive
+        .start_file("merged.ini", zip::write::SimpleFileOptions::default())
+        .expect("zip entry");
+    archive.write_all(b"hash=zip-race\n").expect("zip bytes");
+    archive.finish().expect("finish zip");
+}
+
+fn assert_no_staged_mod_directories(roots: &[&Path], mutation: &str) {
+    for root in roots {
+        let entries = match std::fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("read {root:?} after {mutation}: {error}"),
+        };
+        let leftovers: Vec<_> = entries
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gmm-delete-")
+            })
+            .map(|entry| entry.path())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "{mutation} must remove its staged directory when relocation changes the root; \
+             leftovers under {root:?}: {leftovers:?}",
+        );
+    }
+}
+
+fn public_async_function<'a>(source: &'a str, function: &str) -> &'a str {
+    let signature = format!("    pub async fn {function}(");
+    let start = source.find(&signature).unwrap_or_else(|| {
+        panic!("Library mutation {function} is missing from the implementation")
+    });
+    let rest = &source[start + signature.len()..];
+    let end = rest
+        .find("\n    pub async fn ")
+        .or_else(|| rest.find("\n    async fn "))
+        .or_else(|| rest.find("\n}\n"))
+        .unwrap_or(rest.len());
+    &source[start..start + signature.len() + end]
+}
+
+/// Architecture guard for the shared protocol. The discovery patterns are the
+/// filesystem primitives current Library-content mutations use; the contract
+/// then requires every discovered public mutation to either enter the shared
+/// fence in its declared form or carry the one issue-backed exemption.
+#[test]
+fn every_current_library_content_mutation_declares_its_fence_policy() {
+    let core = include_str!("../src/core/mod.rs");
+    let recovery = include_str!("../src/core/library_recovery.rs");
+    let sources = [core, recovery];
+
+    let contracts: &[(&str, &[&str])] = &[
+        (
+            "finish_interrupted_library_deletes",
+            &["LibraryMutation::FinishInterruptedDeletes"],
+        ),
+        (
+            "set_library_root",
+            &["begin_library_mutation", "LibraryMutation::SetLibraryRoot"],
+        ),
+        (
+            "set_library_path_for_game",
+            &[
+                "begin_library_mutation",
+                "LibraryMutation::SetLibraryPathForGame",
+            ],
+        ),
+        (
+            "adopt_folder",
+            &[
+                "snapshot_library_root_for_mutation",
+                "revalidate_library_root_for_mutation",
+                "LibraryMutation::AdoptFolder",
+            ],
+        ),
+        (
+            "import_zip",
+            &[
+                "snapshot_library_root_for_mutation",
+                "revalidate_library_root_for_mutation",
+                "LibraryMutation::ImportZip",
+            ],
+        ),
+        (
+            "recover_unreferenced_library_dir",
+            &[
+                "begin_guarded_library_mutation",
+                "LibraryMutation::RecoverUnreferencedLibraryDir",
+            ],
+        ),
+        (
+            "delete_unreferenced_library_dir",
+            &[
+                "begin_guarded_library_mutation",
+                "LibraryMutation::DeleteUnreferencedLibraryDir",
+            ],
+        ),
+        (
+            "reinstall_gamebanana_mod_with_endpoints",
+            &[
+                "record_library_mutation_exemption",
+                "LibraryMutation::ReinstallGamebananaMod",
+                "166",
+            ],
+        ),
+    ];
+
+    let discovery_patterns = [
+        "purge_delete_quarantines(",
+        ".move_root(",
+        "copy_dir_recursive(",
+        "zip_import::extract(",
+        "begin_guarded_library_mutation(",
+        "std::fs::remove_dir_all(&library_path)",
+    ];
+    let mut discovered = Vec::new();
+    for source in sources {
+        for line in source.lines() {
+            let Some(signature) = line.strip_prefix("    pub async fn ") else {
+                continue;
+            };
+            let Some((function, _)) = signature.split_once('(') else {
+                continue;
+            };
+            let body = public_async_function(source, function);
+            if discovery_patterns
+                .iter()
+                .any(|pattern| body.contains(pattern))
+            {
+                discovered.push(function);
+            }
+        }
+    }
+    discovered.sort_unstable();
+    discovered.dedup();
+
+    for function in &discovered {
+        assert!(
+            contracts
+                .iter()
+                .any(|(registered, _)| registered == function),
+            "Library mutation {function} has neither a shared fence policy nor a deliberate \
+             issue-backed exemption",
+        );
+    }
+
+    for (function, required_markers) in contracts {
+        assert!(
+            discovered.contains(function),
+            "Library mutation {function} escaped filesystem-mutation discovery; add its \
+             primitive to the enforcement test before changing its fence policy",
+        );
+        let body = sources
+            .iter()
+            .find_map(|source| {
+                source
+                    .contains(&format!("    pub async fn {function}("))
+                    .then(|| public_async_function(source, function))
+            })
+            .expect("contract function exists in one source");
+        for marker in *required_markers {
+            assert!(
+                body.contains(marker),
+                "Library mutation {function} is outside its shared fence policy: missing \
+                 {marker:?}",
+            );
+        }
+    }
+}
+
+/// An adopt that has finished its unbounded copy must revalidate the root
+/// under the shared fence before inserting its row. If relocation won in the
+/// meantime, adopt fails closed and removes the staged bytes from either name.
+#[tokio::test]
+async fn adopt_revalidates_the_library_root_after_copy() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let old_root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("old Library root");
+    let new_root = env._tmp.path().join("relocated-gimi");
+    let source = env._tmp.path().join("adopt-source");
+    std::fs::create_dir_all(&source).expect("source");
+    std::fs::write(source.join("merged.ini"), b"hash=adopt-race\n").expect("marker");
+
+    let mut adopting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::ADOPT_AFTER_LIBRARY_COPY)
+        .op([
+            "adopt",
+            "--from",
+            &source.display().to_string(),
+            "--name",
+            "Adopt Root Race",
+        ])
+        .spawn();
+    adopting.wait_for_pause(gmm_lib::core::crash_points::ADOPT_AFTER_LIBRARY_COPY);
+    probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &new_root.display().to_string(),
+        ])
+        .run()
+        .expect_ok("relocation while adopt is between copy and commit");
+    adopting.resume();
+    let adopted = adopting.wait_for_outcome();
+    assert!(
+        !adopted.ok,
+        "adopt_folder must fail closed when relocation changes its resolved root; \
+         it committed a stale row: {adopted:?}",
+    );
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list")
+            .is_empty(),
+        "a refused adopt must not commit a Mod row",
+    );
+    assert_no_staged_mod_directories(&[&old_root, &new_root], "adopt_folder");
+}
+
+/// ZIP import has the same filesystem-first shape as adopt. Extraction may be
+/// unbounded, so the fence is reacquired only for identity revalidation and
+/// commit; a relocation winner makes import remove its own staged directory.
+#[tokio::test]
+async fn import_zip_revalidates_the_library_root_after_extract() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let old_root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("old Library root");
+    let new_root = env._tmp.path().join("relocated-gimi");
+    let archive = env._tmp.path().join("race.zip");
+    write_single_file_mod_zip(&archive);
+
+    let mut importing = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::IMPORT_ZIP_AFTER_EXTRACT)
+        .op([
+            "import-zip",
+            "--zip",
+            &archive.display().to_string(),
+            "--name",
+            "Import Root Race",
+        ])
+        .spawn();
+    importing.wait_for_pause(gmm_lib::core::crash_points::IMPORT_ZIP_AFTER_EXTRACT);
+    probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &new_root.display().to_string(),
+        ])
+        .run()
+        .expect_ok("relocation while import is between extract and commit");
+    importing.resume();
+    let imported = importing.wait_for_outcome();
+    assert!(
+        !imported.ok,
+        "import_zip must fail closed when relocation changes its resolved root; \
+         it committed a stale row: {imported:?}",
+    );
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list")
+            .is_empty(),
+        "a refused ZIP import must not commit a Mod row",
+    );
+    assert_no_staged_mod_directories(&[&old_root, &new_root], "import_zip");
+}
+
 /// Startup cleanup must not classify an intent as stranded while the delete
 /// that owns it is paused immediately before its quarantine rename.
 ///

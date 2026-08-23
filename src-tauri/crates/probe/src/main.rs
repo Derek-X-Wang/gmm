@@ -205,6 +205,14 @@ async fn run(args: &Args) -> Result<(), String> {
                 .map_err(|e| e.to_string())
         }
 
+        "set-library-path" => {
+            let path = PathBuf::from(args.req("--path")?);
+            core.set_library_path_for_game(args.game()?, Some(&path))
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
         "reconcile" => {
             let mods_dir = PathBuf::from(args.req("--mods-dir")?);
             core.reconcile_junctions(args.game()?, &mods_dir)

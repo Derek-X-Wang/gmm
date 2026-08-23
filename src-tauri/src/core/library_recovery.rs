@@ -47,6 +47,7 @@ use ulid::Ulid;
 
 use super::library_audit::{directory_size_without_links, is_link_or_reparse_point};
 use super::library_identity::IdentifiedDirectory;
+use super::library_mutation::{unique_junction_dir_name, LibraryMutation, LibraryMutationFence};
 use super::{crash_points, Core, Error, GameCode, Mod, Result, Source};
 
 pub(super) const DELETE_QUARANTINE_PREFIX: &str = ".gmm-delete-";
@@ -67,7 +68,7 @@ pub struct DeletedLibraryDir {
 /// writer lock excludes competing recovery/delete calls, while the open
 /// directory handle fixes which filesystem object the caller proved safe.
 struct GuardedLibraryMutation {
-    transaction: sqlx::Transaction<'static, Sqlite>,
+    fence: LibraryMutationFence,
     directory: IdentifiedDirectory,
 }
 
@@ -77,15 +78,23 @@ impl Core {
     /// every startup; failures are retryable because the reserved directory
     /// remains hidden from audit and cannot be recovered as a Mod.
     pub async fn finish_interrupted_library_deletes(&self) -> Result<usize> {
+        // Serialize root resolution and cleanup with every relocation and
+        // ownership mutation. An old root snapshot is not safe evidence once
+        // another mutation can change the configured root.
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::FinishInterruptedDeletes)
+            .await?;
         let mut roots = Vec::new();
         for profile in super::games::GAME_PROFILES {
-            roots.push(self.resolved_library_root_for(profile.code).await?);
+            roots.push(
+                self.resolved_library_root_for_in_mutation(profile.code, &mut fence)
+                    .await?,
+            );
         }
 
         // Serialize cleanup with the pre-commit half of delete. In particular,
         // an intent without a quarantine is known to be stranded only while no
         // delete can be between writing that intent and performing its rename.
-        let transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let removed = tokio::task::spawn_blocking(move || purge_delete_quarantines(&roots))
             .await
             .map_err(|join_error| Error::Io {
@@ -94,7 +103,7 @@ impl Core {
                     "Library quarantine cleanup worker failed: {join_error}"
                 )),
             })??;
-        transaction.commit().await?;
+        fence.commit().await?;
         Ok(removed)
     }
 
@@ -128,11 +137,17 @@ impl Core {
         display_name: &str,
     ) -> Result<Mod> {
         self.ensure_no_active_session().await?;
-        let mut guarded = self.begin_guarded_library_mutation(game, path).await?;
+        let mut guarded = self
+            .begin_guarded_library_mutation(
+                game,
+                path,
+                LibraryMutation::RecoverUnreferencedLibraryDir,
+            )
+            .await?;
         let path = guarded.directory.path().to_path_buf();
 
         let id = self
-            .recovered_mod_id(&path, &mut guarded.transaction)
+            .recovered_mod_id(&path, &mut guarded.fence.transaction)
             .await?;
         let library_path = path
             .parent()
@@ -151,9 +166,21 @@ impl Core {
         }
         self.crash_point(crash_points::RECOVER_AFTER_LIBRARY_MOVE);
 
+        let committed_directory =
+            IdentifiedDirectory::open(&library_path).map_err(|source| Error::Io {
+                path: library_path.clone(),
+                source,
+            })?;
+        if committed_directory.identity() != guarded.directory.identity() {
+            return Err(Error::NotAnUnreferencedLibraryDir {
+                path: library_path,
+                reason: "the directory changed after it was validated".to_string(),
+            });
+        }
+
         let base = super::sanitize_dir_name(display_name);
         let junction_dir_name =
-            unique_junction_dir_name(&mut guarded.transaction, game, &base).await?;
+            unique_junction_dir_name(&mut guarded.fence.transaction, game, &base).await?;
         let created_at = Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO mods (
@@ -169,10 +196,10 @@ impl Core {
         .bind(library_path.to_string_lossy().as_ref())
         .bind(&junction_dir_name)
         .bind(&created_at)
-        .execute(&mut *guarded.transaction)
+        .execute(&mut *guarded.fence.transaction)
         .await?;
 
-        guarded.transaction.commit().await?;
+        guarded.fence.commit().await?;
 
         self.detect_and_record_variants(&id, &library_path).await?;
 
@@ -202,7 +229,13 @@ impl Core {
         path: &Path,
     ) -> Result<DeletedLibraryDir> {
         self.ensure_no_active_session().await?;
-        let guarded = self.begin_guarded_library_mutation(game, path).await?;
+        let guarded = self
+            .begin_guarded_library_mutation(
+                game,
+                path,
+                LibraryMutation::DeleteUnreferencedLibraryDir,
+            )
+            .await?;
         let path = guarded.directory.path().to_path_buf();
         let directory_name = path
             .file_name()
@@ -252,10 +285,10 @@ impl Core {
         }
         self.crash_point(crash_points::DELETE_AFTER_QUARANTINE_MOVE);
 
-        if let Err(error) = guarded.transaction.commit().await {
+        if let Err(error) = guarded.fence.commit().await {
             let _ = fs::rename(&quarantine, &path);
             let _ = fs::remove_file(&intent);
-            return Err(error.into());
+            return Err(error);
         }
 
         let removed = quarantine;
@@ -322,37 +355,17 @@ impl Core {
         )
     }
 
-    async fn ensure_no_active_session_in_mutation(
-        &self,
-        mutation: &mut sqlx::Transaction<'_, Sqlite>,
-    ) -> Result<()> {
-        let row = sqlx::query("SELECT game_code, started_at FROM active_session WHERE id = 1")
-            .fetch_optional(&mut **mutation)
-            .await?;
-        if let Some(row) = row {
-            return Err(Error::SessionActive {
-                game: row.try_get("game_code")?,
-                since: row.try_get("started_at")?,
-            });
-        }
-        Ok(())
-    }
-
     async fn begin_guarded_library_mutation(
         &self,
         game: GameCode,
         path: &Path,
+        mutation: LibraryMutation,
     ) -> Result<GuardedLibraryMutation> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        self.ensure_no_active_session_in_mutation(&mut transaction)
-            .await?;
+        let mut fence = self.begin_library_mutation(mutation).await?;
         let directory = self
-            .validate_unreferenced_library_dir(game, path, &mut *transaction)
+            .validate_unreferenced_library_dir(game, path, &mut *fence.transaction)
             .await?;
-        Ok(GuardedLibraryMutation {
-            transaction,
-            directory,
-        })
+        Ok(GuardedLibraryMutation { fence, directory })
     }
 
     /// The shared precondition for every action in this module.
@@ -451,31 +464,6 @@ impl Core {
 
         Ok(directory)
     }
-}
-
-async fn unique_junction_dir_name(
-    mutation: &mut sqlx::Transaction<'_, Sqlite>,
-    game: GameCode,
-    base: &str,
-) -> Result<String> {
-    let rows = sqlx::query("SELECT junction_dir_name FROM mods WHERE game_code = ?")
-        .bind(game.as_str())
-        .fetch_all(&mut **mutation)
-        .await?;
-    let existing: std::collections::HashSet<String> = rows
-        .iter()
-        .filter_map(|row| row.try_get("junction_dir_name").ok())
-        .collect();
-    if !existing.contains(base) {
-        return Ok(base.to_string());
-    }
-    for n in 2..=u32::MAX {
-        let candidate = format!("{base} ({n})");
-        if !existing.contains(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    unreachable!("u32::MAX collisions on one display name is not a real scenario")
 }
 
 fn purge_delete_quarantines(roots: &[PathBuf]) -> Result<usize> {

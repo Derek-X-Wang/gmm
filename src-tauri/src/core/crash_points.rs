@@ -73,6 +73,11 @@ pub const IMPORT_ZIP_AFTER_EXTRACT: &str = "import_zip.after_extract";
 /// `import_zip`: the row exists, Variants have not been detected yet.
 pub const IMPORT_ZIP_AFTER_ROW_INSERT: &str = "import_zip.after_row_insert";
 
+/// `set_library_path_for_game` / `set_library_root`: the Mod rows whose
+/// paths need rewriting have been snapshotted, but no Library bytes have
+/// moved yet. A concurrent row committer must not enter after this snapshot.
+pub const RELOCATE_AFTER_MOD_SNAPSHOT: &str = "relocate.after_mod_snapshot";
+
 /// `recover_unreferenced_library_dir`: a Library-root directory whose
 /// name was not a usable ULID has been renamed to the fresh one, and no
 /// row references it yet. Leaves the same orphan shape as
@@ -101,6 +106,7 @@ pub const ALL: &[&str] = &[
     ADOPT_AFTER_ROW_INSERT,
     IMPORT_ZIP_AFTER_EXTRACT,
     IMPORT_ZIP_AFTER_ROW_INSERT,
+    RELOCATE_AFTER_MOD_SNAPSHOT,
     RECOVER_AFTER_LIBRARY_MOVE,
     DELETE_AFTER_INTENT_WRITE,
     DELETE_AFTER_QUARANTINE_MOVE,
