@@ -236,67 +236,201 @@ fn top_level_fields(text: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Derive every struct-argument command and its real outer parameter name from
-/// `commands.rs`. Struct names ending in `Args` are the same types Tauri's
-/// generated wrapper deserialises from one outer IPC field.
-fn backend_struct_argument_names() -> BTreeMap<String, String> {
-    let src = read("src-tauri/src/commands.rs");
-    let argument_types: BTreeSet<_> = src
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("pub struct "))
-        .filter_map(|tail| tail.split_whitespace().next())
-        .filter(|name| name.ends_with("Args"))
-        .map(str::to_string)
-        .collect();
-    assert!(!argument_types.is_empty(), "found no public *Args structs");
+fn contains_identifier(text: &str, name: &str) -> bool {
+    text.match_indices(name).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + name.len()..].chars().next();
+        let is_identifier = |character: char| character.is_ascii_alphanumeric() || character == '_';
+        before.is_none_or(|character| !is_identifier(character))
+            && after.is_none_or(|character| !is_identifier(character))
+    })
+}
 
-    let mut found = BTreeMap::new();
-    let mut rest = src.as_str();
-    while let Some(attribute) = rest.find("#[tauri::command]") {
-        rest = &rest[attribute + "#[tauri::command]".len()..];
-        let Some(function) = rest.find("pub async fn ") else {
-            break;
-        };
-        let signature = &rest[function + "pub async fn ".len()..];
-        let Some(open) = signature.find('(') else {
+/// Inventory every one-line `struct` declaration whose name ends in `Args`,
+/// independently of the exact public form the contract parser supports. This
+/// is the completeness sentinel: changing `pub struct ProxyArgs` to
+/// `pub(crate) struct ProxyArgs` must make the parser fail loudly, not make the
+/// type disappear from its input set.
+fn declared_argument_types(src: &str) -> BTreeMap<String, String> {
+    let mut declarations = BTreeMap::new();
+
+    for (index, line) in src.lines().enumerate() {
+        let code = line.split_once("//").map_or(line, |(code, _)| code);
+        let Some(struct_start) = code.find("struct") else {
             continue;
         };
+        let before = code[..struct_start].chars().next_back();
+        let after_keyword = &code[struct_start + "struct".len()..];
+        let after = after_keyword.chars().next();
+        if before.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+            || after.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            continue;
+        }
+
+        let name: String = after_keyword
+            .trim_start()
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        assert!(
+            !name.is_empty(),
+            "unparsed struct declaration at commands.rs:{}: {:?}",
+            index + 1,
+            line.trim(),
+        );
+        if !name.ends_with("Args") {
+            continue;
+        }
+
+        let expected = format!("pub struct {name} {{");
+        assert_eq!(
+            code.trim(),
+            expected,
+            "unparsed *Args declaration for {name} at commands.rs:{}: {:?}; expected the supported `pub struct {name} {{` form",
+            index + 1,
+            line.trim(),
+        );
+        assert!(
+            declarations
+                .insert(
+                    name.clone(),
+                    format!("commands.rs:{}: {}", index + 1, line.trim())
+                )
+                .is_none(),
+            "duplicate *Args declaration for {name}",
+        );
+    }
+
+    assert!(
+        !declarations.is_empty(),
+        "found no *Args struct declarations in commands.rs — the declaration inventory is broken",
+    );
+    declarations
+}
+
+/// Derive every struct-argument command and its real outer parameter name from
+/// `commands.rs`. The supported syntax stays deliberately narrow, while the
+/// independent declaration inventory above makes any unsupported form a named
+/// failure instead of silently narrowing coverage.
+fn backend_struct_argument_names() -> BTreeMap<String, (String, String)> {
+    const ATTRIBUTE: &str = "#[tauri::command]";
+
+    let src = read("src-tauri/src/commands.rs");
+    let argument_types = declared_argument_types(&src);
+    let mut matches: BTreeMap<String, Vec<(String, String)>> = argument_types
+        .keys()
+        .map(|name| (name.clone(), Vec::new()))
+        .collect();
+
+    let mut rest = src.as_str();
+    while let Some(attribute) = rest.find(ATTRIBUTE) {
+        let after_attribute = &rest[attribute + ATTRIBUTE.len()..];
+        let block_end = after_attribute
+            .find(ATTRIBUTE)
+            .unwrap_or(after_attribute.len());
+        let block = &after_attribute[..block_end];
+        rest = &after_attribute[block_end..];
+
+        let declaration = block.trim_start();
+        let Some(signature) = declaration.strip_prefix("pub async fn ") else {
+            let mentioned: Vec<_> = argument_types
+                .keys()
+                .filter(|name| contains_identifier(block, name))
+                .cloned()
+                .collect();
+            assert!(
+                mentioned.is_empty(),
+                "unparsed #[tauri::command] declaration using {mentioned:?}: {:?}; expected the supported `pub async fn` form",
+                declaration.lines().next().unwrap_or_default(),
+            );
+            continue;
+        };
+        let open = signature.find('(').unwrap_or_else(|| {
+            panic!(
+                "unparsed #[tauri::command] function declaration: {:?}",
+                declaration.lines().next().unwrap_or_default(),
+            )
+        });
         let command = signature[..open].trim();
         let tail = &signature[open + 1..];
         let close = matching_delimiter(tail, '(', ')')
-            .unwrap_or_else(|| panic!("unterminated signature for {command}"));
+            .unwrap_or_else(|| panic!("unterminated signature for {command}: {declaration:?}"));
         let parameters = &tail[..close];
 
-        let struct_parameters: Vec<_> = top_level_fields(parameters)
-            .into_iter()
-            .filter_map(|parameter| parameter.split_once(':'))
-            .map(|(name, ty)| (name.trim(), ty.trim()))
-            .filter(|(_, ty)| argument_types.contains(*ty))
-            .collect();
-        assert!(
-            struct_parameters.len() <= 1,
-            "{command} has multiple *Args parameters; the IPC contract test needs an explicit policy",
-        );
-        if let Some((name, _)) = struct_parameters.first() {
-            found.insert(command.to_string(), (*name).to_string());
+        for parameter in top_level_fields(parameters) {
+            let mentioned: Vec<_> = argument_types
+                .keys()
+                .filter(|name| contains_identifier(parameter, name))
+                .cloned()
+                .collect();
+            if mentioned.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                mentioned.len(),
+                1,
+                "unparsed *Args parameter in {command}: {parameter:?}; mentioned types = {mentioned:?}",
+            );
+            let argument_type = &mentioned[0];
+            let (parameter_name, parameter_type) = parameter.split_once(':').unwrap_or_else(|| {
+                panic!(
+                    "unparsed {argument_type} parameter in {command}: {parameter:?}; expected `name: {argument_type}`",
+                )
+            });
+            assert_eq!(
+                parameter_type.trim(),
+                argument_type,
+                "unparsed {argument_type} parameter type in {command}: {parameter:?}; expected the unqualified type `{argument_type}`",
+            );
+            matches
+                .get_mut(argument_type)
+                .expect("declared argument type has a match bucket")
+                .push((command.to_string(), parameter_name.trim().to_string()));
         }
     }
-    assert!(
-        !found.is_empty(),
-        "found no Tauri commands with *Args parameters"
-    );
+
+    let mut found = BTreeMap::new();
+    for (argument_type, declaration) in argument_types {
+        let type_matches = matches
+            .remove(&argument_type)
+            .expect("declared argument type has a match bucket");
+        assert_eq!(
+            type_matches.len(),
+            1,
+            "{argument_type} declared at {declaration} must match exactly one supported #[tauri::command] parameter, found {type_matches:?}",
+        );
+        let (command, parameter_name) = type_matches
+            .into_iter()
+            .next()
+            .expect("exactly one match was asserted");
+        assert!(
+            found
+                .insert(command.clone(), (argument_type.clone(), parameter_name))
+                .is_none(),
+            "multiple *Args types matched the same command {command}",
+        );
+    }
     found
 }
 
-/// Derive outer object keys from the actual frontend `invoke` calls. This is
-/// intentionally not an expected-name table: the test below compares these
-/// real keys directly with the real Rust parameter identifiers.
-fn frontend_invocation_outer_names() -> BTreeMap<String, Vec<String>> {
-    let mut found = BTreeMap::new();
-    for (_file, text) in frontend_sources() {
-        let mut rest = text.as_str();
-        while let Some(invoke) = rest.find("invoke") {
-            rest = &rest[invoke + "invoke".len()..];
+#[derive(Debug)]
+struct FrontendInvocation {
+    callsite: String,
+    outer_names: Result<Vec<String>, String>,
+}
+
+/// Derive outer object keys from every actual frontend `invoke` callsite. This
+/// is intentionally not an expected-name table: the test below compares every
+/// real call directly with the real Rust parameter identifier.
+fn frontend_invocation_outer_names() -> BTreeMap<String, Vec<FrontendInvocation>> {
+    let mut found: BTreeMap<String, Vec<FrontendInvocation>> = BTreeMap::new();
+    for (file, text) in frontend_sources() {
+        let mut cursor = 0usize;
+        while let Some(relative_invoke) = text[cursor..].find("invoke") {
+            let invoke = cursor + relative_invoke;
+            cursor = invoke + "invoke".len();
+            let rest = &text[cursor..];
             let after_generic = match rest.strip_prefix('<') {
                 Some(tail) => match end_of_generic(tail) {
                     Some(end) => &tail[end + 1..],
@@ -315,27 +449,41 @@ fn frontend_invocation_outer_names() -> BTreeMap<String, Vec<String>> {
                 continue;
             };
             let command = &tail[..name_end];
+            let callsite = format!("{file}:{}", text[..invoke].lines().count());
             let after_name = tail[name_end + 1..].trim_start();
-            let Some(after_comma) = after_name.strip_prefix(',') else {
-                continue;
+            let outer_names = match after_name.strip_prefix(',') {
+                None => Err("has no argument object".to_string()),
+                Some(after_comma) => match after_comma.trim_start().strip_prefix('{') {
+                    None => Err(format!(
+                        "has an unsupported non-object argument: {:?}",
+                        after_comma.trim_start().lines().next().unwrap_or_default(),
+                    )),
+                    Some(object) => {
+                        let close = matching_delimiter(object, '{', '}').unwrap_or_else(|| {
+                            panic!(
+                                "unterminated invoke argument object for {command} at {callsite}"
+                            )
+                        });
+                        Ok(top_level_fields(&object[..close])
+                            .into_iter()
+                            .map(|field| {
+                                field
+                                    .split_once(':')
+                                    .map_or(field, |(key, _)| key)
+                                    .trim()
+                                    .to_string()
+                            })
+                            .collect())
+                    }
+                },
             };
-            let after_comma = after_comma.trim_start();
-            let Some(object) = after_comma.strip_prefix('{') else {
-                continue;
-            };
-            let close = matching_delimiter(object, '{', '}')
-                .unwrap_or_else(|| panic!("unterminated invoke argument object for {command}"));
-            let keys = top_level_fields(&object[..close])
-                .into_iter()
-                .map(|field| {
-                    field
-                        .split_once(':')
-                        .map_or(field, |(key, _)| key)
-                        .trim()
-                        .to_string()
-                })
-                .collect();
-            found.insert(command.to_string(), keys);
+            found
+                .entry(command.to_string())
+                .or_default()
+                .push(FrontendInvocation {
+                    callsite,
+                    outer_names,
+                });
         }
     }
     found
@@ -372,16 +520,29 @@ fn struct_argument_outer_names_match_across_the_real_boundary_sources() {
     let backend = backend_struct_argument_names();
     let frontend = frontend_invocation_outer_names();
 
-    for (command, rust_name) in backend {
-        let frontend_names = frontend.get(&command).unwrap_or_else(|| {
-            panic!("{command} has a Rust *Args parameter but no object-shaped frontend invoke")
+    for (command, (argument_type, rust_name)) in backend {
+        let invocations = frontend.get(&command).unwrap_or_else(|| {
+            panic!("{argument_type} maps to {command}, but no frontend invoke callsite was found")
         });
-        assert_eq!(
-            frontend_names,
-            &[rust_name.as_str()],
-            "struct-argument IPC outer-name mismatch for {command}: Rust parameter is \
-             {rust_name:?}, frontend invoke keys are {frontend_names:?}",
+        assert!(
+            !invocations.is_empty(),
+            "{command} has no frontend callsites"
         );
+        for invocation in invocations {
+            let frontend_names = invocation.outer_names.as_ref().unwrap_or_else(|problem| {
+                panic!(
+                    "{argument_type} maps to {command}, but its frontend invoke at {} {problem}",
+                    invocation.callsite,
+                )
+            });
+            assert_eq!(
+                frontend_names,
+                &[rust_name.as_str()],
+                "struct-argument IPC outer-name mismatch for {command} at {}: Rust parameter is \
+                 {rust_name:?}, frontend invoke keys are {frontend_names:?}",
+                invocation.callsite,
+            );
+        }
     }
 }
 

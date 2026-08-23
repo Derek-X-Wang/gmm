@@ -117,8 +117,15 @@ fn adopt_args_deserialises_from_camel_case_json() {
 
 When adding a new `*Args` command, extend `tests/commands_ipc.rs` with the
 backend shape assertions and `src/api.test.ts` with the frontend envelope
-assertion. The cross-source outer-name check discovers the command from its
-real declarations and needs no list update:
+assertion. The cross-source outer-name check has no hand-maintained command
+list: it inventories every `*Args` struct declaration, requires each type to
+be the unqualified parameter of exactly one `#[tauri::command] pub async fn`,
+and checks every frontend `invoke` callsite it finds for that command. Its
+source parser deliberately supports the repository's current declaration
+style; a different visibility, sync function, qualified type, or wrapped type
+fails by naming the unsupported declaration instead of silently dropping it.
+It does not replace the explicit serde-shape and frontend API assertions below,
+or prove Tauri runtime/ACL behaviour:
 
 1. **Args deserialise.** Build a `serde_json::json!({ … })` value
    matching the JS-side shape and `from_value` it into the Args
