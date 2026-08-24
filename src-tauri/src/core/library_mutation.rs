@@ -12,6 +12,8 @@
 //! likewise holds the claim across both its Junction mutation and `enabled`
 //! update: creating or removing one reparse point is bounded, and the two
 //! deployment-state changes must not be observed or overwritten separately.
+//! Active-Variant retargeting uses the same fence so recovery quarantine and
+//! Variant deployment cannot pass one another after either operation's guard.
 
 use std::fs;
 use std::io;
@@ -25,7 +27,7 @@ use super::library_identity::IdentifiedDirectory;
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::mods::{ReinstallRecovery, ReinstallRecoveryOutcome};
 use super::settings::{get as get_setting, keys};
-use super::{crash_points, junction, volume, Core, Error, GameCode, Result};
+use super::{crash_points, junction, link_exists, volume, Core, Error, GameCode, Result};
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 
@@ -41,6 +43,7 @@ pub(super) enum LibraryMutation {
     DeleteUnreferencedLibraryDir,
     ReinstallGamebananaMod,
     SetEnabled,
+    SetActiveVariant,
 }
 
 impl LibraryMutation {
@@ -56,6 +59,7 @@ impl LibraryMutation {
             Self::DeleteUnreferencedLibraryDir => "delete_unreferenced_library_dir",
             Self::ReinstallGamebananaMod => "reinstall_gamebanana_mod_with_endpoints",
             Self::SetEnabled => "set_enabled",
+            Self::SetActiveVariant => "set_active_variant",
         }
     }
 }
@@ -206,6 +210,8 @@ impl Core {
         let mut fence = self
             .begin_library_mutation(LibraryMutation::SetEnabled)
             .await?;
+        ensure_mod_reinstall_is_usable(id, &mut *fence.transaction).await?;
+        self.crash_point(crash_points::SET_ENABLED_AFTER_REINSTALL_GUARD);
         let row =
             sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
                 .bind(id)
@@ -239,6 +245,59 @@ impl Core {
             .execute(&mut *fence.transaction)
             .await?;
         self.crash_point(crash_points::SET_ENABLED_AFTER_DB_UPDATE);
+        fence.commit().await
+    }
+
+    /// Change the selected Variant and its enabled Junction while holding the
+    /// same writer fence used by reinstall recovery and other Library changes.
+    pub(super) async fn set_active_variant_in_library_mutation(
+        &self,
+        mod_id: &str,
+        variant_id: &str,
+        game_mods_dir: &Path,
+    ) -> Result<()> {
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::SetActiveVariant)
+            .await?;
+        ensure_mod_reinstall_is_usable(mod_id, &mut *fence.transaction).await?;
+        self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_REINSTALL_GUARD);
+
+        // Validate the Variant belongs to this Mod before persisting it.
+        sqlx::query("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
+            .bind(variant_id)
+            .bind(mod_id)
+            .fetch_one(&mut *fence.transaction)
+            .await?;
+
+        let mod_row =
+            sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
+                .bind(mod_id)
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+        let junction_dir_name: String = mod_row.try_get("junction_dir_name")?;
+        let enabled: i64 = mod_row.try_get("enabled")?;
+        let library_path = PathBuf::from(mod_row.try_get::<String, _>("library_path")?);
+
+        sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
+            .bind(variant_id)
+            .bind(mod_id)
+            .execute(&mut *fence.transaction)
+            .await?;
+        self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_DB_UPDATE);
+
+        if enabled != 0 {
+            let link = game_mods_dir.join(&junction_dir_name);
+            if link_exists(&link) {
+                junction::remove(&link)?;
+                self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE);
+            }
+            let target = self
+                .junction_target_for(mod_id, &library_path, &mut *fence.transaction)
+                .await?;
+            volume::require_ntfs_pair(game_mods_dir, &target)?;
+            junction::create(&link, &target)?;
+        }
+
         fence.commit().await
     }
 

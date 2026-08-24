@@ -62,6 +62,11 @@ macro_rules! define_crash_points {
 
 define_crash_points! {
 
+/// `set_enabled`: the reinstall-quarantine guard passed while the Library
+/// writer fence is already held, so recovery cannot quarantine this Mod before
+/// the deployment-state transition commits.
+pub const SET_ENABLED_AFTER_REINSTALL_GUARD: &str = "set_enabled.after_reinstall_guard";
+
 /// `set_enabled(true)`: the Junction now exists, the row still says
 /// disabled. Recoverable — see the Junction, believe the row, remove it.
 pub const SET_ENABLED_AFTER_JUNCTION_CREATE: &str = "set_enabled.after_junction_create";
@@ -74,9 +79,15 @@ pub const SET_ENABLED_AFTER_JUNCTION_REMOVE: &str = "set_enabled.after_junction_
 /// writer fence is still held until both halves commit together.
 pub const SET_ENABLED_AFTER_DB_UPDATE: &str = "set_enabled.after_db_update";
 
-/// `set_active_variant`: the row names the new Variant, the Junction
-/// still points at the old one. Recoverable — the row is the source of
-/// truth for which Variant is active.
+/// `set_active_variant`: the reinstall-quarantine guard passed while the
+/// Library writer fence is already held, so recovery cannot quarantine this
+/// Mod before the Variant transition commits.
+pub const SET_ACTIVE_VARIANT_AFTER_REINSTALL_GUARD: &str =
+    "set_active_variant.after_reinstall_guard";
+
+/// `set_active_variant`: the transaction names the new Variant, while the
+/// Junction still points at the old one. A process death rolls the transaction
+/// back, leaving the old persisted selection and old Junction in agreement.
 pub const SET_ACTIVE_VARIANT_AFTER_DB_UPDATE: &str = "set_active_variant.after_db_update";
 
 /// `set_active_variant`: the old Junction is gone and the new one is not

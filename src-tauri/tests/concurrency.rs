@@ -2100,6 +2100,18 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
         toggle.to_string().contains("Retry recovery"),
         "the refusal must point at the in-app escape, got: {toggle}",
     );
+    let variant_switch = started
+        .set_active_variant(
+            &imported.id,
+            "unavailable-while-quarantined",
+            &env.game_mods,
+        )
+        .await
+        .expect_err("a quarantined Mod must reject Variant changes before validation");
+    assert!(
+        variant_switch.to_string().contains("Retry recovery"),
+        "the Variant refusal must identify reinstall quarantine, got: {variant_switch}",
+    );
 
     // The blast radius is exactly one Mod. Unrelated Library work and the
     // per-game conflict scan remain available in the same running Core.
@@ -3623,6 +3635,7 @@ async fn assert_set_enabled_excludes_relocation(
     display_name: &str,
 ) {
     for pause_point in [
+        gmm_lib::core::crash_points::SET_ENABLED_AFTER_REINSTALL_GUARD,
         junction_pause_point,
         gmm_lib::core::crash_points::SET_ENABLED_AFTER_DB_UPDATE,
     ] {
@@ -3634,6 +3647,82 @@ async fn assert_set_enabled_excludes_relocation(
         )
         .await;
     }
+}
+
+/// The reinstall-quarantine guard for a Variant switch must run after the
+/// Library writer fence is acquired. Otherwise recovery can quarantine the Mod
+/// after the guard passes but before the Variant and Junction transition.
+///
+/// Mutation oracle: moving the guard and its adjacent crash point above
+/// `begin_library_mutation` lets the relocation enter while this probe is
+/// paused, and the named lock-refusal assertion fails.
+#[tokio::test]
+async fn active_variant_quarantine_guard_is_inside_library_writer_fence() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let source = env._tmp.path().join("variant-quarantine-guard");
+    for name in ["Red", "Blue"] {
+        let variant = source.join(name);
+        std::fs::create_dir_all(&variant).expect("create Variant fixture");
+        std::fs::write(variant.join("merged.ini"), format!("; {name}\n"))
+            .expect("write Variant fixture");
+    }
+    let imported = core
+        .adopt_folder(GameCode::Gimi, &source, "Guarded Variant")
+        .await
+        .expect("adopt Variant Mod");
+    let variants = core
+        .list_variants(&imported.id)
+        .await
+        .expect("list Variants");
+    let active = core
+        .active_variant_id(&imported.id)
+        .await
+        .expect("read active Variant");
+    let selected = variants
+        .iter()
+        .find(|variant| Some(variant.id.as_str()) != active.as_deref())
+        .expect("a different Variant");
+
+    let mut switching = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::SET_ACTIVE_VARIANT_AFTER_REINSTALL_GUARD)
+        .op([
+            "set-active-variant",
+            "--mod-id",
+            &imported.id,
+            "--variant-id",
+            &selected.id,
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ])
+        .spawn();
+    switching.wait_for_pause(gmm_lib::core::crash_points::SET_ACTIVE_VARIANT_AFTER_REINSTALL_GUARD);
+
+    let relocated_root = env._tmp.path().join("relocated-during-variant-guard");
+    let relocation = probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &relocated_root.display().to_string(),
+        ])
+        .run();
+    relocation.expect_refused(
+        "relocation while set_active_variant paused after its quarantine guard",
+        "database is locked",
+    );
+
+    switching.resume();
+    switching
+        .wait_for_outcome()
+        .expect_ok("set_active_variant after the refused relocation");
+    assert_eq!(
+        core.active_variant_id(&imported.id)
+            .await
+            .expect("read committed Variant")
+            .as_deref(),
+        Some(selected.id.as_str()),
+        "the fenced Variant transition must commit after it resumes",
+    );
 }
 
 async fn assert_set_enabled_excludes_relocation_at(

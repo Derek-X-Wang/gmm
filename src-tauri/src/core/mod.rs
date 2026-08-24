@@ -2816,48 +2816,8 @@ impl Core {
         variant_id: &str,
         game_mods_dir: &Path,
     ) -> Result<()> {
-        self.ensure_no_active_session().await?;
-        library_mutation::ensure_mod_reinstall_is_usable(mod_id, &self.pool).await?;
-        // Validate the variant belongs to this mod and read its subpath.
-        let variant_row =
-            sqlx::query("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
-                .bind(variant_id)
-                .bind(mod_id)
-                .fetch_one(&self.pool)
-                .await?;
-        let _subpath: String = variant_row.try_get("subpath")?;
-
-        // Load the mod row so we know whether to retarget a junction.
-        let mod_row =
-            sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
-                .bind(mod_id)
-                .fetch_one(&self.pool)
-                .await?;
-        let junction_dir_name: String = mod_row.try_get("junction_dir_name")?;
-        let enabled: i64 = mod_row.try_get("enabled")?;
-        let library_path = PathBuf::from(mod_row.try_get::<String, _>("library_path")?);
-
-        sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
-            .bind(variant_id)
-            .bind(mod_id)
-            .execute(&self.pool)
-            .await?;
-        self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_DB_UPDATE);
-
-        if enabled != 0 {
-            let link = game_mods_dir.join(&junction_dir_name);
-            if link_exists(&link) {
-                junction::remove(&link)?;
-                self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE);
-            }
-            let target = self
-                .junction_target_for(mod_id, &library_path, &self.pool)
-                .await?;
-            volume::require_ntfs_pair(game_mods_dir, &target)?;
-            junction::create(&link, &target)?;
-        }
-
-        Ok(())
+        self.set_active_variant_in_library_mutation(mod_id, variant_id, game_mods_dir)
+            .await
     }
 
     /// Build a [`conflicts::ConflictReport`] for `game`. Walks the
