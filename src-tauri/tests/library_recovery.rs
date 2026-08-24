@@ -162,6 +162,160 @@ async fn recovering_a_ulid_named_orphan_reuses_its_id_and_copies_nothing() {
     );
 }
 
+#[cfg(unix)]
+async fn assert_nested_variant_detection_error_is_actionable(
+    candidate_variants: &[&str],
+    inaccessible_variant: &str,
+) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    let orphan = root.join(Ulid::new().to_string());
+    for variant in candidate_variants {
+        let dir = orphan.join(variant);
+        fs::create_dir_all(&dir).expect("Variant directory");
+        fs::write(dir.join("merged.ini"), format!("hash={variant}\n")).expect("Variant INI");
+    }
+
+    let inaccessible = orphan.join(inaccessible_variant);
+    fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o0))
+        .expect("make one Variant subtree unreadable");
+    let result = core
+        .recover_unreferenced_library_dir(GameCode::Gimi, &orphan, "Nested Detection Error")
+        .await;
+    fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o755))
+        .expect("restore inaccessible Variant subtree");
+
+    assert!(
+        matches!(result, Err(gmm_lib::core::Error::Io { ref path, .. }) if path == &inaccessible),
+        "recovery with {} candidate Variants must surface the nested detection error at {}, got {result:?}",
+        candidate_variants.len(),
+        inaccessible.display(),
+    );
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list after nested detection error")
+            .is_empty(),
+        "a nested Variant detection error must leave no recovery row",
+    );
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after nested detection error");
+    assert!(
+        report.unreferenced.iter().any(|entry| entry.path == orphan),
+        "the nested detection failure must leave the orphan visible for retry: {report:?}",
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn two_candidate_variants_with_one_unreadable_subtree_refuse_recovery() {
+    assert_nested_variant_detection_error_is_actionable(&["Blue", "Red"], "Red").await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn three_candidate_variants_with_one_unreadable_subtree_refuse_partial_recovery() {
+    assert_nested_variant_detection_error_is_actionable(&["Blue", "Green", "Red"], "Red").await;
+}
+
+#[tokio::test]
+async fn recovered_variants_match_the_equivalent_adopt_shape() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let source = tmp.path().join("equivalent-variant-source");
+    for variant in ["Red", "Blue", "Green"] {
+        let dir = source.join(variant);
+        fs::create_dir_all(&dir).expect("adopt Variant directory");
+        fs::write(dir.join("merged.ini"), format!("hash={variant}\n")).expect("adopt Variant INI");
+    }
+    let adopted = core
+        .adopt_folder(GameCode::Gimi, &source, "Equivalent Adopt")
+        .await
+        .expect("adopt equivalent Variant tree");
+
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    let orphan = root.join(Ulid::new().to_string());
+    for variant in ["Red", "Blue", "Green"] {
+        let dir = orphan.join(variant);
+        fs::create_dir_all(&dir).expect("recovery Variant directory");
+        fs::write(dir.join("merged.ini"), format!("hash={variant}\n"))
+            .expect("recovery Variant INI");
+    }
+    let recovered = core
+        .recover_unreferenced_library_dir(GameCode::Gimi, &orphan, "Equivalent Recovery")
+        .await
+        .expect("recover equivalent Variant tree");
+
+    let adopted_variants = core
+        .list_variants(&adopted.id)
+        .await
+        .expect("adopted Variants");
+    let recovered_variants = core
+        .list_variants(&recovered.id)
+        .await
+        .expect("recovered Variants");
+    let shape = |variants: &[gmm_lib::core::variants::Variant]| {
+        variants
+            .iter()
+            .map(|variant| (variant.name.clone(), variant.subpath.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shape(&recovered_variants),
+        shape(&adopted_variants),
+        "recovery and adopt must persist the same ordered names and subpaths",
+    );
+    assert_eq!(
+        shape(&recovered_variants),
+        [
+            ("Blue".to_string(), PathBuf::from("Blue")),
+            ("Green".to_string(), PathBuf::from("Green")),
+            ("Red".to_string(), PathBuf::from("Red")),
+        ],
+        "recovery must independently persist the expected alphabetical Variant shape",
+    );
+
+    let adopted_active = core
+        .active_variant_id(&adopted.id)
+        .await
+        .expect("adopted active Variant")
+        .expect("adopt selects a Variant");
+    let recovered_active = core
+        .active_variant_id(&recovered.id)
+        .await
+        .expect("recovered active Variant")
+        .expect("recovery selects a Variant");
+    let active_name = |variants: &[gmm_lib::core::variants::Variant], id: &str| {
+        variants
+            .iter()
+            .find(|variant| variant.id == id)
+            .expect("active Variant belongs to Mod")
+            .name
+            .clone()
+    };
+    assert_eq!(
+        active_name(&recovered_variants, &recovered_active),
+        active_name(&adopted_variants, &adopted_active),
+        "recovery and adopt must select the same initial active Variant",
+    );
+    assert_eq!(
+        active_name(&recovered_variants, &recovered_active),
+        "Blue",
+        "recovery must independently select the first alphabetical Variant",
+    );
+}
+
 #[tokio::test]
 async fn a_hand_dropped_directory_recovers_under_a_fresh_ulid_and_is_moved_not_copied() {
     let tmp = TempDir::new().expect("tmp");

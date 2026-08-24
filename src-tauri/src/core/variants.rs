@@ -85,18 +85,18 @@ pub fn detect_variants(mod_root: &Path) -> Result<Vec<DetectedVariant>> {
         return Ok(Vec::new());
     }
 
-    let mut variants: Vec<DetectedVariant> = candidate_dirs
-        .into_iter()
-        .filter_map(|dir| {
-            if has_ini_anywhere(&dir) {
-                let name = dir.file_name()?.to_string_lossy().to_string();
-                let subpath = PathBuf::from(&name);
-                Some(DetectedVariant { name, subpath })
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut variants = Vec::new();
+    for dir in candidate_dirs {
+        if has_ini_anywhere(&dir)? {
+            let name = dir
+                .file_name()
+                .expect("a candidate Variant is a child of the Mod root")
+                .to_string_lossy()
+                .to_string();
+            let subpath = PathBuf::from(&name);
+            variants.push(DetectedVariant { name, subpath });
+        }
+    }
 
     variants.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -108,26 +108,32 @@ pub fn detect_variants(mod_root: &Path) -> Result<Vec<DetectedVariant>> {
 }
 
 /// Does `dir` contain at least one `.ini` file at any depth?
-fn has_ini_anywhere(dir: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
+fn has_ini_anywhere(dir: &Path) -> Result<bool> {
+    let entries = fs::read_dir(dir).map_err(|source| Error::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
+        let file_type = entry.file_type().map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
         if file_type.is_file() {
             if path
                 .extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("ini"))
             {
-                return true;
+                return Ok(true);
             }
-        } else if file_type.is_dir() && has_ini_anywhere(&path) {
-            return true;
+        } else if file_type.is_dir() && has_ini_anywhere(&path)? {
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
