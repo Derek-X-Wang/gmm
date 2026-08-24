@@ -187,6 +187,19 @@ async fn run(args: &Args) -> Result<(), String> {
             .map_err(|e| e.to_string())
         }
 
+        "import-gamebanana" => {
+            let id = args.req("--id")?;
+            let api_base = args.req("--api-base")?;
+            core.import_gamebanana_with_endpoints(
+                args.game()?,
+                &id,
+                &gmm_lib::core::gamebanana::Endpoints { api_base },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        }
+
         "reinstall" => {
             let mod_id = args.req("--mod-id")?;
             let api_base = args.req("--api-base")?;
