@@ -21,6 +21,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use chrono::Utc;
 use sqlx::{Executor, Row, Sqlite};
 use ulid::Ulid;
 
@@ -41,6 +42,7 @@ pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryMutation {
     FinishInterruptedDeletes,
+    ResolveInterruptedStaging,
     RetryReinstallRecovery,
     SetLibraryRoot,
     SetLibraryPathForGame,
@@ -58,6 +60,7 @@ impl LibraryMutation {
     pub(super) const fn function_name(self) -> &'static str {
         match self {
             Self::FinishInterruptedDeletes => "finish_interrupted_library_deletes",
+            Self::ResolveInterruptedStaging => "resolve_interrupted_staging_at_startup",
             Self::RetryReinstallRecovery => "retry_reinstall_recovery",
             Self::SetLibraryRoot => "set_library_root",
             Self::SetLibraryPathForGame => "set_library_path_for_game",
@@ -95,29 +98,11 @@ impl LibraryRootSnapshot {
     pub(super) fn path(&self) -> &Path {
         self.root.path()
     }
-
-    /// Create the ULID directory before unbounded copy/extract work and retain
-    /// its filesystem identity until either its row commits or guarded cleanup
-    /// proves the same object is still unowned.
-    pub(super) fn create_staged_directory(
-        &self,
-        directory_name: &str,
-    ) -> Result<StagedLibraryDirectory> {
-        let path = self.path().join(directory_name);
-        std::fs::create_dir(&path).map_err(|source| Error::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let directory = IdentifiedDirectory::open(&path).map_err(|source| Error::Io {
-            path: path.clone(),
-            source,
-        })?;
-        Ok(StagedLibraryDirectory { directory })
-    }
 }
 
 /// Identity evidence for bytes staged outside the writer fence.
 pub(super) struct StagedLibraryDirectory {
+    id: String,
     directory: IdentifiedDirectory,
 }
 
@@ -193,6 +178,10 @@ impl StagedLibraryDirectory {
     pub(super) fn path(&self) -> &Path {
         self.directory.path()
     }
+
+    fn identity_key(&self) -> String {
+        self.directory.identity().durable_key()
+    }
 }
 
 impl Core {
@@ -201,7 +190,10 @@ impl Core {
         mutation: LibraryMutation,
     ) -> Result<LibraryMutationFence> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if mutation != LibraryMutation::FinishInterruptedDeletes {
+        if !matches!(
+            mutation,
+            LibraryMutation::FinishInterruptedDeletes | LibraryMutation::ResolveInterruptedStaging
+        ) {
             self.ensure_no_active_session_in_library_mutation(&mut transaction)
                 .await?;
         }
@@ -416,6 +408,131 @@ impl Core {
             keeper_id: keeper_id.to_string(),
             removed_mod_ids,
         })
+    }
+
+    /// Create a staged adopt/import directory and commit its durable owner
+    /// before returning it to code that can write source bytes.
+    pub(super) async fn create_staged_library_directory(
+        &self,
+        game: GameCode,
+        directory_name: &str,
+        mutation: LibraryMutation,
+    ) -> Result<(LibraryRootSnapshot, StagedLibraryDirectory)> {
+        let operation = match mutation {
+            LibraryMutation::AdoptFolder => "adopt",
+            LibraryMutation::ImportZip => "import_zip",
+            _ => unreachable!("only adopt/import create ordinary Library stages"),
+        };
+        let mut fence = self.begin_library_mutation(mutation).await?;
+        let root_path = self
+            .resolved_library_root_for_in_mutation(game, &mut fence)
+            .await?;
+        fs::create_dir_all(&root_path).map_err(|source| Error::Io {
+            path: root_path.clone(),
+            source,
+        })?;
+        let root = IdentifiedDirectory::open(&root_path).map_err(|source| Error::Io {
+            path: root_path.clone(),
+            source,
+        })?;
+        let snapshot = LibraryRootSnapshot { game, root };
+        let staged_path = snapshot.path().join(directory_name);
+        fs::create_dir(&staged_path).map_err(|source| Error::Io {
+            path: staged_path.clone(),
+            source,
+        })?;
+        let directory = match IdentifiedDirectory::open(&staged_path) {
+            Ok(directory) => directory,
+            Err(source) => {
+                let _ = fs::remove_dir(&staged_path);
+                return Err(Error::Io {
+                    path: staged_path,
+                    source,
+                });
+            }
+        };
+        let staged = StagedLibraryDirectory {
+            id: directory_name.to_string(),
+            directory,
+        };
+        let insert = sqlx::query(
+            "INSERT INTO staged_library_operations (
+                id, game_code, operation, staged_path, staged_identity, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&staged.id)
+        .bind(game.as_str())
+        .bind(operation)
+        .bind(staged_path.to_string_lossy().as_ref())
+        .bind(staged.identity_key())
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *fence.transaction)
+        .await;
+        if let Err(error) = insert {
+            let _ = fence.transaction.rollback().await;
+            drop(staged);
+            let _ = fs::remove_dir(&staged_path);
+            return Err(error.into());
+        }
+        if let Err(error) = fence.commit().await {
+            drop(staged);
+            let _ = fs::remove_dir(&staged_path);
+            return Err(error);
+        }
+        self.crash_point(crash_points::STAGING_AFTER_WITNESS_COMMIT);
+        Ok((snapshot, staged))
+    }
+
+    /// Retire the exact staging witness inside the transaction that makes its
+    /// Mod row authoritative. A missing row fails closed rather than allowing
+    /// an unwitnessed commit.
+    pub(super) async fn retire_staging_witness_for_commit(
+        &self,
+        staged: &StagedLibraryDirectory,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<()> {
+        let removed = sqlx::query(
+            "DELETE FROM staged_library_operations
+             WHERE id = ? AND staged_path = ? AND staged_identity = ?",
+        )
+        .bind(&staged.id)
+        .bind(staged.path().to_string_lossy().as_ref())
+        .bind(staged.identity_key())
+        .execute(&mut *fence.transaction)
+        .await?;
+        if removed.rows_affected() != 1 {
+            return Err(Error::StagingWitnessChanged {
+                path: staged.path().to_path_buf(),
+            });
+        }
+        Ok(())
+    }
+
+    /// A crashed producer can no longer finish its staged bytes. Release its
+    /// durable claim at startup but preserve the directory itself so the
+    /// ordinary audit records it and the user can inspect, recover, or delete
+    /// it explicitly.
+    pub(super) async fn resolve_interrupted_staging_at_startup(&self) -> Result<usize> {
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::ResolveInterruptedStaging)
+            .await?;
+        let paths: Vec<String> = sqlx::query_scalar(
+            "SELECT staged_path FROM staged_library_operations ORDER BY created_at, id",
+        )
+        .fetch_all(&mut *fence.transaction)
+        .await?;
+        let removed = sqlx::query("DELETE FROM staged_library_operations")
+            .execute(&mut *fence.transaction)
+            .await?;
+        fence.commit().await?;
+        for path in paths {
+            tracing::warn!(
+                target: "gmm::library",
+                path,
+                "released an interrupted staging witness; preserved any staged bytes for the Library audit",
+            );
+        }
+        Ok(removed.rows_affected() as usize)
     }
 
     /// Change both halves of a Mod's enabled deployment state under the one
@@ -1007,27 +1124,6 @@ impl Core {
         junction::create(&link, &target)
     }
 
-    pub(super) async fn snapshot_library_root_for_mutation(
-        &self,
-        game: GameCode,
-        mutation: LibraryMutation,
-    ) -> Result<LibraryRootSnapshot> {
-        let mut fence = self.begin_library_mutation(mutation).await?;
-        let root = self
-            .resolved_library_root_for_in_mutation(game, &mut fence)
-            .await?;
-        std::fs::create_dir_all(&root).map_err(|source| Error::Io {
-            path: root.clone(),
-            source,
-        })?;
-        let root = IdentifiedDirectory::open(&root).map_err(|source| Error::Io {
-            path: root.clone(),
-            source,
-        })?;
-        fence.commit().await?;
-        Ok(LibraryRootSnapshot { game, root })
-    }
-
     pub(super) async fn revalidate_library_root_for_mutation(
         &self,
         snapshot: &LibraryRootSnapshot,
@@ -1073,6 +1169,38 @@ impl Core {
                 return;
             }
         };
+        let retired = match sqlx::query(
+            "DELETE FROM staged_library_operations
+             WHERE id = ? AND staged_path = ? AND staged_identity = ?",
+        )
+        .bind(&staged.id)
+        .bind(staged.path().to_string_lossy().as_ref())
+        .bind(staged.identity_key())
+        .execute(&mut *fence.transaction)
+        .await
+        {
+            Ok(result) if result.rows_affected() == 1 => true,
+            Ok(_) => {
+                tracing::warn!(
+                    target: "gmm::library",
+                    path = %staged_path.display(),
+                    "staged Library witness changed before cleanup; preserving every candidate",
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "gmm::library",
+                    path = %staged_path.display(),
+                    error = %error,
+                    "could not retire staged Library witness; preserving every candidate",
+                );
+                false
+            }
+        };
+        if retired {
+            self.crash_point(crash_points::STAGED_CLEANUP_AFTER_WITNESS_RETIRE);
+        }
         let current_root = match self
             .resolved_library_root_for_in_mutation(snapshot.game, &mut fence)
             .await
@@ -1125,62 +1253,68 @@ impl Core {
         }
 
         let mut quarantined = None;
-        if let Some((path, current)) = deletion_candidate {
-            let ownership = match LibraryOwnershipSnapshot::load(&mut *fence.transaction).await {
-                Ok(ownership) => Some(ownership),
-                Err(error) => {
-                    tracing::warn!(
-                        target: "gmm::library",
-                        path = %path.display(),
-                        error = %error,
-                        "could not prove a staged Library directory is unowned; leaving it for orphan audit",
-                    );
-                    None
-                }
-            };
-            match ownership
-                .as_ref()
-                .and_then(|ownership| ownership.owner_of(current.identity()))
-            {
-                Some(owner) => {
-                    let owner = match owner {
-                        LibraryDirectoryOwner::Mod => "a Mod",
-                        LibraryDirectoryOwner::ActiveReinstall => "interrupted reinstall state",
-                    };
-                    tracing::warn!(
-                        target: "gmm::library",
-                        path = %path.display(),
-                        owner,
-                        "staged Library cleanup candidate is now owned; leaving it intact",
-                    );
-                }
-                None if ownership.is_some() => {
-                    self.crash_point(super::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE);
-                    match self.quarantine_library_directory(&path, &current, None, None) {
-                        Ok(directory) => {
-                            self.crash_point(
-                                super::crash_points::STAGED_CLEANUP_AFTER_QUARANTINE_MOVE,
-                            );
-                            // Windows keeps a removed directory name visible until
-                            // every open handle closes, even when the handles share
-                            // DELETE. The intent now records the object moved to
-                            // GMM's reserved name, so release the old handles before
-                            // the path-based purge; #172 tracks anchoring removal.
-                            drop(current);
-                            drop(staged);
-                            quarantined = Some(directory);
-                        }
-                        Err(error) => tracing::warn!(
+        if retired {
+            if let Some((path, current)) = deletion_candidate {
+                let ownership = match LibraryOwnershipSnapshot::load(&mut *fence.transaction).await
+                {
+                    Ok(ownership) => Some(ownership),
+                    Err(error) => {
+                        tracing::warn!(
                             target: "gmm::library",
                             path = %path.display(),
                             error = %error,
-                            "could not quarantine a staged Library cleanup candidate; leaving bytes for orphan audit",
-                        ),
+                            "could not prove a staged Library directory is unowned; leaving it for orphan audit",
+                        );
+                        None
                     }
+                };
+                match ownership
+                    .as_ref()
+                    .and_then(|ownership| ownership.owner_of(current.identity()))
+                {
+                    Some(owner) => {
+                        let owner = match owner {
+                            LibraryDirectoryOwner::Mod => "a Mod",
+                            LibraryDirectoryOwner::ActiveReinstall => "interrupted reinstall state",
+                            LibraryDirectoryOwner::ActiveStaging => "another staging operation",
+                        };
+                        tracing::warn!(
+                            target: "gmm::library",
+                            path = %path.display(),
+                            owner,
+                            "staged Library cleanup candidate is now owned; leaving it intact",
+                        );
+                    }
+                    None if ownership.is_some() => {
+                        self.crash_point(
+                            super::crash_points::STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE,
+                        );
+                        match self.quarantine_library_directory(&path, &current, None, None) {
+                            Ok(directory) => {
+                                self.crash_point(
+                                    super::crash_points::STAGED_CLEANUP_AFTER_QUARANTINE_MOVE,
+                                );
+                                // Windows keeps a removed directory name visible until
+                                // every open handle closes, even when the handles share
+                                // DELETE. The intent now records the object moved to
+                                // GMM's reserved name, so release the old handles before
+                                // the path-based purge; #172 tracks anchoring removal.
+                                drop(current);
+                                drop(staged);
+                                quarantined = Some(directory);
+                            }
+                            Err(error) => tracing::warn!(
+                                target: "gmm::library",
+                                path = %path.display(),
+                                error = %error,
+                                "could not quarantine a staged Library cleanup candidate; leaving bytes for orphan audit",
+                            ),
+                        }
+                    }
+                    // Snapshot errors mean ownership is uncertain, so preserve the
+                    // bytes for the read-only orphan audit.
+                    None => {}
                 }
-                // Snapshot errors mean ownership is uncertain, so preserve the
-                // bytes for the read-only orphan audit.
-                None => {}
             }
         }
         if let Err(error) = fence.commit().await {

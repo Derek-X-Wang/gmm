@@ -43,8 +43,9 @@ async fn fresh_core(tmp: &TempDir) -> Core {
 
 /// Run a real `adopt_folder` and kill it at `crash_points::ADOPT_AFTER_LIBRARY_COPY`.
 ///
-/// The returned `Core` shares the pool with `core`, so the caller sees
-/// exactly the database a restart would open: bytes in the Library, no row.
+/// Restart after the injected process death so startup releases the durable
+/// staging witness while preserving the bytes. The caller's existing `Core`
+/// shares that database and sees the resulting auditable orphan.
 async fn orphan_from_crashed_adopt(
     core: &Core,
     tmp: &TempDir,
@@ -73,7 +74,8 @@ async fn orphan_from_crashed_adopt(
         "the adopt must have died at the crash point, not completed",
     );
 
-    let report = core
+    let restarted = fresh_core(tmp).await;
+    let report = restarted
         .audit_library(GameCode::Gimi)
         .await
         .expect("audit after the crashed adopt");

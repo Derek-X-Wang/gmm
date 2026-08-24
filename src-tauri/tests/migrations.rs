@@ -410,6 +410,71 @@ async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
         remaining, 0,
         "ON DELETE CASCADE must retire the reinstall witness when its Mod is deleted",
     );
+
+    let columns = sqlx::query("PRAGMA table_info(staged_library_operations)")
+        .fetch_all(&pool)
+        .await
+        .expect("inspect staged_library_operations columns");
+    let column_names: Vec<String> = columns
+        .iter()
+        .map(|row| row.try_get("name").expect("column name"))
+        .collect();
+    assert_eq!(
+        column_names,
+        [
+            "id",
+            "game_code",
+            "operation",
+            "staged_path",
+            "staged_identity",
+            "created_at",
+        ],
+        "the staging migration must create the complete durable witness",
+    );
+    let foreign_keys = sqlx::query("PRAGMA foreign_key_list(staged_library_operations)")
+        .fetch_all(&pool)
+        .await
+        .expect("inspect staged_library_operations foreign keys");
+    let foreign_keys: Vec<(String, String, String)> = foreign_keys
+        .iter()
+        .map(|row| {
+            (
+                row.try_get("table").expect("foreign table"),
+                row.try_get("from").expect("foreign from"),
+                row.try_get("to").expect("foreign to"),
+            )
+        })
+        .collect();
+    let game_foreign_key = foreign_keys
+        .iter()
+        .any(|(table, from, to)| table == "games" && from == "game_code" && to == "code");
+    assert!(
+        game_foreign_key,
+        "the staging witness must reference its Game: {foreign_keys:?}",
+    );
+    sqlx::query(
+        "INSERT INTO staged_library_operations (
+            id, game_code, operation, staged_path, staged_identity, created_at
+         ) VALUES ('01JMIGRATIONSTAGE000000001', 'gimi', 'adopt',
+                   'D:\\gmm-library\\gimi\\01JMIGRATIONSTAGE000000001',
+                   'staged-directory-id', '2026-08-24T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert adopt staging witness without a Mod row");
+    let invalid_operation = sqlx::query(
+        "INSERT INTO staged_library_operations (
+            id, game_code, operation, staged_path, staged_identity, created_at
+         ) VALUES ('01JMIGRATIONSTAGE000000002', 'gimi', 'reinstall',
+                   'D:\\gmm-library\\gimi\\01JMIGRATIONSTAGE000000002',
+                   'other-staged-directory-id', '2026-08-24T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        invalid_operation.is_err(),
+        "the staging witness must reject operations outside adopt/import_zip",
+    );
     pool.close().await;
 }
 

@@ -65,6 +65,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use gmm_lib::core::{crash_points, Core, GameCode};
+use sqlx::SqlitePool;
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------
@@ -120,6 +121,18 @@ impl TestEnv {
         Core::new(self.library.clone(), &self.db_url)
             .await
             .expect("reopen the DB after a crash")
+    }
+
+    async fn staging_witness_count(&self) -> i64 {
+        let pool = SqlitePool::connect(&self.db_url)
+            .await
+            .expect("open DB without running startup recovery");
+        let count = sqlx::query_scalar("SELECT COUNT(*) FROM staged_library_operations")
+            .fetch_one(&pool)
+            .await
+            .expect("count staged Library witnesses");
+        pool.close().await;
+        count
     }
 
     /// Run one mutation in a child process that aborts at `crash_at`.
@@ -384,7 +397,18 @@ async fn adopt_crashing_after_the_library_copy_reports_the_intact_orphan() {
         ],
     );
 
+    assert_eq!(
+        env.staging_witness_count().await,
+        1,
+        "a process death after copy must leave the durable staging owner",
+    );
+
     let core = recover_and_assert(&env, "adopt crashed after the library copy").await;
+    assert_eq!(
+        env.staging_witness_count().await,
+        0,
+        "startup must release the crashed producer's staging witness",
+    );
     assert!(
         core.list_mods(GameCode::Gimi)
             .await
@@ -642,7 +666,18 @@ async fn import_zip_crashing_after_extract_reports_the_intact_orphan() {
         ],
     );
 
+    assert_eq!(
+        env.staging_witness_count().await,
+        1,
+        "a process death after extraction must leave the durable staging owner",
+    );
+
     let core = recover_and_assert(&env, "import_zip crashed after extract").await;
+    assert_eq!(
+        env.staging_witness_count().await,
+        0,
+        "startup must release the crashed ZIP producer's staging witness",
+    );
     assert!(
         core.list_mods(GameCode::Gimi)
             .await

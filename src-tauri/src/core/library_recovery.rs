@@ -648,6 +648,9 @@ impl Core {
                 super::library_ownership::LibraryDirectoryOwner::ActiveReinstall => {
                     "it is interrupted reinstall state owned by GMM"
                 }
+                super::library_ownership::LibraryDirectoryOwner::ActiveStaging => {
+                    "it is an active staging operation owned by GMM"
+                }
             };
             return Err(Error::NotAnUnreferencedLibraryDir {
                 path,

@@ -62,6 +62,11 @@ macro_rules! define_crash_points {
 
 define_crash_points! {
 
+/// Shared staged adopt/import setup: the empty ULID directory exists and its
+/// durable ownership witness has committed, while no source byte has been
+/// copied or extracted yet.
+pub const STAGING_AFTER_WITNESS_COMMIT: &str = "staging.after_witness_commit";
+
 /// `set_enabled`: the reinstall-quarantine guard passed while the Library
 /// writer fence is already held, so recovery cannot quarantine this Mod before
 /// the deployment-state transition commits.
@@ -106,6 +111,11 @@ pub const RESOLVE_DUPLICATES_AFTER_JUNCTION_WITHDRAWAL: &str =
 /// `tests/crash_recovery.rs` for why this is reported rather than
 /// deleted.
 pub const ADOPT_AFTER_LIBRARY_COPY: &str = "adopt.after_library_copy";
+
+/// `adopt_folder`: at least one source file has been copied into the witnessed
+/// stage, while later files and Variant detection remain outstanding. Tests
+/// pause here to exercise audit/recovery/delete against a live producer.
+pub const ADOPT_DURING_LIBRARY_COPY: &str = "adopt.during_library_copy";
 
 /// `adopt_folder`: the Mod row has been inserted into the still-open
 /// transaction, while the already-detected Variants and active selection have
@@ -162,6 +172,12 @@ pub const RETRY_REINSTALL_AFTER_WITNESS_LOOKUP: &str =
 /// re-proved under the writer fence, immediately before the staged directory
 /// is renamed into the durable delete quarantine.
 pub const STAGED_CLEANUP_BEFORE_QUARANTINE_MOVE: &str = "staged_cleanup.before_quarantine_move";
+
+/// Failed adopt/ZIP cleanup: this operation's staging witness has been
+/// retired in the still-open writer transaction, but the pathname has not yet
+/// been opened and compared with the producer's retained directory identity.
+pub const STAGED_CLEANUP_AFTER_WITNESS_RETIRE: &str =
+    "staged_cleanup.after_witness_retire";
 
 /// Failed adopt/ZIP cleanup: the proven staged directory has moved into the
 /// durable delete quarantine and still carries the writer fence. A restart

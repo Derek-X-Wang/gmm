@@ -274,6 +274,14 @@ pub enum Error {
     #[error("{path:?} is not an unreferenced Library folder GMM can act on: {reason}.")]
     NotAnUnreferencedLibraryDir { path: PathBuf, reason: String },
 
+    /// The durable staging ownership row vanished or changed before the Mod
+    /// transaction could retire it. Committing without that proof would let a
+    /// second actor treat the same directory as unowned.
+    #[error(
+        "the durable staging ownership witness for {path:?} changed before the import committed"
+    )]
+    StagingWitnessChanged { path: PathBuf },
+
     #[error(
         "{prefix} {reason}. {guidance}",
         prefix = DUPLICATE_RESOLUTION_CHANGED_PREFIX,
