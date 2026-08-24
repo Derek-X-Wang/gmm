@@ -6,6 +6,36 @@ use serde::{Deserialize, Serialize};
 use super::error::Error;
 use super::games::GameCode;
 
+/// A failed verified rollback for one interrupted reinstall.
+///
+/// The `reinstall_swaps` witness still owns both possible byte trees. This is
+/// only the user-visible failure attached to that witness; it never replaces
+/// the witness or guesses which tree is authoritative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReinstallRecovery {
+    pub reason: String,
+    pub attempted_at: String,
+    pub attempts: u32,
+    pub library_path: PathBuf,
+    pub staged_path: PathBuf,
+    pub quarantine_path: PathBuf,
+    /// True only after GMM removed the recorded deployment entry, or proved
+    /// that no game install path was configured for one to exist under.
+    pub junction_withdrawn: bool,
+    /// Why the recorded deployment entry could not be withdrawn. `None` with
+    /// `junction_withdrawn == false` is the crash-resumable pending state.
+    pub junction_withdrawal_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum ReinstallRecoveryOutcome {
+    Recovered,
+    AlreadyRecovered,
+    Quarantined { recovery: ReinstallRecovery },
+}
+
 /// How a Mod entered the Library. See `CONTEXT.md` § Source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,4 +99,8 @@ pub struct Mod {
     /// Screenshot URL (preview thumbnail).
     #[serde(default)]
     pub screenshot_url: Option<String>,
+    /// Present only after startup or an in-app retry could not safely settle
+    /// this Mod's durable reinstall witness.
+    #[serde(default)]
+    pub reinstall_recovery: Option<ReinstallRecovery>,
 }

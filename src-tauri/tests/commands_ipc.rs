@@ -141,6 +141,8 @@ async fn list_mods_returns_snake_case_json_keys() {
     assert!(obj.contains_key("library_path"));
     assert!(obj.contains_key("gamebanana_id"));
     assert!(obj.contains_key("source_url"));
+    assert!(obj.contains_key("reinstall_recovery"));
+    assert!(obj.get("reinstall_recovery").unwrap().is_null());
     assert_eq!(obj.get("id").unwrap().as_str(), Some(adopted.id.as_str()));
     assert_eq!(obj.get("source").unwrap().as_str(), Some("manual"));
 }

@@ -4,6 +4,22 @@ export type GameCode = "gimi" | "srmi" | "zzmi" | "wwmi" | "himi" | "efmi";
 
 export type Source = "manual" | "local" | "gamebanana";
 
+export interface ReinstallRecovery {
+  reason: string;
+  attemptedAt: string;
+  attempts: number;
+  libraryPath: string;
+  stagedPath: string;
+  quarantinePath: string;
+  junctionWithdrawn: boolean;
+  junctionWithdrawalError: string | null;
+}
+
+export type ReinstallRecoveryOutcome =
+  | { status: "recovered" }
+  | { status: "alreadyRecovered" }
+  | { status: "quarantined"; recovery: ReinstallRecovery };
+
 export interface Mod {
   id: string;
   game: GameCode;
@@ -16,6 +32,7 @@ export interface Mod {
   author: string | null;
   version: string | null;
   screenshotUrl: string | null;
+  reinstallRecovery: ReinstallRecovery | null;
 }
 
 interface RawMod {
@@ -30,6 +47,7 @@ interface RawMod {
   author?: string | null;
   version?: string | null;
   screenshot_url?: string | null;
+  reinstall_recovery?: ReinstallRecovery | null;
 }
 
 const fromRaw = (m: RawMod): Mod => ({
@@ -44,11 +62,18 @@ const fromRaw = (m: RawMod): Mod => ({
   author: m.author ?? null,
   version: m.version ?? null,
   screenshotUrl: m.screenshot_url ?? null,
+  reinstallRecovery: m.reinstall_recovery ?? null,
 });
 
 export async function listMods(game: GameCode): Promise<Mod[]> {
   const raw = await invoke<RawMod[]>("list_mods", { game });
   return raw.map(fromRaw);
+}
+
+export async function retryReinstallRecovery(
+  modId: string,
+): Promise<ReinstallRecoveryOutcome> {
+  return invoke<ReinstallRecoveryOutcome>("retry_reinstall_recovery", { modId });
 }
 
 export async function adoptFolder(
@@ -113,6 +138,8 @@ export interface ReconcileResult {
   /** Mod IDs whose stranded junction was deleted because the Mod is disabled. */
   removed: string[];
   skipped: string[];
+  /** Mods whose uncertain reinstall state was deliberately left untouched. */
+  quarantined: string[];
 }
 
 interface RawReconcile {
@@ -121,6 +148,7 @@ interface RawReconcile {
   conflicting: { mod_id: string; link: string; expected_target: string }[];
   removed: string[];
   skipped: string[];
+  quarantined?: string[];
 }
 
 const fromRawReconcile = (r: RawReconcile): ReconcileResult => ({
@@ -133,6 +161,7 @@ const fromRawReconcile = (r: RawReconcile): ReconcileResult => ({
   })),
   removed: r.removed,
   skipped: r.skipped,
+  quarantined: r.quarantined ?? [],
 });
 
 export async function reconcileJunctions(game: GameCode): Promise<ReconcileResult> {

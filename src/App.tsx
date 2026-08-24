@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { ImporterOriginPanel } from "./ImporterOriginPanel";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -15,6 +15,7 @@ import {
   listSupportedGames,
   partitionLaunchError,
   resetOnboarding,
+  retryReinstallRecovery,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
   type AvGuidance,
@@ -56,6 +57,11 @@ import {
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { LibraryAuditWarning } from "./LibraryAuditWarning";
+import {
+  ReinstallRecoveryNotices,
+  ReinstallRecoveryWarning,
+  type ReinstallRecoveryFeedback,
+} from "./ReinstallRecoveryWarning";
 import { LoaderVersionNote } from "./LoaderVersionNote";
 import { checkInteractively, type UpdateState } from "./updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -463,7 +469,15 @@ function ModUpdatesPanel({ game }: { game: ApiGameCode }) {
  * + per-mod opt-out toggle. Renders nothing for mods without a
  * gamebanana_id.
  */
-function ModUpdateBadge({ modId, game }: { modId: string; game: ApiGameCode }) {
+function ModUpdateBadge({
+  modId,
+  game,
+  disabled = false,
+}: {
+  modId: string;
+  game: ApiGameCode;
+  disabled?: boolean;
+}) {
   const qc = useQueryClient();
   const rows = useQuery({
     queryKey: ["modUpdates", game],
@@ -489,7 +503,7 @@ function ModUpdateBadge({ modId, game }: { modId: string; game: ApiGameCode }) {
         <button
           className="update-pill"
           onClick={() => apply.mutate()}
-          disabled={apply.isPending}
+          disabled={disabled || apply.isPending}
           title={`Upstream ${row.upstreamVersion}`}
         >
           {apply.isPending ? "Applying…" : `Update → ${row.upstreamVersion}`}
@@ -499,7 +513,7 @@ function ModUpdateBadge({ modId, game }: { modId: string; game: ApiGameCode }) {
         <input
           type="checkbox"
           checked={row.updateCheckEnabled}
-          disabled={toggle.isPending}
+          disabled={disabled || toggle.isPending}
           onChange={(e) => toggle.mutate(e.currentTarget.checked)}
         />
         <span className="muted small">check</span>
@@ -997,7 +1011,8 @@ function RebuildJunctions({ game }: { game: ApiGameCode }) {
       {rebuild.data ? (
         <span className="muted small">
           Recreated {rebuild.data.recreated.length}, removed {rebuild.data.removed.length} stranded,
-          skipped {rebuild.data.skipped.length} disabled.
+          skipped {rebuild.data.skipped.length} disabled, left {rebuild.data.quarantined.length}{" "}
+          quarantined untouched.
         </span>
       ) : null}
       {rebuild.isError ? <p className="error">{String(rebuild.error)}</p> : null}
@@ -1007,6 +1022,10 @@ function RebuildJunctions({ game }: { game: ApiGameCode }) {
 
 function ModList({ game }: { game: ApiGameCode }) {
   const queryClient = useQueryClient();
+  const sectionRef = useRef<HTMLElement>(null);
+  const [recoveryFeedback, setRecoveryFeedback] =
+    useState<ReinstallRecoveryFeedback>(null);
+  useEffect(() => setRecoveryFeedback(null), [game]);
   const mods = useQuery({
     queryKey: ["mods", game],
     queryFn: () => listMods(game),
@@ -1026,10 +1045,42 @@ function ModList({ game }: { game: ApiGameCode }) {
     },
   });
 
+  const retryRecovery = useMutation({
+    mutationFn: ({ id }: { id: string; name: string }) => retryReinstallRecovery(id),
+    onSuccess: (outcome, mod) => {
+      // The callout/button can disappear after the refetch. Move focus to the
+      // stable section, while the separately mounted live region announces.
+      sectionRef.current?.focus();
+      setRecoveryFeedback(
+        outcome.status === "recovered" || outcome.status === "alreadyRecovered"
+          ? {
+              kind: outcome.status,
+              modName: mod.name,
+            }
+          : {
+              kind: "stillQuarantined",
+              modName: mod.name,
+              reason: outcome.recovery.reason,
+            },
+      );
+      queryClient.invalidateQueries({ queryKey: ["mods", game] });
+      queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
+    },
+    onError: (error, mod) => {
+      sectionRef.current?.focus();
+      setRecoveryFeedback({
+        kind: "stillQuarantined",
+        modName: mod.name,
+        reason: String(error),
+      });
+    },
+  });
+
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["mods", game] });
 
   return (
-    <section className="card">
+    <section ref={sectionRef} className="card" tabIndex={-1}>
+      <ReinstallRecoveryNotices feedback={recoveryFeedback} />
       <div className="row row--between">
         <h2>
           Mods ({mods.data?.length ?? 0})
@@ -1054,7 +1105,10 @@ function ModList({ game }: { game: ApiGameCode }) {
 
       <ul className="mods">
         {mods.data?.map((m) => (
-          <li key={m.id} className="mods__row">
+          <li
+            key={m.id}
+            className={`mods__row${m.reinstallRecovery ? " mods__row--quarantined" : ""}`}
+          >
             <div className="mods__main">
               <strong>{m.name}</strong>
               <span className="muted"> · {m.source}</span>
@@ -1065,7 +1119,11 @@ function ModList({ game }: { game: ApiGameCode }) {
                     View on GameBanana
                   </a>
                   {m.version ? <span className="muted small"> · v{m.version}</span> : null}
-                  <ModUpdateBadge modId={m.id} game={game} />
+                  <ModUpdateBadge
+                    modId={m.id}
+                    game={game}
+                    disabled={m.reinstallRecovery !== null}
+                  />
                 </>
               ) : null}
               <ConflictBadge
@@ -1073,18 +1131,41 @@ function ModList({ game }: { game: ApiGameCode }) {
                 conflicts={conflicts.data?.conflicts ?? []}
                 count={conflicts.data?.per_mod_count[m.id] ?? 0}
               />
-              <VariantSelector modId={m.id} game={game} />
+              <VariantSelector
+                modId={m.id}
+                game={game}
+                disabled={m.reinstallRecovery !== null}
+              />
+              {m.reinstallRecovery ? (
+                <ReinstallRecoveryWarning
+                  modName={m.name}
+                  recovery={m.reinstallRecovery}
+                  pending={retryRecovery.isPending}
+                  disabled={sessionActive}
+                  onRetry={() => retryRecovery.mutate({ id: m.id, name: m.name })}
+                />
+              ) : null}
             </div>
             <label className="toggle">
               <input
                 type="checkbox"
                 checked={m.enabled}
-                disabled={toggle.isPending || sessionActive}
+                disabled={
+                  toggle.isPending || sessionActive || m.reinstallRecovery !== null
+                }
                 onChange={(e) =>
                   toggle.mutate({ id: m.id, enabled: e.currentTarget.checked })
                 }
               />
-              <span>{m.enabled ? "Enabled" : "Disabled"}</span>
+              <span>
+                {m.reinstallRecovery
+                  ? m.reinstallRecovery.junctionWithdrawn
+                    ? "Unavailable"
+                    : "Unavailable · may still be loading"
+                  : m.enabled
+                    ? "Enabled"
+                    : "Disabled"}
+              </span>
             </label>
           </li>
         ))}
@@ -1247,7 +1328,15 @@ function ConflictBadge({
  * see no UI change. Switching the active Variant retargets the
  * junction in place; no full toggle cycle needed.
  */
-function VariantSelector({ modId, game }: { modId: string; game: ApiGameCode }) {
+function VariantSelector({
+  modId,
+  game,
+  disabled = false,
+}: {
+  modId: string;
+  game: ApiGameCode;
+  disabled?: boolean;
+}) {
   const qc = useQueryClient();
   const v = useQuery({
     queryKey: ["variants", modId],
@@ -1273,7 +1362,7 @@ function VariantSelector({ modId, game }: { modId: string; game: ApiGameCode }) 
               type="radio"
               name={`variant-${modId}`}
               checked={active}
-              disabled={switchVariant.isPending}
+              disabled={disabled || switchVariant.isPending}
               onChange={() => switchVariant.mutate(variant.id)}
             />
             <span>{variant.name}</span>

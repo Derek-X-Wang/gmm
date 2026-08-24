@@ -272,12 +272,17 @@ pub enum Error {
     ReinstallRecoveryUncertain { mod_id: String, reason: String },
 
     #[error(
-        "GMM could not start because interrupted reinstall recovery for Mod {mod_id} failed: \
-         {reason}. GMM left every directory it could not prove untouched and did not enter \
-         normal operation. Close software using the Library or restore any manually moved \
-         reserved reinstall paths, then restart GMM to retry recovery."
+        "GMM found corrupt interrupted reinstall state for Mod {mod_id}: {reason}. \
+         Startup stopped because database corruption is not evidence about one Mod's \
+         filesystem bytes."
     )]
-    ReinstallStartupRecoveryFailed { mod_id: String, reason: String },
+    ReinstallWitnessCorrupt { mod_id: String, reason: String },
+
+    #[error(
+        "Mod {mod_id} is unavailable because its interrupted reinstall could not be recovered. \
+         Correct the filesystem problem shown on the Mod, then use Retry recovery."
+    )]
+    ReinstallRecoveryQuarantined { mod_id: String },
 
     #[error(
         "the reinstall failed ({reinstall}), and GMM could not complete its verified rollback \

@@ -54,6 +54,10 @@ pub struct ReconcileResult {
     /// Mod IDs we skipped: disabled Mods that had no junction to begin
     /// with, i.e. the ones that were already in the state they should be.
     pub skipped: Vec<String>,
+    /// Mod IDs whose interrupted reinstall recovery is quarantined. Their
+    /// Junction and Library state is intentionally left untouched until the
+    /// witness can be settled; calling them disabled would misstate the row.
+    pub quarantined: Vec<String>,
 }
 
 /// One entry per drifted junction. `mod_id` is the GMM Mod ID; `link`

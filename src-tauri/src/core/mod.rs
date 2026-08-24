@@ -45,7 +45,7 @@ pub use error::{Error, Result};
 pub use games::GameCode;
 pub use library_audit::{LibraryAuditReport, UnreferencedLibraryDir};
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
-pub use mods::{Mod, Source};
+pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
 pub use session::SessionInfo;
 pub use zip_import::ImportZipOptions;
 
@@ -94,23 +94,8 @@ impl Core {
             default_library_root,
             crash_hook: None,
         };
+        core.recover_interrupted_reinstalls_at_startup().await?;
         if let Err(recovery) = core.finish_interrupted_library_deletes().await {
-            // Ordinary delete-quarantine purge remains best-effort. Reinstall
-            // witnesses are different: they are commit-state, and continuing
-            // would make every relocation mistake failed recovery for running
-            // work. The failed cleanup transaction rolls back, so a witness
-            // still visible here proves reinstall recovery did not settle.
-            let pending_reinstall: Option<String> = sqlx::query_scalar(
-                "SELECT mod_id FROM reinstall_swaps ORDER BY created_at, token LIMIT 1",
-            )
-            .fetch_optional(&core.pool)
-            .await?;
-            if let Some(mod_id) = pending_reinstall {
-                return Err(Error::ReinstallStartupRecoveryFailed {
-                    mod_id,
-                    reason: recovery.to_string(),
-                });
-            }
             tracing::warn!(
                 target: "gmm::library",
                 error = %recovery,
@@ -402,14 +387,19 @@ impl Core {
         // alias or differently-cased drive spelling for the same root.
         // This check is under the same writer fence as witness creation, so it
         // happens before any Junction or Library byte is touched.
-        let active_reinstalls = sqlx::query("SELECT mod_id, library_path FROM reinstall_swaps")
-            .fetch_all(&mut *fence.transaction)
-            .await?;
+        let active_reinstalls = sqlx::query(
+            "SELECT token, mod_id, game_code, library_path, staged_path,
+                    quarantine_path, old_identity, staged_identity
+             FROM reinstall_swaps",
+        )
+        .fetch_all(&mut *fence.transaction)
+        .await?;
         for reinstall in active_reinstalls {
-            let library_path = PathBuf::from(reinstall.try_get::<String, _>("library_path")?);
-            if path_within(&library_path, previous) {
+            let witness = library_mutation::ReinstallSwapWitness::from_row(&reinstall)?;
+            witness.validate_paths()?;
+            if path_within(&witness.library_path, previous) {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
-                    mod_id: reinstall.try_get("mod_id")?,
+                    mod_id: witness.mod_id,
                 });
             }
         }
@@ -673,6 +663,7 @@ impl Core {
             author: None,
             version: None,
             screenshot_url: None,
+            reinstall_recovery: None,
         })
     }
 
@@ -2731,6 +2722,7 @@ impl Core {
             author: None,
             version: None,
             screenshot_url: None,
+            reinstall_recovery: None,
         })
     }
 
@@ -2824,47 +2816,8 @@ impl Core {
         variant_id: &str,
         game_mods_dir: &Path,
     ) -> Result<()> {
-        self.ensure_no_active_session().await?;
-        // Validate the variant belongs to this mod and read its subpath.
-        let variant_row =
-            sqlx::query("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
-                .bind(variant_id)
-                .bind(mod_id)
-                .fetch_one(&self.pool)
-                .await?;
-        let _subpath: String = variant_row.try_get("subpath")?;
-
-        // Load the mod row so we know whether to retarget a junction.
-        let mod_row =
-            sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
-                .bind(mod_id)
-                .fetch_one(&self.pool)
-                .await?;
-        let junction_dir_name: String = mod_row.try_get("junction_dir_name")?;
-        let enabled: i64 = mod_row.try_get("enabled")?;
-        let library_path = PathBuf::from(mod_row.try_get::<String, _>("library_path")?);
-
-        sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
-            .bind(variant_id)
-            .bind(mod_id)
-            .execute(&self.pool)
-            .await?;
-        self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_DB_UPDATE);
-
-        if enabled != 0 {
-            let link = game_mods_dir.join(&junction_dir_name);
-            if link_exists(&link) {
-                junction::remove(&link)?;
-                self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE);
-            }
-            let target = self
-                .junction_target_for(mod_id, &library_path, &self.pool)
-                .await?;
-            volume::require_ntfs_pair(game_mods_dir, &target)?;
-            junction::create(&link, &target)?;
-        }
-
-        Ok(())
+        self.set_active_variant_in_library_mutation(mod_id, variant_id, game_mods_dir)
+            .await
     }
 
     /// Build a [`conflicts::ConflictReport`] for `game`. Walks the
@@ -2874,7 +2827,12 @@ impl Core {
     /// bindings, and reports every hash bound by two or more Mods.
     pub async fn detect_conflicts(&self, game: GameCode) -> Result<conflicts::ConflictReport> {
         let rows = sqlx::query(
-            "SELECT id, library_path, active_variant_id, enabled FROM mods WHERE game_code = ?",
+            "SELECT id, library_path, active_variant_id, enabled FROM mods
+             WHERE game_code = ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM reinstall_swaps rs
+                   WHERE rs.mod_id = mods.id AND rs.recovery_error IS NOT NULL
+               )",
         )
         .bind(game.as_str())
         .fetch_all(&self.pool)
@@ -2984,6 +2942,7 @@ impl Core {
                         healthy = result.healthy.len(),
                         conflicting = result.conflicting.len(),
                         skipped = result.skipped.len(),
+                        quarantined = result.quarantined.len(),
                         "startup reconcile completed",
                     );
                     out.push((game, result));
@@ -3014,7 +2973,12 @@ impl Core {
         game_mods_dir: &Path,
     ) -> Result<reconcile::ReconcileResult> {
         let rows = sqlx::query(
-            "SELECT id, junction_dir_name, library_path, enabled FROM mods WHERE game_code = ?",
+            "SELECT m.id, m.junction_dir_name, m.library_path, m.enabled,
+                    rs.token AS reinstall_token, rs.recovery_error
+             FROM mods m
+             LEFT JOIN reinstall_swaps rs
+               ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
+             WHERE m.game_code = ?",
         )
         .bind(game.as_str())
         .fetch_all(&self.pool)
@@ -3035,6 +2999,18 @@ impl Core {
             let junction_dir_name: String = row.try_get("junction_dir_name")?;
             let library_path: String = row.try_get("library_path")?;
             let enabled: i64 = row.try_get("enabled")?;
+
+            if let Some(token) = row.try_get::<Option<String>, _>("reinstall_token")? {
+                let link = game_mods_dir.join(&junction_dir_name);
+                if self
+                    .withdraw_quarantined_reinstall_junction(&token, Some(&link))
+                    .await?
+                    .is_some()
+                {
+                    result.quarantined.push(id);
+                    continue;
+                }
+            }
 
             let link = game_mods_dir.join(&junction_dir_name);
             let library_path = PathBuf::from(&library_path);
@@ -3144,7 +3120,12 @@ impl Core {
         game_mods_dir: &Path,
     ) -> Result<reconcile::ReconcileResult> {
         let rows = sqlx::query(
-            "SELECT id, junction_dir_name, library_path, enabled FROM mods WHERE game_code = ?",
+            "SELECT m.id, m.junction_dir_name, m.library_path, m.enabled,
+                    rs.token AS reinstall_token, rs.recovery_error
+             FROM mods m
+             LEFT JOIN reinstall_swaps rs
+               ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
+             WHERE m.game_code = ?",
         )
         .bind(game.as_str())
         .fetch_all(&self.pool)
@@ -3155,14 +3136,26 @@ impl Core {
             source,
         })?;
 
-        // Resolve every enabled Mod before removing anything. A corrupt
+        // Resolve every usable enabled Mod before removing anything. A corrupt
         // active Variant must leave the user's existing deployment intact,
         // rather than turning Rebuild into a destructive partial operation.
         let mut prepared = Vec::with_capacity(rows.len());
+        let mut result = reconcile::ReconcileResult::default();
         for row in rows {
             let id: String = row.try_get("id")?;
             let junction_dir_name: String = row.try_get("junction_dir_name")?;
             let library_path: String = row.try_get("library_path")?;
+            if let Some(token) = row.try_get::<Option<String>, _>("reinstall_token")? {
+                let link = game_mods_dir.join(&junction_dir_name);
+                if self
+                    .withdraw_quarantined_reinstall_junction(&token, Some(&link))
+                    .await?
+                    .is_some()
+                {
+                    result.quarantined.push(id);
+                    continue;
+                }
+            }
             let enabled = row.try_get::<i64, _>("enabled")? != 0;
             let target = if enabled {
                 let target = self
@@ -3176,7 +3169,6 @@ impl Core {
             prepared.push((id, junction_dir_name, enabled, target));
         }
 
-        let mut result = reconcile::ReconcileResult::default();
         for (id, junction_dir_name, enabled, target) in prepared {
             let link = game_mods_dir.join(&junction_dir_name);
 
@@ -3312,11 +3304,16 @@ impl Core {
     /// List every Mod for a given game, ordered by creation time ascending.
     pub async fn list_mods(&self, game: GameCode) -> Result<Vec<Mod>> {
         let rows = sqlx::query(
-            "SELECT id, game_code, name, source, library_path, enabled,
-                    gamebanana_id, source_url, author, version, screenshot_url
-             FROM mods
-             WHERE game_code = ?
-             ORDER BY created_at ASC",
+            "SELECT m.id, m.game_code, m.name, m.source, m.library_path, m.enabled,
+                    m.gamebanana_id, m.source_url, m.author, m.version, m.screenshot_url,
+                    rs.recovery_error, rs.recovery_attempted_at, rs.recovery_attempts,
+                    rs.staged_path, rs.quarantine_path, rs.junction_withdrawn,
+                    rs.junction_withdrawal_error
+             FROM mods m
+             LEFT JOIN reinstall_swaps rs
+               ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
+             WHERE m.game_code = ?
+             ORDER BY m.created_at ASC",
         )
         .bind(game.as_str())
         .fetch_all(&self.pool)
@@ -3330,6 +3327,23 @@ impl Core {
                 let source: String = row.try_get("source")?;
                 let library_path: String = row.try_get("library_path")?;
                 let enabled: i64 = row.try_get("enabled")?;
+                let recovery_error: Option<String> = row.try_get("recovery_error")?;
+                let reinstall_recovery = recovery_error
+                    .map(|reason| {
+                        Ok::<ReinstallRecovery, Error>(ReinstallRecovery {
+                            reason,
+                            attempted_at: row.try_get("recovery_attempted_at")?,
+                            attempts: row.try_get::<i64, _>("recovery_attempts")? as u32,
+                            library_path: PathBuf::from(library_path.clone()),
+                            staged_path: PathBuf::from(row.try_get::<String, _>("staged_path")?),
+                            quarantine_path: PathBuf::from(
+                                row.try_get::<String, _>("quarantine_path")?,
+                            ),
+                            junction_withdrawn: row.try_get::<i64, _>("junction_withdrawn")? != 0,
+                            junction_withdrawal_error: row.try_get("junction_withdrawal_error")?,
+                        })
+                    })
+                    .transpose()?;
 
                 Ok(Mod {
                     id,
@@ -3345,6 +3359,7 @@ impl Core {
                     author: row.try_get("author")?,
                     version: row.try_get("version")?,
                     screenshot_url: row.try_get("screenshot_url")?,
+                    reinstall_recovery,
                 })
             })
             .collect()

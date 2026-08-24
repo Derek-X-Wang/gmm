@@ -597,11 +597,9 @@ async fn import_zip_crashing_before_variant_detection_still_holds_the_invariant(
 /// Crash after the row names the new Variant but before the Junction is
 /// re-pointed.
 ///
-/// The Junction still resolves into the *old* Variant's subfolder, so
-/// the game loads content the UI says is not selected. The row is the
-/// source of truth for which Variant is active, and the stale target is
-/// inside this Mod's own Library path — nobody but GMM put it there —
-/// so this is unambiguously repairable.
+/// The Variant row update and Junction retarget now share the Library writer
+/// fence. A crash after the in-transaction row update therefore rolls it back:
+/// the old persisted selection and old Junction remain in agreement.
 #[tokio::test]
 async fn variant_switch_crashing_before_the_junction_moves_recovers() {
     let env = TestEnv::new();
@@ -661,9 +659,17 @@ async fn variant_switch_crashing_before_the_junction_moves_recovers() {
 
     let resolved = std::fs::canonicalize(env.link("Variant Mod")).expect("resolve junction");
     assert!(
-        resolved.ends_with(&target_name),
-        "reconcile must re-point the Junction at the Variant the row selects; \
-         expected it to end with {target_name:?}, got {resolved:?}",
+        !resolved.ends_with(&target_name),
+        "the uncommitted Variant choice must roll back with its writer fence; \
+         the Junction unexpectedly moved to {target_name:?}: {resolved:?}",
+    );
+    assert_eq!(
+        core.active_variant_id(&m.id)
+            .await
+            .expect("read recovered active Variant")
+            .as_deref(),
+        Some(active.as_str()),
+        "a crash before the fenced transition commits must preserve the old Variant selection",
     );
     assert_rows_match_disk(&core, &env, "variant switch recovered").await;
 }
@@ -1076,6 +1082,9 @@ async fn every_crash_point_is_exercised_by_an_operation() {
     let gamebanana_id = 157_178;
     let imported = import_gamebanana_fixture(&env, &core, gamebanana_id).await;
     reinstall_gamebanana_fixture(&env, &core, gamebanana_id, &imported.id).await;
+    core.retry_reinstall_recovery(&imported.id)
+        .await
+        .expect("coverage retry after completed reinstall");
 
     // A missing source creates a staged destination and then forces the
     // identity-checked quarantine cleanup path.
