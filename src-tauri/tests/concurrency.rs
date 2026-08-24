@@ -2383,6 +2383,48 @@ async fn rebuild_retries_quarantined_reinstall_junction_withdrawal() {
     );
 }
 
+/// `read_link` accepts a Windows directory symlink, while the junction crate
+/// initially attempts to delete only MOUNT_POINT reparse tags. A dangling
+/// target must not turn the target-following existence check into false proof
+/// that the link entry disappeared. Keeping this native case in the
+/// concurrency target ensures it still runs when another boundary regression
+/// in the same suite also fails.
+#[cfg(windows)]
+#[tokio::test]
+async fn dangling_directory_symlink_cannot_survive_a_successful_quarantine_withdrawal() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Dangling Symlink Withdrawal").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy Mod before quarantine");
+    let deployment = env.game_mods.join("Dangling Symlink Withdrawal");
+    gmm_lib::core::junction::remove(&deployment).expect("remove real Junction");
+    let missing_target = env.data_dir.join("missing-symlink-target");
+    std::os::windows::fs::symlink_dir(&missing_target, &deployment)
+        .expect("create dangling directory symlink");
+    let (token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    mark_reinstall_recovery_as_quarantined(&env.db_url, token).await;
+
+    core.reconcile_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("reconcile quarantined dangling symlink");
+    let recovery = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list quarantined Mod")[0]
+        .reinstall_recovery
+        .clone()
+        .expect("reinstall recovery state");
+    let entry_survives = std::fs::symlink_metadata(&deployment).is_ok();
+
+    assert!(
+        !recovery.junction_withdrawn || !entry_survives,
+        "withdrawal reported success while the dangling directory-symlink entry survived",
+    );
+}
+
 /// Models a process death after the quarantine record committed but before
 /// Junction withdrawal. The default false/null state is intentionally
 /// conservative; startup retries the failed rollback and then resolves the
