@@ -2816,8 +2816,9 @@ async fn corrupt_reinstall_witness_identities_abort_startup_before_filesystem_re
 /// decide whether that witness is in scope. Otherwise a corrupt path can place
 /// itself outside the move and silently bypass the active-reinstall refusal.
 ///
-/// Mutation oracle: deleting `validate_paths` from `move_root` lets this move
-/// succeed and fires the named database-corruption assertion.
+/// Mutation oracle: deleting `validate_paths` from the sole witness row
+/// constructor lets this move succeed and fires the named database-corruption
+/// assertion.
 #[tokio::test]
 async fn relocation_validates_the_complete_reinstall_witness_before_scope_decision() {
     let env = TestEnv::new();
