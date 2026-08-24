@@ -1,4 +1,5 @@
-//! One writer-fence protocol for every mutation of Library-owned bytes.
+//! One writer-fence protocol for every mutation of Library-owned bytes or a
+//! Mod's enabled deployment state.
 //!
 //! Root relocation is the exclusive form: it holds SQLite's writer claim
 //! from the row snapshot through the filesystem move and the setting/row
@@ -7,7 +8,10 @@
 //! perform their copy/extract without blocking SQLite, then reacquire the
 //! claim and prove both the configured root name and its filesystem identity
 //! are unchanged before inserting a row. Recovery/delete keep their bounded
-//! filesystem ownership acts inside one claim.
+//! filesystem ownership acts inside one claim. Enabling or disabling a Mod
+//! likewise holds the claim across both its Junction mutation and `enabled`
+//! update: creating or removing one reparse point is bounded, and the two
+//! deployment-state changes must not be observed or overwritten separately.
 
 use std::fs;
 use std::io;
@@ -20,7 +24,7 @@ use ulid::Ulid;
 use super::library_identity::IdentifiedDirectory;
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::settings::{get as get_setting, keys};
-use super::{junction, volume, Core, Error, GameCode, Result};
+use super::{crash_points, junction, volume, Core, Error, GameCode, Result};
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 
@@ -34,6 +38,7 @@ pub(super) enum LibraryMutation {
     RecoverUnreferencedLibraryDir,
     DeleteUnreferencedLibraryDir,
     ReinstallGamebananaMod,
+    SetEnabled,
 }
 
 impl LibraryMutation {
@@ -47,6 +52,7 @@ impl LibraryMutation {
             Self::RecoverUnreferencedLibraryDir => "recover_unreferenced_library_dir",
             Self::DeleteUnreferencedLibraryDir => "delete_unreferenced_library_dir",
             Self::ReinstallGamebananaMod => "reinstall_gamebanana_mod_with_endpoints",
+            Self::SetEnabled => "set_enabled",
         }
     }
 }
@@ -178,6 +184,58 @@ impl Core {
                 .await?;
         }
         Ok(LibraryMutationFence { transaction })
+    }
+
+    /// Change both halves of a Mod's enabled deployment state under the one
+    /// Library mutation writer fence described by this module.
+    pub(super) async fn set_enabled_in_library_mutation(
+        &self,
+        id: &str,
+        enabled: bool,
+        game_mods_dir: &Path,
+    ) -> Result<()> {
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::SetEnabled)
+            .await?;
+        let row = sqlx::query(
+            "SELECT m.junction_dir_name, m.library_path, m.enabled, v.subpath
+             FROM mods m
+             LEFT JOIN mod_variants v
+               ON v.id = m.active_variant_id AND v.mod_id = m.id
+             WHERE m.id = ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *fence.transaction)
+        .await?;
+
+        let junction_dir_name: String = row.try_get("junction_dir_name")?;
+        let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+        let current_enabled: i64 = row.try_get("enabled")?;
+        let active_variant_subpath: Option<String> = row.try_get("subpath")?;
+        let target = active_variant_subpath
+            .map(|subpath| library_path.join(subpath))
+            .unwrap_or(library_path);
+        let link = game_mods_dir.join(junction_dir_name);
+
+        match (current_enabled != 0, enabled) {
+            (false, true) => {
+                volume::require_ntfs_pair(game_mods_dir, &target)?;
+                junction::create(&link, &target)?;
+                self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_CREATE);
+            }
+            (true, false) => {
+                junction::remove(&link)?;
+                self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_REMOVE);
+            }
+            _ => {}
+        }
+
+        sqlx::query("UPDATE mods SET enabled = ? WHERE id = ?")
+            .bind(if enabled { 1_i64 } else { 0_i64 })
+            .bind(id)
+            .execute(&mut *fence.transaction)
+            .await?;
+        fence.commit().await
     }
 
     pub(super) async fn reinstall_swap_witness(

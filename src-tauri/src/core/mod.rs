@@ -3273,41 +3273,8 @@ impl Core {
     /// (joined with the active Variant's subpath when one is set).
     /// On disable, the Junction is removed (the Library copy is never touched).
     pub async fn set_enabled(&self, id: &str, enabled: bool, game_mods_dir: &Path) -> Result<()> {
-        self.ensure_no_active_session().await?;
-        let row =
-            sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
-                .bind(id)
-                .fetch_one(&self.pool)
-                .await?;
-
-        let junction_dir_name: String = row.try_get("junction_dir_name")?;
-        let library_path: String = row.try_get("library_path")?;
-        let current_enabled: i64 = row.try_get("enabled")?;
-
-        let link = game_mods_dir.join(&junction_dir_name);
-        let library_path = PathBuf::from(library_path);
-        let target = self.junction_target_for(id, &library_path).await?;
-
-        match (current_enabled != 0, enabled) {
-            (false, true) => {
-                volume::require_ntfs_pair(game_mods_dir, &target)?;
-                junction::create(&link, &target)?;
-                self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_CREATE);
-            }
-            (true, false) => {
-                junction::remove(&link)?;
-                self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_REMOVE);
-            }
-            _ => {}
-        }
-
-        sqlx::query("UPDATE mods SET enabled = ? WHERE id = ?")
-            .bind(if enabled { 1_i64 } else { 0_i64 })
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(())
+        self.set_enabled_in_library_mutation(id, enabled, game_mods_dir)
+            .await
     }
 
     /// List every Mod for a given game, ordered by creation time ascending.
