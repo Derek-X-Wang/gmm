@@ -227,6 +227,48 @@ async fn seed_mod(env: &TestEnv, core: &Core, name: &str) -> gmm_lib::core::Mod 
         .expect("adopt")
 }
 
+/// At the post-commit seam, the referenced Mod must already have its complete
+/// Variant shape and initial active selection. This is intentionally stronger
+/// than merely observing the Mod row: it catches a refactor that commits the
+/// row first and records Variants in a later transaction.
+async fn assert_committed_import_shape(env: &TestEnv, context: &str) {
+    let core = recover_and_assert(env, context).await;
+    let mods = core.list_mods(GameCode::Gimi).await.expect("list Mods");
+    assert_eq!(
+        mods.len(),
+        1,
+        "{context}: the committed import must expose exactly one Mod row: {mods:?}",
+    );
+    let variants = core
+        .list_variants(&mods[0].id)
+        .await
+        .expect("list committed Variants");
+    let names = variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        ["Blue", "Red"],
+        "{context}: the commit must already include every detected Variant",
+    );
+    let active_id = core
+        .active_variant_id(&mods[0].id)
+        .await
+        .expect("read committed active Variant");
+    let active_name = active_id.as_deref().and_then(|active_id| {
+        variants
+            .iter()
+            .find(|variant| variant.id == active_id)
+            .map(|variant| variant.name.as_str())
+    });
+    assert_eq!(
+        active_name,
+        Some("Blue"),
+        "{context}: the commit must already include the initial active selection",
+    );
+}
+
 // ---------------------------------------------------------------------
 // set_enabled
 // ---------------------------------------------------------------------
@@ -413,6 +455,32 @@ async fn adopt_crashing_before_variant_recording_rolls_back_the_mod_row() {
     assert!(report.unreferenced[0].path.join("Red/merged.ini").exists());
 }
 
+/// Crash immediately after the adopt fence commits. The committed row must
+/// already include every detected Variant and the initial active selection.
+#[tokio::test]
+async fn adopt_crashing_after_commit_preserves_complete_variant_state() {
+    let env = TestEnv::new();
+    let src = env.tmp.path().join("committed-adopt-variants");
+    for variant in ["Red", "Blue"] {
+        let directory = src.join(variant);
+        std::fs::create_dir_all(&directory).expect("variant directory");
+        std::fs::write(directory.join("merged.ini"), b"hash=9\n").expect("variant ini");
+    }
+
+    env.crash_during(
+        crash_points::ADOPT_AFTER_FENCE_COMMIT,
+        &[
+            "adopt",
+            "--from",
+            &src.display().to_string(),
+            "--name",
+            "Committed Adopt",
+        ],
+    );
+
+    assert_committed_import_shape(&env, "adopt crashed immediately after commit").await;
+}
+
 /// Build a Mod archive with two Variant subfolders.
 fn build_mod_zip(zip_path: &Path) {
     use std::io::Write as _;
@@ -431,6 +499,49 @@ fn build_mod_zip(zip_path: &Path) {
             .expect("write ini");
     }
     zw.finish().expect("finish zip");
+}
+
+async fn crash_gamebanana_import(env: &TestEnv, crash_at: &str, id: u64) {
+    let zip = env.tmp.path().join("gamebanana-mod.zip");
+    build_mod_zip(&zip);
+    let archive_bytes = std::fs::read(&zip).expect("GameBanana ZIP bytes");
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/mod.zip");
+    let mut server = mockito::Server::new_async().await;
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Atomic GameBanana Mod",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "1.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "mod.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_header("content-type", "application/zip")
+        .with_body(archive_bytes)
+        .create_async()
+        .await;
+
+    env.crash_during(
+        crash_at,
+        &[
+            "import-gamebanana",
+            "--id",
+            &id.to_string(),
+            "--api-base",
+            &server.url(),
+        ],
+    );
 }
 
 async fn import_gamebanana_fixture(env: &TestEnv, core: &Core, id: u64) -> gmm_lib::core::Mod {
@@ -593,53 +704,35 @@ async fn import_zip_crashing_before_variant_recording_rolls_back_the_mod_row() {
     assert!(report.unreferenced[0].path.join("Blue/merged.ini").exists());
 }
 
+/// Crash immediately after the ZIP import fence commits. The committed row
+/// must already include every detected Variant and active selection.
+#[tokio::test]
+async fn import_zip_crashing_after_commit_preserves_complete_variant_state() {
+    let env = TestEnv::new();
+    let zip = env.tmp.path().join("committed-mod.zip");
+    build_mod_zip(&zip);
+
+    env.crash_during(
+        crash_points::IMPORT_ZIP_AFTER_FENCE_COMMIT,
+        &[
+            "import-zip",
+            "--zip",
+            &zip.display().to_string(),
+            "--name",
+            "Committed ZIP",
+        ],
+    );
+
+    assert_committed_import_shape(&env, "ZIP import crashed immediately after commit").await;
+}
+
 /// GameBanana ingest delegates its downloaded archive to `import_zip`. Drive
 /// that public path in a real child process so the inherited transaction seam
 /// is proven rather than inferred from the local-ZIP test.
 #[tokio::test]
 async fn gamebanana_import_crashing_before_variant_recording_rolls_back_the_mod_row() {
     let env = TestEnv::new();
-    let zip = env.tmp.path().join("gamebanana-mod.zip");
-    build_mod_zip(&zip);
-    let archive_bytes = std::fs::read(&zip).expect("GameBanana ZIP bytes");
-    let id = 186_001_u64;
-    let api_path = format!("/apiv11/Mod/{id}");
-    let file_path = format!("/file/{id}/mod.zip");
-    let mut server = mockito::Server::new_async().await;
-    let _api = server
-        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
-        .with_status(200)
-        .with_header("content-type", "application/json")
-        .with_body(format!(
-            r#"{{
-                "_idRow": {id}, "_sName": "Atomic GameBanana Mod",
-                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "1.0.0",
-                "_aSubmitter": {{ "_sName": "Author" }},
-                "_aPreviewMedia": {{ "_aImages": [] }},
-                "_aFiles": [{{ "_sFile": "mod.zip", "_sDownloadUrl": "{base}{file_path}" }}]
-            }}"#,
-            base = server.url(),
-        ))
-        .create_async()
-        .await;
-    let _file = server
-        .mock("GET", file_path.as_str())
-        .with_status(200)
-        .with_header("content-type", "application/zip")
-        .with_body(archive_bytes)
-        .create_async()
-        .await;
-
-    env.crash_during(
-        crash_points::IMPORT_ZIP_AFTER_ROW_INSERT,
-        &[
-            "import-gamebanana",
-            "--id",
-            &id.to_string(),
-            "--api-base",
-            &server.url(),
-        ],
-    );
+    crash_gamebanana_import(&env, crash_points::IMPORT_ZIP_AFTER_ROW_INSERT, 186_001).await;
 
     let core = recover_and_assert(&env, "GameBanana import crashed before Variant recording").await;
     let listed = core.list_mods(GameCode::Gimi).await.expect("list");
@@ -657,6 +750,20 @@ async fn gamebanana_import_crashing_before_variant_recording_rolls_back_the_mod_
         "the downloaded Mod stays actionable"
     );
     assert!(report.unreferenced[0].path.join("Red/merged.ini").exists());
+}
+
+/// GameBanana delegates its downloaded archive to `import_zip`; crashing at
+/// the delegated post-commit seam must expose the same complete durable shape.
+#[tokio::test]
+async fn gamebanana_import_crashing_after_commit_preserves_complete_variant_state() {
+    let env = TestEnv::new();
+    crash_gamebanana_import(&env, crash_points::IMPORT_ZIP_AFTER_FENCE_COMMIT, 186_002).await;
+
+    assert_committed_import_shape(
+        &env,
+        "GameBanana import crashed immediately after delegated commit",
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------

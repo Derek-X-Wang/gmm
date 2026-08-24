@@ -5,6 +5,12 @@
 //! pin both sides of that staged design: ordinary detection failures never
 //! expose a referenced Mod, and successful adopt, ZIP, GameBanana, and
 //! recovery paths persist the same Variant shape and initial selection.
+//!
+//! The detection-error cases are Unix-only because their injection method
+//! removes directory permissions. The cleanup and transaction mechanisms are
+//! platform-independent, but these tests do not exercise that error guarantee
+//! on Windows, which is GMM's shipping platform. The real-process crash
+//! atomicity cases in `crash_recovery.rs` are unconditional and do run there.
 
 use std::fs::{self, File};
 use std::io::Write as _;
@@ -267,7 +273,11 @@ fn restore_detection_fixture(inaccessible: &Arc<Mutex<Option<PathBuf>>>) {
 }
 
 #[cfg(unix)]
-async fn assert_detection_error_left_no_mod(core: &Core, result: gmm_lib::core::Result<Mod>) {
+async fn assert_detection_error_left_no_mod(
+    core: &Core,
+    result: gmm_lib::core::Result<Mod>,
+    inaccessible: &Arc<Mutex<Option<PathBuf>>>,
+) {
     assert!(
         matches!(result, Err(Error::Io { ref path, .. }) if path.ends_with("Red")),
         "Variant detection must surface the injected unreadable subtree, got {result:?}",
@@ -276,6 +286,18 @@ async fn assert_detection_error_left_no_mod(core: &Core, result: gmm_lib::core::
     assert!(
         mods.is_empty(),
         "a Variant-detection error must not expose a referenced Mod: {mods:?}",
+    );
+    let inaccessible = inaccessible
+        .lock()
+        .expect("inaccessible path lock")
+        .clone()
+        .expect("the injection observed the staged directory");
+    let staged = inaccessible
+        .parent()
+        .expect("inaccessible Variant has a staged parent");
+    assert!(
+        !staged.exists(),
+        "a Variant-detection error must remove its staged Library directory: {staged:?}",
     );
 }
 
@@ -306,7 +328,7 @@ async fn adopt_variant_detection_error_leaves_no_referenced_mod() {
         .adopt_folder(GameCode::Gimi, &source, "Detection Error Adopt")
         .await;
     restore_detection_fixture(&inaccessible);
-    assert_detection_error_left_no_mod(&core, result).await;
+    assert_detection_error_left_no_mod(&core, result, &inaccessible).await;
 }
 
 #[cfg(unix)]
@@ -341,7 +363,7 @@ async fn zip_variant_detection_error_leaves_no_referenced_mod() {
         )
         .await;
     restore_detection_fixture(&inaccessible);
-    assert_detection_error_left_no_mod(&core, result).await;
+    assert_detection_error_left_no_mod(&core, result, &inaccessible).await;
 }
 
 #[cfg(unix)]
@@ -369,5 +391,5 @@ async fn gamebanana_variant_detection_error_leaves_no_referenced_mod() {
 
     let result = import_gamebanana_archive(&hooked, &archive, 186_200).await;
     restore_detection_fixture(&inaccessible);
-    assert_detection_error_left_no_mod(&core, result).await;
+    assert_detection_error_left_no_mod(&core, result, &inaccessible).await;
 }

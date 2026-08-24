@@ -671,6 +671,7 @@ impl Core {
         self.record_detected_variants(&id, detected_variants, &mut fence.transaction)
             .await?;
         fence.commit().await?;
+        self.crash_point(crash_points::ADOPT_AFTER_FENCE_COMMIT);
 
         Ok(Mod {
             id,
@@ -2749,6 +2750,7 @@ impl Core {
         self.record_detected_variants(&id, detected_variants, &mut fence.transaction)
             .await?;
         fence.commit().await?;
+        self.crash_point(crash_points::IMPORT_ZIP_AFTER_FENCE_COMMIT);
 
         Ok(Mod {
             id,
