@@ -33,6 +33,7 @@
 //! which reports exactly the two failure modes by name, plus a direct
 //! scan of `<Game>/Mods/` for the inverse case reconcile does not cover.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -3059,6 +3060,66 @@ async fn delete_refuses_a_directory_while_adopt_is_copying() {
         .collect();
     names.sort_unstable();
     assert_eq!(names, ["Blue", "Red"], "the Variant set must be complete");
+}
+
+/// A staging witness owns the filesystem object it recorded, not whatever
+/// later appears at the same pathname. Replacing a live stage must therefore
+/// make the replacement visible to audit and eligible for explicit deletion.
+#[tokio::test]
+async fn replacement_at_witnessed_staging_path_remains_unowned() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let source = staged_adopt_source(&env, "replaced-witnessed-staged-adopt");
+    let mut adopting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY)
+        .op([
+            "adopt",
+            "--from",
+            &source.display().to_string(),
+            "--name",
+            "Replaced Witnessed Stage",
+        ])
+        .spawn();
+    adopting.wait_for_pause(gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY);
+    let staged = only_staged_directory(&core).await;
+    let displaced = staged.with_extension("producer-displaced");
+    std::fs::rename(&staged, &displaced).expect("move the witnessed producer identity away");
+    std::fs::create_dir(&staged).expect("create a replacement at the witnessed spelling");
+    std::fs::write(staged.join("replacement.ini"), b"hash=replacement\n")
+        .expect("write replacement bytes");
+
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit the replacement identity");
+    let deletion = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &staged)
+        .await;
+    let reported_paths: HashSet<_> = report
+        .unreferenced
+        .iter()
+        .map(|directory| directory.path.as_path())
+        .collect();
+    assert!(
+        reported_paths.contains(staged.as_path())
+            && reported_paths.contains(displaced.as_path())
+            && matches!(
+                deletion,
+                Ok(ref deleted)
+                    if deleted.reclamation
+                        == gmm_lib::core::LibraryReclamationOutcome::Reclaimed
+            ),
+        "a stale path/identity pair must hide neither object and must not guard the replacement: report={report:?}, deletion={deletion:?}",
+    );
+    assert!(
+        displaced.is_dir(),
+        "acting on the replacement must not remove the witnessed producer identity",
+    );
+
+    // The producer is deliberately not resumed: it has lost its staged name,
+    // so RunningProbe's bounded Drop terminates it without manufacturing a
+    // second pathname replacement and testing a different commit question.
+    drop(adopting);
 }
 
 /// ZIP import uses the same setup boundary as adopt. At the shared pause the

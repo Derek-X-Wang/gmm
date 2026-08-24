@@ -83,8 +83,8 @@ impl LibraryOwnershipSnapshot {
                     Ok(directory) if directory.identity().durable_key() == identity => {
                         active_staging_directories.insert(identity);
                     }
-                    // The witness owns its recorded object, not a replacement
-                    // installed at the same spelling.
+                    // The witness owns its recorded object only while it still
+                    // occupies the recorded spelling.
                     Ok(_) => {}
                     // Preserve the ownership contract's NotFound caveat: a
                     // missing spelling contributes no filesystem identity.
