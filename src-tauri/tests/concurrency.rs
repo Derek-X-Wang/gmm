@@ -42,6 +42,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use gmm_lib::core::{Core, GameCode, SessionInfo};
+use sqlx::Connection;
 use tempfile::TempDir;
 use ulid::Ulid;
 
@@ -2205,6 +2206,65 @@ async fn quarantined_reinstall_preserves_old_and_unproved_byte_trees() {
         .await
         .expect("list quarantined Mod");
     assert!(listed[0].reinstall_recovery.is_some());
+}
+
+/// A malformed witness is database corruption, not evidence about one Mod's
+/// filesystem bytes. This fixture is deliberately artificial: it disables
+/// SQLite foreign keys on one connection to model a corrupt or incorrectly
+/// migrated row that the normal application can never write.
+///
+/// Mutation oracle: making `quarantinable_reinstall_failure` return true for
+/// every error lets Core construction succeed, and the named startup-fatal
+/// assertion fails.
+#[tokio::test]
+async fn corrupt_reinstall_witness_still_aborts_startup() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Corrupt Recovery Witness").await;
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("reinstall stage");
+    let old_identity = durable_directory_key(&imported.library_path);
+    let staged_identity = durable_directory_key(&stage);
+    drop(core);
+
+    let mut connection = sqlx::SqliteConnection::connect(&env.db_url)
+        .await
+        .expect("open connection for corrupt witness fixture");
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut connection)
+        .await
+        .expect("disable foreign keys only for artificial corruption");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'corrupt-game-code', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(old_identity)
+    .bind(staged_identity)
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&mut connection)
+    .await
+    .expect("insert artificial corrupt recovery witness");
+    connection.close().await.expect("close fixture connection");
+
+    let startup = Core::new(env.library.clone(), &env.db_url).await;
+    let error = match startup {
+        Ok(_) => panic!("database-corrupt recovery state must keep startup fatal"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("invalid game code"),
+        "startup must report the database value rather than blame filesystem recovery: {error}",
+    );
 }
 
 /// Reinstall rollback and ordinary delete-quarantine reclamation are separate
