@@ -1561,6 +1561,87 @@ async fn recovery_releases_the_writer_fence_before_variant_detection() {
     );
 }
 
+/// Recovery releases its first transaction before Variant detection. A
+/// concurrent writer can therefore claim a case-variant of the orphan's ULID
+/// while detection is in flight. SQLite's binary primary key accepts that
+/// spelling, so recovery must explicitly repeat its case-insensitive
+/// availability check after reacquiring the writer fence.
+#[tokio::test]
+async fn recovery_rechecks_case_insensitive_mod_id_availability_after_variant_detection() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    let id = loop {
+        let candidate = Ulid::new().to_string();
+        if candidate.to_ascii_lowercase() != candidate {
+            break candidate;
+        }
+    };
+    let orphan = root.join(&id);
+    for variant in ["Blue", "Red"] {
+        let dir = orphan.join(variant);
+        std::fs::create_dir_all(&dir).expect("Variant directory");
+        std::fs::write(dir.join("merged.ini"), format!("hash={variant}\n")).expect("Variant INI");
+    }
+
+    let mut recovering = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::RECOVER_AFTER_LIBRARY_MOVE)
+        .op([
+            "recover",
+            "--path",
+            &orphan.display().to_string(),
+            "--name",
+            "Case-Variant Race",
+        ])
+        .spawn();
+    recovering.wait_for_pause(gmm_lib::core::crash_points::RECOVER_AFTER_LIBRARY_MOVE);
+
+    let claimed_id = id.to_ascii_lowercase();
+    let mut writer = sqlx::SqliteConnection::connect(&env.db_url)
+        .await
+        .expect("open competing writer");
+    sqlx::query(
+        "INSERT INTO mods (
+            id, game_code, name, source, library_path,
+            junction_dir_name, enabled, created_at
+         ) VALUES (?, 'gimi', 'Concurrent Claimant', 'manual', ?, ?, 0, ?)",
+    )
+    .bind(&claimed_id)
+    .bind(
+        root.join("missing-case-variant-claimant")
+            .to_string_lossy()
+            .as_ref(),
+    )
+    .bind(format!("claimant-{claimed_id}"))
+    .bind(Utc::now().to_rfc3339())
+    .execute(&mut writer)
+    .await
+    .expect("SQLite's binary primary key accepts the case-variant ID");
+    writer.close().await.expect("close competing writer");
+
+    recovering.resume();
+    let recovered = recovering.wait_for_outcome();
+    recovered.expect_refused(
+        "recovery after a case-variant ID claim during Variant detection",
+        "ignoring ASCII case while Variant detection ran",
+    );
+    let mods = core.list_mods(GameCode::Gimi).await.expect("list Mods");
+    assert_eq!(
+        mods.iter()
+            .map(|mod_record| mod_record.id.as_str())
+            .collect::<Vec<_>>(),
+        [claimed_id],
+        "the competing claimant must be the only committed Mod row",
+    );
+    assert!(
+        orphan.is_dir(),
+        "refused recovery must preserve the orphan for user action",
+    );
+}
+
 /// A real process death after the recovery row insert but before the staged
 /// Variant set is persisted must roll back that still-open transaction. On
 /// restart, the directory therefore remains in the orphan report and the same
