@@ -145,7 +145,9 @@ async fn short_name_alias_cannot_bypass_the_reinstall_relocation_guard() {
         "INSERT INTO reinstall_swaps (
             token, mod_id, game_code, library_path, staged_path,
             quarantine_path, old_identity, staged_identity, created_at
-         ) VALUES (?, ?, 'gimi', ?, ?, ?, 'old-id', 'staged-id', ?)",
+         ) VALUES (?, ?, 'gimi', ?, ?, ?,
+                   '0000000000000001:0000000000000001',
+                   '0000000000000002:0000000000000002', ?)",
     )
     .bind(&token)
     .bind(&adopted.id)
