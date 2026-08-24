@@ -9,9 +9,12 @@
 use std::fs::{self, File};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 
-use gmm_lib::core::{crash_points, Core, Error, GameCode, Mod};
+#[cfg(unix)]
+use gmm_lib::core::{crash_points, Error};
+use gmm_lib::core::{Core, GameCode, Mod};
 use tempfile::TempDir;
 use ulid::Ulid;
 use zip::write::SimpleFileOptions;
