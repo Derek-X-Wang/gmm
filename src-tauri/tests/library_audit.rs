@@ -7,6 +7,11 @@
 use std::fs;
 use std::path::Path;
 
+#[cfg(windows)]
+use std::ffi::OsString;
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
 use gmm_lib::core::{junction, Core, Error, GameCode, ReviewedDuplicateMod, Source};
 use tempfile::TempDir;
 use ulid::Ulid;
@@ -23,6 +28,28 @@ fn durable_directory_key(path: &Path) -> String {
 
     let metadata = fs::metadata(path).expect("directory metadata for reinstall witness");
     format!("{:016x}:{:016x}", metadata.dev(), metadata.ino())
+}
+
+#[cfg(windows)]
+fn short_path_name(path: &Path) -> std::path::PathBuf {
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let long: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let required = unsafe { GetShortPathNameW(long.as_ptr(), std::ptr::null_mut(), 0) };
+    assert_ne!(
+        required,
+        0,
+        "read the Junction's 8.3 alias: {}",
+        std::io::Error::last_os_error(),
+    );
+    let mut short = vec![0_u16; required as usize];
+    let written = unsafe { GetShortPathNameW(long.as_ptr(), short.as_mut_ptr(), required) };
+    assert!(
+        written > 0 && written < required,
+        "read the Junction's 8.3 alias into the allocated buffer: {}",
+        std::io::Error::last_os_error(),
+    );
+    std::path::PathBuf::from(OsString::from_wide(&short[..written as usize]))
 }
 
 #[cfg(windows)]
@@ -835,6 +862,79 @@ async fn duplicate_resolution_refuses_a_junction_path_claimed_by_the_keeper() {
         .await
         .expect("count records after shared-Junction refusal");
     assert_eq!(rows, 2);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn duplicate_resolution_refuses_a_survivor_claiming_the_junction_by_its_short_name() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let short_path = short_path_name(&fixture.duplicate_junction);
+    let short_name = short_path.file_name().expect("short Junction leaf name");
+    assert_ne!(
+        short_name,
+        fixture
+            .duplicate_junction
+            .file_name()
+            .expect("long Junction leaf name"),
+        "the Windows CI volume must expose a distinct 8.3 alias for this Junction",
+    );
+
+    let outside_source = tmp.path().join("outside-reviewed-group");
+    fs::create_dir(&outside_source).expect("outside source");
+    fs::write(outside_source.join("outside.ini"), b"outside").expect("outside bytes");
+    let outside = fixture
+        .core
+        .adopt_folder(GameCode::Srmi, &outside_source, "Outside Survivor")
+        .await
+        .expect("adopt survivor outside the reviewed duplicate group");
+    let install = fixture
+        .duplicate_junction
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("game install");
+    fixture
+        .core
+        .set_game_install_path(GameCode::Srmi, install)
+        .await
+        .expect("share one install path across games");
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+        .await
+        .expect("open duplicate DB");
+    sqlx::query("UPDATE mods SET junction_dir_name = ? WHERE id = ?")
+        .bind(short_name.to_string_lossy().as_ref())
+        .bind(&outside.id)
+        .execute(&pool)
+        .await
+        .expect("claim the existing Junction through its 8.3 alias");
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(Error::DuplicateModJunctionClaimedBySurvivor {
+                ref mod_id,
+                ref surviving_mod_id,
+                ..
+            }) if mod_id == &fixture.duplicate_id && surviving_mod_id == &outside.id
+        ),
+        "a survivor's 8.3 spelling must identify the same Junction entry, got {result:?}",
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "the survivor's physical Junction remains",
+    );
+    let duplicate_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count reviewed duplicate rows after refusal");
+    assert_eq!(duplicate_rows, 2, "both reviewed records survive refusal");
 }
 
 #[tokio::test]
