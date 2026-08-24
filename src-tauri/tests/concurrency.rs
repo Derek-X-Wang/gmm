@@ -3087,11 +3087,24 @@ async fn assert_set_enabled_excludes_relocation(
             &relocated_root.display().to_string(),
         ])
         .run();
+    relocation.expect_refused(
+        "relocation while set_enabled held the deployment-state fence",
+        "database is locked",
+    );
 
     toggling.resume();
     toggling
         .wait_for_outcome()
         .expect_ok("set_enabled while relocation was excluded");
+
+    let relocation_after_resume = probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &relocated_root.display().to_string(),
+        ])
+        .run();
+    relocation_after_resume.expect_ok("relocation after set_enabled released its fence");
 
     let listed = core.list_mods(GameCode::Gimi).await.expect("list Mods");
     let row = listed
@@ -3110,11 +3123,8 @@ async fn assert_set_enabled_excludes_relocation(
     assert_eq!(
         junction_loads_mod, requested_enabled,
         "set_enabled and a fenced Library relocation left the enabled flag and Junction \
-         inconsistent: requested enabled={requested_enabled}, relocation={relocation:?}",
-    );
-    assert!(
-        !relocation.ok,
-        "relocation entered while set_enabled held the deployment-state fence: {relocation:?}",
+         inconsistent: requested enabled={requested_enabled}, first relocation={relocation:?}, \
+         relocation after resume={relocation_after_resume:?}",
     );
 }
 

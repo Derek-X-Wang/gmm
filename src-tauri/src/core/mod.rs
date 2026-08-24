@@ -38,7 +38,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::Utc;
-use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
+use sqlx::{sqlite::SqliteConnectOptions, Executor, Row, Sqlite, SqlitePool};
 use ulid::Ulid;
 
 pub use error::{Error, Result};
@@ -570,25 +570,15 @@ impl Core {
             path: mods_dir.clone(),
             source,
         })?;
-        let row = sqlx::query(
-            "SELECT junction_dir_name, library_path, active_variant_id
-             FROM mods WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_one(&mut *fence.transaction)
-        .await?;
+        let row = sqlx::query("SELECT junction_dir_name, library_path FROM mods WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *fence.transaction)
+            .await?;
         let junction_dir_name: String = row.try_get("junction_dir_name")?;
         let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
-        let active_variant_id: Option<String> = row.try_get("active_variant_id")?;
-        let target = if let Some(active_variant_id) = active_variant_id {
-            let variant = sqlx::query("SELECT subpath FROM mod_variants WHERE id = ?")
-                .bind(active_variant_id)
-                .fetch_one(&mut *fence.transaction)
-                .await?;
-            library_path.join(variant.try_get::<String, _>("subpath")?)
-        } else {
-            library_path
-        };
+        let target = self
+            .junction_target_for(id, &library_path, &mut *fence.transaction)
+            .await?;
         let link = mods_dir.join(junction_dir_name);
         volume::require_ntfs_pair(&mods_dir, &target)?;
         junction::create(&link, &target)?;
@@ -2867,7 +2857,9 @@ impl Core {
                 junction::remove(&link)?;
                 self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE);
             }
-            let target = self.junction_target_for(mod_id, &library_path).await?;
+            let target = self
+                .junction_target_for(mod_id, &library_path, &self.pool)
+                .await?;
             volume::require_ntfs_pair(game_mods_dir, &target)?;
             junction::create(&link, &target)?;
         }
@@ -2897,7 +2889,9 @@ impl Core {
             let id: String = row.try_get("id")?;
             let library_path: String = row.try_get("library_path")?;
             let library_path = PathBuf::from(library_path);
-            let effective = self.junction_target_for(&id, &library_path).await?;
+            let effective = self
+                .junction_target_for(&id, &library_path, &self.pool)
+                .await?;
             let bindings = conflicts::extract_hashes_from_dir(&effective)?;
             per_mod_bindings.push((id, bindings));
         }
@@ -2905,19 +2899,38 @@ impl Core {
         Ok(conflicts::build_report(&per_mod_bindings))
     }
 
-    /// Resolve the junction target for a Mod: Library path joined
-    /// with the active variant's subpath when one exists, else the
-    /// Library root.
-    async fn junction_target_for(&self, mod_id: &str, library_path: &Path) -> Result<PathBuf> {
-        if let Some(active_id) = self.active_variant_id(mod_id).await? {
-            let row = sqlx::query("SELECT subpath FROM mod_variants WHERE id = ?")
-                .bind(&active_id)
-                .fetch_one(&self.pool)
-                .await?;
-            let subpath: String = row.try_get("subpath")?;
-            return Ok(library_path.join(subpath));
+    /// Resolve the one Junction target implied by a Mod's persisted active
+    /// Variant. A dangling ID or a Variant owned by another Mod is corrupt
+    /// state, not permission to silently deploy the Mod root instead.
+    async fn junction_target_for<'e, E>(
+        &self,
+        mod_id: &str,
+        library_path: &Path,
+        executor: E,
+    ) -> Result<PathBuf>
+    where
+        E: Executor<'e, Database = Sqlite>,
+    {
+        let row = sqlx::query(
+            "SELECT m.active_variant_id, v.subpath
+             FROM mods m
+             LEFT JOIN mod_variants v
+               ON v.id = m.active_variant_id AND v.mod_id = m.id
+             WHERE m.id = ?",
+        )
+        .bind(mod_id)
+        .fetch_one(executor)
+        .await?;
+        let active_variant_id: Option<String> = row.try_get("active_variant_id")?;
+        let active_variant_subpath: Option<String> = row.try_get("subpath")?;
+        match (active_variant_id, active_variant_subpath) {
+            (None, _) => Ok(library_path.to_path_buf()),
+            (Some(_), Some(subpath)) => Ok(library_path.join(subpath)),
+            (Some(variant_id), None) => Err(Error::InvalidActiveVariant {
+                mod_id: mod_id.to_string(),
+                variant_id,
+            }),
         }
-        Ok(library_path.to_path_buf())
     }
 
     /// Read the persisted install path for a game (None until the user
@@ -3023,7 +3036,9 @@ impl Core {
 
             let link = game_mods_dir.join(&junction_dir_name);
             let library_path = PathBuf::from(&library_path);
-            let expected_target = self.junction_target_for(&id, &library_path).await?;
+            let expected_target = self
+                .junction_target_for(&id, &library_path, &self.pool)
+                .await?;
 
             // A disabled Mod should have no junction. If one is there,
             // something tore between `set_enabled`'s filesystem step and
@@ -3166,7 +3181,9 @@ impl Core {
                 }
                 continue;
             }
-            let target = self.junction_target_for(&id, &library_path).await?;
+            let target = self
+                .junction_target_for(&id, &library_path, &self.pool)
+                .await?;
             volume::require_ntfs_pair(game_mods_dir, &target)?;
             junction::create(&link, &target)?;
             result.recreated.push(id);

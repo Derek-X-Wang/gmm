@@ -197,24 +197,18 @@ impl Core {
         let mut fence = self
             .begin_library_mutation(LibraryMutation::SetEnabled)
             .await?;
-        let row = sqlx::query(
-            "SELECT m.junction_dir_name, m.library_path, m.enabled, v.subpath
-             FROM mods m
-             LEFT JOIN mod_variants v
-               ON v.id = m.active_variant_id AND v.mod_id = m.id
-             WHERE m.id = ?",
-        )
-        .bind(id)
-        .fetch_one(&mut *fence.transaction)
-        .await?;
+        let row =
+            sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *fence.transaction)
+                .await?;
 
         let junction_dir_name: String = row.try_get("junction_dir_name")?;
         let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
         let current_enabled: i64 = row.try_get("enabled")?;
-        let active_variant_subpath: Option<String> = row.try_get("subpath")?;
-        let target = active_variant_subpath
-            .map(|subpath| library_path.join(subpath))
-            .unwrap_or(library_path);
+        let target = self
+            .junction_target_for(id, &library_path, &mut *fence.transaction)
+            .await?;
         let link = game_mods_dir.join(junction_dir_name);
 
         match (current_enabled != 0, enabled) {
@@ -460,8 +454,7 @@ impl Core {
         fence: &mut LibraryMutationFence,
     ) -> Result<()> {
         let row = sqlx::query(
-            "SELECT m.enabled, m.junction_dir_name, m.active_variant_id,
-                    g.install_path
+            "SELECT m.enabled, m.junction_dir_name, g.install_path
              FROM mods m JOIN games g ON g.code = m.game_code
              WHERE m.id = ? AND m.game_code = ?",
         )
@@ -483,19 +476,13 @@ impl Core {
         if row.try_get::<i64, _>("enabled")? == 0 {
             return Ok(());
         }
-        let target = if let Some(active_variant_id) =
-            row.try_get::<Option<String>, _>("active_variant_id")?
-        {
-            let subpath: String =
-                sqlx::query_scalar("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
-                    .bind(active_variant_id)
-                    .bind(&witness.mod_id)
-                    .fetch_one(&mut *fence.transaction)
-                    .await?;
-            witness.library_path.join(subpath)
-        } else {
-            witness.library_path.clone()
-        };
+        let target = self
+            .junction_target_for(
+                &witness.mod_id,
+                &witness.library_path,
+                &mut *fence.transaction,
+            )
+            .await?;
         fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
             path: mods_dir.clone(),
             source,
