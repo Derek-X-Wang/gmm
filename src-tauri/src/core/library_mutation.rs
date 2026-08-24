@@ -229,6 +229,7 @@ impl Core {
             .bind(id)
             .execute(&mut *fence.transaction)
             .await?;
+        self.crash_point(crash_points::SET_ENABLED_AFTER_DB_UPDATE);
         fence.commit().await
     }
 

@@ -3041,6 +3041,26 @@ fn single_delete_quarantine(root: &Path, context: &str) -> (PathBuf, PathBuf) {
 async fn assert_set_enabled_excludes_relocation(
     start_enabled: bool,
     requested_enabled: bool,
+    junction_pause_point: &'static str,
+    display_name: &str,
+) {
+    for pause_point in [
+        junction_pause_point,
+        gmm_lib::core::crash_points::SET_ENABLED_AFTER_DB_UPDATE,
+    ] {
+        assert_set_enabled_excludes_relocation_at(
+            start_enabled,
+            requested_enabled,
+            pause_point,
+            display_name,
+        )
+        .await;
+    }
+}
+
+async fn assert_set_enabled_excludes_relocation_at(
+    start_enabled: bool,
+    requested_enabled: bool,
     pause_point: &'static str,
     display_name: &str,
 ) {
@@ -3075,10 +3095,9 @@ async fn assert_set_enabled_excludes_relocation(
         .spawn();
     toggling.wait_for_pause(pause_point);
 
-    // The toggle is paused after its Junction mutation. Its writer fence must
-    // still exclude relocation until the matching `enabled` update commits.
-    // With that fence removed, relocation succeeds here from the stale row,
-    // reverses the Junction mutation, and recreates the issue's torn state.
+    // The toggle is paused after either its Junction mutation or its flag
+    // update. Its writer fence must exclude relocation at both boundaries
+    // until the complete deployment-state transition commits.
     let relocated_root = env._tmp.path().join(format!("relocated-{enabled}"));
     let relocation = probe(&env)
         .op([
@@ -3088,7 +3107,7 @@ async fn assert_set_enabled_excludes_relocation(
         ])
         .run();
     relocation.expect_refused(
-        "relocation while set_enabled held the deployment-state fence",
+        &format!("relocation while set_enabled paused at {pause_point}"),
         "database is locked",
     );
 

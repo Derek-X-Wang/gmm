@@ -70,6 +70,10 @@ pub const SET_ENABLED_AFTER_JUNCTION_CREATE: &str = "set_enabled.after_junction_
 /// enabled. Recoverable — reconcile recreates it.
 pub const SET_ENABLED_AFTER_JUNCTION_REMOVE: &str = "set_enabled.after_junction_remove";
 
+/// `set_enabled`: the row now matches the requested Junction state, while the
+/// writer fence is still held until both halves commit together.
+pub const SET_ENABLED_AFTER_DB_UPDATE: &str = "set_enabled.after_db_update";
+
 /// `set_active_variant`: the row names the new Variant, the Junction
 /// still points at the old one. Recoverable — the row is the source of
 /// truth for which Variant is active.
