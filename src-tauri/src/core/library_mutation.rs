@@ -28,7 +28,7 @@ use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, Revi
 use super::library_identity::IdentifiedDirectory;
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::mods::{ReinstallRecovery, ReinstallRecoveryOutcome};
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 use super::same_path;
 use super::settings::{get as get_setting, keys};
 use super::{
@@ -350,7 +350,7 @@ impl Core {
             let link = PathBuf::from(install_path)
                 .join("Mods")
                 .join(row.try_get::<String, _>("junction_dir_name")?);
-            if !link_exists(&link) {
+            if !link_exists(&link)? {
                 continue;
             }
             for (surviving_mod_id, surviving_link) in &surviving_junctions {
@@ -384,7 +384,7 @@ impl Core {
         for (mod_id, link) in &junctions {
             withdraw_reinstall_junction(link)?;
             self.crash_point(crash_points::RESOLVE_DUPLICATES_AFTER_JUNCTION_WITHDRAWAL);
-            if link_exists(link) {
+            if link_exists(link)? {
                 return Err(Error::DuplicateModJunctionStillPresent {
                     mod_id: mod_id.clone(),
                     path: link.clone(),
@@ -514,7 +514,7 @@ impl Core {
 
         if enabled != 0 {
             let link = game_mods_dir.join(&junction_dir_name);
-            if link_exists(&link) {
+            if link_exists(&link)? {
                 junction::remove(&link)?;
                 self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE);
             }
@@ -743,8 +743,14 @@ impl Core {
         let Some(state) = state else {
             return Ok(None);
         };
-        if state != 0 && link.is_none_or(|path| !super::link_exists(path)) {
-            return Ok(Some(true));
+        if state != 0 {
+            let absent = match link {
+                Some(path) => !super::link_exists(path)?,
+                None => true,
+            };
+            if absent {
+                return Ok(Some(true));
+            }
         }
 
         let withdrawal = link.map_or(Ok(()), withdraw_reinstall_junction);
@@ -980,7 +986,7 @@ impl Core {
         };
         let mods_dir = install.join("Mods");
         let link = mods_dir.join(row.try_get::<String, _>("junction_dir_name")?);
-        if super::link_exists(&link) {
+        if super::link_exists(&link)? {
             junction::remove(&link)?;
         }
         if row.try_get::<i64, _>("enabled")? == 0 {
@@ -1304,7 +1310,7 @@ fn quarantinable_reinstall_failure(error: &Error) -> bool {
 }
 
 pub(super) fn withdraw_reinstall_junction(link: &Path) -> Result<()> {
-    if !super::link_exists(link) {
+    if !super::link_exists(link)? {
         return Ok(());
     }
     if super::resolve_link(link).is_none() {
@@ -1364,18 +1370,44 @@ fn same_physical_link_path(left: &Path, right: &Path) -> Result<bool> {
         };
         Ok(left.identity() == right.identity())
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let left = match fs::symlink_metadata(left) {
+            Ok(metadata) => Some(metadata),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(Error::Io {
+                    path: left.to_path_buf(),
+                    source,
+                })
+            }
+        };
+        let Some(left) = left else {
+            return Ok(false);
+        };
+        let right = match fs::symlink_metadata(right) {
+            Ok(metadata) => Some(metadata),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(Error::Io {
+                    path: right.to_path_buf(),
+                    source,
+                })
+            }
+        };
+        let Some(right) = right else {
+            return Ok(false);
+        };
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let (Some(left_parent), Some(right_parent)) = (left.parent(), right.parent()) else {
             return Ok(false);
         };
-        if !same_path(left_parent, right_parent) {
-            return Ok(false);
-        }
-        let (Some(left_name), Some(right_name)) = (left.file_name(), right.file_name()) else {
-            return Ok(false);
-        };
-        Ok(left_name == right_name)
+        Ok(same_path(left_parent, right_parent) && left.file_name() == right.file_name())
     }
 }
 

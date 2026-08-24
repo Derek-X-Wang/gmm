@@ -17,6 +17,23 @@ use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use ulid::Ulid;
 
+#[cfg(unix)]
+fn deny_directory_search(path: &Path) -> fs::Permissions {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let original = fs::metadata(path)
+        .expect("read directory permissions before error injection")
+        .permissions();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o0))
+        .expect("inject an unreadable deployment directory");
+    original
+}
+
+#[cfg(unix)]
+fn restore_directory_search(path: &Path, permissions: fs::Permissions) {
+    fs::set_permissions(path, permissions).expect("restore deployment directory permissions");
+}
+
 async fn fresh_core(tmp: &TempDir) -> Core {
     let library_root = tmp.path().join("library");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
@@ -1038,6 +1055,95 @@ async fn duplicate_resolution_refuses_a_survivor_claiming_the_junction_by_its_sh
     assert_eq!(duplicate_rows, 2, "both reviewed records survive refusal");
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn duplicate_resolution_refuses_a_survivor_claiming_the_same_case_insensitive_entry() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let alias_name = fixture
+        .duplicate_junction
+        .file_name()
+        .expect("Junction leaf name")
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let alias_path = fixture
+        .duplicate_junction
+        .parent()
+        .expect("game Mods directory")
+        .join(&alias_name);
+    assert_ne!(
+        alias_path, fixture.duplicate_junction,
+        "the test must use a distinct path spelling",
+    );
+    let original_metadata = fs::symlink_metadata(&fixture.duplicate_junction)
+        .expect("read the original deployment entry");
+    let alias_metadata = fs::symlink_metadata(&alias_path)
+        .expect("default macOS storage must resolve the case-insensitive alias");
+    assert_eq!(
+        (original_metadata.dev(), original_metadata.ino()),
+        (alias_metadata.dev(), alias_metadata.ino()),
+        "both spellings must identify one deployment entry",
+    );
+
+    let outside_source = tmp.path().join("outside-case-alias");
+    fs::create_dir(&outside_source).expect("outside source");
+    fs::write(outside_source.join("outside.ini"), b"outside").expect("outside bytes");
+    let outside = fixture
+        .core
+        .adopt_folder(GameCode::Srmi, &outside_source, "Outside Case Survivor")
+        .await
+        .expect("adopt survivor outside the reviewed duplicate group");
+    let install = fixture
+        .duplicate_junction
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("game install");
+    fixture
+        .core
+        .set_game_install_path(GameCode::Srmi, install)
+        .await
+        .expect("share one install path across games");
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+        .await
+        .expect("open duplicate DB");
+    sqlx::query("UPDATE mods SET junction_dir_name = ? WHERE id = ?")
+        .bind(&alias_name)
+        .bind(&outside.id)
+        .execute(&pool)
+        .await
+        .expect("claim the existing Junction through a case-insensitive alias");
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(Error::DuplicateModJunctionClaimedBySurvivor {
+                ref mod_id,
+                ref surviving_mod_id,
+                ..
+            }) if mod_id == &fixture.duplicate_id && surviving_mod_id == &outside.id
+        ),
+        "a survivor's case-insensitive spelling must identify the same Junction entry, got {result:?}",
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "the survivor's physical Junction remains",
+    );
+    let duplicate_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count reviewed duplicate rows after refusal");
+    assert_eq!(duplicate_rows, 2, "both reviewed records survive refusal");
+}
+
 #[tokio::test]
 async fn duplicate_resolution_distinguishes_two_junction_names_with_one_target() {
     let tmp = TempDir::new().expect("tmp");
@@ -1246,5 +1352,102 @@ async fn duplicate_resolution_refuses_when_a_withdrawn_junction_is_still_present
         .fetch_one(&pool)
         .await
         .expect("count records after post-withdrawal refusal");
+    assert_eq!(rows, 2, "both reviewed records survive refusal");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn duplicate_resolution_refuses_an_unreadable_present_junction_during_preflight() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let game_mods = fixture
+        .duplicate_junction
+        .parent()
+        .expect("game Mods directory");
+    let original_permissions = deny_directory_search(game_mods);
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    restore_directory_search(game_mods, original_permissions);
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::Io { ref path, ref source })
+                if path == &fixture.duplicate_junction
+                    && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "an unreadable deployment entry must refuse before withdrawal, got {result:?}",
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "the unreadable but present Junction survives preflight refusal",
+    );
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+        .await
+        .expect("open duplicate DB after preflight refusal");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count records after unreadable preflight refusal");
+    assert_eq!(rows, 2, "both reviewed records survive refusal");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn duplicate_resolution_refuses_an_unreadable_recreated_junction_after_withdrawal() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let link = fixture.duplicate_junction.clone();
+    let target = fixture.library_path.join("Amber");
+    let game_mods = link.parent().expect("game Mods directory").to_path_buf();
+    let original_permissions = fs::metadata(&game_mods)
+        .expect("read game Mods permissions")
+        .permissions();
+    let hook_game_mods = game_mods.clone();
+    let hooked = fixture
+        .core
+        .clone()
+        .with_crash_hook(std::sync::Arc::new(move |point| {
+            if point == gmm_lib::core::crash_points::RESOLVE_DUPLICATES_AFTER_JUNCTION_WITHDRAWAL {
+                junction::create(&link, &target)
+                    .expect("recreate the Junction at the post-withdrawal test seam");
+                let _ = deny_directory_search(&hook_game_mods);
+            }
+        }));
+
+    let result = hooked
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    restore_directory_search(&game_mods, original_permissions);
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::Io { ref path, ref source })
+                if path == &fixture.duplicate_junction
+                    && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "an unreadable post-withdrawal deployment entry must refuse row deletion, got {result:?}",
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "the unreadable but still-present Junction remains visible for recovery",
+    );
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+        .await
+        .expect("open duplicate DB after unreadable post-withdrawal refusal");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count records after unreadable post-withdrawal refusal");
     assert_eq!(rows, 2, "both reviewed records survive refusal");
 }
