@@ -18,11 +18,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use sqlx::{Row, Sqlite};
+use sqlx::{Executor, Row, Sqlite};
 use ulid::Ulid;
 
 use super::library_identity::IdentifiedDirectory;
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
+use super::mods::{ReinstallRecovery, ReinstallRecoveryOutcome};
 use super::settings::{get as get_setting, keys};
 use super::{crash_points, junction, volume, Core, Error, GameCode, Result};
 
@@ -31,6 +32,7 @@ pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryMutation {
     FinishInterruptedDeletes,
+    RetryReinstallRecovery,
     SetLibraryRoot,
     SetLibraryPathForGame,
     AdoptFolder,
@@ -45,6 +47,7 @@ impl LibraryMutation {
     pub(super) const fn function_name(self) -> &'static str {
         match self {
             Self::FinishInterruptedDeletes => "finish_interrupted_library_deletes",
+            Self::RetryReinstallRecovery => "retry_reinstall_recovery",
             Self::SetLibraryRoot => "set_library_root",
             Self::SetLibraryPathForGame => "set_library_path_for_game",
             Self::AdoptFolder => "adopt_folder",
@@ -251,33 +254,124 @@ impl Core {
         self.rebase_reinstall_swap_witness(witness, fence).await
     }
 
-    /// Roll back every reinstall whose durable witness is still present.
-    /// Witness presence is the only decision: even if the complete new tree
-    /// already occupies the live name, startup restores the old tree. A
-    /// successful reinstall deletes the witness in the same SQLite transaction
-    /// that commits its metadata and Variant rows, so an absent witness means
-    /// the live replacement wins and the old delete quarantine can be purged.
-    pub(super) async fn rollback_interrupted_reinstall_swaps(
-        &self,
-        fence: &mut LibraryMutationFence,
-    ) -> Result<usize> {
-        let rows = sqlx::query(
-            "SELECT token, mod_id, game_code, library_path, staged_path,
-                    quarantine_path, old_identity, staged_identity
-             FROM reinstall_swaps ORDER BY created_at, token",
-        )
-        .fetch_all(&mut *fence.transaction)
-        .await?;
+    /// Attempt every durable reinstall witness independently at startup.
+    /// Filesystem/identity failures quarantine only that Mod and remain
+    /// retryable through the same witness. Database and schema failures still
+    /// abort Core construction because they are not evidence about one Mod's
+    /// bytes.
+    pub(super) async fn recover_interrupted_reinstalls_at_startup(&self) -> Result<usize> {
+        let rows = sqlx::query("SELECT token FROM reinstall_swaps ORDER BY created_at, token")
+            .fetch_all(&self.pool)
+            .await?;
         let mut rolled_back = 0;
         for row in rows {
-            let witness = ReinstallSwapWitness::from_row(&row)?;
-            witness.validate_paths()?;
-            let witness = self.rebase_reinstall_swap_witness(witness, fence).await?;
-            self.rollback_reinstall_swap_in_mutation(&witness, fence)
-                .await?;
-            rolled_back += 1;
+            let token: String = row.try_get("token")?;
+            match self
+                .attempt_reinstall_recovery(&token, LibraryMutation::FinishInterruptedDeletes)
+                .await?
+            {
+                ReinstallRecoveryOutcome::Recovered => rolled_back += 1,
+                ReinstallRecoveryOutcome::Quarantined { recovery } => tracing::error!(
+                    target: "gmm::library",
+                    token,
+                    error = %recovery.reason,
+                    "interrupted reinstall remains quarantined; the rest of GMM will start",
+                ),
+            }
         }
         Ok(rolled_back)
+    }
+
+    /// Retry the exact verified rollback that startup attempted for one Mod.
+    /// No witness means another retry/startup already settled it, so this is
+    /// idempotently successful.
+    pub async fn retry_reinstall_recovery(&self, mod_id: &str) -> Result<ReinstallRecoveryOutcome> {
+        let token: Option<String> =
+            sqlx::query_scalar("SELECT token FROM reinstall_swaps WHERE mod_id = ?")
+                .bind(mod_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(token) = token else {
+            return Ok(ReinstallRecoveryOutcome::Recovered);
+        };
+        let outcome = self
+            .attempt_reinstall_recovery(&token, LibraryMutation::RetryReinstallRecovery)
+            .await?;
+        if matches!(outcome, ReinstallRecoveryOutcome::Recovered) {
+            if let Err(error) = self.finish_interrupted_library_deletes().await {
+                tracing::warn!(
+                    target: "gmm::library",
+                    mod_id,
+                    error = %error,
+                    "reinstall recovery succeeded but ordinary quarantine cleanup was deferred",
+                );
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn attempt_reinstall_recovery(
+        &self,
+        token_raw: &str,
+        mutation: LibraryMutation,
+    ) -> Result<ReinstallRecoveryOutcome> {
+        let token =
+            Ulid::from_string(token_raw).map_err(|_| Error::ReinstallRecoveryUncertain {
+                mod_id: "<unknown>".to_string(),
+                reason: format!("the swap token {token_raw:?} is not a ULID"),
+            })?;
+        let mut fence = self.begin_library_mutation(mutation).await?;
+        let recovery = async {
+            let witness = self.reinstall_swap_witness(token, &mut fence).await?;
+            self.rollback_reinstall_swap_in_mutation(&witness, &mut fence)
+                .await
+        }
+        .await;
+        match recovery {
+            Ok(()) => {
+                fence.commit().await?;
+                Ok(ReinstallRecoveryOutcome::Recovered)
+            }
+            Err(error) if quarantinable_reinstall_failure(&error) => {
+                fence.transaction.rollback().await?;
+                let recovery = self
+                    .record_reinstall_recovery_failure(token_raw, &error.to_string())
+                    .await?;
+                Ok(ReinstallRecoveryOutcome::Quarantined { recovery })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn record_reinstall_recovery_failure(
+        &self,
+        token: &str,
+        reason: &str,
+    ) -> Result<ReinstallRecovery> {
+        let attempted_at = chrono::Utc::now().to_rfc3339();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            "UPDATE reinstall_swaps
+             SET recovery_error = ?, recovery_attempted_at = ?,
+                 recovery_attempts = recovery_attempts + 1
+             WHERE token = ?",
+        )
+        .bind(reason)
+        .bind(&attempted_at)
+        .bind(token)
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query(
+            "SELECT recovery_error, recovery_attempted_at, recovery_attempts,
+                    library_path, staged_path, quarantine_path
+             FROM reinstall_swaps WHERE token = ?",
+        )
+        .bind(token)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let recovery = reinstall_recovery_from_row(&row)?;
+        transaction.commit().await?;
+        Ok(recovery)
     }
 
     /// Current relocation refuses to move a subtree with an active witness,
@@ -630,7 +724,7 @@ impl Core {
                 Some(owner) => {
                     let owner = match owner {
                         LibraryDirectoryOwner::Mod => "a Mod",
-                        LibraryDirectoryOwner::ActiveReinstallStage => "an active reinstall stage",
+                        LibraryDirectoryOwner::ActiveReinstall => "interrupted reinstall state",
                     };
                     tracing::warn!(
                         target: "gmm::library",
@@ -747,6 +841,43 @@ impl Core {
         }
         Ok(())
     }
+}
+
+pub(super) async fn ensure_mod_reinstall_is_usable<'e, E>(mod_id: &str, executor: E) -> Result<()>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
+    let quarantined = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM reinstall_swaps
+         WHERE mod_id = ? AND recovery_error IS NOT NULL",
+    )
+    .bind(mod_id)
+    .fetch_one(executor)
+    .await?;
+    if quarantined != 0 {
+        return Err(Error::ReinstallRecoveryQuarantined {
+            mod_id: mod_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn reinstall_recovery_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ReinstallRecovery> {
+    Ok(ReinstallRecovery {
+        reason: row.try_get("recovery_error")?,
+        attempted_at: row.try_get("recovery_attempted_at")?,
+        attempts: row.try_get::<i64, _>("recovery_attempts")? as u32,
+        library_path: PathBuf::from(row.try_get::<String, _>("library_path")?),
+        staged_path: PathBuf::from(row.try_get::<String, _>("staged_path")?),
+        quarantine_path: PathBuf::from(row.try_get::<String, _>("quarantine_path")?),
+    })
+}
+
+fn quarantinable_reinstall_failure(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Io { .. } | Error::ReinstallRecoveryUncertain { .. } | Error::NonNtfsVolume { .. }
+    )
 }
 
 fn identified_if_exists(path: &Path) -> Result<Option<IdentifiedDirectory>> {

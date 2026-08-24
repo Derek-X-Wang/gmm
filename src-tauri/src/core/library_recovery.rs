@@ -154,25 +154,12 @@ impl QuarantinedLibraryDirectory {
 }
 
 impl Core {
-    /// Finish delete quarantines left by a process that stopped after the
-    /// atomic rename and before recursive purge. `Core::new` runs this on
-    /// every startup. An owned quarantine that still matches remains hidden
-    /// and retryable. When a purge cannot establish ownership because the
-    /// reserved path or intent changed, GMM cannot locate the quarantined
-    /// directory on that startup. A later startup retries only if GMM can
-    /// again verify the original directory at its reserved name.
+    /// Finish ordinary delete quarantines left by a process that stopped after
+    /// the atomic rename and before recursive purge. Reinstall rollback is a
+    /// separate, earlier startup phase: any witness that remains after that
+    /// phase is a quarantined Mod, and both of its recorded identities must be
+    /// preserved rather than reclaimed here.
     pub async fn finish_interrupted_library_deletes(&self) -> Result<usize> {
-        // Reinstall rollback is the correctness phase. Commit its witness
-        // deletion before attempting ordinary quarantine reclamation: a later
-        // purge failure must not roll the witness back into existence and make
-        // startup misclassify successful rollback as failed reinstall recovery.
-        let mut fence = self
-            .begin_library_mutation(LibraryMutation::FinishInterruptedDeletes)
-            .await?;
-        self.rollback_interrupted_reinstall_swaps(&mut fence)
-            .await?;
-        fence.commit().await?;
-
         // Serialize cleanup with the pre-commit half of delete. In particular,
         // an intent without a quarantine is known to be stranded only while no
         // delete can be between writing that intent and performing its rename.
@@ -188,14 +175,18 @@ impl Core {
                     .await?,
             );
         }
-        let removed = tokio::task::spawn_blocking(move || purge_delete_quarantines(&roots))
-            .await
-            .map_err(|join_error| Error::Io {
-                path: PathBuf::from("<Library delete quarantines>"),
-                source: io::Error::other(format!(
-                    "Library quarantine cleanup worker failed: {join_error}"
-                )),
-            })??;
+        let ownership =
+            super::library_ownership::LibraryOwnershipSnapshot::load(&mut *fence.transaction)
+                .await?;
+        let removed =
+            tokio::task::spawn_blocking(move || purge_delete_quarantines(&roots, &ownership))
+                .await
+                .map_err(|join_error| Error::Io {
+                    path: PathBuf::from("<Library delete quarantines>"),
+                    source: io::Error::other(format!(
+                        "Library quarantine cleanup worker failed: {join_error}"
+                    )),
+                })??;
         fence.commit().await?;
         Ok(removed)
     }
@@ -352,6 +343,7 @@ impl Core {
             author: None,
             version: None,
             screenshot_url: None,
+            reinstall_recovery: None,
         })
     }
 
@@ -653,8 +645,8 @@ impl Core {
                 super::library_ownership::LibraryDirectoryOwner::Mod => {
                     "a Mod now references it — refresh the report"
                 }
-                super::library_ownership::LibraryDirectoryOwner::ActiveReinstallStage => {
-                    "it is an active reinstall staging directory owned by GMM"
+                super::library_ownership::LibraryDirectoryOwner::ActiveReinstall => {
+                    "it is interrupted reinstall state owned by GMM"
                 }
             };
             return Err(Error::NotAnUnreferencedLibraryDir {
@@ -667,7 +659,10 @@ impl Core {
     }
 }
 
-fn purge_delete_quarantines(roots: &[PathBuf]) -> Result<usize> {
+fn purge_delete_quarantines(
+    roots: &[PathBuf],
+    ownership: &super::library_ownership::LibraryOwnershipSnapshot,
+) -> Result<usize> {
     let mut removed = 0;
     for root in roots {
         let entries = match fs::read_dir(root) {
@@ -708,6 +703,17 @@ fn purge_delete_quarantines(roots: &[PathBuf]) -> Result<usize> {
                 }
                 continue;
             }
+            let directory = IdentifiedDirectory::open(&quarantine).map_err(|source| Error::Io {
+                path: quarantine.clone(),
+                source,
+            })?;
+            if matches!(
+                ownership.owner_of(directory.identity()),
+                Some(super::library_ownership::LibraryDirectoryOwner::ActiveReinstall)
+            ) {
+                continue;
+            }
+            drop(directory);
             match (QuarantinedLibraryDirectory {
                 path: quarantine,
                 intent,

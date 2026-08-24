@@ -120,6 +120,56 @@ code {
   font-weight: 600;
 }
 
+.mods__row--quarantined {
+  align-items: flex-start;
+  border-color: #92400e;
+}
+
+.reinstall-recovery-warning {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.6rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #92400e;
+  background: #2b2118;
+  border-radius: 8px;
+  color: #fbbf24;
+}
+
+.reinstall-recovery-warning p,
+.reinstall-recovery-warning dl {
+  margin: 0;
+}
+
+.reinstall-recovery-warning dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.25rem 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.reinstall-recovery-warning dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.reinstall-recovery-warning button {
+  justify-self: start;
+}
+
+/* Keep retry live regions mounted without adding empty rows. */
+.reinstall-action-notice:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .toggle {
   display: flex;
   align-items: center;

@@ -165,6 +165,7 @@ pub fn run() {
         .manage(crate::runtime::SessionRuntime::new())
         .invoke_handler(tauri::generate_handler![
             commands::list_mods,
+            commands::retry_reinstall_recovery,
             commands::adopt_folder,
             commands::import_zip,
             commands::set_mod_enabled,

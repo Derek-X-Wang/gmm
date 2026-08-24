@@ -24,7 +24,7 @@ use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
     Core, DeletedLibraryDir, GameCode, ImportZipOptions, LibraryAuditReport, Mod, MoveReport,
-    SessionInfo,
+    ReinstallRecoveryOutcome, SessionInfo,
 };
 use crate::runtime::launch::{self, LaunchOptions};
 use crate::runtime::SessionRuntime;
@@ -50,6 +50,16 @@ pub struct ImportZipArgs {
 #[tauri::command]
 pub async fn list_mods(core: State<'_, Core>, game: GameCode) -> Result<Vec<Mod>, String> {
     core.list_mods(game).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn retry_reinstall_recovery(
+    core: State<'_, Core>,
+    mod_id: String,
+) -> Result<ReinstallRecoveryOutcome, String> {
+    core.retry_reinstall_recovery(&mod_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

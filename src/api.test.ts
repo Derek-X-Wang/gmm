@@ -9,6 +9,7 @@ const {
   importGamebanana,
   importZip,
   recoverUnreferencedLibraryDir,
+  retryReinstallRecovery,
   setProxyConfig,
 } = await import("./api");
 
@@ -27,6 +28,12 @@ beforeEach(() => {
 });
 
 it.each([
+  [
+    "retryReinstallRecovery",
+    () => retryReinstallRecovery("01MOD"),
+    "retry_reinstall_recovery",
+    { modId: "01MOD" },
+  ],
   [
     "adoptFolder",
     () => adoptFolder("gimi", "C:\\source", "Adopted"),

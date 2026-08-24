@@ -291,12 +291,13 @@ async fn every_schema_version_migrates_and_keeps_the_users_data() {
     }
 }
 
-/// Migration 7 is recovery infrastructure, so a populated old fixture cannot
-/// seed it before migration. Exercise its actual schema contract after
-/// upgrading the schema-6 corpus member: the shape is inspectable, only one
-/// active reinstall may own a Mod, and deleting that Mod retires the witness.
+/// Migrations 7 and 8 are recovery infrastructure, so a populated old fixture
+/// cannot seed them before migration. Exercise their actual schema contract
+/// after upgrading the schema-6 corpus member: the shape is inspectable, only
+/// one active reinstall may own a Mod, and deleting that Mod retires the
+/// witness.
 #[tokio::test]
-async fn migration_7_enforces_the_reinstall_witness_contract() {
+async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
     let (_, fixture) = corpus()
         .into_iter()
         .find(|(version, _)| *version == 6)
@@ -327,8 +328,11 @@ async fn migration_7_enforces_the_reinstall_witness_contract() {
             "old_identity",
             "staged_identity",
             "created_at",
+            "recovery_error",
+            "recovery_attempted_at",
+            "recovery_attempts",
         ],
-        "migration 7 must create every reinstall witness column in the expected order",
+        "the reinstall migrations must create every witness column in the expected order",
     );
 
     let foreign_keys = sqlx::query("PRAGMA foreign_key_list(reinstall_swaps)")

@@ -12,7 +12,7 @@ use super::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryDirectoryOwner {
     Mod,
-    ActiveReinstallStage,
+    ActiveReinstall,
 }
 
 /// A point-in-time view of every filesystem object GMM currently owns.
@@ -31,7 +31,7 @@ pub(super) enum LibraryDirectoryOwner {
 #[derive(Debug, Clone)]
 pub(super) struct LibraryOwnershipSnapshot {
     mods: HashSet<DirectoryIdentity>,
-    active_reinstall_stages: HashSet<String>,
+    active_reinstall_directories: HashSet<String>,
 }
 
 impl LibraryOwnershipSnapshot {
@@ -40,17 +40,21 @@ impl LibraryOwnershipSnapshot {
         E: Executor<'e, Database = Sqlite>,
     {
         let rows = sqlx::query(
-            "SELECT library_path, NULL AS staged_identity FROM mods
+            "SELECT library_path, NULL AS reinstall_identity FROM mods
              UNION ALL
-             SELECT staged_path AS library_path, staged_identity FROM reinstall_swaps",
+             SELECT staged_path AS library_path, staged_identity AS reinstall_identity
+             FROM reinstall_swaps
+             UNION ALL
+             SELECT quarantine_path AS library_path, old_identity AS reinstall_identity
+             FROM reinstall_swaps",
         )
         .fetch_all(executor)
         .await?;
         let mut mods = HashSet::new();
-        let mut active_reinstall_stages = HashSet::new();
+        let mut active_reinstall_directories = HashSet::new();
         for row in rows {
-            if let Some(staged_identity) = row.try_get::<Option<String>, _>("staged_identity")? {
-                active_reinstall_stages.insert(staged_identity);
+            if let Some(identity) = row.try_get::<Option<String>, _>("reinstall_identity")? {
+                active_reinstall_directories.insert(identity);
                 continue;
             }
 
@@ -67,16 +71,16 @@ impl LibraryOwnershipSnapshot {
 
         Ok(Self {
             mods,
-            active_reinstall_stages,
+            active_reinstall_directories,
         })
     }
 
     pub(super) fn owner_of(&self, identity: &DirectoryIdentity) -> Option<LibraryDirectoryOwner> {
         if self
-            .active_reinstall_stages
+            .active_reinstall_directories
             .contains(&identity.durable_key())
         {
-            return Some(LibraryDirectoryOwner::ActiveReinstallStage);
+            return Some(LibraryDirectoryOwner::ActiveReinstall);
         }
         self.mods
             .contains(identity)
