@@ -47,7 +47,11 @@ pub struct Variant {
 /// name (lexicographic, case-sensitive). An empty list means the Mod
 /// has no Variants — callers should treat it as a single-folder Mod.
 pub fn detect_variants(mod_root: &Path) -> Result<Vec<DetectedVariant>> {
-    if !mod_root.is_dir() {
+    let metadata = fs::metadata(mod_root).map_err(|source| Error::Io {
+        path: mod_root.to_path_buf(),
+        source,
+    })?;
+    if !metadata.is_dir() {
         return Ok(Vec::new());
     }
 

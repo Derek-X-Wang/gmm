@@ -60,6 +60,49 @@ fn detect_rejects_directories_without_inis() {
     assert!(detect_variants(root).expect("detect").is_empty());
 }
 
+#[test]
+fn detect_returns_empty_for_a_genuine_non_directory() {
+    let tmp = TempDir::new().expect("tmp");
+    let mod_root = tmp.path().join("regular-file");
+    fs::write(&mod_root, b"not a directory").expect("regular-file fixture");
+
+    assert!(
+        detect_variants(&mod_root)
+            .expect("a genuine non-directory is a single-folder Mod")
+            .is_empty(),
+        "a genuine non-directory must still produce no Variants",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn detect_propagates_a_mod_root_metadata_error() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = TempDir::new().expect("tmp");
+    let inaccessible_parent = tmp.path().join("inaccessible-parent");
+    let mod_root = inaccessible_parent.join("mod-root");
+    fs::create_dir_all(&mod_root).expect("Mod root fixture");
+    let original_permissions = fs::metadata(&inaccessible_parent)
+        .expect("parent metadata")
+        .permissions();
+    fs::set_permissions(&inaccessible_parent, fs::Permissions::from_mode(0o0))
+        .expect("make Mod root metadata inaccessible");
+
+    let result = detect_variants(&mod_root);
+
+    fs::set_permissions(&inaccessible_parent, original_permissions)
+        .expect("restore Mod root parent permissions");
+    assert!(
+        matches!(
+            result,
+            Err(Error::Io { ref path, ref source })
+                if path == &mod_root && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "a Mod root metadata error must propagate instead of becoming zero Variants, got {result:?}",
+    );
+}
+
 fn build_three_variant_zip(zip_path: &Path) {
     let f = File::create(zip_path).expect("create");
     let mut zw = ZipWriter::new(f);

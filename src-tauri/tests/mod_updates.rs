@@ -503,3 +503,105 @@ async fn failed_reinstall_preserves_installed_bytes_enabled_state_and_junction()
         "failed reinstall must not leave a staging directory",
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_quarantine_after_reinstall_rollback_does_not_relabel_success() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let library_root = tmp.path().join("library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_root, &db_url).await.expect("init");
+
+    let mut ingest_server = mockito::Server::new_async().await;
+    let id = 10_188_u64;
+    let imported = ingest(
+        &mut ingest_server,
+        &core,
+        id,
+        "Rollback Truth",
+        "1.0.0",
+        b"[TextureOverrideOld]\nhash = 0xORIGINAL\n",
+        &tmp.path().join("original-rollback.zip"),
+    )
+    .await;
+    let original_path = imported.library_path.join("merged.ini");
+    let original_bytes = std::fs::read(&original_path).expect("original Library bytes");
+
+    // Ordinary quarantine cleanup runs after rollback has committed. Make a
+    // separate game's quarantine impossible to open without interfering with
+    // the reinstall rollback itself.
+    let cleanup_root = core
+        .resolved_library_root_for(GameCode::Srmi)
+        .await
+        .expect("ordinary cleanup root");
+    std::fs::create_dir_all(&cleanup_root).expect("ordinary cleanup root exists");
+    let cleanup_token = ulid::Ulid::new();
+    let unreadable_quarantine = cleanup_root.join(format!(".gmm-delete-{cleanup_token}"));
+    let durable_intent = cleanup_root.join(format!(".gmm-delete-{cleanup_token}.intent"));
+    symlink(&unreadable_quarantine, &unreadable_quarantine)
+        .expect("create a quarantine whose followed metadata is unreadable");
+    std::fs::write(&durable_intent, b"durable ownership evidence")
+        .expect("write durable ownership intent");
+
+    let mut reinstall_server = mockito::Server::new_async().await;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/corrupt.zip");
+    let _api = reinstall_server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id},
+                "_sName": "Broken Update",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}",
+                "_sVersion": "2.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "corrupt.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = reinstall_server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = reinstall_server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_body(b"this is not a ZIP archive")
+        .create_async()
+        .await;
+    let endpoints = Endpoints {
+        api_base: reinstall_server.url(),
+    };
+
+    let result = core
+        .reinstall_gamebanana_mod_with_endpoints(&imported.id, &endpoints)
+        .await;
+
+    assert!(
+        matches!(&result, Err(error) if !matches!(error, gmm_lib::core::Error::ReinstallRollbackFailed { .. })),
+        "a completed rollback must report the original reinstall failure, got {result:?}",
+    );
+    assert_eq!(
+        std::fs::read(&original_path).expect("installed bytes after rollback"),
+        original_bytes,
+        "the successful rollback must preserve the installed bytes",
+    );
+    let verification_pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open DB for rollback verification");
+    let witness_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&verification_pool)
+        .await
+        .expect("count reinstall witnesses");
+    assert_eq!(
+        witness_count, 0,
+        "the successful rollback must durably delete its witness",
+    );
+    assert!(
+        durable_intent.is_file(),
+        "deferred ordinary cleanup must retain its durable ownership intent",
+    );
+}

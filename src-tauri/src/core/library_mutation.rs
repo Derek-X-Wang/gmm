@@ -1019,7 +1019,14 @@ impl Core {
         // The rollback moved the staged replacement into the ordinary shared
         // delete quarantine. Finish it now; startup repeats the same verified
         // purge if this process stops first.
-        self.finish_interrupted_library_deletes().await?;
+        if let Err(error) = self.finish_interrupted_library_deletes().await {
+            tracing::warn!(
+                target: "gmm::library",
+                mod_id = %witness.mod_id,
+                error = %error,
+                "reinstall rollback succeeded but ordinary quarantine cleanup was deferred"
+            );
+        }
         Ok(())
     }
 
