@@ -23,8 +23,8 @@ use crate::core::reconcile::ReconcileResult;
 use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
-    Core, DeletedLibraryDir, GameCode, ImportZipOptions, LibraryAuditReport, Mod, MoveReport,
-    ReinstallRecoveryOutcome, SessionInfo,
+    Core, DeletedLibraryDir, DuplicateResolution, GameCode, ImportZipOptions, LibraryAuditReport,
+    Mod, MoveReport, ReinstallRecoveryOutcome, SessionInfo,
 };
 use crate::runtime::launch::{self, LaunchOptions};
 use crate::runtime::SessionRuntime;
@@ -255,6 +255,24 @@ pub async fn audit_library(
     game: GameCode,
 ) -> Result<LibraryAuditReport, String> {
     core.audit_library(game).await.map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveDuplicateModsArgs {
+    pub keeper_id: String,
+    pub reviewed_mod_ids: Vec<String>,
+}
+
+/// Discard only the duplicate Mod records the user reviewed and rejected.
+#[tauri::command]
+pub async fn resolve_duplicate_mods(
+    core: State<'_, Core>,
+    args: ResolveDuplicateModsArgs,
+) -> Result<DuplicateResolution, String> {
+    core.resolve_duplicate_mods(&args.keeper_id, &args.reviewed_mod_ids)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Arguments for recovering an unreferenced Library directory.

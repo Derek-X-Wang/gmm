@@ -8,12 +8,14 @@ const auditLibrary = vi.fn();
 const revealUnreferencedLibraryDir = vi.fn();
 const recoverUnreferencedLibraryDir = vi.fn();
 const deleteUnreferencedLibraryDir = vi.fn();
+const resolveDuplicateMods = vi.fn();
 
 vi.mock("./api", () => ({
   auditLibrary: (...args: unknown[]) => auditLibrary(...args),
   revealUnreferencedLibraryDir: (...args: unknown[]) => revealUnreferencedLibraryDir(...args),
   recoverUnreferencedLibraryDir: (...args: unknown[]) => recoverUnreferencedLibraryDir(...args),
   deleteUnreferencedLibraryDir: (...args: unknown[]) => deleteUnreferencedLibraryDir(...args),
+  resolveDuplicateMods: (...args: unknown[]) => resolveDuplicateMods(...args),
 }));
 
 const { LibraryAuditWarning } = await import("./LibraryAuditWarning");
@@ -28,6 +30,60 @@ const AUDIT_REPORT = {
   ],
   totalBytes: 412 * 1024 * 1024,
 };
+const DUPLICATE_PATH = "C:\\GMM\\library\\gimi\\01SHARED";
+const DUPLICATE_REPORT = {
+  game: "gimi",
+  unreferenced: [],
+  totalBytes: 0,
+  duplicates: [
+    {
+      path: DUPLICATE_PATH,
+      mods: [
+        {
+          id: "01KEEPER",
+          game: "gimi",
+          name: "Manual Keeper",
+          source: "manual",
+          libraryPath: DUPLICATE_PATH,
+          junctionDirName: "Manual Keeper",
+          enabled: false,
+          createdAt: "2026-08-23T00:00:00Z",
+          gamebananaId: null,
+          sourceUrl: null,
+          author: null,
+          version: null,
+          upstreamVersion: null,
+          updateCheckEnabled: true,
+          screenshotUrl: null,
+          variants: [],
+          reinstallInProgress: false,
+        },
+        {
+          id: "01REJECTED",
+          game: "gimi",
+          name: "GameBanana Duplicate",
+          source: "gamebanana",
+          libraryPath: DUPLICATE_PATH,
+          junctionDirName: "GameBanana Duplicate",
+          enabled: true,
+          createdAt: "2026-08-24T00:00:00Z",
+          gamebananaId: 24680,
+          sourceUrl: "https://gamebanana.com/mods/24680",
+          author: "Duplicate Author",
+          version: "9.9.9",
+          upstreamVersion: "10.0.0",
+          updateCheckEnabled: false,
+          screenshotUrl: "https://images.example.test/duplicate.png",
+          variants: [
+            { id: "01AMBER", name: "Amber", subpath: "Amber", active: true },
+            { id: "01BLUE", name: "Blue", subpath: "Blue", active: false },
+          ],
+          reinstallInProgress: false,
+        },
+      ],
+    },
+  ],
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -39,6 +95,10 @@ beforeEach(() => {
     path: FIRST,
     sizeBytes: 400 * 1024 * 1024,
     reclamation: { status: "reclaimed" },
+  });
+  resolveDuplicateMods.mockResolvedValue({
+    keeperId: "01KEEPER",
+    removedModIds: ["01REJECTED"],
   });
 });
 
@@ -392,4 +452,108 @@ it("announces ownership loss without presenting the reserved path as a cleanup t
   );
   expect(notice).not.toHaveFocus();
   expect(document.activeElement).not.toBe(document.body);
+});
+
+it("shows every duplicate record field before asking the user to choose", async () => {
+  auditLibrary.mockResolvedValue(DUPLICATE_REPORT);
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  const warning = await screen.findByRole("region", {
+    name: /unreferenced library folders and duplicate mod records/i,
+  });
+  expect(warning).toHaveTextContent("1 Library directory has duplicate Mod records");
+  expect(warning).toHaveTextContent(DUPLICATE_PATH);
+  expect(warning).toHaveTextContent("Manual Keeper");
+  expect(warning).toHaveTextContent("GameBanana Duplicate");
+  expect(warning).toHaveTextContent("Enabled");
+  expect(warning).toHaveTextContent("gamebanana");
+  expect(warning).toHaveTextContent("submission 24680");
+  expect(warning).toHaveTextContent("Duplicate Author / 9.9.9");
+  expect(warning).toHaveTextContent(/Last seen upstream\s*10.0.0/);
+  expect(warning).toHaveTextContent(/Update checks\s*Disabled/);
+  expect(warning).toHaveTextContent("Amber (Amber) — selected");
+  expect(warning).toHaveTextContent("Blue (Blue)");
+  expect(warning).toHaveTextContent("GameBanana Duplicate");
+
+  const radios = within(warning).getAllByRole("radio");
+  expect(radios).toHaveLength(2);
+  expect(radios.every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+  expect(within(warning).getByRole("button", { name: /resolve/i })).toBeDisabled();
+  expect(resolveDuplicateMods).not.toHaveBeenCalled();
+});
+
+it("requires an unpreselected keeper and an explicit safe-focused confirmation", async () => {
+  const user = userEvent.setup();
+  auditLibrary.mockResolvedValue(DUPLICATE_REPORT);
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  const keeper = await screen.findByRole("radio", { name: /Manual Keeper/i });
+  await user.click(keeper);
+  const resolve = screen.getByRole("button", { name: /^resolve/i });
+  expect(resolve).toBeEnabled();
+  await user.click(resolve);
+
+  const confirmation = screen.getByRole("group", {
+    name: /confirm duplicate mod resolution/i,
+  });
+  expect(confirmation).toHaveAccessibleDescription(
+    /Keep Manual Keeper.*discard the other 1 GMM record.*shared Library directory.*will remain.*cannot be undone/i,
+  );
+  expect(within(confirmation).getByRole("button", { name: /cancel/i })).toHaveFocus();
+  expect(resolveDuplicateMods).not.toHaveBeenCalled();
+
+  await user.click(within(confirmation).getByRole("button", { name: /keep this record/i }));
+  await waitFor(() =>
+    expect(resolveDuplicateMods).toHaveBeenCalledWith("01KEEPER", [
+      "01KEEPER",
+      "01REJECTED",
+    ]),
+  );
+});
+
+it("announces resolved duplicates from the already-mounted live region and retains focus", async () => {
+  const user = userEvent.setup();
+  auditLibrary
+    .mockResolvedValueOnce(DUPLICATE_REPORT)
+    .mockResolvedValue({ game: "gimi", unreferenced: [], duplicates: [], totalBytes: 0 });
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  const status = await screen.findByRole("status");
+  expect(status).toBeEmptyDOMElement();
+  await user.click(await screen.findByRole("radio", { name: /Manual Keeper/i }));
+  await user.click(screen.getByRole("button", { name: /^resolve/i }));
+  await user.click(screen.getByRole("button", { name: /keep this record/i }));
+
+  await waitFor(() => expect(status).toHaveTextContent(/Kept Manual Keeper.*only GMM record/i));
+  expect(status).toHaveTextContent(/shared Library bytes were left in place/i);
+  expect(screen.getByRole("status")).toBe(status);
+  await waitFor(() =>
+    expect(
+      screen.getByRole("region", {
+        name: /unreferenced library folders and duplicate mod records/i,
+      }),
+    ).toHaveFocus(),
+  );
+  expect(status).not.toHaveFocus();
+});
+
+it("blocks duplicate resolution while any reviewed record has a reinstall witness", async () => {
+  auditLibrary.mockResolvedValue({
+    ...DUPLICATE_REPORT,
+    duplicates: [
+      {
+        ...DUPLICATE_REPORT.duplicates[0],
+        mods: DUPLICATE_REPORT.duplicates[0].mods.map((mod, index) => ({
+          ...mod,
+          reinstallInProgress: index === 1,
+        })),
+      },
+    ],
+  });
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  await screen.findByText(/At least one record has an unfinished update/i);
+  expect(screen.getByText(/use Retry recovery there/i)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /^resolve/i })).toBeDisabled();
+  expect(resolveDuplicateMods).not.toHaveBeenCalled();
 });

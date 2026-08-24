@@ -413,6 +413,166 @@ async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
     pool.close().await;
 }
 
+/// Duplicate Mod rows are user state, not input for a migration-time survivor
+/// policy. Stage the last schema that predates issue #185 with all four states
+/// the reverted attempt would have destroyed, then run every current migration.
+#[tokio::test]
+async fn migrations_preserve_duplicate_rows_metadata_variants_and_reinstall_witnesses() {
+    let fixture = fixture_dir().join("009_reinstall_recovery_junction_state.db");
+    assert!(
+        fixture.is_file(),
+        "schema-9 fixture predating duplicate preservation"
+    );
+    let tmp = TempDir::new().expect("tmp");
+    let db = stage(&fixture, &tmp);
+    let pool = raw_pool(&db).await;
+    let keeper_id = SEED_MODS[0].id;
+    let duplicate_id = "01JDUPLICATEMIGRATION000001";
+    let duplicate_variant_id = "01JDUPLICATEVARIANT0000001";
+    let shared_path: String = sqlx::query_scalar("SELECT library_path FROM mods WHERE id = ?")
+        .bind(keeper_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read shared path");
+
+    sqlx::query(
+        "INSERT INTO mods (
+            id, game_code, name, source, library_path, junction_dir_name,
+            enabled, created_at, gamebanana_id, source_url, author, version,
+            upstream_version, update_check_enabled, screenshot_url
+         ) VALUES (?, 'gimi', 'Duplicate With Metadata', 'gamebanana', ?,
+                   'Duplicate With Metadata', 1, '2026-08-24T00:00:00Z',
+                   98765, 'https://gamebanana.com/mods/98765', 'Duplicate Author', '4.2.0',
+                   '4.3.0', 0, 'https://images.example.test/duplicate.png')",
+    )
+    .bind(duplicate_id)
+    .bind(&shared_path)
+    .execute(&pool)
+    .await
+    .expect("seed duplicate Mod row");
+    sqlx::query("INSERT INTO mod_variants (id, mod_id, name, subpath) VALUES (?, ?, ?, ?)")
+        .bind(duplicate_variant_id)
+        .bind(duplicate_id)
+        .bind("Selected Duplicate Variant")
+        .bind("selected")
+        .execute(&pool)
+        .await
+        .expect("seed duplicate Variant");
+    sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
+        .bind(duplicate_variant_id)
+        .bind(duplicate_id)
+        .execute(&pool)
+        .await
+        .expect("seed active Variant selection");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES ('01JDUPLICATEWITNESS000001', ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(duplicate_id)
+    .bind(&shared_path)
+    .bind(r"D:\gmm-library\gimi\.gmm-reinstall-01JDUPLICATEWITNESS000001")
+    .bind(r"D:\gmm-library\gimi\.gmm-delete-01JDUPLICATEWITNESS000001")
+    .bind("0000000000000001:0000000000000002")
+    .bind("0000000000000001:0000000000000003")
+    .bind("2026-08-24T00:00:01Z")
+    .execute(&pool)
+    .await
+    .expect("seed duplicate reinstall witness");
+
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("run current migrations over duplicate state");
+
+    let rows = sqlx::query(
+        "SELECT id, name, source, enabled, gamebanana_id, author, version,
+                upstream_version, update_check_enabled, screenshot_url, active_variant_id
+         FROM mods WHERE library_path = ? ORDER BY id",
+    )
+    .bind(&shared_path)
+    .fetch_all(&pool)
+    .await
+    .expect("read preserved duplicate rows");
+    assert_eq!(
+        rows.len(),
+        2,
+        "no migration may choose a duplicate survivor"
+    );
+    let duplicate = rows
+        .iter()
+        .find(|row| row.try_get::<String, _>("id").expect("id") == duplicate_id)
+        .expect("duplicate row survives");
+    assert_eq!(
+        duplicate.try_get::<String, _>("name").expect("name"),
+        "Duplicate With Metadata"
+    );
+    assert_eq!(
+        duplicate.try_get::<String, _>("source").expect("source"),
+        "gamebanana"
+    );
+    assert_eq!(duplicate.try_get::<i64, _>("enabled").expect("enabled"), 1);
+    assert_eq!(
+        duplicate
+            .try_get::<i64, _>("gamebanana_id")
+            .expect("GameBanana ID"),
+        98765
+    );
+    assert_eq!(
+        duplicate.try_get::<String, _>("author").expect("author"),
+        "Duplicate Author"
+    );
+    assert_eq!(
+        duplicate.try_get::<String, _>("version").expect("version"),
+        "4.2.0"
+    );
+    assert_eq!(
+        duplicate
+            .try_get::<String, _>("upstream_version")
+            .expect("upstream version"),
+        "4.3.0"
+    );
+    assert_eq!(
+        duplicate
+            .try_get::<i64, _>("update_check_enabled")
+            .expect("update check preference"),
+        0
+    );
+    assert_eq!(
+        duplicate
+            .try_get::<String, _>("screenshot_url")
+            .expect("screenshot URL"),
+        "https://images.example.test/duplicate.png"
+    );
+    assert_eq!(
+        duplicate
+            .try_get::<String, _>("active_variant_id")
+            .expect("active Variant"),
+        duplicate_variant_id,
+    );
+    let variants: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mod_variants WHERE mod_id = ?")
+        .bind(duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count preserved Variants");
+    let witnesses: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps WHERE mod_id = ?")
+            .bind(duplicate_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count preserved witness");
+    assert_eq!(
+        variants, 1,
+        "the duplicate's Variant set survives migration"
+    );
+    assert_eq!(
+        witnesses, 1,
+        "the duplicate's reinstall witness survives migration"
+    );
+    pool.close().await;
+}
+
 /// Startup runs the migrator every time, not just on upgrade. Opening
 /// an already-current database must change nothing.
 #[tokio::test]

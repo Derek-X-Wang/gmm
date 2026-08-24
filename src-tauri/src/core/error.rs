@@ -250,6 +250,37 @@ pub enum Error {
     NotAnUnreferencedLibraryDir { path: PathBuf, reason: String },
 
     #[error(
+        "GMM could not resolve these duplicate Mod records because the report is no longer current: \
+         {reason}. Refresh the Library audit and review every record again."
+    )]
+    DuplicateModResolutionChanged { reason: String },
+
+    #[error(
+        "GMM cannot discard duplicate Mod {mod_id} while it has an unfinished update. \
+         Let that update settle first; if the Mod shows a recovery warning, use Retry recovery, \
+         then review the duplicate records again. No Mod record, Variant, Junction, or Library byte was changed."
+    )]
+    DuplicateModResolutionBlockedByReinstall { mod_id: String },
+
+    #[error(
+        "GMM cannot discard enabled duplicate Mod {mod_id} because its {game} install path is not set, \
+         so GMM cannot locate its deployment Junction. Set the game install path, then review the duplicate records again."
+    )]
+    DuplicateModInstallPathMissing { mod_id: String, game: String },
+
+    #[error(
+        "GMM cannot discard duplicate Mod {mod_id} because its deployment path {path:?} is not a \
+         Junction into that Mod's Library directory. GMM left every duplicate record intact."
+    )]
+    DuplicateModJunctionConflict { mod_id: String, path: PathBuf },
+
+    #[error(
+        "GMM tried to withdraw duplicate Mod {mod_id}'s deployment Junction at {path:?}, but the \
+         path is still present. GMM left every duplicate record intact."
+    )]
+    DuplicateModJunctionStillPresent { mod_id: String, path: PathBuf },
+
+    #[error(
         "{mutation} stopped because the Library root changed from {previous:?} to {current:?} \
          while files were being prepared. No Mod row was committed."
     )]

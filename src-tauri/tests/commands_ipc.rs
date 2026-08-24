@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use gmm_lib::commands::{
     list_supported_games, AdoptArgs, GameBananaImportArgs, ImportZipArgs, LibraryPaths, ProxyArgs,
-    RecoverLibraryDirArgs, NO_INSTALL_PATH_FOR_ENABLE_MSG,
+    RecoverLibraryDirArgs, ResolveDuplicateModsArgs, NO_INSTALL_PATH_FOR_ENABLE_MSG,
 };
 use gmm_lib::core::conflicts::ConflictReport;
 use gmm_lib::core::games::GAME_PROFILES;
@@ -245,6 +245,7 @@ fn library_audit_response_uses_camel_case() {
             path: "/library/gimi/01ORPHAN".into(),
             size_bytes: Some(42),
         }],
+        duplicates: Vec::new(),
         total_bytes: 42,
     };
 
@@ -263,6 +264,16 @@ fn library_audit_response_uses_camel_case() {
         Some("01ORPHAN")
     );
     assert_eq!(directory.get("sizeBytes").and_then(Value::as_u64), Some(42));
+}
+
+#[test]
+fn resolve_duplicate_mods_args_deserialise_from_camel_case_json() {
+    let args: ResolveDuplicateModsArgs = from_json(serde_json::json!({
+        "keeperId": "01KEEPER",
+        "reviewedModIds": ["01KEEPER", "01REJECTED"],
+    }));
+    assert_eq!(args.keeper_id, "01KEEPER");
+    assert_eq!(args.reviewed_mod_ids, ["01KEEPER", "01REJECTED"]);
 }
 
 #[test]

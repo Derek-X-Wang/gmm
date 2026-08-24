@@ -2773,6 +2773,14 @@ fn current_known_library_content_mutations_declare_their_fence_policy() {
             ],
         ),
         (
+            "resolve_duplicate_mods",
+            &[
+                "begin_library_mutation",
+                "LibraryMutation::ResolveDuplicateMods",
+                "withdraw_reinstall_junction",
+            ],
+        ),
+        (
             "reinstall_gamebanana_mod_with_endpoints",
             &[
                 "begin_library_mutation",

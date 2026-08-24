@@ -15,6 +15,7 @@
 //! Active-Variant retargeting uses the same fence so recovery quarantine and
 //! Variant deployment cannot pass one another after either operation's guard.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,11 +24,15 @@ use std::str::FromStr;
 use sqlx::{Executor, Row, Sqlite};
 use ulid::Ulid;
 
+use super::library_audit::DuplicateResolution;
 use super::library_identity::IdentifiedDirectory;
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::mods::{ReinstallRecovery, ReinstallRecoveryOutcome};
 use super::settings::{get as get_setting, keys};
-use super::{crash_points, junction, link_exists, volume, Core, Error, GameCode, Result};
+use super::{
+    crash_points, junction, link_exists, path_within, resolve_link, volume, Core, Error, GameCode,
+    Result,
+};
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 
@@ -44,6 +49,7 @@ pub(super) enum LibraryMutation {
     ReinstallGamebananaMod,
     SetEnabled,
     SetActiveVariant,
+    ResolveDuplicateMods,
 }
 
 impl LibraryMutation {
@@ -60,6 +66,7 @@ impl LibraryMutation {
             Self::ReinstallGamebananaMod => "reinstall_gamebanana_mod_with_endpoints",
             Self::SetEnabled => "set_enabled",
             Self::SetActiveVariant => "set_active_variant",
+            Self::ResolveDuplicateMods => "resolve_duplicate_mods",
         }
     }
 }
@@ -197,6 +204,174 @@ impl Core {
                 .await?;
         }
         Ok(LibraryMutationFence { transaction })
+    }
+
+    /// Keep the one Mod record the user selected and discard only the other
+    /// records they reviewed in the duplicate audit.
+    ///
+    /// SQLite cannot lock filesystem identity, so the BEGIN IMMEDIATE fence
+    /// covers a fresh identity snapshot, Junction preflight/removal, and the
+    /// row deletion. The caller supplies the exact reviewed IDs; any drift
+    /// refuses the action instead of silently widening the user's choice.
+    pub async fn resolve_duplicate_mods(
+        &self,
+        keeper_id: &str,
+        reviewed_mod_ids: &[String],
+    ) -> Result<DuplicateResolution> {
+        let reviewed: HashSet<_> = reviewed_mod_ids.iter().cloned().collect();
+        if reviewed.len() < 2 || reviewed.len() != reviewed_mod_ids.len() {
+            return Err(Error::DuplicateModResolutionChanged {
+                reason: "the reviewed record list is incomplete or contains the same record twice"
+                    .to_string(),
+            });
+        }
+        if !reviewed.contains(keeper_id) {
+            return Err(Error::DuplicateModResolutionChanged {
+                reason: "the selected keeper is not one of the reviewed records".to_string(),
+            });
+        }
+
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::ResolveDuplicateMods)
+            .await?;
+        let ownership = LibraryOwnershipSnapshot::load(&mut *fence.transaction).await?;
+        let keeper_path: Option<String> =
+            sqlx::query_scalar("SELECT library_path FROM mods WHERE id = ?")
+                .bind(keeper_id)
+                .fetch_optional(&mut *fence.transaction)
+                .await?;
+        let keeper_path = keeper_path.ok_or_else(|| Error::DuplicateModResolutionChanged {
+            reason: format!("the selected keeper {keeper_id} no longer exists"),
+        })?;
+        let keeper_path = PathBuf::from(keeper_path);
+        let keeper_directory = IdentifiedDirectory::open(&keeper_path).map_err(|source| {
+            Error::DuplicateModResolutionChanged {
+                reason: format!(
+                    "the selected keeper's Library directory could not be identified: {source}"
+                ),
+            }
+        })?;
+        let current: HashSet<_> = ownership
+            .mod_ids_for(keeper_directory.identity())
+            .iter()
+            .cloned()
+            .collect();
+        if current != reviewed {
+            return Err(Error::DuplicateModResolutionChanged {
+                reason: "the set of Mod records naming this directory changed".to_string(),
+            });
+        }
+
+        let witness_rows = sqlx::query("SELECT mod_id FROM reinstall_swaps")
+            .fetch_all(&mut *fence.transaction)
+            .await?;
+        for row in witness_rows {
+            let mod_id: String = row.try_get("mod_id")?;
+            if reviewed.contains(&mod_id) {
+                return Err(Error::DuplicateModResolutionBlockedByReinstall { mod_id });
+            }
+        }
+
+        let rows = sqlx::query(
+            "SELECT m.id, m.game_code, m.library_path, m.junction_dir_name,
+                    m.enabled, g.install_path
+             FROM mods m JOIN games g ON g.code = m.game_code",
+        )
+        .fetch_all(&mut *fence.transaction)
+        .await?;
+        let mut seen = HashSet::new();
+        let mut junctions = Vec::new();
+        for row in rows {
+            let mod_id: String = row.try_get("id")?;
+            if !reviewed.contains(&mod_id) || mod_id == keeper_id {
+                continue;
+            }
+            seen.insert(mod_id.clone());
+            let game_code: String = row.try_get("game_code")?;
+            let enabled = row.try_get::<i64, _>("enabled")? != 0;
+            let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+            if enabled {
+                let target = self
+                    .junction_target_for(&mod_id, &library_path, &mut *fence.transaction)
+                    .await?;
+                if !target.is_dir() {
+                    return Err(Error::DuplicateModResolutionChanged {
+                        reason: format!(
+                            "duplicate Mod {mod_id}'s selected Library target is no longer a directory"
+                        ),
+                    });
+                }
+            }
+
+            let install_path: Option<String> = row.try_get("install_path")?;
+            let Some(install_path) = install_path else {
+                if enabled {
+                    return Err(Error::DuplicateModInstallPathMissing {
+                        mod_id,
+                        game: game_code,
+                    });
+                }
+                continue;
+            };
+            let link = PathBuf::from(install_path)
+                .join("Mods")
+                .join(row.try_get::<String, _>("junction_dir_name")?);
+            if !link_exists(&link) {
+                continue;
+            }
+            let actual =
+                resolve_link(&link).ok_or_else(|| Error::DuplicateModJunctionConflict {
+                    mod_id: mod_id.clone(),
+                    path: link.clone(),
+                })?;
+            if !path_within(&actual, &library_path) {
+                return Err(Error::DuplicateModJunctionConflict { mod_id, path: link });
+            }
+            junctions.push((mod_id, link));
+        }
+        if seen.len() != reviewed.len() - 1 {
+            return Err(Error::DuplicateModResolutionChanged {
+                reason: "one or more reviewed duplicate records no longer exist".to_string(),
+            });
+        }
+
+        // Every row, Variant target, witness, and Junction is validated before
+        // the first filesystem act. If a later step fails, the rows remain and
+        // ordinary reconcile can recreate any already-withdrawn enabled link.
+        for (mod_id, link) in &junctions {
+            withdraw_reinstall_junction(link)?;
+            if link_exists(link) {
+                return Err(Error::DuplicateModJunctionStillPresent {
+                    mod_id: mod_id.clone(),
+                    path: link.clone(),
+                });
+            }
+        }
+
+        let mut removed_mod_ids: Vec<_> = reviewed
+            .into_iter()
+            .filter(|mod_id| mod_id != keeper_id)
+            .collect();
+        removed_mod_ids.sort();
+        for mod_id in &removed_mod_ids {
+            // Break the mods.active_variant_id -> mod_variants cycle before
+            // the chosen row's ON DELETE CASCADE removes its Variant set.
+            sqlx::query("UPDATE mods SET active_variant_id = NULL WHERE id = ?")
+                .bind(mod_id)
+                .execute(&mut *fence.transaction)
+                .await?;
+            sqlx::query("DELETE FROM mods WHERE id = ?")
+                .bind(mod_id)
+                .execute(&mut *fence.transaction)
+                .await?;
+        }
+        fence.commit().await?;
+        drop(keeper_directory);
+
+        Ok(DuplicateResolution {
+            keeper_id: keeper_id.to_string(),
+            removed_mod_ids,
+        })
     }
 
     /// Change both halves of a Mod's enabled deployment state under the one

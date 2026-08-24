@@ -43,7 +43,10 @@ use ulid::Ulid;
 
 pub use error::{Error, Result};
 pub use games::GameCode;
-pub use library_audit::{LibraryAuditReport, UnreferencedLibraryDir};
+pub use library_audit::{
+    DuplicateModGroup, DuplicateModRecord, DuplicateModVariant, DuplicateResolution,
+    LibraryAuditReport, UnreferencedLibraryDir,
+};
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
 pub use session::SessionInfo;

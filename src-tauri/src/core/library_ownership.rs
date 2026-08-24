@@ -1,6 +1,6 @@
 //! The single database-to-filesystem ownership rule for Library directories.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 
@@ -30,7 +30,7 @@ pub(super) enum LibraryDirectoryOwner {
 /// closed together instead of deleting bytes while ownership is uncertain.
 #[derive(Debug, Clone)]
 pub(super) struct LibraryOwnershipSnapshot {
-    mods: HashSet<DirectoryIdentity>,
+    mods: HashMap<DirectoryIdentity, Vec<String>>,
     active_reinstall_directories: HashSet<String>,
 }
 
@@ -38,7 +38,7 @@ impl LibraryOwnershipSnapshot {
     #[cfg(test)]
     pub(super) fn empty_for_test() -> Self {
         Self {
-            mods: HashSet::new(),
+            mods: HashMap::new(),
             active_reinstall_directories: HashSet::new(),
         }
     }
@@ -48,17 +48,19 @@ impl LibraryOwnershipSnapshot {
         E: Executor<'e, Database = Sqlite>,
     {
         let rows = sqlx::query(
-            "SELECT library_path, NULL AS reinstall_identity FROM mods
+            "SELECT id AS mod_id, library_path, NULL AS reinstall_identity FROM mods
              UNION ALL
-             SELECT staged_path AS library_path, staged_identity AS reinstall_identity
+             SELECT NULL AS mod_id, staged_path AS library_path,
+                    staged_identity AS reinstall_identity
              FROM reinstall_swaps
              UNION ALL
-             SELECT quarantine_path AS library_path, old_identity AS reinstall_identity
+             SELECT NULL AS mod_id, quarantine_path AS library_path,
+                    old_identity AS reinstall_identity
              FROM reinstall_swaps",
         )
         .fetch_all(executor)
         .await?;
-        let mut mods = HashSet::new();
+        let mut mods: HashMap<DirectoryIdentity, Vec<String>> = HashMap::new();
         let mut active_reinstall_directories = HashSet::new();
         for row in rows {
             if let Some(identity) = row.try_get::<Option<String>, _>("reinstall_identity")? {
@@ -69,7 +71,10 @@ impl LibraryOwnershipSnapshot {
             let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
             match IdentifiedDirectory::open(&path) {
                 Ok(directory) => {
-                    mods.insert(directory.identity().clone());
+                    let mod_id: String = row.try_get("mod_id")?;
+                    mods.entry(directory.identity().clone())
+                        .or_default()
+                        .push(mod_id);
                 }
                 // A missing spelling provides no filesystem identity to own.
                 Err(source) if source.kind() == io::ErrorKind::NotFound => {}
@@ -91,7 +96,36 @@ impl LibraryOwnershipSnapshot {
             return Some(LibraryDirectoryOwner::ActiveReinstall);
         }
         self.mods
-            .contains(identity)
+            .contains_key(identity)
             .then_some(LibraryDirectoryOwner::Mod)
+    }
+
+    /// Mod rows that currently resolve to `identity`.
+    ///
+    /// This is also the one uniqueness rule. There is deliberately no SQLite
+    /// UNIQUE index on `mods.library_path`: path strings are not filesystem
+    /// identity, and SQLite cannot express Windows volume serial plus file
+    /// index. Audit and explicit duplicate resolution therefore use this same
+    /// opened-directory evidence instead of presenting a string approximation
+    /// as the invariant.
+    pub(super) fn mod_ids_for(&self, identity: &DirectoryIdentity) -> &[String] {
+        self.mods.get(identity).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub(super) fn duplicate_mod_ids(&self) -> HashSet<String> {
+        self.mods
+            .values()
+            .filter(|ids| ids.len() > 1)
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn duplicate_mod_groups(&self) -> Vec<Vec<String>> {
+        self.mods
+            .values()
+            .filter(|ids| ids.len() > 1)
+            .cloned()
+            .collect()
     }
 }

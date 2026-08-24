@@ -6,7 +6,10 @@ import {
   deleteUnreferencedLibraryDir,
   recoverUnreferencedLibraryDir,
   revealUnreferencedLibraryDir,
+  resolveDuplicateMods,
   type DeletedLibraryDir,
+  type DuplicateModGroup,
+  type DuplicateModRecord,
   type GameCode,
   type UnreferencedLibraryDir,
 } from "./api";
@@ -27,17 +30,19 @@ function formatBytes(bytes: number): string {
 /** Which folder, if any, has an open recover form or delete confirmation. */
 type OpenAction = {
   path: string;
-  kind: "recover" | "delete";
+  kind: "recover" | "delete" | "resolve-duplicates";
   trigger: HTMLButtonElement;
 } | null;
 
 type ActionFeedback =
   | { kind: "recovered"; directoryName: string; name: string }
-  | { kind: "deleted"; deleted: DeletedLibraryDir };
+  | { kind: "deleted"; deleted: DeletedLibraryDir }
+  | { kind: "duplicatesResolved"; keeperName: string; removedCount: number };
 
 /**
  * The Settings report for Library directories with no Mod row, and the
- * three things a user can do about one (#72).
+ * three things a user can do about one (#72), plus multiple Mod rows that
+ * resolve to the same directory (#185).
  *
  * Every action is per folder and explicitly chosen. There is deliberately
  * no "delete all": a bulk button is a bulk confirmation, and this is the
@@ -45,15 +50,22 @@ type ActionFeedback =
  * the Library untouched by everything else). The real safety here is that
  * Inspect and Recover sit beside Delete, so a user with something valuable
  * in a folder never has to reach for the destructive option.
+ *
+ * Duplicate rows are similarly preserve-first: every record is shown, no
+ * keeper is preselected, and the confirmation removes database state only
+ * after the user has reviewed and selected the record to retain. Shared
+ * Library bytes are never removed by duplicate resolution.
  */
 export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState<OpenAction>(null);
   const [feedback, setFeedback] = useState<ActionFeedback | null>(null);
+  const [keepers, setKeepers] = useState<Record<string, string>>({});
   const reportRef = useRef<HTMLElement>(null);
   useEffect(() => {
     setOpen(null);
     setFeedback(null);
+    setKeepers({});
   }, [game]);
 
   const audit = useQuery({
@@ -95,10 +107,24 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
       publishFeedback({ kind: "deleted", deleted });
     },
   });
+  const resolveDuplicates = useMutation({
+    mutationFn: (args: {
+      keeperId: string;
+      keeperName: string;
+      reviewedModIds: string[];
+    }) => resolveDuplicateMods(args.keeperId, args.reviewedModIds),
+    onSuccess: (resolution, args) => {
+      publishFeedback({
+        kind: "duplicatesResolved",
+        keeperName: args.keeperName,
+        removedCount: resolution.removedModIds.length,
+      });
+    },
+  });
 
   const beginAction = (
     path: string,
-    kind: "recover" | "delete",
+    kind: "recover" | "delete" | "resolve-duplicates",
     trigger: HTMLButtonElement,
   ) => {
     setFeedback(null);
@@ -113,15 +139,17 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const report = audit.data;
   if (!report) return null;
 
-  const failure = reveal.error ?? recover.error ?? remove.error;
-  const busy = reveal.isPending || recover.isPending || remove.isPending;
+  const failure = reveal.error ?? recover.error ?? remove.error ?? resolveDuplicates.error;
+  const busy =
+    reveal.isPending || recover.isPending || remove.isPending || resolveDuplicates.isPending;
   const count = report.unreferenced.length;
-  if (count === 0) {
+  const duplicates = report.duplicates ?? [];
+  if (count === 0 && duplicates.length === 0) {
     return feedback ? (
       <section
         ref={reportRef}
         className="library-audit-warning"
-        aria-label="Unreferenced Library folders"
+        aria-label="Unreferenced Library folders and duplicate Mod records"
         tabIndex={-1}
       >
         <ActionNotice feedback={feedback} />
@@ -137,7 +165,7 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
     <section
       ref={reportRef}
       className="library-audit-warning"
-      aria-label="Unreferenced Library folders"
+      aria-label="Unreferenced Library folders and duplicate Mod records"
       tabIndex={-1}
     >
       <ActionNotice feedback={feedback} />
@@ -146,73 +174,127 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
           {String(failure)}
         </p>
       ) : null}
-      <strong>
-        {count} unreferenced Library {count === 1 ? "folder" : "folders"} using{" "}
-        {formatBytes(report.totalBytes)}
-      </strong>
-      <p className="muted small">
-        These are most likely imports GMM was interrupted partway through. Look inside one
-        before you decide: recovering adds it to your Library as a Mod without moving or
-        copying anything, and deleting is permanent.
-      </p>
-      <ul>
-        {report.unreferenced.map((directory) => (
-          <li key={directory.path}>
-            <code>{directory.path}</code>
-            {directory.sizeBytes === null ? null : (
-              <span className="muted small"> · {formatBytes(directory.sizeBytes)}</span>
-            )}
-            <div className="row">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => reveal.mutate(directory.path)}
-              >
-                Inspect
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={(event) =>
-                  beginAction(directory.path, "recover", event.currentTarget)
-                }
-              >
-                Recover…
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={(event) =>
-                  beginAction(directory.path, "delete", event.currentTarget)
-                }
-              >
-                Delete…
-              </button>
-            </div>
-            {open?.path === directory.path && open.kind === "recover" ? (
-              <RecoverForm
-                pending={recover.isPending}
-                onCancel={cancelAction}
-                onRecover={(name) =>
-                  recover.mutate({
-                    path: directory.path,
-                    directoryName: directory.directoryName,
-                    name,
-                  })
-                }
-              />
-            ) : null}
-            {open?.path === directory.path && open.kind === "delete" ? (
-              <DeleteConfirmation
-                directory={directory}
-                pending={remove.isPending}
-                onCancel={cancelAction}
-                onDelete={() => remove.mutate(directory.path)}
-              />
-            ) : null}
-          </li>
-        ))}
-      </ul>
+      {count > 0 ? (
+        <>
+          <strong>
+            {count} unreferenced Library {count === 1 ? "folder" : "folders"} using{" "}
+            {formatBytes(report.totalBytes)}
+          </strong>
+          <p className="muted small">
+            These are most likely imports GMM was interrupted partway through. Look inside one
+            before you decide: recovering adds it to your Library as a Mod without moving or
+            copying anything, and deleting is permanent.
+          </p>
+          <ul>
+            {report.unreferenced.map((directory) => (
+              <li key={directory.path}>
+                <code>{directory.path}</code>
+                {directory.sizeBytes === null ? null : (
+                  <span className="muted small"> · {formatBytes(directory.sizeBytes)}</span>
+                )}
+                <div className="row">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => reveal.mutate(directory.path)}
+                  >
+                    Inspect
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={(event) =>
+                      beginAction(directory.path, "recover", event.currentTarget)
+                    }
+                  >
+                    Recover…
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={(event) =>
+                      beginAction(directory.path, "delete", event.currentTarget)
+                    }
+                  >
+                    Delete…
+                  </button>
+                </div>
+                {open?.path === directory.path && open.kind === "recover" ? (
+                  <RecoverForm
+                    pending={recover.isPending}
+                    onCancel={cancelAction}
+                    onRecover={(name) =>
+                      recover.mutate({
+                        path: directory.path,
+                        directoryName: directory.directoryName,
+                        name,
+                      })
+                    }
+                  />
+                ) : null}
+                {open?.path === directory.path && open.kind === "delete" ? (
+                  <DeleteConfirmation
+                    directory={directory}
+                    pending={remove.isPending}
+                    onCancel={cancelAction}
+                    onDelete={() => remove.mutate(directory.path)}
+                  />
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {duplicates.length > 0 ? (
+        <div className="duplicate-mod-report">
+          <strong>
+            {duplicates.length} Library {duplicates.length === 1 ? "directory has" : "directories have"}{" "}
+            duplicate Mod records
+          </strong>
+          <p className="muted small">
+            GMM found multiple records for the same on-disk directory. Review every field, then
+            choose the one record that actually represents those bytes. GMM never chooses for you.
+          </p>
+          <ul>
+            {duplicates.map((group) => {
+              const keeperId = keepers[group.path];
+              const keeper = group.mods.find((mod) => mod.id === keeperId);
+              const blocked = group.mods.some((mod) => mod.reinstallInProgress);
+              return (
+                <li key={group.path}>
+                  <DuplicateGroup
+                    group={group}
+                    keeperId={keeperId}
+                    blocked={blocked}
+                    busy={busy}
+                    onKeeperChange={(id) =>
+                      setKeepers((current) => ({ ...current, [group.path]: id }))
+                    }
+                    onBegin={(trigger) =>
+                      beginAction(group.path, "resolve-duplicates", trigger)
+                    }
+                  />
+                  {open?.path === group.path && open.kind === "resolve-duplicates" && keeper ? (
+                    <DuplicateConfirmation
+                      keeper={keeper}
+                      rejectedCount={group.mods.length - 1}
+                      pending={resolveDuplicates.isPending}
+                      onCancel={cancelAction}
+                      onResolve={() =>
+                        resolveDuplicates.mutate({
+                          keeperId: keeper.id,
+                          keeperName: keeper.name,
+                          reviewedModIds: group.mods.map((mod) => mod.id),
+                        })
+                      }
+                    />
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -259,6 +341,15 @@ function ActionNotice({ feedback }: { feedback: ActionFeedback | null }) {
         </>
       );
     }
+  } else if (feedback?.kind === "duplicatesResolved") {
+    status = (
+      <>
+        Kept {feedback.keeperName} as the only GMM record for this Library directory and
+        removed {feedback.removedCount} rejected duplicate{" "}
+        {feedback.removedCount === 1 ? "record" : "records"}. The shared Library bytes were
+        left in place.
+      </>
+    );
   }
 
   // Both regions must exist before their text changes. Mounting a populated
@@ -355,6 +446,185 @@ function DeleteConfirmation({
         Delete
       </button>
       {/* The safe option takes focus, so Enter cancels rather than deletes. */}
+      <button type="button" autoFocus onClick={onCancel} disabled={pending}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+function DuplicateGroup({
+  group,
+  keeperId,
+  blocked,
+  busy,
+  onKeeperChange,
+  onBegin,
+}: {
+  group: DuplicateModGroup;
+  keeperId: string | undefined;
+  blocked: boolean;
+  busy: boolean;
+  onKeeperChange: (id: string) => void;
+  onBegin: (trigger: HTMLButtonElement) => void;
+}) {
+  return (
+    <div>
+      <p>
+        Shared directory: <code>{group.path}</code>
+      </p>
+      <fieldset>
+        <legend>Select the one Mod record to keep</legend>
+        {group.mods.map((mod) => (
+          <label key={mod.id} className="duplicate-mod-record">
+            <span>
+              <input
+                type="radio"
+                name={`duplicate-keeper-${group.path}`}
+                value={mod.id}
+                checked={keeperId === mod.id}
+                onChange={() => onKeeperChange(mod.id)}
+              />{" "}
+              <strong>{mod.name}</strong> · {mod.game.toUpperCase()} ·{" "}
+              {mod.enabled ? "Enabled" : "Disabled"}
+            </span>
+            <DuplicateModDetails mod={mod} />
+          </label>
+        ))}
+      </fieldset>
+      {blocked ? (
+        <p className="error small">
+          At least one record has an unfinished update. Let it settle first; if its Mod card
+          shows a recovery warning, use Retry recovery there, then refresh this audit. GMM will
+          not remove any record while its recovery witness exists.
+        </p>
+      ) : null}
+      <button
+        type="button"
+        disabled={busy || blocked || keeperId === undefined}
+        onClick={(event) => onBegin(event.currentTarget)}
+      >
+        Resolve…
+      </button>
+    </div>
+  );
+}
+
+function DuplicateModDetails({ mod }: { mod: DuplicateModRecord }) {
+  return (
+    <dl className="duplicate-mod-details small">
+      <div>
+        <dt>Record ID</dt>
+        <dd>
+          <code>{mod.id}</code>
+        </dd>
+      </div>
+      <div>
+        <dt>Stored path</dt>
+        <dd>
+          <code>{mod.libraryPath}</code>
+        </dd>
+      </div>
+      <div>
+        <dt>Provenance</dt>
+        <dd>{mod.source}</dd>
+      </div>
+      <div>
+        <dt>GameBanana</dt>
+        <dd>
+          {mod.gamebananaId === null ? "None" : `submission ${mod.gamebananaId}`}
+          {mod.sourceUrl ? (
+            <>
+              {" "}· <code>{mod.sourceUrl}</code>
+            </>
+          ) : null}
+        </dd>
+      </div>
+      <div>
+        <dt>Author / version</dt>
+        <dd>
+          {mod.author ?? "Unknown"} / {mod.version ?? "Unknown"}
+        </dd>
+      </div>
+      <div>
+        <dt>Last seen upstream</dt>
+        <dd>{mod.upstreamVersion ?? "Unknown"}</dd>
+      </div>
+      <div>
+        <dt>Update checks</dt>
+        <dd>{mod.updateCheckEnabled ? "Enabled" : "Disabled"}</dd>
+      </div>
+      <div>
+        <dt>Screenshot metadata</dt>
+        <dd>{mod.screenshotUrl ? <code>{mod.screenshotUrl}</code> : "None"}</dd>
+      </div>
+      <div>
+        <dt>Variants</dt>
+        <dd>
+          {mod.variants.length === 0 ? (
+            "None"
+          ) : (
+            <ul>
+              {mod.variants.map((variant) => (
+                <li key={variant.id}>
+                  {variant.name} (<code>{variant.subpath}</code>)
+                  {variant.active ? " — selected" : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+        </dd>
+      </div>
+      <div>
+        <dt>Junction name</dt>
+        <dd>
+          <code>{mod.junctionDirName}</code>
+        </dd>
+      </div>
+      <div>
+        <dt>Created</dt>
+        <dd>{mod.createdAt}</dd>
+      </div>
+      <div>
+        <dt>Unfinished update</dt>
+        <dd>{mod.reinstallInProgress ? "Yes" : "No"}</dd>
+      </div>
+    </dl>
+  );
+}
+
+function DuplicateConfirmation({
+  keeper,
+  rejectedCount,
+  pending,
+  onCancel,
+  onResolve,
+}: {
+  keeper: DuplicateModRecord;
+  rejectedCount: number;
+  pending: boolean;
+  onCancel: () => void;
+  onResolve: () => void;
+}) {
+  const descriptionId = useId();
+  return (
+    <div
+      className="row"
+      role="group"
+      aria-label="Confirm duplicate Mod resolution"
+      aria-describedby={descriptionId}
+    >
+      <p id={descriptionId}>
+        Keep <strong>{keeper.name}</strong> ({keeper.id}) and permanently discard the other{" "}
+        {rejectedCount} GMM {rejectedCount === 1 ? "record" : "records"}, including their
+        Variant selections and metadata? The shared Library directory and every byte inside it
+        will remain. GMM requests removal of each rejected record&apos;s Junction before deleting
+        its database record; it does not claim that request proves no externally changed link can
+        remain. This cannot be undone.
+      </p>
+      <button type="button" onClick={onResolve} disabled={pending}>
+        Keep this record
+      </button>
       <button type="button" autoFocus onClick={onCancel} disabled={pending}>
         Cancel
       </button>
