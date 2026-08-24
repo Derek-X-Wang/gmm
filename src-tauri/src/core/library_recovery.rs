@@ -292,15 +292,12 @@ impl Core {
                 reason: "the directory changed while Variant detection ran".to_string(),
             });
         }
-        let revalidated_id = self
-            .recovered_mod_id(&library_path, &mut fence.transaction)
-            .await?;
-        if revalidated_id != id {
-            return Err(Error::NotAnUnreferencedLibraryDir {
-                path: library_path,
-                reason: "the recovered Mod ID changed while Variant detection ran".to_string(),
-            });
-        }
+        self.recheck_recovered_mod_id_is_available_ignoring_ascii_case(
+            &id,
+            &library_path,
+            &mut fence.transaction,
+        )
+        .await?;
 
         let base = super::sanitize_dir_name(display_name);
         let junction_dir_name =
@@ -545,6 +542,23 @@ impl Core {
         Ok(Ulid::new().to_string())
     }
 
+    async fn recheck_recovered_mod_id_is_available_ignoring_ascii_case(
+        &self,
+        id: &str,
+        path: &Path,
+        mutation: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<()> {
+        if self.mod_id_exists(id, &mut **mutation).await? {
+            return Err(Error::NotAnUnreferencedLibraryDir {
+                path: path.to_path_buf(),
+                reason:
+                    "a Mod ID claimed this ULID, ignoring ASCII case while Variant detection ran"
+                        .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     async fn mod_id_exists<'e, E>(&self, id: &str, executor: E) -> Result<bool>
     where
         E: Executor<'e, Database = Sqlite>,
@@ -701,18 +715,27 @@ fn purge_delete_quarantines_with(
             };
             let intent = entry.path();
             let quarantine = root.join(format!("{DELETE_QUARANTINE_PREFIX}{quarantine_name}"));
-            if !quarantine.exists() {
-                match fs::remove_file(&intent) {
-                    Ok(()) => {}
-                    Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-                    Err(source) => {
-                        return Err(Error::Io {
-                            path: intent,
-                            source,
-                        })
+            match fs::symlink_metadata(&quarantine) {
+                Ok(_) => {}
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                    match fs::remove_file(&intent) {
+                        Ok(()) => {}
+                        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                        Err(source) => {
+                            return Err(Error::Io {
+                                path: intent,
+                                source,
+                            })
+                        }
                     }
+                    continue;
                 }
-                continue;
+                Err(source) => {
+                    return Err(Error::Io {
+                        path: quarantine,
+                        source,
+                    })
+                }
             }
             before_open(&quarantine);
             let directory = match IdentifiedDirectory::open(&quarantine) {
@@ -908,5 +931,35 @@ mod tests {
         );
         assert!(!later.exists(), "the later quarantine must be removed");
         assert!(!later_intent.exists(), "the later intent must be removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_quarantine_keeps_its_durable_intent() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary Library");
+        let root = temp.path().join("gimi");
+        fs::create_dir_all(&root).expect("create test Library root");
+        let token = Ulid::new();
+        let quarantine = root.join(format!("{DELETE_QUARANTINE_PREFIX}{token}"));
+        let intent = root.join(format!(
+            "{DELETE_QUARANTINE_PREFIX}{token}{DELETE_INTENT_SUFFIX}"
+        ));
+        symlink(&quarantine, &quarantine)
+            .expect("create a quarantine whose followed metadata is unreadable");
+        fs::write(&intent, b"durable ownership evidence").expect("write ownership intent");
+        let ownership = super::super::library_ownership::LibraryOwnershipSnapshot::empty_for_test();
+
+        let result = purge_delete_quarantines(&[root], &ownership);
+
+        assert!(
+            intent.is_file(),
+            "metadata uncertainty must retain the quarantine's durable ownership intent",
+        );
+        assert!(
+            matches!(result, Err(Error::Io { ref path, .. }) if path == &quarantine),
+            "an unreadable quarantine must propagate its filesystem error, got {result:?}",
+        );
     }
 }
