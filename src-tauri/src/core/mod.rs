@@ -2912,7 +2912,7 @@ impl Core {
         E: Executor<'e, Database = Sqlite>,
     {
         let row = sqlx::query(
-            "SELECT m.active_variant_id, v.subpath
+            "SELECT m.name, m.active_variant_id, v.subpath
              FROM mods m
              LEFT JOIN mod_variants v
                ON v.id = m.active_variant_id AND v.mod_id = m.id
@@ -2921,6 +2921,7 @@ impl Core {
         .bind(mod_id)
         .fetch_one(executor)
         .await?;
+        let mod_name: String = row.try_get("name")?;
         let active_variant_id: Option<String> = row.try_get("active_variant_id")?;
         let active_variant_subpath: Option<String> = row.try_get("subpath")?;
         match (active_variant_id, active_variant_subpath) {
@@ -2928,6 +2929,7 @@ impl Core {
             (Some(_), Some(subpath)) => Ok(library_path.join(subpath)),
             (Some(variant_id), None) => Err(Error::InvalidActiveVariant {
                 mod_id: mod_id.to_string(),
+                mod_name,
                 variant_id,
             }),
         }
@@ -3153,14 +3155,30 @@ impl Core {
             source,
         })?;
 
-        let mut result = reconcile::ReconcileResult::default();
+        // Resolve every enabled Mod before removing anything. A corrupt
+        // active Variant must leave the user's existing deployment intact,
+        // rather than turning Rebuild into a destructive partial operation.
+        let mut prepared = Vec::with_capacity(rows.len());
         for row in rows {
             let id: String = row.try_get("id")?;
             let junction_dir_name: String = row.try_get("junction_dir_name")?;
             let library_path: String = row.try_get("library_path")?;
-            let enabled: i64 = row.try_get("enabled")?;
+            let enabled = row.try_get::<i64, _>("enabled")? != 0;
+            let target = if enabled {
+                let target = self
+                    .junction_target_for(&id, Path::new(&library_path), &self.pool)
+                    .await?;
+                volume::require_ntfs_pair(game_mods_dir, &target)?;
+                Some(target)
+            } else {
+                None
+            };
+            prepared.push((id, junction_dir_name, enabled, target));
+        }
+
+        let mut result = reconcile::ReconcileResult::default();
+        for (id, junction_dir_name, enabled, target) in prepared {
             let link = game_mods_dir.join(&junction_dir_name);
-            let library_path = PathBuf::from(library_path);
 
             // Always drop the existing link first; if the user relocated
             // the Library, the old link would resolve to thin air.
@@ -3169,7 +3187,7 @@ impl Core {
                 let _ = junction::remove(&link);
             }
 
-            if enabled == 0 {
+            if !enabled {
                 // Rebuild already deletes stranded junctions as a side
                 // effect of dropping every link. Report it the same way
                 // reconcile does, so `removed` means one thing across
@@ -3181,10 +3199,7 @@ impl Core {
                 }
                 continue;
             }
-            let target = self
-                .junction_target_for(&id, &library_path, &self.pool)
-                .await?;
-            volume::require_ntfs_pair(game_mods_dir, &target)?;
+            let target = target.expect("enabled Mods have a preflighted Junction target");
             junction::create(&link, &target)?;
             result.recreated.push(id);
         }

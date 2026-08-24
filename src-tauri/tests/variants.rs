@@ -206,10 +206,18 @@ async fn a_foreign_persisted_active_variant_is_not_used_as_a_junction_target() {
             &error,
             Error::InvalidActiveVariant {
                 mod_id,
+                mod_name,
                 variant_id,
-            } if mod_id == &first.id && variant_id == &foreign_variant_id
+            } if mod_id == &first.id
+                && mod_name == "First Mod"
+                && variant_id == &foreign_variant_id
         ),
         "the corruption error must name both mismatched rows, got: {error}",
+    );
+    assert_eq!(
+        error.to_string(),
+        "Mod \"First Mod\" has an invalid active Variant selection. Select a valid Variant for this Mod, or reinstall it.",
+        "the corruption error must name the Mod and give the user both repair routes",
     );
 }
 
@@ -257,13 +265,74 @@ async fn a_dangling_persisted_active_variant_is_not_replaced_with_the_mod_root()
             &error,
             Error::InvalidActiveVariant {
                 mod_id,
+                mod_name,
                 variant_id,
-            } if mod_id == &imported.id && variant_id == dangling_variant_id
+            } if mod_id == &imported.id
+                && mod_name == "Dangling Variant"
+                && variant_id == dangling_variant_id
         ),
         "the corruption error must name the dangling reference, got: {error}",
     );
     assert!(
         !game_mods.join("Dangling Variant").exists(),
         "corrupt Variant state must not silently deploy the Mod root",
+    );
+}
+
+#[tokio::test]
+async fn a_dangling_persisted_active_variant_does_not_block_disable() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_root = tmp.path().join("library");
+    let game_mods = tmp.path().join("Genshin/Mods");
+    fs::create_dir_all(&game_mods).expect("game Mods dir");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_root, &db_url).await.expect("init");
+
+    let zip_path = tmp.path().join("variants.zip");
+    build_three_variant_zip(&zip_path);
+    let imported = core
+        .import_zip(
+            GameCode::Gimi,
+            &zip_path,
+            "Disable Corrupt Variant",
+            Default::default(),
+        )
+        .await
+        .expect("import Mod");
+    core.set_enabled(&imported.id, true, &game_mods)
+        .await
+        .expect("enable before planting corruption");
+    let link = game_mods.join("Disable Corrupt Variant");
+    assert!(link.join("merged.ini").is_file(), "precondition: Mod loads");
+
+    let pool = SqlitePool::connect(&db_url).await.expect("open fixture DB");
+    let mut connection = pool.acquire().await.expect("acquire fixture DB connection");
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .expect("allow planting a legacy dangling reference");
+    sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
+        .bind("missing-active-variant")
+        .bind(&imported.id)
+        .execute(&mut *connection)
+        .await
+        .expect("plant dangling active Variant ID");
+    drop(connection);
+
+    core.set_enabled(&imported.id, false, &game_mods)
+        .await
+        .expect("a dangling active Variant must not block disable");
+
+    let row = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list Mods")
+        .into_iter()
+        .find(|candidate| candidate.id == imported.id)
+        .expect("disabled Mod row");
+    assert!(!row.enabled, "disable must persist enabled = false");
+    assert!(
+        fs::symlink_metadata(&link).is_err(),
+        "disable must remove the Junction despite corrupt Variant state",
     );
 }

@@ -3097,6 +3097,26 @@ async fn assert_set_enabled_excludes_relocation(
         .wait_for_outcome()
         .expect_ok("set_enabled while relocation was excluded");
 
+    let listed_after_toggle = core.list_mods(GameCode::Gimi).await.expect("list Mods");
+    let row_after_toggle = listed_after_toggle
+        .iter()
+        .find(|candidate| candidate.id == m.id)
+        .expect("toggled Mod row before relocation retry");
+    assert_eq!(
+        row_after_toggle.enabled, requested_enabled,
+        "set_enabled must commit the requested enabled flag before relocation retries",
+    );
+    let junction_loads_mod_after_toggle = env
+        .game_mods
+        .join(display_name)
+        .join("merged.ini")
+        .is_file();
+    assert_eq!(
+        junction_loads_mod_after_toggle, requested_enabled,
+        "set_enabled itself left the enabled flag and Junction inconsistent before the \
+         relocation retry: requested enabled={requested_enabled}, first relocation={relocation:?}",
+    );
+
     let relocation_after_resume = probe(&env)
         .op([
             "set-library-path",

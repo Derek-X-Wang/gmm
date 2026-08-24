@@ -206,13 +206,13 @@ impl Core {
         let junction_dir_name: String = row.try_get("junction_dir_name")?;
         let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
         let current_enabled: i64 = row.try_get("enabled")?;
-        let target = self
-            .junction_target_for(id, &library_path, &mut *fence.transaction)
-            .await?;
         let link = game_mods_dir.join(junction_dir_name);
 
         match (current_enabled != 0, enabled) {
             (false, true) => {
+                let target = self
+                    .junction_target_for(id, &library_path, &mut *fence.transaction)
+                    .await?;
                 volume::require_ntfs_pair(game_mods_dir, &target)?;
                 junction::create(&link, &target)?;
                 self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_CREATE);

@@ -38,9 +38,13 @@ pub enum Error {
     InvalidSource(String),
 
     #[error(
-        "Mod {mod_id} names {variant_id} as its active Variant, but that Variant does not belong to the Mod"
+        "Mod \"{mod_name}\" has an invalid active Variant selection. Select a valid Variant for this Mod, or reinstall it."
     )]
-    InvalidActiveVariant { mod_id: String, variant_id: String },
+    InvalidActiveVariant {
+        mod_id: String,
+        mod_name: String,
+        variant_id: String,
+    },
 
     #[error("zip error at {path:?}: {message}")]
     Zip { path: PathBuf, message: String },
