@@ -1153,21 +1153,7 @@ impl Core {
 
         if old_is_quarantined {
             if let Some(current_live) = identified_if_exists(&witness.library_path)? {
-                if current_live.identity() != &witness.staged_identity {
-                    return witness
-                        .uncertain("the live name no longer identifies the staged replacement");
-                }
-                if witness.staged_path.exists() {
-                    return witness
-                        .uncertain("both the live and staging names contain replacement bytes");
-                }
-                drop(current_live);
-                fs::rename(&witness.library_path, &witness.staged_path).map_err(|source| {
-                    Error::Io {
-                        path: witness.library_path.clone(),
-                        source,
-                    }
-                })?;
+                move_live_replacement_back_to_stage(witness, current_live)?;
             }
             fs::rename(&witness.quarantine_path, &witness.library_path).map_err(|source| {
                 Error::Io {
@@ -1603,6 +1589,37 @@ fn identified_if_exists(path: &Path) -> Result<Option<IdentifiedDirectory>> {
     }
 }
 
+fn move_live_replacement_back_to_stage(
+    witness: &ReinstallSwapWitness,
+    current_live: IdentifiedDirectory,
+) -> Result<()> {
+    if current_live.identity() != &witness.staged_identity {
+        return witness.uncertain("the live name no longer identifies the staged replacement");
+    }
+    if entry_exists(&witness.staged_path)? {
+        return witness.uncertain("both the live and staging names contain replacement bytes");
+    }
+    drop(current_live);
+    fs::rename(&witness.library_path, &witness.staged_path).map_err(|source| Error::Io {
+        path: witness.library_path.clone(),
+        source,
+    })
+}
+
+/// Inspect the named entry itself. Only `NotFound` proves that a rename
+/// destination is free; target-following existence checks collapse every
+/// other metadata failure into the same false answer.
+fn entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 fn reject_unexpected_identity(
     witness: &ReinstallSwapWitness,
     name: &str,
@@ -1704,4 +1721,82 @@ pub(super) async fn unique_junction_dir_name(
         }
     }
     unreachable!("u32::MAX collisions on one display name is not a real scenario")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// A staging-name inspection error is uncertainty, never evidence that
+    /// the name is free for a rename. Mutation oracle: restoring
+    /// target-following `Path::exists` reaches the rename, attributes its
+    /// failure to the live path, and fires the named pre-rename assertion.
+    #[cfg(unix)]
+    #[test]
+    fn reinstall_rollback_propagates_staging_metadata_error_before_rename() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = TempDir::new().expect("tmp");
+        let token = Ulid::new();
+        let mod_id = Ulid::new().to_string();
+        let library_path = tmp.path().join(&mod_id);
+        let staged_path = tmp
+            .path()
+            .join(format!("{REINSTALL_STAGING_PREFIX}{token}"));
+        let quarantine_path = tmp.path().join(format!(
+            "{}{}",
+            super::super::library_recovery::DELETE_QUARANTINE_PREFIX,
+            token
+        ));
+        std::fs::create_dir(&library_path).expect("live replacement");
+        std::fs::write(library_path.join("replacement.ini"), b"replacement")
+            .expect("live replacement bytes");
+        std::fs::create_dir(&quarantine_path).expect("old quarantine");
+        let current_live = IdentifiedDirectory::open(&library_path).expect("identify live");
+        let old = IdentifiedDirectory::open(&quarantine_path).expect("identify old");
+        let witness = ReinstallSwapWitness {
+            token,
+            mod_id,
+            game: GameCode::Gimi,
+            library_path: library_path.clone(),
+            staged_path: staged_path.clone(),
+            quarantine_path,
+            old_identity: old.identity().clone(),
+            staged_identity: current_live.identity().clone(),
+        };
+
+        let original_permissions = std::fs::metadata(tmp.path())
+            .expect("temporary root metadata")
+            .permissions();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o0))
+            .expect("make staging name unreadable");
+        let result = move_live_replacement_back_to_stage(&witness, current_live);
+        std::fs::set_permissions(tmp.path(), original_permissions)
+            .expect("restore temporary root permissions");
+        let error = result.expect_err("staging metadata errors must stop rollback before rename");
+
+        assert!(
+            matches!(
+                error,
+                Error::Io { ref path, ref source }
+                    if path == &staged_path
+                        && source.kind() == io::ErrorKind::PermissionDenied
+            ),
+            "staging metadata errors must stop rollback before rename: {error}",
+        );
+        assert_eq!(
+            std::fs::read(library_path.join("replacement.ini"))
+                .expect("live bytes remain before rename"),
+            b"replacement",
+            "a staging metadata error must not permit the live replacement rename",
+        );
+        assert!(
+            matches!(
+                std::fs::symlink_metadata(&staged_path),
+                Err(error) if error.kind() == io::ErrorKind::NotFound
+            ),
+            "a staging metadata error must leave the reserved name untouched",
+        );
+    }
 }
