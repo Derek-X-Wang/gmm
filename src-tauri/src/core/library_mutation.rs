@@ -1,4 +1,5 @@
-//! One writer-fence protocol for every mutation of Library-owned bytes.
+//! One writer-fence protocol for every mutation of Library-owned bytes or a
+//! Mod's enabled deployment state.
 //!
 //! Root relocation is the exclusive form: it holds SQLite's writer claim
 //! from the row snapshot through the filesystem move and the setting/row
@@ -7,7 +8,10 @@
 //! perform their copy/extract without blocking SQLite, then reacquire the
 //! claim and prove both the configured root name and its filesystem identity
 //! are unchanged before inserting a row. Recovery/delete keep their bounded
-//! filesystem ownership acts inside one claim.
+//! filesystem ownership acts inside one claim. Enabling or disabling a Mod
+//! likewise holds the claim across both its Junction mutation and `enabled`
+//! update: creating or removing one reparse point is bounded, and the two
+//! deployment-state changes must not be observed or overwritten separately.
 
 use std::fs;
 use std::io;
@@ -20,7 +24,7 @@ use ulid::Ulid;
 use super::library_identity::IdentifiedDirectory;
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::settings::{get as get_setting, keys};
-use super::{junction, volume, Core, Error, GameCode, Result};
+use super::{crash_points, junction, volume, Core, Error, GameCode, Result};
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 
@@ -34,6 +38,7 @@ pub(super) enum LibraryMutation {
     RecoverUnreferencedLibraryDir,
     DeleteUnreferencedLibraryDir,
     ReinstallGamebananaMod,
+    SetEnabled,
 }
 
 impl LibraryMutation {
@@ -47,6 +52,7 @@ impl LibraryMutation {
             Self::RecoverUnreferencedLibraryDir => "recover_unreferenced_library_dir",
             Self::DeleteUnreferencedLibraryDir => "delete_unreferenced_library_dir",
             Self::ReinstallGamebananaMod => "reinstall_gamebanana_mod_with_endpoints",
+            Self::SetEnabled => "set_enabled",
         }
     }
 }
@@ -178,6 +184,53 @@ impl Core {
                 .await?;
         }
         Ok(LibraryMutationFence { transaction })
+    }
+
+    /// Change both halves of a Mod's enabled deployment state under the one
+    /// Library mutation writer fence described by this module.
+    pub(super) async fn set_enabled_in_library_mutation(
+        &self,
+        id: &str,
+        enabled: bool,
+        game_mods_dir: &Path,
+    ) -> Result<()> {
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::SetEnabled)
+            .await?;
+        let row =
+            sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+
+        let junction_dir_name: String = row.try_get("junction_dir_name")?;
+        let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+        let current_enabled: i64 = row.try_get("enabled")?;
+        let link = game_mods_dir.join(junction_dir_name);
+
+        match (current_enabled != 0, enabled) {
+            (false, true) => {
+                let target = self
+                    .junction_target_for(id, &library_path, &mut *fence.transaction)
+                    .await?;
+                volume::require_ntfs_pair(game_mods_dir, &target)?;
+                junction::create(&link, &target)?;
+                self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_CREATE);
+            }
+            (true, false) => {
+                junction::remove(&link)?;
+                self.crash_point(crash_points::SET_ENABLED_AFTER_JUNCTION_REMOVE);
+            }
+            _ => {}
+        }
+
+        sqlx::query("UPDATE mods SET enabled = ? WHERE id = ?")
+            .bind(if enabled { 1_i64 } else { 0_i64 })
+            .bind(id)
+            .execute(&mut *fence.transaction)
+            .await?;
+        self.crash_point(crash_points::SET_ENABLED_AFTER_DB_UPDATE);
+        fence.commit().await
     }
 
     pub(super) async fn reinstall_swap_witness(
@@ -402,8 +455,7 @@ impl Core {
         fence: &mut LibraryMutationFence,
     ) -> Result<()> {
         let row = sqlx::query(
-            "SELECT m.enabled, m.junction_dir_name, m.active_variant_id,
-                    g.install_path
+            "SELECT m.enabled, m.junction_dir_name, g.install_path
              FROM mods m JOIN games g ON g.code = m.game_code
              WHERE m.id = ? AND m.game_code = ?",
         )
@@ -425,19 +477,13 @@ impl Core {
         if row.try_get::<i64, _>("enabled")? == 0 {
             return Ok(());
         }
-        let target = if let Some(active_variant_id) =
-            row.try_get::<Option<String>, _>("active_variant_id")?
-        {
-            let subpath: String =
-                sqlx::query_scalar("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
-                    .bind(active_variant_id)
-                    .bind(&witness.mod_id)
-                    .fetch_one(&mut *fence.transaction)
-                    .await?;
-            witness.library_path.join(subpath)
-        } else {
-            witness.library_path.clone()
-        };
+        let target = self
+            .junction_target_for(
+                &witness.mod_id,
+                &witness.library_path,
+                &mut *fence.transaction,
+            )
+            .await?;
         fs::create_dir_all(&mods_dir).map_err(|source| Error::Io {
             path: mods_dir.clone(),
             source,

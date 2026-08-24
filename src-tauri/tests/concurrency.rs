@@ -3038,6 +3038,165 @@ fn single_delete_quarantine(root: &Path, context: &str) -> (PathBuf, PathBuf) {
     (quarantine, intent)
 }
 
+async fn assert_set_enabled_excludes_relocation(
+    start_enabled: bool,
+    requested_enabled: bool,
+    junction_pause_point: &'static str,
+    display_name: &str,
+) {
+    for pause_point in [
+        junction_pause_point,
+        gmm_lib::core::crash_points::SET_ENABLED_AFTER_DB_UPDATE,
+    ] {
+        assert_set_enabled_excludes_relocation_at(
+            start_enabled,
+            requested_enabled,
+            pause_point,
+            display_name,
+        )
+        .await;
+    }
+}
+
+async fn assert_set_enabled_excludes_relocation_at(
+    start_enabled: bool,
+    requested_enabled: bool,
+    pause_point: &'static str,
+    display_name: &str,
+) {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("record game install path");
+    let m = env.seed_mod(&core, display_name).await;
+    if start_enabled {
+        core.set_enabled(&m.id, true, &env.game_mods)
+            .await
+            .expect("set starting enabled state");
+    }
+
+    let mods_dir = env.game_mods.display().to_string();
+    let enabled = if requested_enabled { "1" } else { "0" };
+    let mut toggling = probe(&env)
+        .pausing_at(pause_point)
+        .op([
+            "set-enabled",
+            "--mod-id",
+            &m.id,
+            "--enabled",
+            enabled,
+            "--mods-dir",
+            &mods_dir,
+        ])
+        .spawn();
+    toggling.wait_for_pause(pause_point);
+
+    // The toggle is paused after either its Junction mutation or its flag
+    // update. Its writer fence must exclude relocation at both boundaries
+    // until the complete deployment-state transition commits.
+    let relocated_root = env._tmp.path().join(format!("relocated-{enabled}"));
+    let relocation = probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &relocated_root.display().to_string(),
+        ])
+        .run();
+    relocation.expect_refused(
+        &format!("relocation while set_enabled paused at {pause_point}"),
+        "database is locked",
+    );
+
+    toggling.resume();
+    toggling
+        .wait_for_outcome()
+        .expect_ok("set_enabled while relocation was excluded");
+
+    let listed_after_toggle = core.list_mods(GameCode::Gimi).await.expect("list Mods");
+    let row_after_toggle = listed_after_toggle
+        .iter()
+        .find(|candidate| candidate.id == m.id)
+        .expect("toggled Mod row before relocation retry");
+    assert_eq!(
+        row_after_toggle.enabled, requested_enabled,
+        "set_enabled must commit the requested enabled flag before relocation retries",
+    );
+    let junction_loads_mod_after_toggle = env
+        .game_mods
+        .join(display_name)
+        .join("merged.ini")
+        .is_file();
+    assert_eq!(
+        junction_loads_mod_after_toggle, requested_enabled,
+        "set_enabled itself left the enabled flag and Junction inconsistent before the \
+         relocation retry: requested enabled={requested_enabled}, first relocation={relocation:?}",
+    );
+
+    let relocation_after_resume = probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &relocated_root.display().to_string(),
+        ])
+        .run();
+    relocation_after_resume.expect_ok("relocation after set_enabled released its fence");
+
+    let listed = core.list_mods(GameCode::Gimi).await.expect("list Mods");
+    let row = listed
+        .iter()
+        .find(|candidate| candidate.id == m.id)
+        .expect("toggled Mod row");
+    assert_eq!(
+        row.enabled, requested_enabled,
+        "set_enabled must commit the requested enabled flag",
+    );
+    let junction_loads_mod = env
+        .game_mods
+        .join(display_name)
+        .join("merged.ini")
+        .is_file();
+    assert_eq!(
+        junction_loads_mod, requested_enabled,
+        "set_enabled and a fenced Library relocation left the enabled flag and Junction \
+         inconsistent: requested enabled={requested_enabled}, first relocation={relocation:?}, \
+         relocation after resume={relocation_after_resume:?}",
+    );
+}
+
+/// A disable paused after Junction removal must still own the writer fence.
+/// Mutation oracle: releasing the fence before the Junction operation lets
+/// relocation recreate the Junction from stale `enabled = 1`; the explicit
+/// Junction/flag consistency assertion then fails after disable commits zero.
+#[tokio::test]
+async fn disable_excludes_relocation_until_junction_and_flag_agree() {
+    assert_set_enabled_excludes_relocation(
+        true,
+        false,
+        gmm_lib::core::crash_points::SET_ENABLED_AFTER_JUNCTION_REMOVE,
+        "Fenced Disable",
+    )
+    .await;
+}
+
+/// An enable paused after Junction creation must still own the writer fence.
+/// Mutation oracle: releasing the fence before the Junction operation lets
+/// relocation act from stale `enabled = 0` and strand the row without the
+/// Junction after enable commits one.
+#[tokio::test]
+async fn enable_excludes_relocation_until_junction_and_flag_agree() {
+    assert_set_enabled_excludes_relocation(
+        false,
+        true,
+        gmm_lib::core::crash_points::SET_ENABLED_AFTER_JUNCTION_CREATE,
+        "Fenced Enable",
+    )
+    .await;
+}
+
 /// Two processes enable the same Mod at the same instant.
 ///
 /// Both read `enabled = 0`, so both take the create-Junction branch, and

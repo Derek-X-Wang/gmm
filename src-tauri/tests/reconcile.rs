@@ -7,7 +7,8 @@
 
 use std::fs;
 
-use gmm_lib::core::{Core, GameCode};
+use gmm_lib::core::{Core, Error, GameCode};
+use sqlx::SqlitePool;
 use tempfile::TempDir;
 
 async fn fresh_core(tmp: &TempDir) -> (Core, std::path::PathBuf, std::path::PathBuf) {
@@ -166,6 +167,81 @@ async fn rebuild_skips_disabled_mods() {
     assert_eq!(result.recreated.len(), 0);
     assert_eq!(result.skipped.as_slice(), &[disabled.id]);
     assert!(!game_mods.join("Disabled Mod").exists());
+}
+
+#[tokio::test]
+async fn rebuild_preserves_an_enabled_mods_junction_when_its_active_variant_is_foreign() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, _, game_mods) = fresh_core(&tmp).await;
+
+    let first_fixture = tmp.path().join("fixture/First");
+    for variant in ["Blue", "Red"] {
+        let dir = first_fixture.join(variant);
+        fs::create_dir_all(&dir).expect("first Mod Variant dir");
+        fs::write(dir.join("merged.ini"), format!("; first {variant}\n")).expect("first ini");
+    }
+    let first = core
+        .adopt_folder(GameCode::Gimi, &first_fixture, "Keep This Junction")
+        .await
+        .expect("adopt first Mod");
+    core.set_enabled(&first.id, true, &game_mods)
+        .await
+        .expect("enable first Mod");
+
+    let second_fixture = tmp.path().join("fixture/Second");
+    for variant in ["Dark", "Light"] {
+        let dir = second_fixture.join(variant);
+        fs::create_dir_all(&dir).expect("second Mod Variant dir");
+        fs::write(dir.join("merged.ini"), format!("; second {variant}\n")).expect("second ini");
+    }
+    let second = core
+        .adopt_folder(GameCode::Gimi, &second_fixture, "Variant Owner")
+        .await
+        .expect("adopt second Mod");
+    let foreign_variant_id = core
+        .list_variants(&second.id)
+        .await
+        .expect("list second Mod Variants")[0]
+        .id
+        .clone();
+
+    let link = game_mods.join("Keep This Junction");
+    let original_target = fs::canonicalize(&link).expect("resolve original Junction");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let pool = SqlitePool::connect(&db_url).await.expect("open fixture DB");
+    sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
+        .bind(&foreign_variant_id)
+        .bind(&first.id)
+        .execute(&pool)
+        .await
+        .expect("plant foreign active Variant ID");
+
+    let error = core
+        .rebuild_junctions(GameCode::Gimi, &game_mods)
+        .await
+        .expect_err("rebuild must reject a foreign active Variant");
+    assert!(
+        matches!(
+            error,
+            Error::InvalidActiveVariant {
+                ref mod_id,
+                ref mod_name,
+                ref variant_id,
+            } if mod_id == &first.id
+                && mod_name == "Keep This Junction"
+                && variant_id == &foreign_variant_id
+        ),
+        "rebuild must report the corrupt Mod and Variant, got: {error}",
+    );
+    assert!(
+        fs::symlink_metadata(&link).is_ok(),
+        "rebuild refusal must leave the original Junction intact",
+    );
+    assert_eq!(
+        fs::canonicalize(&link).expect("resolve preserved Junction"),
+        original_target,
+        "rebuild refusal must not retarget the original Junction",
+    );
 }
 
 /// A junction that still points where the DB says, but whose target
