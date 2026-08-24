@@ -428,6 +428,9 @@ async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
             "staged_path",
             "staged_identity",
             "created_at",
+            "recovery_error",
+            "recovery_attempted_at",
+            "recovery_attempts",
         ],
         "the staging migration must create the complete durable witness",
     );

@@ -511,21 +511,39 @@ impl Core {
     /// A crashed producer can no longer finish its staged bytes. Release its
     /// durable claim at startup but preserve the directory itself so the
     /// ordinary audit records it and the user can inspect, recover, or delete
-    /// it explicitly.
+    /// it explicitly. If witness deletion fails, record that obstruction on
+    /// every surviving witness and stop treating those rows as active owners;
+    /// otherwise the durable claim would permanently conceal the only copy of
+    /// a partial import from every in-app recovery action.
     pub(super) async fn resolve_interrupted_staging_at_startup(&self) -> Result<usize> {
         let mut fence = self
             .begin_library_mutation(LibraryMutation::ResolveInterruptedStaging)
             .await?;
-        let paths: Vec<String> = sqlx::query_scalar(
-            "SELECT staged_path FROM staged_library_operations ORDER BY created_at, id",
+        let witnesses: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, staged_path
+             FROM staged_library_operations ORDER BY created_at, id",
         )
         .fetch_all(&mut *fence.transaction)
         .await?;
-        let removed = sqlx::query("DELETE FROM staged_library_operations")
+        let removed = match sqlx::query("DELETE FROM staged_library_operations")
             .execute(&mut *fence.transaction)
-            .await?;
-        fence.commit().await?;
-        for path in paths {
+            .await
+        {
+            Ok(removed) => removed,
+            Err(error) => {
+                let reason = error.to_string();
+                fence.transaction.rollback().await?;
+                self.record_interrupted_staging_resolution_failure(&witnesses, &reason)
+                    .await?;
+                return Ok(0);
+            }
+        };
+        if let Err(error) = fence.commit().await {
+            self.record_interrupted_staging_resolution_failure(&witnesses, &error.to_string())
+                .await?;
+            return Ok(0);
+        }
+        for (_, path) in witnesses {
             tracing::warn!(
                 target: "gmm::library",
                 path,
@@ -533,6 +551,42 @@ impl Core {
             );
         }
         Ok(removed.rows_affected() as usize)
+    }
+
+    async fn record_interrupted_staging_resolution_failure(
+        &self,
+        witnesses: &[(String, String)],
+        reason: &str,
+    ) -> Result<usize> {
+        let attempted_at = Utc::now().to_rfc3339();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut marked_paths = Vec::new();
+        for (id, path) in witnesses {
+            let marked = sqlx::query(
+                "UPDATE staged_library_operations
+                 SET recovery_error = ?, recovery_attempted_at = ?,
+                     recovery_attempts = recovery_attempts + 1
+                 WHERE id = ?",
+            )
+            .bind(reason)
+            .bind(&attempted_at)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+            if marked.rows_affected() == 1 {
+                marked_paths.push(path.clone());
+            }
+        }
+        transaction.commit().await?;
+        for path in &marked_paths {
+            tracing::error!(
+                target: "gmm::library",
+                path,
+                error = reason,
+                "could not release an interrupted staging witness; preserved and exposed any staged bytes through the Library audit",
+            );
+        }
+        Ok(marked_paths.len())
     }
 
     /// Change both halves of a Mod's enabled deployment state under the one

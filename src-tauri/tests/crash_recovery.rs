@@ -644,6 +644,99 @@ async fn reinstall_gamebanana_fixture(env: &TestEnv, core: &Core, id: u64, mod_i
         .expect("coverage GameBanana reinstall");
 }
 
+/// A staging-release failure must not turn the durable witness into a
+/// permanent concealment record. Preserve the witness as failure evidence,
+/// but surface the bytes through the ordinary orphan workflow so the user can
+/// inspect, recover, or delete them without hand-editing SQLite.
+#[tokio::test]
+async fn failed_startup_staging_resolution_keeps_directory_visible_and_actionable() {
+    let env = TestEnv::new();
+    let src = env.tmp.path().join("failed-startup-staging-resolution");
+    std::fs::create_dir_all(&src).expect("src");
+    std::fs::write(src.join("merged.ini"), b"hash=failed-startup-release\n").expect("ini");
+
+    env.crash_during(
+        crash_points::ADOPT_AFTER_LIBRARY_COPY,
+        &[
+            "adopt",
+            "--from",
+            &src.display().to_string(),
+            "--name",
+            "Interrupted Unknown Mod",
+        ],
+    );
+    assert_eq!(
+        env.staging_witness_count().await,
+        1,
+        "the crashed producer must leave one durable staging witness",
+    );
+
+    let pool = SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB to force startup release failure");
+    sqlx::query(
+        "CREATE TRIGGER reject_staging_witness_release
+         BEFORE DELETE ON staged_library_operations
+         BEGIN
+             SELECT RAISE(ABORT, 'forced staging witness release failure');
+         END",
+    )
+    .execute(&pool)
+    .await
+    .expect("install forced staging witness release failure");
+    pool.close().await;
+
+    let core = env.restart().await;
+    let pool = SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB to inspect durable startup failure");
+    let failure: (Option<String>, i64) =
+        sqlx::query_as("SELECT recovery_error, recovery_attempts FROM staged_library_operations")
+            .fetch_one(&pool)
+            .await
+            .expect("read failed staging witness");
+    pool.close().await;
+    assert_eq!(
+        failure.1, 1,
+        "startup must durably count the failed release"
+    );
+    assert!(
+        failure
+            .0
+            .as_deref()
+            .is_some_and(|reason| reason.contains("forced staging witness release failure")),
+        "the durable witness must record the real release obstruction: {failure:?}",
+    );
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after failed staging witness release");
+    assert_eq!(
+        report.unreferenced.len(),
+        1,
+        "a failed startup release must leave the staging directory visible: {report:?}",
+    );
+    let orphan = &report.unreferenced[0];
+    assert!(
+        orphan.path.join("merged.ini").is_file(),
+        "surfacing the failed staging directory must preserve its bytes",
+    );
+
+    let recovered = core
+        .recover_unreferenced_library_dir(
+            GameCode::Gimi,
+            &orphan.path,
+            "User Identified Recovered Mod",
+        )
+        .await
+        .expect("the surfaced staging directory must remain actionable");
+    assert_eq!(recovered.library_path, orphan.path);
+    assert!(
+        recovered.library_path.join("merged.ini").is_file(),
+        "recovery must adopt the preserved bytes in place",
+    );
+}
+
 /// Crash after the archive is extracted into the Library, before the row
 /// insert. Same orphan shape as `adopt`, reached by the other import
 /// path — worth its own case because `import_zip` has a cleanup branch

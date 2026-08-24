@@ -65,7 +65,8 @@ impl LibraryOwnershipSnapshot {
              UNION ALL
              SELECT NULL AS mod_id, staged_path AS library_path, NULL AS reinstall_identity,
                     staged_identity AS staging_identity
-             FROM staged_library_operations",
+             FROM staged_library_operations
+             WHERE recovery_error IS NULL",
         )
         .fetch_all(executor)
         .await?;
