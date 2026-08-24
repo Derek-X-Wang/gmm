@@ -406,10 +406,9 @@ impl Core {
         .await?;
         for reinstall in active_reinstalls {
             let witness = library_mutation::ReinstallSwapWitness::from_row(&reinstall)?;
-            witness.validate_paths()?;
-            if path_within(&witness.library_path, previous) {
+            if path_within(witness.library_path(), previous) {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
-                    mod_id: witness.mod_id,
+                    mod_id: witness.mod_id().to_string(),
                 });
             }
         }
@@ -1031,19 +1030,18 @@ impl Core {
                 .begin_library_mutation(library_mutation::LibraryMutation::ReinstallGamebananaMod)
                 .await?;
             let witness = self.reinstall_swap_witness(token, &mut commit).await?;
-            let live = library_identity::IdentifiedDirectory::open(&witness.library_path).map_err(
-                |source| Error::Io {
-                    path: witness.library_path.clone(),
-                    source,
-                },
-            )?;
-            let staged = library_identity::IdentifiedDirectory::open(&witness.staged_path)
+            let live = library_identity::IdentifiedDirectory::open(witness.library_path())
                 .map_err(|source| Error::Io {
-                    path: witness.staged_path.clone(),
+                    path: witness.library_path().to_path_buf(),
                     source,
                 })?;
-            if live.identity().durable_key() != witness.old_identity
-                || staged.identity().durable_key() != witness.staged_identity
+            let staged = library_identity::IdentifiedDirectory::open(witness.staged_path())
+                .map_err(|source| Error::Io {
+                    path: witness.staged_path().to_path_buf(),
+                    source,
+                })?;
+            if live.identity() != witness.old_identity()
+                || staged.identity() != witness.staged_identity()
             {
                 return Err(Error::ReinstallRecoveryUncertain {
                     mod_id: mod_id.to_string(),
@@ -1067,7 +1065,7 @@ impl Core {
                 .map(|install| install.join("Mods"));
 
             let quarantined = self.quarantine_library_directory_with_token(
-                &witness.library_path,
+                witness.library_path(),
                 &live,
                 token,
                 None,
@@ -1075,19 +1073,19 @@ impl Core {
             )?;
             drop(live);
             self.crash_point(crash_points::REINSTALL_AFTER_OLD_QUARANTINE_MOVE);
-            std::fs::rename(&witness.staged_path, &witness.library_path).map_err(|source| {
+            std::fs::rename(witness.staged_path(), witness.library_path()).map_err(|source| {
                 Error::Io {
-                    path: witness.staged_path.clone(),
+                    path: witness.staged_path().to_path_buf(),
                     source,
                 }
             })?;
             drop(staged);
-            let installed = library_identity::IdentifiedDirectory::open(&witness.library_path)
+            let installed = library_identity::IdentifiedDirectory::open(witness.library_path())
                 .map_err(|source| Error::Io {
-                    path: witness.library_path.clone(),
+                    path: witness.library_path().to_path_buf(),
                     source,
                 })?;
-            if installed.identity().durable_key() != witness.staged_identity {
+            if installed.identity() != witness.staged_identity() {
                 return Err(Error::ReinstallRecoveryUncertain {
                     mod_id: mod_id.to_string(),
                     reason: "the replacement changed identity during its final rename".to_string(),
@@ -1099,8 +1097,8 @@ impl Core {
             let first_variant_id = detected_variants.first().map(|_| Ulid::new().to_string());
             let new_target = detected_variants
                 .first()
-                .map(|variant| witness.library_path.join(&variant.subpath))
-                .unwrap_or_else(|| witness.library_path.clone());
+                .map(|variant| witness.library_path().join(&variant.subpath))
+                .unwrap_or_else(|| witness.library_path().to_path_buf());
             if enabled {
                 if let Some(mods_dir) = mods_dir.as_ref() {
                     std::fs::create_dir_all(mods_dir).map_err(|source| Error::Io {

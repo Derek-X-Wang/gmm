@@ -2229,9 +2229,9 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
 /// to delete it, startup must continue, and the UI model must say the Mod may
 /// still be loading.
 ///
-/// Mutation oracle: propagating `withdraw_reinstall_junction` from
-/// `withdraw_quarantined_reinstall_junction` makes Core construction fail at
-/// the named startup assertion.
+/// Mutation oracle: deleting the non-link refusal in
+/// `withdraw_reinstall_junction` changes the durable withdrawal reason and
+/// fires the named user-visible evidence assertion below.
 #[tokio::test]
 async fn junction_withdrawal_failure_quarantines_as_possibly_deployed_without_aborting_startup() {
     let env = TestEnv::new();
@@ -2389,6 +2389,9 @@ async fn rebuild_retries_quarantined_reinstall_junction_withdrawal() {
 /// that the link entry disappeared. Keeping this native case in the
 /// concurrency target ensures it still runs when another boundary regression
 /// in the same suite also fails.
+///
+/// Mutation oracle: restoring the target-following `Path::exists` checks in
+/// `junction::remove` fires the named false-success assertion on Windows CI.
 #[cfg(windows)]
 #[tokio::test]
 async fn dangling_directory_symlink_cannot_survive_a_successful_quarantine_withdrawal() {

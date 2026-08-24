@@ -26,7 +26,7 @@ use sqlx::{Executor, Row, Sqlite};
 use ulid::Ulid;
 
 use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
-use super::library_identity::IdentifiedDirectory;
+use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::mods::{ReinstallRecovery, ReinstallRecoveryOutcome};
 #[cfg(not(any(windows, unix)))]
@@ -108,39 +108,121 @@ pub(super) struct StagedLibraryDirectory {
 
 #[derive(Debug, Clone)]
 pub(super) struct ReinstallSwapWitness {
-    pub(super) token: Ulid,
-    pub(super) mod_id: String,
-    pub(super) game: GameCode,
-    pub(super) library_path: PathBuf,
-    pub(super) staged_path: PathBuf,
-    pub(super) quarantine_path: PathBuf,
-    pub(super) old_identity: String,
-    pub(super) staged_identity: String,
+    token: Ulid,
+    mod_id: String,
+    game: GameCode,
+    library_path: PathBuf,
+    staged_path: PathBuf,
+    quarantine_path: PathBuf,
+    old_identity: DirectoryIdentity,
+    staged_identity: DirectoryIdentity,
 }
 
-impl ReinstallSwapWitness {
-    pub(super) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
-        let token_raw: String = row.try_get("token")?;
-        let token = Ulid::from_string(&token_raw).map_err(|_| Error::ReinstallWitnessCorrupt {
-            mod_id: row
-                .try_get("mod_id")
-                .unwrap_or_else(|_| "<unknown>".to_string()),
-            reason: format!("the swap token {token_raw:?} is not a ULID"),
-        })?;
-        let game_raw: String = row.try_get("game_code")?;
+/// The database representation is deliberately a separate type from the
+/// witness recovery is allowed to trust. The exhaustive destructure in
+/// `validate` makes adding a field to this row a compile error until its
+/// construction rule is decided; typed identities keep malformed durable keys
+/// out of every downstream filesystem classification by construction.
+struct UnvalidatedReinstallSwapWitness {
+    token: String,
+    mod_id: String,
+    game_code: String,
+    library_path: String,
+    staged_path: String,
+    quarantine_path: String,
+    old_identity: String,
+    staged_identity: String,
+}
+
+impl UnvalidatedReinstallSwapWitness {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
         Ok(Self {
-            token,
+            token: row.try_get("token")?,
             mod_id: row.try_get("mod_id")?,
-            game: GameCode::from_str(&game_raw)?,
-            library_path: PathBuf::from(row.try_get::<String, _>("library_path")?),
-            staged_path: PathBuf::from(row.try_get::<String, _>("staged_path")?),
-            quarantine_path: PathBuf::from(row.try_get::<String, _>("quarantine_path")?),
+            game_code: row.try_get("game_code")?,
+            library_path: row.try_get("library_path")?,
+            staged_path: row.try_get("staged_path")?,
+            quarantine_path: row.try_get("quarantine_path")?,
             old_identity: row.try_get("old_identity")?,
             staged_identity: row.try_get("staged_identity")?,
         })
     }
 
-    pub(super) fn validate_paths(&self) -> Result<()> {
+    fn validate(self) -> Result<ReinstallSwapWitness> {
+        let Self {
+            token,
+            mod_id,
+            game_code,
+            library_path,
+            staged_path,
+            quarantine_path,
+            old_identity,
+            staged_identity,
+        } = self;
+        let corrupt = |reason| Error::ReinstallWitnessCorrupt {
+            mod_id: mod_id.clone(),
+            reason,
+        };
+        let token = Ulid::from_string(&token)
+            .map_err(|_| corrupt(format!("the swap token {token:?} is not a ULID")))?;
+        Ulid::from_string(&mod_id)
+            .map_err(|_| corrupt(format!("the Mod ID {mod_id:?} is not a ULID")))?;
+        let game = GameCode::from_str(&game_code).map_err(|_| {
+            corrupt(format!(
+                "the recorded value {game_code:?} is an invalid game code"
+            ))
+        })?;
+        let old_identity = DirectoryIdentity::from_durable_key(&old_identity).ok_or_else(|| {
+            corrupt(format!(
+                "the old directory identity {old_identity:?} is not a canonical durable identity"
+            ))
+        })?;
+        let staged_identity = DirectoryIdentity::from_durable_key(&staged_identity).ok_or_else(|| {
+            corrupt(format!(
+                "the staged directory identity {staged_identity:?} is not a canonical durable identity"
+            ))
+        })?;
+        let witness = ReinstallSwapWitness {
+            token,
+            mod_id,
+            game,
+            library_path: PathBuf::from(library_path),
+            staged_path: PathBuf::from(staged_path),
+            quarantine_path: PathBuf::from(quarantine_path),
+            old_identity,
+            staged_identity,
+        };
+        witness.validate_paths()?;
+        Ok(witness)
+    }
+}
+
+impl ReinstallSwapWitness {
+    pub(super) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
+        UnvalidatedReinstallSwapWitness::from_row(row)?.validate()
+    }
+
+    pub(super) fn mod_id(&self) -> &str {
+        &self.mod_id
+    }
+
+    pub(super) fn library_path(&self) -> &Path {
+        &self.library_path
+    }
+
+    pub(super) fn staged_path(&self) -> &Path {
+        &self.staged_path
+    }
+
+    pub(super) fn old_identity(&self) -> &DirectoryIdentity {
+        &self.old_identity
+    }
+
+    pub(super) fn staged_identity(&self) -> &DirectoryIdentity {
+        &self.staged_identity
+    }
+
+    fn validate_paths(&self) -> Result<()> {
         let Some(root) = self.library_path.parent() else {
             return self.corrupt("the recorded live path has no Library root");
         };
@@ -713,7 +795,6 @@ impl Core {
         .fetch_one(&mut *fence.transaction)
         .await?;
         let witness = ReinstallSwapWitness::from_row(&row)?;
-        witness.validate_paths()?;
         self.rebase_reinstall_swap_witness(witness, fence).await
     }
 
@@ -839,7 +920,6 @@ impl Core {
             return Ok(None);
         };
         let witness = ReinstallSwapWitness::from_row(&row)?;
-        witness.validate_paths()?;
         self.rebase_reinstall_swap_witness(witness, fence)
             .await
             .map(Some)
@@ -1053,10 +1133,10 @@ impl Core {
 
         let old_is_live = live
             .as_ref()
-            .is_some_and(|directory| directory.identity().durable_key() == witness.old_identity);
+            .is_some_and(|directory| directory.identity() == &witness.old_identity);
         let old_is_quarantined = quarantine
             .as_ref()
-            .is_some_and(|directory| directory.identity().durable_key() == witness.old_identity);
+            .is_some_and(|directory| directory.identity() == &witness.old_identity);
         if old_is_live == old_is_quarantined {
             return witness.uncertain(if old_is_live {
                 "the old directory appears at both its live and quarantine names"
@@ -1073,7 +1153,7 @@ impl Core {
 
         if old_is_quarantined {
             if let Some(current_live) = identified_if_exists(&witness.library_path)? {
-                if current_live.identity().durable_key() != witness.staged_identity {
+                if current_live.identity() != &witness.staged_identity {
                     return witness
                         .uncertain("the live name no longer identifies the staged replacement");
                 }
@@ -1117,7 +1197,7 @@ impl Core {
         }
 
         if let Some(replacement) = identified_if_exists(&witness.staged_path)? {
-            if replacement.identity().durable_key() != witness.staged_identity {
+            if replacement.identity() != &witness.staged_identity {
                 return witness.uncertain("the staging name changed identity during rollback");
             }
             let staged_quarantine =
@@ -1527,13 +1607,15 @@ fn reject_unexpected_identity(
     witness: &ReinstallSwapWitness,
     name: &str,
     directory: Option<&IdentifiedDirectory>,
-    expected: &[&String],
+    expected: &[&DirectoryIdentity],
 ) -> Result<()> {
     let Some(directory) = directory else {
         return Ok(());
     };
-    let actual = directory.identity().durable_key();
-    if expected.iter().any(|expected| actual == expected.as_str()) {
+    if expected
+        .iter()
+        .any(|expected| directory.identity() == *expected)
+    {
         return Ok(());
     }
     witness.uncertain(format!(

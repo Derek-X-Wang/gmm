@@ -51,6 +51,19 @@ impl DirectoryIdentity {
     pub(super) fn durable_key(&self) -> String {
         format!("{:016x}:{:016x}", self.volume, self.file)
     }
+
+    /// Parse the one canonical representation persisted as durable ownership
+    /// evidence. Re-serializing after the numeric parse rejects shortened,
+    /// upper-case, over-wide, or otherwise non-canonical strings rather than
+    /// letting multiple database spellings describe one identity.
+    pub(super) fn from_durable_key(value: &str) -> Option<Self> {
+        let (volume, file) = value.split_once(':')?;
+        let identity = Self {
+            volume: u64::from_str_radix(volume, 16).ok()?,
+            file: u64::from_str_radix(file, 16).ok()?,
+        };
+        (identity.durable_key() == value).then_some(identity)
+    }
 }
 
 #[cfg(windows)]
