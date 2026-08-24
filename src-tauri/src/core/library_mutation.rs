@@ -210,8 +210,12 @@ impl Core {
         let mut fence = self
             .begin_library_mutation(LibraryMutation::SetEnabled)
             .await?;
-        ensure_mod_reinstall_is_usable(id, &mut *fence.transaction).await?;
-        self.crash_point(crash_points::SET_ENABLED_AFTER_REINSTALL_GUARD);
+        self.ensure_mod_reinstall_is_usable(
+            id,
+            &mut *fence.transaction,
+            crash_points::SET_ENABLED_AFTER_REINSTALL_GUARD,
+        )
+        .await?;
         let row =
             sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")
                 .bind(id)
@@ -259,8 +263,12 @@ impl Core {
         let mut fence = self
             .begin_library_mutation(LibraryMutation::SetActiveVariant)
             .await?;
-        ensure_mod_reinstall_is_usable(mod_id, &mut *fence.transaction).await?;
-        self.crash_point(crash_points::SET_ACTIVE_VARIANT_AFTER_REINSTALL_GUARD);
+        self.ensure_mod_reinstall_is_usable(
+            mod_id,
+            &mut *fence.transaction,
+            crash_points::SET_ACTIVE_VARIANT_AFTER_REINSTALL_GUARD,
+        )
+        .await?;
 
         // Validate the Variant belongs to this Mod before persisting it.
         sqlx::query("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
@@ -1029,25 +1037,31 @@ impl Core {
         }
         Ok(())
     }
-}
 
-pub(super) async fn ensure_mod_reinstall_is_usable<'e, E>(mod_id: &str, executor: E) -> Result<()>
-where
-    E: Executor<'e, Database = Sqlite>,
-{
-    let quarantined = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM reinstall_swaps
-         WHERE mod_id = ? AND recovery_error IS NOT NULL",
-    )
-    .bind(mod_id)
-    .fetch_one(executor)
-    .await?;
-    if quarantined != 0 {
-        return Err(Error::ReinstallRecoveryQuarantined {
-            mod_id: mod_id.to_string(),
-        });
+    async fn ensure_mod_reinstall_is_usable<'e, E>(
+        &self,
+        mod_id: &str,
+        executor: E,
+        checked_at: &'static str,
+    ) -> Result<()>
+    where
+        E: Executor<'e, Database = Sqlite>,
+    {
+        let quarantined = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM reinstall_swaps
+             WHERE mod_id = ? AND recovery_error IS NOT NULL",
+        )
+        .bind(mod_id)
+        .fetch_one(executor)
+        .await?;
+        self.crash_point(checked_at);
+        if quarantined != 0 {
+            return Err(Error::ReinstallRecoveryQuarantined {
+                mod_id: mod_id.to_string(),
+            });
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn reinstall_recovery_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ReinstallRecovery> {
