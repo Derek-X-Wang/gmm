@@ -95,6 +95,12 @@ pub const SET_ACTIVE_VARIANT_AFTER_DB_UPDATE: &str = "set_active_variant.after_d
 pub const SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE: &str =
     "set_active_variant.after_junction_remove";
 
+/// `resolve_duplicate_mods`: one rejected Mod's Junction was withdrawn, but
+/// the row transaction is still open. Tests can recreate the entry here to
+/// prove the post-withdrawal verification refuses row deletion.
+pub const RESOLVE_DUPLICATES_AFTER_JUNCTION_WITHDRAWAL: &str =
+    "resolve_duplicates.after_junction_withdrawal";
+
 /// `adopt_folder`: the Library copy exists, no row references it. Leaves
 /// an orphaned Library directory — see the module docs in
 /// `tests/crash_recovery.rs` for why this is reported rather than

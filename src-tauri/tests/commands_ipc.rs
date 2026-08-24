@@ -31,16 +31,6 @@ use gmm_lib::commands::{
     RecoverLibraryDirArgs, ResolveDuplicateModsArgs, NO_INSTALL_PATH_FOR_ENABLE_MSG,
 };
 use gmm_lib::core::conflicts::ConflictReport;
-use gmm_lib::core::error::{
-    DUPLICATE_RESOLUTION_CHANGED_PREFIX, DUPLICATE_RESOLUTION_INSTALL_PATH_GUIDANCE,
-    DUPLICATE_RESOLUTION_INSTALL_PATH_PREFIX, DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_GUIDANCE,
-    DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_PREFIX,
-    DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_GUIDANCE,
-    DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_PREFIX,
-    DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_GUIDANCE, DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_PREFIX,
-    DUPLICATE_RESOLUTION_REINSTALL_GUIDANCE, DUPLICATE_RESOLUTION_REINSTALL_PREFIX,
-    DUPLICATE_RESOLUTION_REVIEW_AGAIN,
-};
 use gmm_lib::core::games::GAME_PROFILES;
 use gmm_lib::core::importer::AssetPattern;
 use gmm_lib::core::reconcile::ReconcileResult;
@@ -368,32 +358,26 @@ fn duplicate_resolution_error_copy_is_stable() {
     let cases = [
         (
             Error::DuplicateModResolutionChanged { reason: "records changed".into() },
-            format!(
-                "{DUPLICATE_RESOLUTION_CHANGED_PREFIX} records changed. {DUPLICATE_RESOLUTION_REVIEW_AGAIN}"
-            ),
+            "GMM could not resolve these duplicate Mod records because the report is no longer current: records changed. Refresh the Library audit and review every record again.".to_string(),
         ),
         (
             Error::DuplicateModResolutionBlockedByReinstall { mod_id: "01MOD".into() },
-            format!(
-                "{DUPLICATE_RESOLUTION_REINSTALL_PREFIX} Mod ID: 01MOD. {DUPLICATE_RESOLUTION_REINSTALL_GUIDANCE}"
-            ),
+            "GMM cannot discard the duplicate Mod while it has an unfinished update. Mod ID: 01MOD. Let that update settle first; if the Mod shows a recovery warning, use Retry recovery, then review the duplicate records again. No Mod record, Variant, Junction, or Library byte was changed.".to_string(),
         ),
         (
             Error::DuplicateModInstallPathMissing { mod_id: "01MOD".into(), game: "gimi".into() },
-            format!(
-                "{DUPLICATE_RESOLUTION_INSTALL_PATH_PREFIX} Mod ID: 01MOD; game: gimi. {DUPLICATE_RESOLUTION_INSTALL_PATH_GUIDANCE}"
-            ),
+            "GMM cannot discard the enabled duplicate Mod because its game install path is not set, so GMM cannot locate its deployment Junction. Mod ID: 01MOD; game: gimi. Set the game install path, then review the duplicate records again.".to_string(),
         ),
         (
             Error::DuplicateModJunctionConflict { mod_id: "01MOD".into(), path: path.clone() },
             format!(
-                "{DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_PREFIX} Mod ID: 01MOD; path: {path:?}. {DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_GUIDANCE}"
+                "GMM cannot discard the duplicate Mod because its deployment path is not a Junction into that Mod's Library directory. Mod ID: 01MOD; path: {path:?}. GMM left every duplicate record intact."
             ),
         ),
         (
             Error::DuplicateModJunctionStillPresent { mod_id: "01MOD".into(), path: path.clone() },
             format!(
-                "{DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_PREFIX} Mod ID: 01MOD; path: {path:?}. {DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_GUIDANCE}"
+                "GMM tried to withdraw the duplicate Mod's deployment Junction, but the path is still present. Mod ID: 01MOD; path: {path:?}. GMM left every duplicate record intact."
             ),
         ),
         (
@@ -403,7 +387,7 @@ fn duplicate_resolution_error_copy_is_stable() {
                 path: path.clone(),
             },
             format!(
-                "{DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_PREFIX} Rejected Mod ID: 01DROP; surviving Mod ID: 01KEEP; path: {path:?}. {DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_GUIDANCE}"
+                "GMM cannot discard the duplicate Mod because its deployment path is also claimed by a surviving Mod. Rejected Mod ID: 01DROP; surviving Mod ID: 01KEEP; path: {path:?}. GMM left every duplicate record and Junction intact."
             ),
         ),
     ];

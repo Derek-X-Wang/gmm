@@ -28,10 +28,12 @@ use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, Revi
 use super::library_identity::IdentifiedDirectory;
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::mods::{ReinstallRecovery, ReinstallRecoveryOutcome};
+#[cfg(not(windows))]
+use super::same_path;
 use super::settings::{get as get_setting, keys};
 use super::{
-    crash_points, junction, link_exists, path_within, resolve_link, same_path, volume, Core, Error,
-    GameCode, Result,
+    crash_points, junction, link_exists, path_within, resolve_link, volume, Core, Error, GameCode,
+    Result,
 };
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
@@ -348,18 +350,17 @@ impl Core {
             let link = PathBuf::from(install_path)
                 .join("Mods")
                 .join(row.try_get::<String, _>("junction_dir_name")?);
-            if let Some((surviving_mod_id, _)) = surviving_junctions
-                .iter()
-                .find(|(_, surviving_link)| same_physical_link_path(&link, surviving_link))
-            {
-                return Err(Error::DuplicateModJunctionClaimedBySurvivor {
-                    mod_id,
-                    surviving_mod_id: surviving_mod_id.clone(),
-                    path: link,
-                });
-            }
             if !link_exists(&link) {
                 continue;
+            }
+            for (surviving_mod_id, surviving_link) in &surviving_junctions {
+                if same_physical_link_path(&link, surviving_link)? {
+                    return Err(Error::DuplicateModJunctionClaimedBySurvivor {
+                        mod_id,
+                        surviving_mod_id: surviving_mod_id.clone(),
+                        path: link,
+                    });
+                }
             }
             let actual =
                 resolve_link(&link).ok_or_else(|| Error::DuplicateModJunctionConflict {
@@ -382,6 +383,7 @@ impl Core {
         // ordinary reconcile can recreate any already-withdrawn enabled link.
         for (mod_id, link) in &junctions {
             withdraw_reinstall_junction(link)?;
+            self.crash_point(crash_points::RESOLVE_DUPLICATES_AFTER_JUNCTION_WITHDRAWAL);
             if link_exists(link) {
                 return Err(Error::DuplicateModJunctionStillPresent {
                     mod_id: mod_id.clone(),
@@ -1348,25 +1350,32 @@ fn reject_unexpected_identity(
 /// Compare deployment entry paths without resolving the final Junction.
 /// Resolving the whole path would compare targets and falsely conflate two
 /// distinct Junction names that happen to deploy the same duplicate bytes.
-fn same_physical_link_path(left: &Path, right: &Path) -> bool {
-    let (Some(left_parent), Some(right_parent)) = (left.parent(), right.parent()) else {
-        return false;
-    };
-    if !same_path(left_parent, right_parent) {
-        return false;
-    }
-    let (Some(left_name), Some(right_name)) = (left.file_name(), right.file_name()) else {
-        return false;
-    };
+fn same_physical_link_path(left: &Path, right: &Path) -> Result<bool> {
     #[cfg(windows)]
     {
-        left_name
-            .to_string_lossy()
-            .eq_ignore_ascii_case(&right_name.to_string_lossy())
+        // These handles deliberately retain FILE_FLAG_OPEN_REPARSE_POINT via
+        // IdentifiedDirectory, so the identity belongs to each Junction entry
+        // rather than to the duplicate Library directory both entries target.
+        let Some(left) = identified_if_exists(left)? else {
+            return Ok(false);
+        };
+        let Some(right) = identified_if_exists(right)? else {
+            return Ok(false);
+        };
+        Ok(left.identity() == right.identity())
     }
     #[cfg(not(windows))]
     {
-        left_name == right_name
+        let (Some(left_parent), Some(right_parent)) = (left.parent(), right.parent()) else {
+            return Ok(false);
+        };
+        if !same_path(left_parent, right_parent) {
+            return Ok(false);
+        }
+        let (Some(left_name), Some(right_name)) = (left.file_name(), right.file_name()) else {
+            return Ok(false);
+        };
+        Ok(left_name == right_name)
     }
 }
 

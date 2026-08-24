@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
 
 use gmm_lib::core::{junction, Core, Error, GameCode, ReviewedDuplicateMod, Source};
+use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use ulid::Ulid;
 
@@ -578,6 +579,37 @@ async fn audit_surfaces_every_informed_duplicate_choice_without_mutating_it() {
 }
 
 #[tokio::test]
+async fn duplicate_fingerprint_covers_every_rendered_review_field() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let report = fixture
+        .core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit duplicates");
+    let record = report.duplicates[0]
+        .mods
+        .iter()
+        .find(|record| record.id == fixture.duplicate_id)
+        .expect("rendered duplicate record");
+    let mut rendered = serde_json::to_value(record).expect("serialise rendered record");
+    let fingerprint = rendered
+        .as_object_mut()
+        .expect("rendered record is an object")
+        .remove("fingerprint")
+        .expect("rendered record includes its fingerprint");
+    let expected = hex::encode(Sha256::digest(
+        serde_json::to_vec(&rendered).expect("encode rendered review state"),
+    ));
+
+    assert_eq!(
+        fingerprint.as_str(),
+        Some(expected.as_str()),
+        "the fingerprint must cover the complete rendered review state",
+    );
+}
+
+#[tokio::test]
 async fn explicit_duplicate_resolution_keeps_shared_bytes_and_withdraws_the_rejected_junction() {
     let tmp = TempDir::new().expect("tmp");
     let fixture = duplicate_fixture(&tmp).await;
@@ -864,6 +896,75 @@ async fn duplicate_resolution_refuses_a_junction_path_claimed_by_the_keeper() {
     assert_eq!(rows, 2);
 }
 
+#[tokio::test]
+async fn duplicate_resolution_refuses_a_junction_path_claimed_outside_the_reviewed_group() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let outside_source = tmp.path().join("outside-survivor-source");
+    fs::create_dir(&outside_source).expect("outside survivor source");
+    fs::write(outside_source.join("outside.ini"), b"outside").expect("outside bytes");
+    let outside = fixture
+        .core
+        .adopt_folder(GameCode::Srmi, &outside_source, "Outside Survivor")
+        .await
+        .expect("adopt survivor outside the reviewed duplicate group");
+    let install = fixture
+        .duplicate_junction
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("game install");
+    fixture
+        .core
+        .set_game_install_path(GameCode::Srmi, install)
+        .await
+        .expect("share one install path across games");
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+        .await
+        .expect("open duplicate DB");
+    sqlx::query("UPDATE mods SET junction_dir_name = ? WHERE id = ?")
+        .bind(
+            fixture
+                .duplicate_junction
+                .file_name()
+                .expect("rejected Junction leaf")
+                .to_string_lossy()
+                .as_ref(),
+        )
+        .bind(&outside.id)
+        .execute(&pool)
+        .await
+        .expect("claim the reviewed group's Junction from an outside Mod");
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(Error::DuplicateModJunctionClaimedBySurvivor {
+                ref mod_id,
+                ref surviving_mod_id,
+                ..
+            }) if mod_id == &fixture.duplicate_id && surviving_mod_id == &outside.id
+        ),
+        "a survivor outside the reviewed group must protect its Junction, got {result:?}",
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "the outside survivor's physical Junction remains",
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .bind(&outside.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count every record after outside-survivor refusal");
+    assert_eq!(rows, 3, "every record survives refusal");
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn duplicate_resolution_refuses_a_survivor_claiming_the_junction_by_its_short_name() {
@@ -1102,4 +1203,48 @@ async fn duplicate_resolution_preflights_every_junction_before_withdrawing_any()
         .await
         .unwrap();
     assert_eq!(rows, 3, "multi-Junction refusal preserves every record");
+}
+
+#[tokio::test]
+async fn duplicate_resolution_refuses_when_a_withdrawn_junction_is_still_present() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let link = fixture.duplicate_junction.clone();
+    let target = fixture.library_path.join("Amber");
+    let hooked = fixture
+        .core
+        .clone()
+        .with_crash_hook(std::sync::Arc::new(move |point| {
+            if point == gmm_lib::core::crash_points::RESOLVE_DUPLICATES_AFTER_JUNCTION_WITHDRAWAL {
+                junction::create(&link, &target)
+                    .expect("recreate the Junction at the post-withdrawal test seam");
+            }
+        }));
+
+    let result = hooked
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(Error::DuplicateModJunctionStillPresent { ref mod_id, .. })
+                if mod_id == &fixture.duplicate_id
+        ),
+        "a deployment entry still present after withdrawal must refuse row deletion, got {result:?}",
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "the still-present Junction remains visible for recovery",
+    );
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+        .await
+        .expect("open duplicate DB after post-withdrawal refusal");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count records after post-withdrawal refusal");
+    assert_eq!(rows, 2, "both reviewed records survive refusal");
 }

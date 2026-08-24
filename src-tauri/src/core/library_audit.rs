@@ -303,49 +303,19 @@ where
 }
 
 fn duplicate_mod_fingerprint(record: &DuplicateModRecord) -> String {
-    // Struct field order and Vec order are stable here; the query orders
-    // Variants by name, and IDs break any otherwise indistinguishable entry.
-    // The fingerprint itself is deliberately opaque to the frontend.
-    #[derive(Serialize)]
-    struct ReviewedFields<'a> {
-        id: &'a str,
-        game: GameCode,
-        name: &'a str,
-        source: Source,
-        library_path: &'a Path,
-        junction_dir_name: &'a str,
-        enabled: bool,
-        created_at: &'a str,
-        gamebanana_id: Option<u64>,
-        source_url: &'a Option<String>,
-        author: &'a Option<String>,
-        version: &'a Option<String>,
-        upstream_version: &'a Option<String>,
-        update_check_enabled: bool,
-        screenshot_url: &'a Option<String>,
-        variants: &'a [DuplicateModVariant],
-        reinstall_in_progress: bool,
-    }
-    let reviewed_fields = ReviewedFields {
-        id: &record.id,
-        game: record.game,
-        name: &record.name,
-        source: record.source,
-        library_path: &record.library_path,
-        junction_dir_name: &record.junction_dir_name,
-        enabled: record.enabled,
-        created_at: &record.created_at,
-        gamebanana_id: record.gamebanana_id,
-        source_url: &record.source_url,
-        author: &record.author,
-        version: &record.version,
-        upstream_version: &record.upstream_version,
-        update_check_enabled: record.update_check_enabled,
-        screenshot_url: &record.screenshot_url,
-        variants: &record.variants,
-        reinstall_in_progress: record.reinstall_in_progress,
-    };
-    let encoded = serde_json::to_vec(&reviewed_fields)
+    // Hash the same serialised definition the review UI receives, less the
+    // opaque digest itself. A newly rendered field therefore joins the digest
+    // automatically instead of requiring a second hand-maintained schema.
+    // Vec order is stable because the query orders Variants by name and their
+    // IDs break otherwise indistinguishable entries.
+    let mut reviewed =
+        serde_json::to_value(record).expect("duplicate review fields are always JSON serialisable");
+    reviewed
+        .as_object_mut()
+        .expect("DuplicateModRecord serialises as an object")
+        .remove("fingerprint")
+        .expect("DuplicateModRecord always serialises its fingerprint");
+    let encoded = serde_json::to_vec(&reviewed)
         .expect("duplicate review fields are always JSON serialisable");
     hex::encode(Sha256::digest(encoded))
 }
