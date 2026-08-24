@@ -204,14 +204,62 @@ export interface UnreferencedLibraryDir {
   sizeBytes: number | null;
 }
 
+export interface DuplicateModVariant {
+  id: string;
+  name: string;
+  subpath: string;
+  active: boolean;
+}
+
+export interface DuplicateModRecord {
+  id: string;
+  game: GameCode;
+  name: string;
+  source: Source;
+  libraryPath: string;
+  junctionDirName: string;
+  enabled: boolean;
+  createdAt: string;
+  gamebananaId: number | null;
+  sourceUrl: string | null;
+  author: string | null;
+  version: string | null;
+  upstreamVersion: string | null;
+  updateCheckEnabled: boolean;
+  screenshotUrl: string | null;
+  variants: DuplicateModVariant[];
+  reinstallInProgress: boolean;
+  fingerprint: string;
+}
+
+export interface DuplicateModGroup {
+  path: string;
+  mods: DuplicateModRecord[];
+}
+
+export interface DuplicateResolution {
+  keeperId: string;
+  removedModIds: string[];
+}
+
 export interface LibraryAuditReport {
   game: GameCode;
   unreferenced: UnreferencedLibraryDir[];
+  duplicates: DuplicateModGroup[];
   totalBytes: number;
 }
 
 export async function auditLibrary(game: GameCode): Promise<LibraryAuditReport> {
   return invoke<LibraryAuditReport>("audit_library", { game });
+}
+
+export async function resolveDuplicateMods(
+  keeperId: string,
+  reviewedMods: Array<{ id: string; fingerprint: string }>,
+): Promise<DuplicateResolution> {
+  return invoke<DuplicateResolution>("resolve_duplicate_mods", {
+    args: { keeperId, reviewedMods },
+  });
 }
 
 export interface DeletedLibraryDir {

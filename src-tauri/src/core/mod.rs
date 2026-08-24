@@ -43,7 +43,10 @@ use ulid::Ulid;
 
 pub use error::{Error, Result};
 pub use games::GameCode;
-pub use library_audit::{LibraryAuditReport, UnreferencedLibraryDir};
+pub use library_audit::{
+    DuplicateModGroup, DuplicateModRecord, DuplicateModVariant, DuplicateResolution,
+    LibraryAuditReport, ReviewedDuplicateMod, UnreferencedLibraryDir,
+};
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
 pub use session::SessionInfo;
@@ -451,7 +454,7 @@ impl Core {
                     .await?;
                 let junction_dir_name: String = junction_row.try_get("junction_dir_name")?;
                 let link = mods_dir.join(junction_dir_name);
-                if link_exists(&link) {
+                if link_exists(&link)? {
                     let _ = junction::remove(&link);
                 }
             }
@@ -1128,7 +1131,7 @@ impl Core {
                         source,
                     })?;
                     let link = mods_dir.join(&junction_dir_name);
-                    if link_exists(&link) {
+                    if link_exists(&link)? {
                         junction::remove(&link)?;
                     }
                     volume::require_ntfs_pair(mods_dir, &new_target)?;
@@ -3052,7 +3055,7 @@ impl Core {
             // instance, a race (#58). Left alone, the Model Importer
             // keeps loading a Mod the UI says is off.
             if enabled == 0 {
-                if !link_exists(&link) {
+                if !link_exists(&link)? {
                     result.skipped.push(id);
                     continue;
                 }
@@ -3075,7 +3078,7 @@ impl Core {
                 continue;
             }
 
-            if !link_exists(&link) {
+            if !link_exists(&link)? {
                 volume::require_ntfs_pair(game_mods_dir, &expected_target)?;
                 junction::create(&link, &expected_target)?;
                 result.recreated.push(id);
@@ -3202,7 +3205,7 @@ impl Core {
 
             // Always drop the existing link first; if the user relocated
             // the Library, the old link would resolve to thin air.
-            let had_link = link_exists(&link);
+            let had_link = link_exists(&link)?;
             if had_link {
                 let _ = junction::remove(&link);
             }
@@ -3515,11 +3518,19 @@ fn remove_reinstall_stage_if_identity_matches(path: &Path, expected: &str) -> Re
     })
 }
 
-/// Does the path exist as a symlink/junction? `Path::exists` follows
-/// the link; we want "the link entry itself is there", which is what
-/// `symlink_metadata` returns.
-fn link_exists(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok()
+/// Does the path exist as a symlink/junction? `Path::exists` follows the
+/// link; we want "the link entry itself is there", which is what
+/// `symlink_metadata` returns. Only `NotFound` proves absence: an unreadable
+/// deployment entry must not be treated as safe to replace or already gone.
+fn link_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// Resolve the target of a junction/symlink. Returns `None` if `path`

@@ -1293,6 +1293,57 @@ async fn every_crash_point_is_exercised_by_an_operation() {
         .await
         .expect("coverage relocation");
 
+    // Resolving a duplicate drives the seam between Junction withdrawal and
+    // the verification that the deployment entry is truly gone.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let keeper = seed_mod(&env, &core, "Coverage Duplicate Keeper").await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("coverage game install root"),
+    )
+    .await
+    .expect("coverage duplicate game install path");
+    let duplicate_id = ulid::Ulid::new().to_string();
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("coverage duplicate DB");
+    sqlx::query(
+        "INSERT INTO mods (
+            id, game_code, name, source, library_path, junction_dir_name,
+            enabled, created_at
+         ) VALUES (?, 'gimi', 'Coverage Duplicate Rejected', 'manual', ?,
+                   'Coverage Duplicate Rejected', 0, ?)",
+    )
+    .bind(&duplicate_id)
+    .bind(keeper.library_path.to_string_lossy().as_ref())
+    .bind("2026-08-24T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert coverage duplicate row");
+    core.set_enabled(&duplicate_id, true, &env.game_mods)
+        .await
+        .expect("enable coverage duplicate");
+    let group = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit coverage duplicate")
+        .duplicates
+        .into_iter()
+        .find(|group| group.mods.iter().any(|record| record.id == keeper.id))
+        .expect("coverage duplicate group");
+    let reviewed: Vec<_> = group
+        .mods
+        .into_iter()
+        .map(|record| gmm_lib::core::ReviewedDuplicateMod {
+            id: record.id,
+            fingerprint: record.fingerprint,
+        })
+        .collect();
+    core.resolve_duplicate_mods(&keeper.id, &reviewed)
+        .await
+        .expect("coverage duplicate resolution");
+
     // Recovery of a non-ULID directory and explicit deletion reach the two
     // remaining Library-recovery paths.
     let env = TestEnv::new();

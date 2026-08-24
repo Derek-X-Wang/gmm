@@ -239,6 +239,48 @@ code {
   gap: 0.4rem;
 }
 
+.duplicate-mod-report {
+  display: grid;
+  gap: 0.45rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid #92400e;
+}
+
+.duplicate-mod-record {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.45rem 0;
+  padding: 0.55rem;
+  border: 1px solid #6b4f2a;
+  border-radius: 6px;
+  background: #221d18;
+}
+
+.duplicate-mod-details {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0;
+}
+
+.duplicate-mod-details > div {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) minmax(0, 1fr);
+  gap: 0.45rem;
+}
+
+.duplicate-mod-details dt {
+  color: #d1a45b;
+}
+
+.duplicate-mod-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.duplicate-mod-details ul {
+  padding-left: 1rem;
+}
+
 .library-audit-warning [role="alertdialog"] p {
   flex-basis: 100%;
 }

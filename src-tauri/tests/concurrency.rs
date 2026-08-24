@@ -2703,6 +2703,7 @@ fn public_async_function<'a>(source: &'a str, function: &str) -> &'a str {
     let rest = &source[start + signature.len()..];
     let end = rest
         .find("\n    pub async fn ")
+        .or_else(|| rest.find("\n    pub(super) async fn "))
         .or_else(|| rest.find("\n    async fn "))
         .or_else(|| rest.find("\n}"))
         .unwrap_or(rest.len());
@@ -2770,6 +2771,14 @@ fn current_known_library_content_mutations_declare_their_fence_policy() {
             &[
                 "begin_guarded_library_mutation",
                 "LibraryMutation::DeleteUnreferencedLibraryDir",
+            ],
+        ),
+        (
+            "resolve_duplicate_mods",
+            &[
+                "begin_library_mutation",
+                "LibraryMutation::ResolveDuplicateMods",
+                "withdraw_reinstall_junction",
             ],
         ),
         (

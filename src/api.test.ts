@@ -9,6 +9,7 @@ const {
   importGamebanana,
   importZip,
   recoverUnreferencedLibraryDir,
+  resolveDuplicateMods,
   retryReinstallRecovery,
   setProxyConfig,
 } = await import("./api");
@@ -72,6 +73,23 @@ it.each([
         game: "gimi",
         path: "C:\\GMM\\orphan",
         name: "Recovered",
+      },
+    },
+  ],
+  [
+    "resolveDuplicateMods",
+    () => resolveDuplicateMods("01KEEPER", [
+      { id: "01KEEPER", fingerprint: "keeper-fingerprint" },
+      { id: "01REJECTED", fingerprint: "rejected-fingerprint" },
+    ]),
+    "resolve_duplicate_mods",
+    {
+      args: {
+        keeperId: "01KEEPER",
+        reviewedMods: [
+          { id: "01KEEPER", fingerprint: "keeper-fingerprint" },
+          { id: "01REJECTED", fingerprint: "rejected-fingerprint" },
+        ],
       },
     },
   ],

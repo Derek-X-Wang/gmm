@@ -179,6 +179,7 @@ pub fn run() {
             commands::rebuild_junctions,
             commands::get_library_paths,
             commands::audit_library,
+            commands::resolve_duplicate_mods,
             commands::reveal_unreferenced_library_dir,
             commands::recover_unreferenced_library_dir,
             commands::delete_unreferenced_library_dir,
