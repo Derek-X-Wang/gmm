@@ -16,6 +16,31 @@ pub const SET_AN_ORIGIN_HINT: &str =
     "Set one under Model Importer → Importer Origin, or switch the game to a \
      package you choose yourself.";
 
+pub const DUPLICATE_RESOLUTION_CHANGED_PREFIX: &str =
+    "GMM could not resolve these duplicate Mod records because the report is no longer current:";
+pub const DUPLICATE_RESOLUTION_REVIEW_AGAIN: &str =
+    "Refresh the Library audit and review every record again.";
+pub const DUPLICATE_RESOLUTION_REINSTALL_PREFIX: &str =
+    "GMM cannot discard the duplicate Mod while it has an unfinished update.";
+pub const DUPLICATE_RESOLUTION_REINSTALL_GUIDANCE: &str =
+    "Let that update settle first; if the Mod shows a recovery warning, use Retry recovery, then review the duplicate records again. No Mod record, Variant, Junction, or Library byte was changed.";
+pub const DUPLICATE_RESOLUTION_INSTALL_PATH_PREFIX: &str =
+    "GMM cannot discard the enabled duplicate Mod because its game install path is not set, so GMM cannot locate its deployment Junction.";
+pub const DUPLICATE_RESOLUTION_INSTALL_PATH_GUIDANCE: &str =
+    "Set the game install path, then review the duplicate records again.";
+pub const DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_PREFIX: &str =
+    "GMM cannot discard the duplicate Mod because its deployment path is not a Junction into that Mod's Library directory.";
+pub const DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_GUIDANCE: &str =
+    "GMM left every duplicate record intact.";
+pub const DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_PREFIX: &str =
+    "GMM tried to withdraw the duplicate Mod's deployment Junction, but the path is still present.";
+pub const DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_GUIDANCE: &str =
+    "GMM left every duplicate record intact.";
+pub const DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_PREFIX: &str =
+    "GMM cannot discard the duplicate Mod because its deployment path is also claimed by a surviving Mod.";
+pub const DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_GUIDANCE: &str =
+    "GMM left every duplicate record and Junction intact.";
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("database error: {0}")]
@@ -250,33 +275,48 @@ pub enum Error {
     NotAnUnreferencedLibraryDir { path: PathBuf, reason: String },
 
     #[error(
-        "GMM could not resolve these duplicate Mod records because the report is no longer current: \
-         {reason}. Refresh the Library audit and review every record again."
+        "{prefix} {reason}. {guidance}",
+        prefix = DUPLICATE_RESOLUTION_CHANGED_PREFIX,
+        guidance = DUPLICATE_RESOLUTION_REVIEW_AGAIN
     )]
     DuplicateModResolutionChanged { reason: String },
 
     #[error(
-        "GMM cannot discard duplicate Mod {mod_id} while it has an unfinished update. \
-         Let that update settle first; if the Mod shows a recovery warning, use Retry recovery, \
-         then review the duplicate records again. No Mod record, Variant, Junction, or Library byte was changed."
+        "{prefix} Mod ID: {mod_id}. {guidance}",
+        prefix = DUPLICATE_RESOLUTION_REINSTALL_PREFIX,
+        guidance = DUPLICATE_RESOLUTION_REINSTALL_GUIDANCE
     )]
     DuplicateModResolutionBlockedByReinstall { mod_id: String },
 
     #[error(
-        "GMM cannot discard enabled duplicate Mod {mod_id} because its {game} install path is not set, \
-         so GMM cannot locate its deployment Junction. Set the game install path, then review the duplicate records again."
+        "{prefix} Mod ID: {mod_id}; game: {game}. {guidance}",
+        prefix = DUPLICATE_RESOLUTION_INSTALL_PATH_PREFIX,
+        guidance = DUPLICATE_RESOLUTION_INSTALL_PATH_GUIDANCE
     )]
     DuplicateModInstallPathMissing { mod_id: String, game: String },
 
     #[error(
-        "GMM cannot discard duplicate Mod {mod_id} because its deployment path {path:?} is not a \
-         Junction into that Mod's Library directory. GMM left every duplicate record intact."
+        "{prefix} Mod ID: {mod_id}; path: {path:?}. {guidance}",
+        prefix = DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_PREFIX,
+        guidance = DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_GUIDANCE
     )]
     DuplicateModJunctionConflict { mod_id: String, path: PathBuf },
 
     #[error(
-        "GMM tried to withdraw duplicate Mod {mod_id}'s deployment Junction at {path:?}, but the \
-         path is still present. GMM left every duplicate record intact."
+        "{prefix} Rejected Mod ID: {mod_id}; surviving Mod ID: {surviving_mod_id}; path: {path:?}. {guidance}",
+        prefix = DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_PREFIX,
+        guidance = DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_GUIDANCE
+    )]
+    DuplicateModJunctionClaimedBySurvivor {
+        mod_id: String,
+        surviving_mod_id: String,
+        path: PathBuf,
+    },
+
+    #[error(
+        "{prefix} Mod ID: {mod_id}; path: {path:?}. {guidance}",
+        prefix = DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_PREFIX,
+        guidance = DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_GUIDANCE
     )]
     DuplicateModJunctionStillPresent { mod_id: String, path: PathBuf },
 

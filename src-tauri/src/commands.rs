@@ -24,7 +24,7 @@ use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
     Core, DeletedLibraryDir, DuplicateResolution, GameCode, ImportZipOptions, LibraryAuditReport,
-    Mod, MoveReport, ReinstallRecoveryOutcome, SessionInfo,
+    Mod, MoveReport, ReinstallRecoveryOutcome, ReviewedDuplicateMod, SessionInfo,
 };
 use crate::runtime::launch::{self, LaunchOptions};
 use crate::runtime::SessionRuntime;
@@ -261,7 +261,7 @@ pub async fn audit_library(
 #[serde(rename_all = "camelCase")]
 pub struct ResolveDuplicateModsArgs {
     pub keeper_id: String,
-    pub reviewed_mod_ids: Vec<String>,
+    pub reviewed_mods: Vec<ReviewedDuplicateMod>,
 }
 
 /// Discard only the duplicate Mod records the user reviewed and rejected.
@@ -270,7 +270,7 @@ pub async fn resolve_duplicate_mods(
     core: State<'_, Core>,
     args: ResolveDuplicateModsArgs,
 ) -> Result<DuplicateResolution, String> {
-    core.resolve_duplicate_mods(&args.keeper_id, &args.reviewed_mod_ids)
+    core.resolve_duplicate_mods(&args.keeper_id, &args.reviewed_mods)
         .await
         .map_err(|e| e.to_string())
 }

@@ -2703,6 +2703,7 @@ fn public_async_function<'a>(source: &'a str, function: &str) -> &'a str {
     let rest = &source[start + signature.len()..];
     let end = rest
         .find("\n    pub async fn ")
+        .or_else(|| rest.find("\n    pub(super) async fn "))
         .or_else(|| rest.find("\n    async fn "))
         .or_else(|| rest.find("\n}"))
         .unwrap_or(rest.len());

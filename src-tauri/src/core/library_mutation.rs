@@ -15,7 +15,7 @@
 //! Active-Variant retargeting uses the same fence so recovery quarantine and
 //! Variant deployment cannot pass one another after either operation's guard.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,14 +24,14 @@ use std::str::FromStr;
 use sqlx::{Executor, Row, Sqlite};
 use ulid::Ulid;
 
-use super::library_audit::DuplicateResolution;
+use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
 use super::library_identity::IdentifiedDirectory;
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::mods::{ReinstallRecovery, ReinstallRecoveryOutcome};
 use super::settings::{get as get_setting, keys};
 use super::{
-    crash_points, junction, link_exists, path_within, resolve_link, volume, Core, Error, GameCode,
-    Result,
+    crash_points, junction, link_exists, path_within, resolve_link, same_path, volume, Core, Error,
+    GameCode, Result,
 };
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
@@ -216,10 +216,14 @@ impl Core {
     pub async fn resolve_duplicate_mods(
         &self,
         keeper_id: &str,
-        reviewed_mod_ids: &[String],
+        reviewed_mods: &[ReviewedDuplicateMod],
     ) -> Result<DuplicateResolution> {
-        let reviewed: HashSet<_> = reviewed_mod_ids.iter().cloned().collect();
-        if reviewed.len() < 2 || reviewed.len() != reviewed_mod_ids.len() {
+        let reviewed_fingerprints: HashMap<_, _> = reviewed_mods
+            .iter()
+            .map(|record| (record.id.clone(), record.fingerprint.clone()))
+            .collect();
+        let reviewed: HashSet<_> = reviewed_fingerprints.keys().cloned().collect();
+        if reviewed.len() < 2 || reviewed.len() != reviewed_mods.len() {
             return Err(Error::DuplicateModResolutionChanged {
                 reason: "the reviewed record list is incomplete or contains the same record twice"
                     .to_string(),
@@ -272,6 +276,18 @@ impl Core {
             }
         }
 
+        let current_records =
+            load_duplicate_mod_records(&mut *fence.transaction, &reviewed).await?;
+        if current_records.len() != reviewed.len()
+            || current_records
+                .iter()
+                .any(|(id, record)| reviewed_fingerprints.get(id) != Some(&record.fingerprint))
+        {
+            return Err(Error::DuplicateModResolutionChanged {
+                reason: "one or more reviewed records changed after the audit".to_string(),
+            });
+        }
+
         let rows = sqlx::query(
             "SELECT m.id, m.game_code, m.library_path, m.junction_dir_name,
                     m.enabled, g.install_path
@@ -279,6 +295,22 @@ impl Core {
         )
         .fetch_all(&mut *fence.transaction)
         .await?;
+        let mut surviving_junctions = Vec::new();
+        for row in &rows {
+            let mod_id: String = row.try_get("id")?;
+            if reviewed.contains(&mod_id) && mod_id != keeper_id {
+                continue;
+            }
+            let Some(install_path) = row.try_get::<Option<String>, _>("install_path")? else {
+                continue;
+            };
+            surviving_junctions.push((
+                mod_id,
+                PathBuf::from(install_path)
+                    .join("Mods")
+                    .join(row.try_get::<String, _>("junction_dir_name")?),
+            ));
+        }
         let mut seen = HashSet::new();
         let mut junctions = Vec::new();
         for row in rows {
@@ -316,6 +348,16 @@ impl Core {
             let link = PathBuf::from(install_path)
                 .join("Mods")
                 .join(row.try_get::<String, _>("junction_dir_name")?);
+            if let Some((surviving_mod_id, _)) = surviving_junctions
+                .iter()
+                .find(|(_, surviving_link)| same_physical_link_path(&link, surviving_link))
+            {
+                return Err(Error::DuplicateModJunctionClaimedBySurvivor {
+                    mod_id,
+                    surviving_mod_id: surviving_mod_id.clone(),
+                    path: link,
+                });
+            }
             if !link_exists(&link) {
                 continue;
             }
@@ -1301,6 +1343,31 @@ fn reject_unexpected_identity(
     witness.uncertain(format!(
         "the recorded {name} path identifies an unrelated directory"
     ))
+}
+
+/// Compare deployment entry paths without resolving the final Junction.
+/// Resolving the whole path would compare targets and falsely conflate two
+/// distinct Junction names that happen to deploy the same duplicate bytes.
+fn same_physical_link_path(left: &Path, right: &Path) -> bool {
+    let (Some(left_parent), Some(right_parent)) = (left.parent(), right.parent()) else {
+        return false;
+    };
+    if !same_path(left_parent, right_parent) {
+        return false;
+    }
+    let (Some(left_name), Some(right_name)) = (left.file_name(), right.file_name()) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        left_name
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right_name.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left_name == right_name
+    }
 }
 
 pub(super) async fn unique_junction_dir_name(

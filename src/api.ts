@@ -229,6 +229,7 @@ export interface DuplicateModRecord {
   screenshotUrl: string | null;
   variants: DuplicateModVariant[];
   reinstallInProgress: boolean;
+  fingerprint: string;
 }
 
 export interface DuplicateModGroup {
@@ -254,10 +255,10 @@ export async function auditLibrary(game: GameCode): Promise<LibraryAuditReport> 
 
 export async function resolveDuplicateMods(
   keeperId: string,
-  reviewedModIds: string[],
+  reviewedMods: Array<{ id: string; fingerprint: string }>,
 ): Promise<DuplicateResolution> {
   return invoke<DuplicateResolution>("resolve_duplicate_mods", {
-    args: { keeperId, reviewedModIds },
+    args: { keeperId, reviewedMods },
   });
 }
 

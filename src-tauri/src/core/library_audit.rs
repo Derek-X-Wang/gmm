@@ -15,7 +15,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{Executor, Row, Sqlite};
 
 use super::library_identity::IdentifiedDirectory;
@@ -61,6 +62,17 @@ pub struct DuplicateModRecord {
     pub screenshot_url: Option<String>,
     pub variants: Vec<DuplicateModVariant>,
     pub reinstall_in_progress: bool,
+    /// Digest of every field rendered by the duplicate-review UI. Resolution
+    /// recomputes it under the Library writer fence so stable IDs cannot
+    /// authorize discarding records whose reviewed contents have changed.
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewedDuplicateMod {
+    pub id: String,
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -211,7 +223,7 @@ fn scan_game_root(
     })
 }
 
-async fn load_duplicate_mod_records<'e, E>(
+pub(super) async fn load_duplicate_mod_records<'e, E>(
     executor: E,
     duplicate_ids: &HashSet<String>,
 ) -> Result<HashMap<String, DuplicateModRecord>>
@@ -266,6 +278,7 @@ where
                     screenshot_url: row.try_get("screenshot_url")?,
                     variants: Vec::new(),
                     reinstall_in_progress: row.try_get::<i64, _>("reinstall_in_progress")? != 0,
+                    fingerprint: String::new(),
                 },
             );
         }
@@ -283,7 +296,58 @@ where
                 });
         }
     }
+    for record in records.values_mut() {
+        record.fingerprint = duplicate_mod_fingerprint(record);
+    }
     Ok(records)
+}
+
+fn duplicate_mod_fingerprint(record: &DuplicateModRecord) -> String {
+    // Struct field order and Vec order are stable here; the query orders
+    // Variants by name, and IDs break any otherwise indistinguishable entry.
+    // The fingerprint itself is deliberately opaque to the frontend.
+    #[derive(Serialize)]
+    struct ReviewedFields<'a> {
+        id: &'a str,
+        game: GameCode,
+        name: &'a str,
+        source: Source,
+        library_path: &'a Path,
+        junction_dir_name: &'a str,
+        enabled: bool,
+        created_at: &'a str,
+        gamebanana_id: Option<u64>,
+        source_url: &'a Option<String>,
+        author: &'a Option<String>,
+        version: &'a Option<String>,
+        upstream_version: &'a Option<String>,
+        update_check_enabled: bool,
+        screenshot_url: &'a Option<String>,
+        variants: &'a [DuplicateModVariant],
+        reinstall_in_progress: bool,
+    }
+    let reviewed_fields = ReviewedFields {
+        id: &record.id,
+        game: record.game,
+        name: &record.name,
+        source: record.source,
+        library_path: &record.library_path,
+        junction_dir_name: &record.junction_dir_name,
+        enabled: record.enabled,
+        created_at: &record.created_at,
+        gamebanana_id: record.gamebanana_id,
+        source_url: &record.source_url,
+        author: &record.author,
+        version: &record.version,
+        upstream_version: &record.upstream_version,
+        update_check_enabled: record.update_check_enabled,
+        screenshot_url: &record.screenshot_url,
+        variants: &record.variants,
+        reinstall_in_progress: record.reinstall_in_progress,
+    };
+    let encoded = serde_json::to_vec(&reviewed_fields)
+        .expect("duplicate review fields are always JSON serialisable");
+    hex::encode(Sha256::digest(encoded))
 }
 
 pub(super) fn directory_size_without_links(path: &Path) -> io::Result<u64> {

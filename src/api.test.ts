@@ -78,12 +78,18 @@ it.each([
   ],
   [
     "resolveDuplicateMods",
-    () => resolveDuplicateMods("01KEEPER", ["01KEEPER", "01REJECTED"]),
+    () => resolveDuplicateMods("01KEEPER", [
+      { id: "01KEEPER", fingerprint: "keeper-fingerprint" },
+      { id: "01REJECTED", fingerprint: "rejected-fingerprint" },
+    ]),
     "resolve_duplicate_mods",
     {
       args: {
         keeperId: "01KEEPER",
-        reviewedModIds: ["01KEEPER", "01REJECTED"],
+        reviewedMods: [
+          { id: "01KEEPER", fingerprint: "keeper-fingerprint" },
+          { id: "01REJECTED", fingerprint: "rejected-fingerprint" },
+        ],
       },
     },
   ],

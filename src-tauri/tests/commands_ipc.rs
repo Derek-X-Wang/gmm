@@ -31,6 +31,16 @@ use gmm_lib::commands::{
     RecoverLibraryDirArgs, ResolveDuplicateModsArgs, NO_INSTALL_PATH_FOR_ENABLE_MSG,
 };
 use gmm_lib::core::conflicts::ConflictReport;
+use gmm_lib::core::error::{
+    DUPLICATE_RESOLUTION_CHANGED_PREFIX, DUPLICATE_RESOLUTION_INSTALL_PATH_GUIDANCE,
+    DUPLICATE_RESOLUTION_INSTALL_PATH_PREFIX, DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_GUIDANCE,
+    DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_PREFIX,
+    DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_GUIDANCE,
+    DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_PREFIX,
+    DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_GUIDANCE, DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_PREFIX,
+    DUPLICATE_RESOLUTION_REINSTALL_GUIDANCE, DUPLICATE_RESOLUTION_REINSTALL_PREFIX,
+    DUPLICATE_RESOLUTION_REVIEW_AGAIN,
+};
 use gmm_lib::core::games::GAME_PROFILES;
 use gmm_lib::core::importer::AssetPattern;
 use gmm_lib::core::reconcile::ReconcileResult;
@@ -38,8 +48,9 @@ use gmm_lib::core::updates::UpdateStatus;
 use gmm_lib::core::variants::Variant;
 use gmm_lib::core::{av, crash_points};
 use gmm_lib::core::{
-    Core, DeletedLibraryDir, GameCode, ImportZipOptions, LibraryAuditReport,
-    LibraryReclamationOutcome, Mod, Source, UnreferencedLibraryDir,
+    Core, DeletedLibraryDir, DuplicateModGroup, DuplicateModRecord, DuplicateModVariant,
+    DuplicateResolution, GameCode, ImportZipOptions, LibraryAuditReport, LibraryReclamationOutcome,
+    Mod, ReviewedDuplicateMod, Source, UnreferencedLibraryDir,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -245,7 +256,34 @@ fn library_audit_response_uses_camel_case() {
             path: "/library/gimi/01ORPHAN".into(),
             size_bytes: Some(42),
         }],
-        duplicates: Vec::new(),
+        duplicates: vec![DuplicateModGroup {
+            path: "/library/gimi/01SHARED".into(),
+            mods: vec![DuplicateModRecord {
+                id: "01KEEPER".into(),
+                game: GameCode::Gimi,
+                name: "Keeper".into(),
+                source: Source::Manual,
+                library_path: "/library/gimi/01SHARED".into(),
+                junction_dir_name: "Keeper".into(),
+                enabled: true,
+                created_at: "2026-08-24T00:00:00Z".into(),
+                gamebanana_id: Some(24680),
+                source_url: Some("https://gamebanana.com/mods/24680".into()),
+                author: Some("Author".into()),
+                version: Some("1.0".into()),
+                upstream_version: Some("1.1".into()),
+                update_check_enabled: false,
+                screenshot_url: Some("https://images.example.test/mod.png".into()),
+                variants: vec![DuplicateModVariant {
+                    id: "01VARIANT".into(),
+                    name: "Blue".into(),
+                    subpath: "Blue".into(),
+                    active: true,
+                }],
+                reinstall_in_progress: false,
+                fingerprint: "review-fingerprint".into(),
+            }],
+        }],
         total_bytes: 42,
     };
 
@@ -264,16 +302,114 @@ fn library_audit_response_uses_camel_case() {
         Some("01ORPHAN")
     );
     assert_eq!(directory.get("sizeBytes").and_then(Value::as_u64), Some(42));
+    let duplicate = object["duplicates"][0]["mods"][0]
+        .as_object()
+        .expect("nested duplicate record");
+    for key in [
+        "libraryPath",
+        "junctionDirName",
+        "gamebananaId",
+        "sourceUrl",
+        "upstreamVersion",
+        "updateCheckEnabled",
+        "screenshotUrl",
+        "reinstallInProgress",
+        "fingerprint",
+    ] {
+        assert!(
+            duplicate.contains_key(key),
+            "missing duplicate wire field {key}"
+        );
+    }
+    assert_eq!(duplicate["variants"][0]["subpath"], "Blue");
+    assert_eq!(duplicate["variants"][0]["active"], true);
 }
 
 #[test]
 fn resolve_duplicate_mods_args_deserialise_from_camel_case_json() {
     let args: ResolveDuplicateModsArgs = from_json(serde_json::json!({
         "keeperId": "01KEEPER",
-        "reviewedModIds": ["01KEEPER", "01REJECTED"],
+        "reviewedMods": [
+            { "id": "01KEEPER", "fingerprint": "keeper-fingerprint" },
+            { "id": "01REJECTED", "fingerprint": "rejected-fingerprint" }
+        ],
     }));
     assert_eq!(args.keeper_id, "01KEEPER");
-    assert_eq!(args.reviewed_mod_ids, ["01KEEPER", "01REJECTED"]);
+    assert_eq!(
+        args.reviewed_mods,
+        [
+            ReviewedDuplicateMod {
+                id: "01KEEPER".into(),
+                fingerprint: "keeper-fingerprint".into()
+            },
+            ReviewedDuplicateMod {
+                id: "01REJECTED".into(),
+                fingerprint: "rejected-fingerprint".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn duplicate_resolution_response_uses_camel_case() {
+    let value = to_json(&DuplicateResolution {
+        keeper_id: "01KEEPER".into(),
+        removed_mod_ids: vec!["01REJECTED".into()],
+    });
+    assert_eq!(value["keeperId"], "01KEEPER");
+    assert_eq!(value["removedModIds"], json!(["01REJECTED"]));
+}
+
+#[test]
+fn duplicate_resolution_error_copy_is_stable() {
+    use gmm_lib::core::Error;
+
+    let path = std::path::PathBuf::from("C:/Game/Mods/Shared");
+    let cases = [
+        (
+            Error::DuplicateModResolutionChanged { reason: "records changed".into() },
+            format!(
+                "{DUPLICATE_RESOLUTION_CHANGED_PREFIX} records changed. {DUPLICATE_RESOLUTION_REVIEW_AGAIN}"
+            ),
+        ),
+        (
+            Error::DuplicateModResolutionBlockedByReinstall { mod_id: "01MOD".into() },
+            format!(
+                "{DUPLICATE_RESOLUTION_REINSTALL_PREFIX} Mod ID: 01MOD. {DUPLICATE_RESOLUTION_REINSTALL_GUIDANCE}"
+            ),
+        ),
+        (
+            Error::DuplicateModInstallPathMissing { mod_id: "01MOD".into(), game: "gimi".into() },
+            format!(
+                "{DUPLICATE_RESOLUTION_INSTALL_PATH_PREFIX} Mod ID: 01MOD; game: gimi. {DUPLICATE_RESOLUTION_INSTALL_PATH_GUIDANCE}"
+            ),
+        ),
+        (
+            Error::DuplicateModJunctionConflict { mod_id: "01MOD".into(), path: path.clone() },
+            format!(
+                "{DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_PREFIX} Mod ID: 01MOD; path: {path:?}. {DUPLICATE_RESOLUTION_JUNCTION_CONFLICT_GUIDANCE}"
+            ),
+        ),
+        (
+            Error::DuplicateModJunctionStillPresent { mod_id: "01MOD".into(), path: path.clone() },
+            format!(
+                "{DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_PREFIX} Mod ID: 01MOD; path: {path:?}. {DUPLICATE_RESOLUTION_JUNCTION_STILL_PRESENT_GUIDANCE}"
+            ),
+        ),
+        (
+            Error::DuplicateModJunctionClaimedBySurvivor {
+                mod_id: "01DROP".into(),
+                surviving_mod_id: "01KEEP".into(),
+                path: path.clone(),
+            },
+            format!(
+                "{DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_PREFIX} Rejected Mod ID: 01DROP; surviving Mod ID: 01KEEP; path: {path:?}. {DUPLICATE_RESOLUTION_JUNCTION_SURVIVOR_GUIDANCE}"
+            ),
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+    }
 }
 
 #[test]

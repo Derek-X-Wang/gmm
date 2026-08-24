@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::Path;
 
-use gmm_lib::core::{junction, Core, Error, GameCode, Source};
+use gmm_lib::core::{junction, Core, Error, GameCode, ReviewedDuplicateMod, Source};
 use tempfile::TempDir;
 use ulid::Ulid;
 
@@ -465,6 +465,30 @@ async fn duplicate_fixture(tmp: &TempDir) -> DuplicateFixture {
     }
 }
 
+async fn reviewed_duplicate_mods(fixture: &DuplicateFixture) -> Vec<ReviewedDuplicateMod> {
+    fixture
+        .core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit duplicate records before review")
+        .duplicates
+        .into_iter()
+        .find(|group| {
+            group
+                .mods
+                .iter()
+                .any(|record| record.id == fixture.keeper_id)
+        })
+        .expect("fixture duplicate group")
+        .mods
+        .into_iter()
+        .map(|record| ReviewedDuplicateMod {
+            id: record.id,
+            fingerprint: record.fingerprint,
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn audit_surfaces_every_informed_duplicate_choice_without_mutating_it() {
     let tmp = TempDir::new().expect("tmp");
@@ -530,7 +554,7 @@ async fn audit_surfaces_every_informed_duplicate_choice_without_mutating_it() {
 async fn explicit_duplicate_resolution_keeps_shared_bytes_and_withdraws_the_rejected_junction() {
     let tmp = TempDir::new().expect("tmp");
     let fixture = duplicate_fixture(&tmp).await;
-    let reviewed = vec![fixture.keeper_id.clone(), fixture.duplicate_id.clone()];
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
 
     let resolved = fixture
         .core
@@ -597,6 +621,7 @@ async fn explicit_duplicate_resolution_keeps_shared_bytes_and_withdraws_the_reje
 async fn duplicate_resolution_refuses_an_active_reinstall_witness_without_changing_any_state() {
     let tmp = TempDir::new().expect("tmp");
     let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
     let token = Ulid::new();
     let root = fixture.library_path.parent().expect("game Library root");
     let stage = root.join(format!(".gmm-reinstall-{token}"));
@@ -624,7 +649,6 @@ async fn duplicate_resolution_refuses_an_active_reinstall_witness_without_changi
     .await
     .expect("insert active reinstall witness");
 
-    let reviewed = vec![fixture.keeper_id.clone(), fixture.duplicate_id.clone()];
     let result = fixture
         .core
         .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
@@ -676,6 +700,7 @@ async fn duplicate_resolution_refuses_an_active_reinstall_witness_without_changi
 async fn duplicate_resolution_refuses_when_the_reviewed_group_is_stale() {
     let tmp = TempDir::new().expect("tmp");
     let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
     let unseen_id = Ulid::new().to_string();
     let pool = sqlx::SqlitePool::connect(&fixture.db_url)
         .await
@@ -692,7 +717,6 @@ async fn duplicate_resolution_refuses_when_the_reviewed_group_is_stale() {
     .await
     .expect("insert duplicate after the user's report");
 
-    let reviewed = vec![fixture.keeper_id.clone(), fixture.duplicate_id.clone()];
     let result = fixture
         .core
         .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
@@ -718,4 +742,264 @@ async fn duplicate_resolution_refuses_when_the_reviewed_group_is_stale() {
         b"shared user bytes",
     );
     pool.close().await;
+}
+
+#[tokio::test]
+async fn duplicate_resolution_refuses_when_a_displayed_field_changed_after_review() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+        .await
+        .expect("open duplicate DB");
+    sqlx::query("UPDATE mods SET name = 'Changed after review' WHERE id = ?")
+        .bind(&fixture.duplicate_id)
+        .execute(&pool)
+        .await
+        .expect("change displayed Mod name");
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(result, Err(Error::DuplicateModResolutionChanged { ref reason }) if reason.contains("changed after the audit")),
+        "displayed-field drift must require a fresh review, got {result:?}",
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count records after drift refusal");
+    assert_eq!(
+        rows, 2,
+        "ID equality must not authorize deleting changed contents"
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "the Junction survives drift refusal"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_resolution_refuses_a_junction_path_claimed_by_the_keeper() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let install = fixture
+        .duplicate_junction
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("game install")
+        .to_path_buf();
+    fixture
+        .core
+        .set_game_install_path(GameCode::Srmi, &install)
+        .await
+        .expect("share one install path across games");
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+        .await
+        .expect("open duplicate DB");
+    sqlx::query(
+        "UPDATE mods SET game_code = 'srmi', junction_dir_name = 'GameBanana Duplicate' WHERE id = ?",
+    )
+    .bind(&fixture.keeper_id)
+    .execute(&pool)
+    .await
+    .expect("make keeper claim the rejected row's physical Junction path");
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(Error::DuplicateModJunctionClaimedBySurvivor {
+                ref mod_id,
+                ref surviving_mod_id,
+                ..
+            }) if mod_id == &fixture.duplicate_id && surviving_mod_id == &fixture.keeper_id
+        ),
+        "a surviving keeper's deployment path must never be removed, got {result:?}",
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "the shared physical Junction remains for the keeper",
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count records after shared-Junction refusal");
+    assert_eq!(rows, 2);
+}
+
+#[tokio::test]
+async fn duplicate_resolution_distinguishes_two_junction_names_with_one_target() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let game_mods = fixture.duplicate_junction.parent().expect("game Mods");
+    fixture
+        .core
+        .set_enabled(&fixture.keeper_id, true, game_mods)
+        .await
+        .expect("enable keeper under its distinct Junction name");
+    let keeper_junction = game_mods.join("Manual Keeper");
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+
+    fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await
+        .expect("distinct physical Junction path is not a survivor conflict");
+    assert!(
+        keeper_junction.exists(),
+        "the keeper's distinct Junction remains"
+    );
+    assert!(
+        fs::symlink_metadata(&fixture.duplicate_junction).is_err(),
+        "only the rejected row's distinct Junction is withdrawn",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_resolution_refuses_enabled_record_without_an_install_path() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url).await.unwrap();
+    sqlx::query("UPDATE games SET install_path = NULL WHERE code = 'gimi'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(matches!(
+        result,
+        Err(Error::DuplicateModInstallPathMissing { .. })
+    ));
+    assert!(
+        fs::symlink_metadata(&fixture.duplicate_junction).is_ok(),
+        "the Junction entry remains after install-path refusal",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_resolution_refuses_a_regular_directory_at_the_junction_path() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    junction::remove(&fixture.duplicate_junction).expect("remove fixture Junction");
+    fs::create_dir(&fixture.duplicate_junction).expect("replace it with user directory");
+    fs::write(fixture.duplicate_junction.join("user.ini"), b"keep").unwrap();
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(matches!(
+        result,
+        Err(Error::DuplicateModJunctionConflict { .. })
+    ));
+    assert_eq!(
+        fs::read(fixture.duplicate_junction.join("user.ini")).unwrap(),
+        b"keep"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_resolution_refuses_a_junction_repointed_outside_the_library() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let outside = tmp.path().join("outside-library");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("outside.ini"), b"keep").unwrap();
+    junction::remove(&fixture.duplicate_junction).expect("remove fixture Junction");
+    junction::create(&fixture.duplicate_junction, &outside).expect("repoint outside Library");
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(matches!(
+        result,
+        Err(Error::DuplicateModJunctionConflict { .. })
+    ));
+    assert_eq!(fs::read(outside.join("outside.ini")).unwrap(), b"keep");
+}
+
+#[tokio::test]
+async fn duplicate_resolution_refuses_a_missing_selected_variant_target() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    fs::remove_dir_all(fixture.library_path.join("Amber")).expect("remove selected Variant target");
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(result, Err(Error::DuplicateModResolutionChanged { ref reason }) if reason.contains("selected Library target")),
+        "missing selected Variant target must refuse before Junction removal, got {result:?}",
+    );
+    assert!(
+        fs::symlink_metadata(&fixture.duplicate_junction).is_ok(),
+        "the broken Junction entry remains after target refusal",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_resolution_preflights_every_junction_before_withdrawing_any() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let later_id = Ulid::new().to_string();
+    let pool = sqlx::SqlitePool::connect(&fixture.db_url).await.unwrap();
+    sqlx::query(
+        "INSERT INTO mods (
+            id, game_code, name, source, library_path, junction_dir_name, enabled, created_at
+         ) VALUES (?, 'gimi', 'Later Conflict', 'manual', ?, 'Later Conflict', 0, ?)",
+    )
+    .bind(&later_id)
+    .bind(fixture.library_path.to_string_lossy().as_ref())
+    .bind("2026-08-24T00:00:04Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+    let game_mods = fixture.duplicate_junction.parent().expect("game Mods");
+    fixture
+        .core
+        .set_enabled(&later_id, true, game_mods)
+        .await
+        .unwrap();
+    let later_junction = game_mods.join("Later Conflict");
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    junction::remove(&later_junction).unwrap();
+    fs::create_dir(&later_junction).unwrap();
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(result, Err(Error::DuplicateModJunctionConflict { ref mod_id, .. }) if mod_id == &later_id)
+    );
+    assert!(
+        fixture.duplicate_junction.exists(),
+        "an earlier valid Junction must remain when a later Junction fails preflight",
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mods WHERE id IN (?, ?, ?)")
+        .bind(&fixture.keeper_id)
+        .bind(&fixture.duplicate_id)
+        .bind(&later_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 3, "multi-Junction refusal preserves every record");
 }

@@ -57,6 +57,7 @@ const DUPLICATE_REPORT = {
           screenshotUrl: null,
           variants: [],
           reinstallInProgress: false,
+          fingerprint: "keeper-fingerprint",
         },
         {
           id: "01REJECTED",
@@ -79,6 +80,7 @@ const DUPLICATE_REPORT = {
             { id: "01BLUE", name: "Blue", subpath: "Blue", active: false },
           ],
           reinstallInProgress: false,
+          fingerprint: "rejected-fingerprint",
         },
       ],
     },
@@ -432,13 +434,13 @@ it("announces ownership loss without presenting the reserved path as a cleanup t
   });
   renderWithQuery(<LibraryAuditWarning game="gimi" />);
 
-  const notice = await screen.findByRole("alert");
+  const notice = await screen.findByRole("alert", { name: /library cleanup warning/i });
   expect(notice).toBeEmptyDOMElement();
   await user.click((await folder(FIRST)).getByRole("button", { name: /delete/i }));
   await user.click((await folder(FIRST)).getByRole("button", { name: /^delete$/i }));
 
   await waitFor(() => expect(auditLibrary).toHaveBeenCalledTimes(2));
-  expect(screen.getByRole("alert")).toBe(notice);
+  expect(screen.getByRole("alert", { name: /library cleanup warning/i })).toBe(notice);
   expect(notice).toHaveTextContent(FIRST);
   expect(notice).toHaveTextContent(/could not confirm whether its disk space was reclaimed/i);
   expect(notice).toHaveTextContent(/does not know whether any of that folder's bytes remain/i);
@@ -505,10 +507,28 @@ it("requires an unpreselected keeper and an explicit safe-focused confirmation",
   await user.click(within(confirmation).getByRole("button", { name: /keep this record/i }));
   await waitFor(() =>
     expect(resolveDuplicateMods).toHaveBeenCalledWith("01KEEPER", [
-      "01KEEPER",
-      "01REJECTED",
+      { id: "01KEEPER", fingerprint: "keeper-fingerprint" },
+      { id: "01REJECTED", fingerprint: "rejected-fingerprint" },
     ]),
   );
+});
+
+it("announces a rejected resolution through the alert mounted before the request", async () => {
+  const user = userEvent.setup();
+  auditLibrary.mockResolvedValue(DUPLICATE_REPORT);
+  resolveDuplicateMods.mockRejectedValue(
+    "The duplicate records changed after the audit. Review them again.",
+  );
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+
+  const alert = await screen.findByRole("alert", { name: /library action failed/i });
+  expect(alert).toBeEmptyDOMElement();
+  await user.click(await screen.findByRole("radio", { name: /Manual Keeper/i }));
+  await user.click(screen.getByRole("button", { name: /^resolve/i }));
+  await user.click(screen.getByRole("button", { name: /keep this record/i }));
+
+  await waitFor(() => expect(alert).toHaveTextContent(/records changed after the audit/i));
+  expect(screen.getByRole("alert", { name: /library action failed/i })).toBe(alert);
 });
 
 it("announces resolved duplicates from the already-mounted live region and retains focus", async () => {

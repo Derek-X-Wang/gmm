@@ -111,8 +111,8 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
     mutationFn: (args: {
       keeperId: string;
       keeperName: string;
-      reviewedModIds: string[];
-    }) => resolveDuplicateMods(args.keeperId, args.reviewedModIds),
+      reviewedMods: Array<{ id: string; fingerprint: string }>;
+    }) => resolveDuplicateMods(args.keeperId, args.reviewedMods),
     onSuccess: (resolution, args) => {
       publishFeedback({
         kind: "duplicatesResolved",
@@ -169,11 +169,9 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
       tabIndex={-1}
     >
       <ActionNotice feedback={feedback} />
-      {failure ? (
-        <p className="error" role="alert">
-          {String(failure)}
-        </p>
-      ) : null}
+      <p className="error" role="alert" aria-label="Library action failed">
+        {failure ? String(failure) : null}
+      </p>
       {count > 0 ? (
         <>
           <strong>
@@ -284,7 +282,10 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
                         resolveDuplicates.mutate({
                           keeperId: keeper.id,
                           keeperName: keeper.name,
-                          reviewedModIds: group.mods.map((mod) => mod.id),
+                          reviewedMods: group.mods.map(({ id, fingerprint }) => ({
+                            id,
+                            fingerprint,
+                          })),
                         })
                       }
                     />
@@ -359,7 +360,7 @@ function ActionNotice({ feedback }: { feedback: ActionFeedback | null }) {
       <div className="action-notice muted small" role="status">
         {status}
       </div>
-      <div className="action-notice error" role="alert">
+      <div className="action-notice error" role="alert" aria-label="Library cleanup warning">
         {alert}
       </div>
     </>
