@@ -35,6 +35,14 @@ pub(super) struct LibraryOwnershipSnapshot {
 }
 
 impl LibraryOwnershipSnapshot {
+    #[cfg(test)]
+    pub(super) fn empty_for_test() -> Self {
+        Self {
+            mods: HashSet::new(),
+            active_reinstall_directories: HashSet::new(),
+        }
+    }
+
     pub(super) async fn load<'e, E>(executor: E) -> Result<Self>
     where
         E: Executor<'e, Database = Sqlite>,

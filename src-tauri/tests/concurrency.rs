@@ -1954,6 +1954,20 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
     let env = TestEnv::new();
     let core = env.core().await;
     let imported = env.seed_mod(&core, "Stale Reinstall Recovery").await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("record game install path");
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("enable Mod before its reinstall is quarantined");
+    let junction = env.game_mods.join("Stale Reinstall Recovery");
+    assert!(
+        junction.join("merged.ini").is_file(),
+        "the enabled Mod must begin deployed"
+    );
     let root = imported.library_path.parent().expect("game Library root");
     let token = Ulid::new();
     let stage = root.join(format!(".gmm-reinstall-{token}"));
@@ -1995,6 +2009,14 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
     let started = Core::new(env.library.clone(), &env.db_url)
         .await
         .expect("one Mod's failed filesystem recovery must not stop GMM");
+    assert!(
+        std::fs::symlink_metadata(&junction).is_err(),
+        "quarantine must withdraw its live Junction before Core starts",
+    );
+    assert!(
+        imported.library_path.join("merged.ini").is_file(),
+        "withdrawing a Junction must not touch the Mod's Library bytes",
+    );
     let listed = started
         .list_mods(GameCode::Gimi)
         .await
@@ -2009,6 +2031,14 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
     assert_eq!(quarantined.staged_path, stage);
     assert_eq!(quarantined.quarantine_path, quarantine);
     assert!(
+        listed
+            .iter()
+            .find(|mod_| mod_.id == imported.id)
+            .expect("quarantined Mod remains listed")
+            .enabled,
+        "quarantine must preserve the user's enabled intent",
+    );
+    assert!(
         quarantined.reason.contains("unrelated directory"),
         "the durable quarantine must retain the specific intervention evidence: {quarantined:?}",
     );
@@ -2019,7 +2049,7 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
     );
 
     let toggle = started
-        .set_enabled(&imported.id, !imported.enabled, &env.game_mods)
+        .set_enabled(&imported.id, false, &env.game_mods)
         .await
         .expect_err("a quarantined Mod must be unusable");
     assert!(
@@ -2054,6 +2084,10 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
         reconciled.quarantined.as_slice(),
         std::slice::from_ref(&imported.id),
         "reconcile must name the Mod as quarantined rather than disabled",
+    );
+    assert!(
+        std::fs::symlink_metadata(&junction).is_err(),
+        "reconcile must keep a quarantined Mod withdrawn from the game",
     );
 
     // Undo the external substitution and use the in-app retry. Recovery
@@ -2093,6 +2127,10 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
         imported.library_path.join("merged.ini").is_file(),
         "successful retry must keep the original Mod bytes",
     );
+    assert!(
+        junction.join("merged.ini").is_file(),
+        "successful retry must restore the enabled Mod's Junction before returning",
+    );
     let recovered = started
         .list_mods(GameCode::Gimi)
         .await
@@ -2105,6 +2143,14 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
             .reinstall_recovery
             .is_none(),
         "the Mod must become usable when the witness is retired",
+    );
+    assert!(
+        recovered
+            .iter()
+            .find(|mod_| mod_.id == imported.id)
+            .expect("recovered Mod remains listed")
+            .enabled,
+        "recovery must preserve the user's enabled intent",
     );
     drop(started);
     let pool = sqlx::SqlitePool::connect(&env.db_url)
@@ -2265,6 +2311,73 @@ async fn corrupt_reinstall_witness_still_aborts_startup() {
         error.to_string().contains("invalid game code"),
         "startup must report the database value rather than blame filesystem recovery: {error}",
     );
+}
+
+/// Structural witness paths are database corruption, even when the token,
+/// Mod, and Game all identify real rows. None of these values may become a
+/// per-Mod filesystem quarantine or reach path-based relocation decisions.
+///
+/// Mutation oracle: classifying `ReinstallWitnessCorrupt` as quarantinable
+/// makes Core construction succeed and fires the case-specific startup-fatal
+/// assertion below.
+#[tokio::test]
+async fn corrupt_reinstall_witness_paths_still_abort_startup() {
+    for corrupt_field in ["library_path", "staged_path", "quarantine_path"] {
+        let env = TestEnv::new();
+        let core = env.core().await;
+        let imported = env.seed_mod(&core, "Corrupt Recovery Witness Path").await;
+        let root = imported.library_path.parent().expect("game Library root");
+        let token = Ulid::new();
+        let stage = root.join(format!(".gmm-reinstall-{token}"));
+        let quarantine = root.join(format!(".gmm-delete-{token}"));
+        std::fs::create_dir(&stage).expect("reinstall stage");
+        let old_identity = durable_directory_key(&imported.library_path);
+        let staged_identity = durable_directory_key(&stage);
+        let mut library_path = imported.library_path.clone();
+        let mut staged_path = stage.clone();
+        let mut quarantine_path = quarantine.clone();
+        match corrupt_field {
+            "library_path" => library_path = root.join("not-the-mod-id"),
+            "staged_path" => staged_path = root.join(".gmm-reinstall-wrong-token"),
+            "quarantine_path" => quarantine_path = root.join(".gmm-delete-wrong-token"),
+            _ => unreachable!(),
+        }
+
+        let pool = sqlx::SqlitePool::connect(&env.db_url)
+            .await
+            .expect("open DB for corrupt path fixture");
+        sqlx::query(
+            "INSERT INTO reinstall_swaps (
+                token, mod_id, game_code, library_path, staged_path,
+                quarantine_path, old_identity, staged_identity, created_at
+             ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(token.to_string())
+        .bind(&imported.id)
+        .bind(library_path.to_string_lossy().as_ref())
+        .bind(staged_path.to_string_lossy().as_ref())
+        .bind(quarantine_path.to_string_lossy().as_ref())
+        .bind(old_identity)
+        .bind(staged_identity)
+        .bind("2026-08-23T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert corrupt path witness");
+        pool.close().await;
+        drop(core);
+
+        let startup = Core::new(env.library.clone(), &env.db_url).await;
+        let error = match startup {
+            Ok(_) => panic!(
+                "corrupt {corrupt_field} witness must keep startup fatal rather than quarantine one Mod"
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("database corruption"),
+            "corrupt {corrupt_field} must be reported as database state, got: {error}",
+        );
+    }
 }
 
 /// Reinstall rollback and ordinary delete-quarantine reclamation are separate

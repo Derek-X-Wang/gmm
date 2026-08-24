@@ -272,6 +272,13 @@ pub enum Error {
     ReinstallRecoveryUncertain { mod_id: String, reason: String },
 
     #[error(
+        "GMM found corrupt interrupted reinstall state for Mod {mod_id}: {reason}. \
+         Startup stopped because database corruption is not evidence about one Mod's \
+         filesystem bytes."
+    )]
+    ReinstallWitnessCorrupt { mod_id: String, reason: String },
+
+    #[error(
         "Mod {mod_id} is unavailable because its interrupted reinstall could not be recovered. \
          Correct the filesystem problem shown on the Mod, then use Retry recovery."
     )]

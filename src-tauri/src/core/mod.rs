@@ -387,14 +387,19 @@ impl Core {
         // alias or differently-cased drive spelling for the same root.
         // This check is under the same writer fence as witness creation, so it
         // happens before any Junction or Library byte is touched.
-        let active_reinstalls = sqlx::query("SELECT mod_id, library_path FROM reinstall_swaps")
-            .fetch_all(&mut *fence.transaction)
-            .await?;
+        let active_reinstalls = sqlx::query(
+            "SELECT token, mod_id, game_code, library_path, staged_path,
+                    quarantine_path, old_identity, staged_identity
+             FROM reinstall_swaps",
+        )
+        .fetch_all(&mut *fence.transaction)
+        .await?;
         for reinstall in active_reinstalls {
-            let library_path = PathBuf::from(reinstall.try_get::<String, _>("library_path")?);
-            if path_within(&library_path, previous) {
+            let witness = library_mutation::ReinstallSwapWitness::from_row(&reinstall)?;
+            witness.validate_paths()?;
+            if path_within(&witness.library_path, previous) {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
-                    mod_id: reinstall.try_get("mod_id")?,
+                    mod_id: witness.mod_id,
                 });
             }
         }
@@ -3038,6 +3043,8 @@ impl Core {
                 .try_get::<Option<String>, _>("recovery_error")?
                 .is_some()
             {
+                let link = game_mods_dir.join(&junction_dir_name);
+                library_mutation::withdraw_reinstall_junction(&link)?;
                 result.quarantined.push(id);
                 continue;
             }
@@ -3178,6 +3185,8 @@ impl Core {
                 .try_get::<Option<String>, _>("recovery_error")?
                 .is_some()
             {
+                let link = game_mods_dir.join(&junction_dir_name);
+                library_mutation::withdraw_reinstall_junction(&link)?;
                 result.quarantined.push(id);
                 continue;
             }

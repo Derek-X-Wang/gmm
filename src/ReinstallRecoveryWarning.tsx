@@ -52,10 +52,11 @@ export function ReinstallRecoveryWarning({
     >
       <strong>Unavailable — interrupted reinstall needs recovery</strong>
       <p>
-        GMM could not safely decide which reinstall tree should be live, so it
-        left every directory it could not prove untouched and quarantined only
-        this Mod. Its recovery witness still owns both recorded byte identities;
-        ordinary cleanup will not discard either one.
+        The recovery witness says the old tree should be live, but GMM could not
+        restore or verify it. GMM left every directory it could not prove untouched
+        and removed this Mod&apos;s Junction; the Mod will not load until recovery
+        succeeds. Your enabled or disabled choice is unchanged, and ordinary cleanup
+        will not discard either recorded byte identity.
       </p>
       <p>
         <strong>Retry may work:</strong> if a file was briefly locked or the

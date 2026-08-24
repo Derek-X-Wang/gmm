@@ -121,15 +121,14 @@ pub(super) struct ReinstallSwapWitness {
 }
 
 impl ReinstallSwapWitness {
-    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
+    pub(super) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
         let token_raw: String = row.try_get("token")?;
-        let token =
-            Ulid::from_string(&token_raw).map_err(|_| Error::ReinstallRecoveryUncertain {
-                mod_id: row
-                    .try_get("mod_id")
-                    .unwrap_or_else(|_| "<unknown>".to_string()),
-                reason: format!("the swap token {token_raw:?} is not a ULID"),
-            })?;
+        let token = Ulid::from_string(&token_raw).map_err(|_| Error::ReinstallWitnessCorrupt {
+            mod_id: row
+                .try_get("mod_id")
+                .unwrap_or_else(|_| "<unknown>".to_string()),
+            reason: format!("the swap token {token_raw:?} is not a ULID"),
+        })?;
         let game_raw: String = row.try_get("game_code")?;
         Ok(Self {
             token,
@@ -143,9 +142,9 @@ impl ReinstallSwapWitness {
         })
     }
 
-    fn validate_paths(&self) -> Result<()> {
+    pub(super) fn validate_paths(&self) -> Result<()> {
         let Some(root) = self.library_path.parent() else {
-            return self.uncertain("the recorded live path has no Library root");
+            return self.corrupt("the recorded live path has no Library root");
         };
         let expected_stage = root.join(format!("{REINSTALL_STAGING_PREFIX}{}", self.token));
         let expected_quarantine = root.join(format!(
@@ -157,9 +156,16 @@ impl ReinstallSwapWitness {
             || self.staged_path != expected_stage
             || self.quarantine_path != expected_quarantine
         {
-            return self.uncertain("the recorded swap paths do not match the Mod ID and token");
+            return self.corrupt("the recorded swap paths do not match the Mod ID and token");
         }
         Ok(())
+    }
+
+    fn corrupt<T>(&self, reason: impl Into<String>) -> Result<T> {
+        Err(Error::ReinstallWitnessCorrupt {
+            mod_id: self.mod_id.clone(),
+            reason: reason.into(),
+        })
     }
 
     fn uncertain<T>(&self, reason: impl Into<String>) -> Result<T> {
@@ -283,8 +289,10 @@ impl Core {
     }
 
     /// Retry the exact verified rollback that startup attempted for one Mod.
-    /// No witness means another retry/startup already settled it, so this is
-    /// idempotently successful.
+    /// A witness absent at the initial lookup means startup or an earlier
+    /// completed retry already settled it. Concurrent calls that both observe
+    /// the token are serialized, but the later call can report that the row
+    /// vanished rather than claiming in-flight retries are idempotent.
     pub async fn retry_reinstall_recovery(&self, mod_id: &str) -> Result<ReinstallRecoveryOutcome> {
         let token: Option<String> =
             sqlx::query_scalar("SELECT token FROM reinstall_swaps WHERE mod_id = ?")
@@ -315,11 +323,10 @@ impl Core {
         token_raw: &str,
         mutation: LibraryMutation,
     ) -> Result<ReinstallRecoveryOutcome> {
-        let token =
-            Ulid::from_string(token_raw).map_err(|_| Error::ReinstallRecoveryUncertain {
-                mod_id: "<unknown>".to_string(),
-                reason: format!("the swap token {token_raw:?} is not a ULID"),
-            })?;
+        let token = Ulid::from_string(token_raw).map_err(|_| Error::ReinstallWitnessCorrupt {
+            mod_id: "<unknown>".to_string(),
+            reason: format!("the swap token {token_raw:?} is not a ULID"),
+        })?;
         let mut fence = self.begin_library_mutation(mutation).await?;
         let recovery = async {
             let witness = self.reinstall_swap_witness(token, &mut fence).await?;
@@ -361,6 +368,27 @@ impl Core {
         .bind(token)
         .execute(&mut *transaction)
         .await?;
+
+        let junction = sqlx::query(
+            "SELECT m.junction_dir_name, g.install_path
+             FROM reinstall_swaps rs
+             JOIN mods m ON m.id = rs.mod_id
+             JOIN games g ON g.code = m.game_code
+             WHERE rs.token = ?",
+        )
+        .bind(token)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if let Some(install_path) = junction
+            .try_get::<Option<String>, _>("install_path")?
+            .map(PathBuf::from)
+        {
+            let link = install_path
+                .join("Mods")
+                .join(junction.try_get::<String, _>("junction_dir_name")?);
+            withdraw_reinstall_junction(&link)?;
+        }
+
         let row = sqlx::query(
             "SELECT recovery_error, recovery_attempted_at, recovery_attempts,
                     library_path, staged_path, quarantine_path
@@ -400,7 +428,7 @@ impl Core {
                 .and_then(|name| name.to_str())
                 != Some(&witness.mod_id)
         {
-            return witness.uncertain(
+            return witness.corrupt(
                 "the current Mod row is not a direct child of its effective Library root",
             );
         }
@@ -878,6 +906,21 @@ fn quarantinable_reinstall_failure(error: &Error) -> bool {
         error,
         Error::Io { .. } | Error::ReinstallRecoveryUncertain { .. } | Error::NonNtfsVolume { .. }
     )
+}
+
+pub(super) fn withdraw_reinstall_junction(link: &Path) -> Result<()> {
+    if !super::link_exists(link) {
+        return Ok(());
+    }
+    if super::resolve_link(link).is_none() {
+        return Err(Error::Io {
+            path: link.to_path_buf(),
+            source: io::Error::other(
+                "the Mod deployment path is not a Junction GMM can safely remove",
+            ),
+        });
+    }
+    junction::remove(link)
 }
 
 fn identified_if_exists(path: &Path) -> Result<Option<IdentifiedDirectory>> {

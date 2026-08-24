@@ -663,6 +663,14 @@ fn purge_delete_quarantines(
     roots: &[PathBuf],
     ownership: &super::library_ownership::LibraryOwnershipSnapshot,
 ) -> Result<usize> {
+    purge_delete_quarantines_with(roots, ownership, |_| {})
+}
+
+fn purge_delete_quarantines_with(
+    roots: &[PathBuf],
+    ownership: &super::library_ownership::LibraryOwnershipSnapshot,
+    mut before_open: impl FnMut(&Path),
+) -> Result<usize> {
     let mut removed = 0;
     for root in roots {
         let entries = match fs::read_dir(root) {
@@ -703,10 +711,17 @@ fn purge_delete_quarantines(
                 }
                 continue;
             }
-            let directory = IdentifiedDirectory::open(&quarantine).map_err(|source| Error::Io {
-                path: quarantine.clone(),
-                source,
-            })?;
+            before_open(&quarantine);
+            let directory = match IdentifiedDirectory::open(&quarantine) {
+                Ok(directory) => directory,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(Error::Io {
+                        path: quarantine.clone(),
+                        source,
+                    })
+                }
+            };
             if matches!(
                 ownership.owner_of(directory.identity()),
                 Some(super::library_ownership::LibraryDirectoryOwner::ActiveReinstall)
@@ -834,4 +849,61 @@ fn lexically_normalized(path: &Path) -> Option<PathBuf> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owned_quarantine(root: &Path) -> (PathBuf, PathBuf) {
+        fs::create_dir_all(root).expect("create test Library root");
+        let token = Ulid::new();
+        let quarantine = root.join(format!("{DELETE_QUARANTINE_PREFIX}{token}"));
+        let intent = root.join(format!(
+            "{DELETE_QUARANTINE_PREFIX}{token}{DELETE_INTENT_SUFFIX}"
+        ));
+        fs::create_dir(&quarantine).expect("create owned quarantine");
+        fs::write(quarantine.join("marker"), b"owned bytes").expect("write quarantine bytes");
+        let identity = IdentifiedDirectory::open(&quarantine)
+            .expect("identify owned quarantine")
+            .identity()
+            .durable_key();
+        fs::write(&intent, identity).expect("write ownership intent");
+        (quarantine, intent)
+    }
+
+    #[test]
+    fn vanished_quarantine_does_not_abort_later_cleanup() {
+        let temp = tempfile::tempdir().expect("temporary Library");
+        let first_root = temp.path().join("gimi");
+        let later_root = temp.path().join("srmi");
+        let (vanished, vanished_intent) = owned_quarantine(&first_root);
+        let (later, later_intent) = owned_quarantine(&later_root);
+        let ownership = super::super::library_ownership::LibraryOwnershipSnapshot::empty_for_test();
+
+        let result =
+            purge_delete_quarantines_with(&[first_root, later_root], &ownership, |about_to_open| {
+                if about_to_open == vanished {
+                    fs::remove_dir_all(&vanished)
+                        .expect("make first quarantine vanish after its existence check");
+                }
+            });
+        let removed = match result {
+            Ok(removed) => removed,
+            Err(error) => panic!(
+                "a quarantine that vanished after its existence check must not abort later cleanup: {error}"
+            ),
+        };
+
+        assert_eq!(
+            removed, 1,
+            "the later owned quarantine must still be reclaimed"
+        );
+        assert!(
+            vanished_intent.is_file(),
+            "identity uncertainty keeps the vanished quarantine's intent for a later pass"
+        );
+        assert!(!later.exists(), "the later quarantine must be removed");
+        assert!(!later_intent.exists(), "the later intent must be removed");
+    }
 }

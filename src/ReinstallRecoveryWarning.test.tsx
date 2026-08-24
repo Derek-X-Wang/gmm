@@ -33,7 +33,11 @@ it("distinguishes a retryable obstruction from intervention without guessing", a
   expect(warning).toHaveTextContent(/Retry may work:.*briefly locked.*device was unavailable/i);
   expect(warning).toHaveTextContent(/This needs you:.*moved or deleted.*permissions/i);
   expect(warning).toHaveTextContent(/cannot reliably distinguish/i);
-  expect(warning).toHaveTextContent(/will not discard either one/i);
+  expect(warning).toHaveTextContent(/will not discard either recorded byte identity/i);
+  expect(warning).toHaveTextContent(/witness says the old tree should be live/i);
+  expect(warning).toHaveTextContent(/could not restore or verify it/i);
+  expect(warning).toHaveTextContent(/will not load until recovery succeeds/i);
+  expect(warning).toHaveTextContent(/enabled or disabled choice is unchanged/i);
 
   await userEvent.click(screen.getByRole("button", { name: /retry recovery/i }));
   expect(retry).toHaveBeenCalledTimes(1);
