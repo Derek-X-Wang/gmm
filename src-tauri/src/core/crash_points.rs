@@ -101,14 +101,18 @@ pub const SET_ACTIVE_VARIANT_AFTER_JUNCTION_REMOVE: &str =
 /// deleted.
 pub const ADOPT_AFTER_LIBRARY_COPY: &str = "adopt.after_library_copy";
 
-/// `adopt_folder`: the row exists, Variants have not been detected yet.
+/// `adopt_folder`: the Mod row has been inserted into the still-open
+/// transaction, while the already-detected Variants and active selection have
+/// not been persisted. A process death rolls the whole transaction back.
 pub const ADOPT_AFTER_ROW_INSERT: &str = "adopt.after_row_insert";
 
 /// `import_zip`: the archive is extracted into the Library, no row
 /// references it. Same orphan shape as [`ADOPT_AFTER_LIBRARY_COPY`].
 pub const IMPORT_ZIP_AFTER_EXTRACT: &str = "import_zip.after_extract";
 
-/// `import_zip`: the row exists, Variants have not been detected yet.
+/// `import_zip`: the Mod row has been inserted into the still-open
+/// transaction, while the already-detected Variants and active selection have
+/// not been persisted. A process death rolls the whole transaction back.
 pub const IMPORT_ZIP_AFTER_ROW_INSERT: &str = "import_zip.after_row_insert";
 
 /// `reinstall_gamebanana_mod`: the empty same-root stage and its durable

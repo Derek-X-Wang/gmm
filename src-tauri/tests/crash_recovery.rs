@@ -52,13 +52,12 @@
 //!   the same orphan shape under the new name, which the audit reports
 //!   and the same feature can recover a second time.
 //!
-//! * **Missing Variant rows.** A crash between the row insert and
-//!   `detect_and_record_variants` leaves a Mod whose Library subtree has
-//!   Variant subfolders but whose `mod_variants` table is empty, so
-//!   enabling it junctions to the Mod root instead of a Variant. The
-//!   enabled-state invariant still holds — the Junction matches what the
-//!   row says — so this is a content bug, not a consistency bug.
-//!   Re-running detection on load would fix it.
+//! Variant detection for adopt and import is intentionally completed before
+//! the Library writer fence because it is an unbounded recursive traversal.
+//! The later Mod row, Variant rows, and active selection share one bounded
+//! transaction. A crash after row insertion therefore rolls back the row and
+//! leaves the intact Library directory visible to the orphan audit instead of
+//! exposing a referenced Mod with missing Variant state.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -372,13 +371,11 @@ async fn adopt_crashing_after_the_library_copy_reports_the_intact_orphan() {
     );
 }
 
-/// Crash between the row insert and Variant detection.
-///
-/// The Mod exists and is disabled, so the enabled-state invariant holds.
-/// The Variant rows are missing, which is a content bug rather than a
-/// consistency one — see the module docs.
+/// Crash after the row insert but before the already-detected Variants are
+/// recorded. The row and Variant shape are one transaction, so restart sees
+/// no referenced Mod and the intact copied directory remains recoverable.
 #[tokio::test]
-async fn adopt_crashing_before_variant_detection_still_holds_the_invariant() {
+async fn adopt_crashing_before_variant_recording_rolls_back_the_mod_row() {
     let env = TestEnv::new();
     let src = env.tmp.path().join("multi-variant");
     for variant in ["Red", "Blue"] {
@@ -398,21 +395,22 @@ async fn adopt_crashing_before_variant_detection_still_holds_the_invariant() {
         ],
     );
 
-    let core = recover_and_assert(&env, "adopt crashed before variant detection").await;
+    let core = recover_and_assert(&env, "adopt crashed before Variant recording").await;
     let listed = core.list_mods(GameCode::Gimi).await.expect("list");
-    assert_eq!(listed.len(), 1, "the row insert committed before the crash");
-    assert!(!listed[0].enabled, "a freshly adopted Mod is disabled");
-    assert_rows_match_disk(&core, &env, "adopt crashed before variant detection").await;
-
-    // Known limitation, pinned: detection never ran, so the Mod looks
-    // single-folder even though its Library subtree has two Variants.
     assert!(
-        core.list_variants(&listed[0].id)
-            .await
-            .expect("variants")
-            .is_empty(),
-        "Variant rows are missing after a crash before detection",
+        listed.is_empty(),
+        "the in-transaction adopt row must roll back when the process dies: {listed:?}",
     );
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after adopt transaction crash");
+    assert_eq!(
+        report.unreferenced.len(),
+        1,
+        "the copied Mod stays actionable"
+    );
+    assert!(report.unreferenced[0].path.join("Red/merged.ini").exists());
 }
 
 /// Build a Mod archive with two Variant subfolders.
@@ -557,10 +555,11 @@ async fn import_zip_crashing_after_extract_reports_the_intact_orphan() {
     );
 }
 
-/// Crash between `import_zip`'s row insert and Variant detection. The
-/// enabled-state invariant holds; the Variant rows are missing.
+/// Crash after `import_zip` inserts its row but before it records the
+/// already-detected Variants. The single transaction rolls the row back and
+/// leaves the extracted directory visible to recovery.
 #[tokio::test]
-async fn import_zip_crashing_before_variant_detection_still_holds_the_invariant() {
+async fn import_zip_crashing_before_variant_recording_rolls_back_the_mod_row() {
     let env = TestEnv::new();
     let zip = env.tmp.path().join("mod2.zip");
     build_mod_zip(&zip);
@@ -576,18 +575,88 @@ async fn import_zip_crashing_before_variant_detection_still_holds_the_invariant(
         ],
     );
 
-    let core = recover_and_assert(&env, "import_zip crashed before variant detection").await;
+    let core = recover_and_assert(&env, "import_zip crashed before Variant recording").await;
     let listed = core.list_mods(GameCode::Gimi).await.expect("list");
-    assert_eq!(listed.len(), 1, "the row insert committed before the crash");
-    assert!(!listed[0].enabled, "a freshly imported Mod is disabled");
-    assert_rows_match_disk(&core, &env, "import_zip crashed before variant detection").await;
     assert!(
-        core.list_variants(&listed[0].id)
-            .await
-            .expect("variants")
-            .is_empty(),
-        "Variant rows are missing after a crash before detection",
+        listed.is_empty(),
+        "the in-transaction ZIP-import row must roll back when the process dies: {listed:?}",
     );
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after ZIP-import transaction crash");
+    assert_eq!(
+        report.unreferenced.len(),
+        1,
+        "the extracted Mod stays actionable"
+    );
+    assert!(report.unreferenced[0].path.join("Blue/merged.ini").exists());
+}
+
+/// GameBanana ingest delegates its downloaded archive to `import_zip`. Drive
+/// that public path in a real child process so the inherited transaction seam
+/// is proven rather than inferred from the local-ZIP test.
+#[tokio::test]
+async fn gamebanana_import_crashing_before_variant_recording_rolls_back_the_mod_row() {
+    let env = TestEnv::new();
+    let zip = env.tmp.path().join("gamebanana-mod.zip");
+    build_mod_zip(&zip);
+    let archive_bytes = std::fs::read(&zip).expect("GameBanana ZIP bytes");
+    let id = 186_001_u64;
+    let api_path = format!("/apiv11/Mod/{id}");
+    let file_path = format!("/file/{id}/mod.zip");
+    let mut server = mockito::Server::new_async().await;
+    let _api = server
+        .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(format!(
+            r#"{{
+                "_idRow": {id}, "_sName": "Atomic GameBanana Mod",
+                "_sProfileUrl": "https://gamebanana.com/mods/{id}", "_sVersion": "1.0.0",
+                "_aSubmitter": {{ "_sName": "Author" }},
+                "_aPreviewMedia": {{ "_aImages": [] }},
+                "_aFiles": [{{ "_sFile": "mod.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+            }}"#,
+            base = server.url(),
+        ))
+        .create_async()
+        .await;
+    let _file = server
+        .mock("GET", file_path.as_str())
+        .with_status(200)
+        .with_header("content-type", "application/zip")
+        .with_body(archive_bytes)
+        .create_async()
+        .await;
+
+    env.crash_during(
+        crash_points::IMPORT_ZIP_AFTER_ROW_INSERT,
+        &[
+            "import-gamebanana",
+            "--id",
+            &id.to_string(),
+            "--api-base",
+            &server.url(),
+        ],
+    );
+
+    let core = recover_and_assert(&env, "GameBanana import crashed before Variant recording").await;
+    let listed = core.list_mods(GameCode::Gimi).await.expect("list");
+    assert!(
+        listed.is_empty(),
+        "the delegated in-transaction GameBanana row must roll back: {listed:?}",
+    );
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit after GameBanana transaction crash");
+    assert_eq!(
+        report.unreferenced.len(),
+        1,
+        "the downloaded Mod stays actionable"
+    );
+    assert!(report.unreferenced[0].path.join("Red/merged.ini").exists());
 }
 
 // ---------------------------------------------------------------------
