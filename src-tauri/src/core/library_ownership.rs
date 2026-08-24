@@ -13,6 +13,7 @@ use super::{Error, Result};
 pub(super) enum LibraryDirectoryOwner {
     Mod,
     ActiveReinstall,
+    ActiveStaging,
 }
 
 /// A point-in-time view of every filesystem object GMM currently owns.
@@ -32,6 +33,7 @@ pub(super) enum LibraryDirectoryOwner {
 pub(super) struct LibraryOwnershipSnapshot {
     mods: HashMap<DirectoryIdentity, Vec<String>>,
     active_reinstall_directories: HashSet<String>,
+    active_staging_directories: HashSet<String>,
 }
 
 impl LibraryOwnershipSnapshot {
@@ -40,6 +42,7 @@ impl LibraryOwnershipSnapshot {
         Self {
             mods: HashMap::new(),
             active_reinstall_directories: HashSet::new(),
+            active_staging_directories: HashSet::new(),
         }
     }
 
@@ -48,23 +51,47 @@ impl LibraryOwnershipSnapshot {
         E: Executor<'e, Database = Sqlite>,
     {
         let rows = sqlx::query(
-            "SELECT id AS mod_id, library_path, NULL AS reinstall_identity FROM mods
+            "SELECT id AS mod_id, library_path, NULL AS reinstall_identity,
+                    NULL AS staging_identity
+             FROM mods
              UNION ALL
              SELECT NULL AS mod_id, staged_path AS library_path,
-                    staged_identity AS reinstall_identity
+                    staged_identity AS reinstall_identity, NULL AS staging_identity
              FROM reinstall_swaps
              UNION ALL
              SELECT NULL AS mod_id, quarantine_path AS library_path,
-                    old_identity AS reinstall_identity
-             FROM reinstall_swaps",
+                    old_identity AS reinstall_identity, NULL AS staging_identity
+             FROM reinstall_swaps
+             UNION ALL
+             SELECT NULL AS mod_id, staged_path AS library_path, NULL AS reinstall_identity,
+                    staged_identity AS staging_identity
+             FROM staged_library_operations
+             WHERE recovery_error IS NULL",
         )
         .fetch_all(executor)
         .await?;
         let mut mods: HashMap<DirectoryIdentity, Vec<String>> = HashMap::new();
         let mut active_reinstall_directories = HashSet::new();
+        let mut active_staging_directories = HashSet::new();
         for row in rows {
             if let Some(identity) = row.try_get::<Option<String>, _>("reinstall_identity")? {
                 active_reinstall_directories.insert(identity);
+                continue;
+            }
+            if let Some(identity) = row.try_get::<Option<String>, _>("staging_identity")? {
+                let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+                match IdentifiedDirectory::open(&path) {
+                    Ok(directory) if directory.identity().durable_key() == identity => {
+                        active_staging_directories.insert(identity);
+                    }
+                    // The witness owns its recorded object only while it still
+                    // occupies the recorded spelling.
+                    Ok(_) => {}
+                    // Preserve the ownership contract's NotFound caveat: a
+                    // missing spelling contributes no filesystem identity.
+                    Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => return Err(Error::Io { path, source }),
+                }
                 continue;
             }
 
@@ -85,6 +112,7 @@ impl LibraryOwnershipSnapshot {
         Ok(Self {
             mods,
             active_reinstall_directories,
+            active_staging_directories,
         })
     }
 
@@ -94,6 +122,12 @@ impl LibraryOwnershipSnapshot {
             .contains(&identity.durable_key())
         {
             return Some(LibraryDirectoryOwner::ActiveReinstall);
+        }
+        if self
+            .active_staging_directories
+            .contains(&identity.durable_key())
+        {
+            return Some(LibraryDirectoryOwner::ActiveStaging);
         }
         self.mods
             .contains_key(identity)

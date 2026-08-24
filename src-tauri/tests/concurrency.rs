@@ -33,6 +33,7 @@
 //! which reports exactly the two failure modes by name, plus a direct
 //! scan of `<Game>/Mods/` for the inverse case reconcile does not cover.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -2746,16 +2747,16 @@ fn current_known_library_content_mutations_declare_their_fence_policy() {
         (
             "adopt_folder",
             &[
-                "snapshot_library_root_for_mutation",
-                "revalidate_library_root_for_mutation",
+                "create_staged_library_directory",
+                "commit_staged_mod",
                 "LibraryMutation::AdoptFolder",
             ],
         ),
         (
             "import_zip",
             &[
-                "snapshot_library_root_for_mutation",
-                "revalidate_library_root_for_mutation",
+                "create_staged_library_directory",
+                "commit_staged_mod",
                 "LibraryMutation::ImportZip",
             ],
         ),
@@ -2902,6 +2903,342 @@ async fn adopt_revalidates_the_library_root_after_copy() {
             .expect("list")
             .is_empty(),
         "a refused adopt must not commit a Mod row",
+    );
+}
+
+fn staged_adopt_source(env: &TestEnv, name: &str) -> PathBuf {
+    let source = env._tmp.path().join(name);
+    for variant in ["Red", "Blue"] {
+        let directory = source.join(variant);
+        std::fs::create_dir_all(&directory).expect("staged adopt Variant directory");
+        std::fs::write(
+            directory.join("merged.ini"),
+            format!("hash=staged-{variant}\n"),
+        )
+        .expect("staged adopt Variant file");
+    }
+    source
+}
+
+async fn only_staged_directory(core: &Core) -> PathBuf {
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("resolve staging Library root");
+    let directories: Vec<PathBuf> = std::fs::read_dir(&root)
+        .expect("read staging Library root")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(
+        directories.len(),
+        1,
+        "the paused adopt should own exactly one staged directory: {directories:?}",
+    );
+    directories
+        .into_iter()
+        .next()
+        .expect("one staged directory")
+}
+
+/// A real adopt producer pauses after its first file copy. Recovery observes
+/// the committed staging identity through the shared ownership snapshot and
+/// must refuse before it can claim a partial Variant tree.
+#[tokio::test]
+async fn recovery_refuses_a_directory_while_adopt_is_copying() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let source = staged_adopt_source(&env, "recovery-refused-staged-adopt");
+    let mut adopting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY)
+        .op([
+            "adopt",
+            "--from",
+            &source.display().to_string(),
+            "--name",
+            "Recovery Guarded Stage",
+        ])
+        .spawn();
+    adopting.wait_for_pause(gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY);
+    let staged = only_staged_directory(&core).await;
+
+    let recovered = core
+        .recover_unreferenced_library_dir(GameCode::Gimi, &staged, "Must Not Recover")
+        .await;
+    assert!(
+        matches!(
+            recovered,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { ref reason, .. })
+                if reason.contains("active staging operation")
+        ),
+        "recovery must refuse specifically because the producer owns the stage: {recovered:?}",
+    );
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit the live stage");
+    assert!(
+        report.unreferenced.is_empty(),
+        "the audit must not offer the live stage as an orphan: {report:?}",
+    );
+
+    adopting.resume();
+    adopting
+        .wait_for_outcome()
+        .expect_ok("the witnessed adopt after recovery refusal");
+    let mods = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list adopted Mod");
+    assert_eq!(mods.len(), 1, "the original adopt must commit one Mod");
+    let variants = core
+        .list_variants(&mods[0].id)
+        .await
+        .expect("list completed staged Variants");
+    let mut names: Vec<&str> = variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["Blue", "Red"], "the Variant set must be complete");
+}
+
+/// Delete shares the exact ownership snapshot used by audit and recovery. It
+/// must reject the same live staged identity without moving or purging bytes,
+/// then allow the producer to finish normally.
+#[tokio::test]
+async fn delete_refuses_a_directory_while_adopt_is_copying() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let source = staged_adopt_source(&env, "delete-refused-staged-adopt");
+    let mut adopting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY)
+        .op([
+            "adopt",
+            "--from",
+            &source.display().to_string(),
+            "--name",
+            "Delete Guarded Stage",
+        ])
+        .spawn();
+    adopting.wait_for_pause(gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY);
+    let staged = only_staged_directory(&core).await;
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &staged)
+        .await;
+    assert!(
+        matches!(
+            deleted,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { ref reason, .. })
+                if reason.contains("active staging operation")
+        ),
+        "delete must refuse specifically because the producer owns the stage: {deleted:?}",
+    );
+    assert!(
+        staged.is_dir(),
+        "a refused delete must leave the live stage in place"
+    );
+
+    adopting.resume();
+    adopting
+        .wait_for_outcome()
+        .expect_ok("the witnessed adopt after delete refusal");
+    let mods = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list adopted Mod");
+    assert_eq!(mods.len(), 1, "the original adopt must commit one Mod");
+    let variants = core
+        .list_variants(&mods[0].id)
+        .await
+        .expect("list completed staged Variants");
+    let mut names: Vec<&str> = variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["Blue", "Red"], "the Variant set must be complete");
+}
+
+/// A staging witness owns the filesystem object it recorded, not whatever
+/// later appears at the same pathname. Replacing a live stage must therefore
+/// make the replacement visible to audit and eligible for explicit deletion.
+#[tokio::test]
+async fn replacement_at_witnessed_staging_path_remains_unowned() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let source = staged_adopt_source(&env, "replaced-witnessed-staged-adopt");
+    let mut adopting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY)
+        .op([
+            "adopt",
+            "--from",
+            &source.display().to_string(),
+            "--name",
+            "Replaced Witnessed Stage",
+        ])
+        .spawn();
+    adopting.wait_for_pause(gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY);
+    let staged = only_staged_directory(&core).await;
+    let displaced = staged.with_extension("producer-displaced");
+    std::fs::rename(&staged, &displaced).expect("move the witnessed producer identity away");
+    std::fs::create_dir(&staged).expect("create a replacement at the witnessed spelling");
+    std::fs::write(staged.join("replacement.ini"), b"hash=replacement\n")
+        .expect("write replacement bytes");
+
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit the replacement identity");
+    let deletion = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &staged)
+        .await;
+    let reported_paths: HashSet<_> = report
+        .unreferenced
+        .iter()
+        .map(|directory| directory.path.as_path())
+        .collect();
+    assert!(
+        reported_paths.contains(staged.as_path())
+            && reported_paths.contains(displaced.as_path())
+            && matches!(
+                deletion,
+                Ok(ref deleted)
+                    if deleted.reclamation
+                        == gmm_lib::core::LibraryReclamationOutcome::Reclaimed
+            ),
+        "a stale path/identity pair must hide neither object and must not guard the replacement: report={report:?}, deletion={deletion:?}",
+    );
+    assert!(
+        displaced.is_dir(),
+        "acting on the replacement must not remove the witnessed producer identity",
+    );
+
+    // The producer is deliberately not resumed: it has lost its staged name,
+    // so RunningProbe's bounded Drop terminates it without manufacturing a
+    // second pathname replacement and testing a different commit question.
+    drop(adopting);
+}
+
+/// ZIP import uses the same setup boundary as adopt. At the shared pause the
+/// witness is committed, extraction has not written a byte, and the ownership
+/// snapshot already hides the empty stage from the audit.
+#[tokio::test]
+async fn import_zip_witness_commits_before_extraction_starts() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let archive = env._tmp.path().join("witnessed-import.zip");
+    write_reinstall_zip(&archive, b"hash=witnessed-zip\n");
+    let mut importing = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::STAGING_AFTER_WITNESS_COMMIT)
+        .op([
+            "import-zip",
+            "--zip",
+            &archive.display().to_string(),
+            "--name",
+            "Witnessed ZIP Stage",
+        ])
+        .spawn();
+    importing.wait_for_pause(gmm_lib::core::crash_points::STAGING_AFTER_WITNESS_COMMIT);
+    let staged = only_staged_directory(&core).await;
+    assert!(
+        std::fs::read_dir(&staged)
+            .expect("read pre-extract stage")
+            .next()
+            .is_none(),
+        "the witness boundary must fire before extraction writes its first entry",
+    );
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for staging witness inspection");
+    let operation: String = sqlx::query_scalar("SELECT operation FROM staged_library_operations")
+        .fetch_one(&pool)
+        .await
+        .expect("ZIP staging witness exists");
+    pool.close().await;
+    assert_eq!(operation, "import_zip");
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit pre-extract stage");
+    assert!(
+        report.unreferenced.is_empty(),
+        "the committed pre-extract witness must hide the live stage: {report:?}",
+    );
+
+    importing.resume();
+    importing
+        .wait_for_outcome()
+        .expect_ok("the witnessed ZIP import after inspection");
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after ZIP import");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM staged_library_operations")
+        .fetch_one(&pool)
+        .await
+        .expect("count ZIP staging witnesses after commit");
+    pool.close().await;
+    assert_eq!(
+        witnesses, 0,
+        "the successful ZIP Mod commit must retire its witness",
+    );
+}
+
+/// Retiring a failed producer's database witness is not permission to delete
+/// whatever later occupies its pathname. Cleanup retains the original open
+/// identity, reopens the name after witness retirement, and preserves both
+/// the moved original and the user's replacement when they differ.
+#[tokio::test]
+async fn rollback_witness_retirement_preserves_a_replacement_directory() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let missing_source = env._tmp.path().join("missing-rollback-source");
+    let mut adopting = probe(&env)
+        .pausing_at(gmm_lib::core::crash_points::STAGED_CLEANUP_AFTER_WITNESS_RETIRE)
+        .op([
+            "adopt",
+            "--from",
+            &missing_source.display().to_string(),
+            "--name",
+            "Rollback Identity Guard",
+        ])
+        .spawn();
+    adopting.wait_for_pause(gmm_lib::core::crash_points::STAGED_CLEANUP_AFTER_WITNESS_RETIRE);
+    let staged = only_staged_directory(&core).await;
+    let original = staged.with_extension("producer-moved-away");
+    std::fs::rename(&staged, &original).expect("move producer's empty stage away");
+    std::fs::create_dir(&staged).expect("create user replacement at staged spelling");
+    std::fs::write(staged.join("precious.buf"), b"user-owned replacement")
+        .expect("write replacement bytes");
+
+    adopting.resume();
+    let outcome = adopting.wait_for_outcome();
+    assert!(
+        !outcome.ok,
+        "the missing source must still report its original failure: {outcome:?}",
+    );
+    assert_eq!(
+        std::fs::read(staged.join("precious.buf")).expect("replacement survives cleanup"),
+        b"user-owned replacement",
+        "witness retirement must not turn the pathname into deletion authority",
+    );
+    assert!(
+        original.is_dir(),
+        "cleanup must also leave the moved producer identity untouched",
+    );
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after rollback cleanup");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM staged_library_operations")
+        .fetch_one(&pool)
+        .await
+        .expect("count rollback staging witnesses");
+    pool.close().await;
+    assert_eq!(
+        witnesses, 0,
+        "the returned-error rollback must still retire its durable witness",
     );
 }
 

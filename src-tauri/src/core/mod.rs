@@ -97,6 +97,13 @@ impl Core {
             default_library_root,
             crash_hook: None,
         };
+        if let Err(recovery) = core.resolve_interrupted_staging_at_startup().await {
+            tracing::warn!(
+                target: "gmm::library",
+                error = %recovery,
+                "could not release interrupted Library staging witnesses at startup",
+            );
+        }
         core.recover_interrupted_reinstalls_at_startup().await?;
         if let Err(recovery) = core.finish_interrupted_library_deletes().await {
             tracing::warn!(
@@ -589,17 +596,21 @@ impl Core {
         source_path: &Path,
         display_name: &str,
     ) -> Result<Mod> {
-        let root = self
-            .snapshot_library_root_for_mutation(
+        let id = Ulid::new().to_string();
+        let (root, staged) = self
+            .create_staged_library_directory(
                 game,
+                &id,
                 library_mutation::LibraryMutation::AdoptFolder,
             )
             .await?;
-        let id = Ulid::new().to_string();
-        let staged = root.create_staged_directory(&id)?;
         let library_path = staged.path().to_path_buf();
 
-        if let Err(error) = copy_dir_recursive(source_path, &library_path) {
+        let first_file = std::sync::Once::new();
+        let after_file = || {
+            first_file.call_once(|| self.crash_point(crash_points::ADOPT_DURING_LIBRARY_COPY));
+        };
+        if let Err(error) = copy_dir_recursive(source_path, &library_path, Some(&after_file)) {
             self.cleanup_staged_library_dir(
                 &root,
                 staged,
@@ -627,54 +638,20 @@ impl Core {
             }
         };
 
-        let mut fence = match self
-            .revalidate_library_root_for_mutation(
-                &root,
-                library_mutation::LibraryMutation::AdoptFolder,
-            )
-            .await
-        {
-            Ok(fence) => fence,
-            Err(error) => {
-                self.cleanup_staged_library_dir(
-                    &root,
-                    staged,
-                    library_mutation::LibraryMutation::AdoptFolder,
-                )
-                .await;
-                return Err(error);
-            }
-        };
-        let base = sanitize_dir_name(display_name);
-        let junction_dir_name =
-            library_mutation::unique_junction_dir_name(&mut fence.transaction, game, &base).await?;
-
-        let created_at = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO mods (
-                id, game_code, name, source, library_path,
-                junction_dir_name, enabled, created_at
-             )
-             VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+        self.commit_staged_mod(
+            root,
+            staged,
+            game,
+            &id,
+            display_name,
+            Source::Manual,
+            &library_path,
+            detected_variants,
+            library_mutation::LibraryMutation::AdoptFolder,
+            crash_points::ADOPT_AFTER_ROW_INSERT,
+            crash_points::ADOPT_AFTER_FENCE_COMMIT,
         )
-        .bind(&id)
-        .bind(game.as_str())
-        .bind(display_name)
-        .bind(Source::Manual.as_str())
-        .bind(library_path.to_string_lossy().as_ref())
-        .bind(&junction_dir_name)
-        .bind(&created_at)
-        .execute(&mut *fence.transaction)
         .await?;
-
-        // This seam is deliberately inside the transaction: a process death
-        // here must roll back the Mod row instead of exposing it without its
-        // detected Variants and active selection.
-        self.crash_point(crash_points::ADOPT_AFTER_ROW_INSERT);
-        self.record_detected_variants(&id, detected_variants, &mut fence.transaction)
-            .await?;
-        fence.commit().await?;
-        self.crash_point(crash_points::ADOPT_AFTER_FENCE_COMMIT);
 
         Ok(Mod {
             id,
@@ -2670,11 +2647,14 @@ impl Core {
         display_name: &str,
         opts: ImportZipOptions,
     ) -> Result<Mod> {
-        let root = self
-            .snapshot_library_root_for_mutation(game, library_mutation::LibraryMutation::ImportZip)
-            .await?;
         let id = Ulid::new().to_string();
-        let staged = root.create_staged_directory(&id)?;
+        let (root, staged) = self
+            .create_staged_library_directory(
+                game,
+                &id,
+                library_mutation::LibraryMutation::ImportZip,
+            )
+            .await?;
         let library_path = staged.path().to_path_buf();
 
         if let Err(e) = zip_import::extract(zip_path, &library_path, opts) {
@@ -2707,53 +2687,20 @@ impl Core {
             }
         };
 
-        let mut fence = match self
-            .revalidate_library_root_for_mutation(
-                &root,
-                library_mutation::LibraryMutation::ImportZip,
-            )
-            .await
-        {
-            Ok(fence) => fence,
-            Err(error) => {
-                self.cleanup_staged_library_dir(
-                    &root,
-                    staged,
-                    library_mutation::LibraryMutation::ImportZip,
-                )
-                .await;
-                return Err(error);
-            }
-        };
-        let base = sanitize_dir_name(display_name);
-        let junction_dir_name =
-            library_mutation::unique_junction_dir_name(&mut fence.transaction, game, &base).await?;
-
-        let created_at = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO mods (
-                id, game_code, name, source, library_path,
-                junction_dir_name, enabled, created_at
-             )
-             VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+        self.commit_staged_mod(
+            root,
+            staged,
+            game,
+            &id,
+            display_name,
+            Source::Local,
+            &library_path,
+            detected_variants,
+            library_mutation::LibraryMutation::ImportZip,
+            crash_points::IMPORT_ZIP_AFTER_ROW_INSERT,
+            crash_points::IMPORT_ZIP_AFTER_FENCE_COMMIT,
         )
-        .bind(&id)
-        .bind(game.as_str())
-        .bind(display_name)
-        .bind(Source::Local.as_str())
-        .bind(library_path.to_string_lossy().as_ref())
-        .bind(&junction_dir_name)
-        .bind(&created_at)
-        .execute(&mut *fence.transaction)
         .await?;
-
-        // Keep the atomicity seam before Variant persistence and before the
-        // transaction commit so aborting here cannot expose a partial Mod.
-        self.crash_point(crash_points::IMPORT_ZIP_AFTER_ROW_INSERT);
-        self.record_detected_variants(&id, detected_variants, &mut fence.transaction)
-            .await?;
-        fence.commit().await?;
-        self.crash_point(crash_points::IMPORT_ZIP_AFTER_FENCE_COMMIT);
 
         Ok(Mod {
             id,
@@ -2769,6 +2716,84 @@ impl Core {
             screenshot_url: None,
             reinstall_recovery: None,
         })
+    }
+
+    /// Revalidate a witnessed stage and commit its Mod/Variant state together
+    /// with witness retirement. Every returned database error rolls the fence
+    /// back before entering the same identity-checked cleanup used by copy and
+    /// detection failures.
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_staged_mod(
+        &self,
+        root: library_mutation::LibraryRootSnapshot,
+        staged: library_mutation::StagedLibraryDirectory,
+        game: GameCode,
+        id: &str,
+        display_name: &str,
+        source: Source,
+        library_path: &Path,
+        detected_variants: Vec<variants::DetectedVariant>,
+        mutation: library_mutation::LibraryMutation,
+        after_row_insert: &'static str,
+        after_commit: &'static str,
+    ) -> Result<()> {
+        let mut fence = match self
+            .revalidate_library_root_for_mutation(&root, mutation)
+            .await
+        {
+            Ok(fence) => fence,
+            Err(error) => {
+                self.cleanup_staged_library_dir(&root, staged, mutation)
+                    .await;
+                return Err(error);
+            }
+        };
+        let staged_write = async {
+            let base = sanitize_dir_name(display_name);
+            let junction_dir_name =
+                library_mutation::unique_junction_dir_name(&mut fence.transaction, game, &base)
+                    .await?;
+            sqlx::query(
+                "INSERT INTO mods (
+                    id, game_code, name, source, library_path,
+                    junction_dir_name, enabled, created_at
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+            )
+            .bind(id)
+            .bind(game.as_str())
+            .bind(display_name)
+            .bind(source.as_str())
+            .bind(library_path.to_string_lossy().as_ref())
+            .bind(&junction_dir_name)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&mut *fence.transaction)
+            .await?;
+
+            // This seam is deliberately inside the transaction: a process
+            // death here must roll back the Mod row instead of exposing it
+            // without its detected Variants and active selection.
+            self.crash_point(after_row_insert);
+            self.record_detected_variants(id, detected_variants, &mut fence.transaction)
+                .await?;
+            self.retire_staging_witness_for_commit(&staged, &mut fence)
+                .await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = staged_write {
+            let _ = fence.transaction.rollback().await;
+            self.cleanup_staged_library_dir(&root, staged, mutation)
+                .await;
+            return Err(error);
+        }
+        if let Err(error) = fence.commit().await {
+            self.cleanup_staged_library_dir(&root, staged, mutation)
+                .await;
+            return Err(error);
+        }
+        self.crash_point(after_commit);
+        Ok(())
     }
 
     /// Persist an already-detected Variant set and its initial active choice
@@ -3479,7 +3504,7 @@ fn move_subtree(from: &Path, to: &Path, report: &mut MoveReport) -> Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => {}
         Err(_) => {
-            copy_dir_recursive(from, to)?;
+            copy_dir_recursive(from, to, None)?;
             std::fs::remove_dir_all(from).map_err(|source| Error::Io {
                 path: from.to_path_buf(),
                 source,
@@ -3569,7 +3594,7 @@ fn path_within(path: &Path, ancestor: &Path) -> bool {
 }
 
 /// Recursive directory copy. Standard library has no built-in equivalent.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+fn copy_dir_recursive(src: &Path, dst: &Path, after_file: Option<&dyn Fn()>) -> Result<()> {
     std::fs::create_dir_all(dst).map_err(|source| Error::Io {
         path: dst.to_path_buf(),
         source,
@@ -3594,12 +3619,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         })?;
 
         if metadata.is_dir() {
-            copy_dir_recursive(&entry_path, &dst_path)?;
+            copy_dir_recursive(&entry_path, &dst_path, after_file)?;
         } else {
             std::fs::copy(&entry_path, &dst_path).map_err(|source| Error::Io {
                 path: entry_path.clone(),
                 source,
             })?;
+            if let Some(after_file) = after_file {
+                after_file();
+            }
         }
     }
 
