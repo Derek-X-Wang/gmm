@@ -610,6 +610,23 @@ impl Core {
         }
         self.crash_point(crash_points::ADOPT_AFTER_LIBRARY_COPY);
 
+        // Variant detection recursively traverses user-supplied content and
+        // is therefore unbounded. Complete it before acquiring the Library
+        // writer fence, then persist the detected shape with the Mod row in
+        // the single transaction below.
+        let detected_variants = match variants::detect_variants(&library_path) {
+            Ok(detected) => detected,
+            Err(error) => {
+                self.cleanup_staged_library_dir(
+                    &root,
+                    staged,
+                    library_mutation::LibraryMutation::AdoptFolder,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+
         let mut fence = match self
             .revalidate_library_root_for_mutation(
                 &root,
@@ -649,10 +666,15 @@ impl Core {
         .bind(&created_at)
         .execute(&mut *fence.transaction)
         .await?;
-        fence.commit().await?;
-        self.crash_point(crash_points::ADOPT_AFTER_ROW_INSERT);
 
-        self.detect_and_record_variants(&id, &library_path).await?;
+        // This seam is deliberately inside the transaction: a process death
+        // here must roll back the Mod row instead of exposing it without its
+        // detected Variants and active selection.
+        self.crash_point(crash_points::ADOPT_AFTER_ROW_INSERT);
+        self.record_detected_variants(&id, detected_variants, &mut fence.transaction)
+            .await?;
+        fence.commit().await?;
+        self.crash_point(crash_points::ADOPT_AFTER_FENCE_COMMIT);
 
         Ok(Mod {
             id,
@@ -2669,6 +2691,22 @@ impl Core {
         }
         self.crash_point(crash_points::IMPORT_ZIP_AFTER_EXTRACT);
 
+        // Keep recursive Variant detection outside the Library writer fence.
+        // The Mod row, detected Variant rows, and active selection are staged
+        // later in one bounded database transaction.
+        let detected_variants = match variants::detect_variants(&library_path) {
+            Ok(detected) => detected,
+            Err(error) => {
+                self.cleanup_staged_library_dir(
+                    &root,
+                    staged,
+                    library_mutation::LibraryMutation::ImportZip,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+
         let mut fence = match self
             .revalidate_library_root_for_mutation(
                 &root,
@@ -2708,10 +2746,14 @@ impl Core {
         .bind(&created_at)
         .execute(&mut *fence.transaction)
         .await?;
-        fence.commit().await?;
-        self.crash_point(crash_points::IMPORT_ZIP_AFTER_ROW_INSERT);
 
-        self.detect_and_record_variants(&id, &library_path).await?;
+        // Keep the atomicity seam before Variant persistence and before the
+        // transaction commit so aborting here cannot expose a partial Mod.
+        self.crash_point(crash_points::IMPORT_ZIP_AFTER_ROW_INSERT);
+        self.record_detected_variants(&id, detected_variants, &mut fence.transaction)
+            .await?;
+        fence.commit().await?;
+        self.crash_point(crash_points::IMPORT_ZIP_AFTER_FENCE_COMMIT);
 
         Ok(Mod {
             id,
@@ -2727,20 +2769,6 @@ impl Core {
             screenshot_url: None,
             reinstall_recovery: None,
         })
-    }
-
-    /// Run the Variant detection heuristic against the freshly extracted
-    /// Library subtree and persist the result. If 2+ Variants are
-    /// detected we set `active_variant_id` to the first alphabetical
-    /// row so the junction (created later via `set_enabled`) has a
-    /// concrete target. No-op when the heuristic finds 0 or 1 candidate.
-    async fn detect_and_record_variants(&self, mod_id: &str, library_path: &Path) -> Result<()> {
-        let detected = variants::detect_variants(library_path)?;
-        let mut transaction = self.pool.begin().await?;
-        self.record_detected_variants(mod_id, detected, &mut transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok(())
     }
 
     /// Persist an already-detected Variant set and its initial active choice
