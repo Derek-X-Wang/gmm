@@ -1723,7 +1723,7 @@ pub(super) async fn unique_junction_dir_name(
     unreachable!("u32::MAX collisions on one display name is not a real scenario")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -1732,7 +1732,6 @@ mod tests {
     /// the name is free for a rename. Mutation oracle: restoring
     /// target-following `Path::exists` reaches the rename, attributes its
     /// failure to the live path, and fires the named pre-rename assertion.
-    #[cfg(unix)]
     #[test]
     fn reinstall_rollback_propagates_staging_metadata_error_before_rename() {
         use std::os::unix::fs::PermissionsExt as _;
