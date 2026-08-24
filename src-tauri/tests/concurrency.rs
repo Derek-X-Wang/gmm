@@ -2296,6 +2296,93 @@ async fn junction_withdrawal_failure_quarantines_as_possibly_deployed_without_ab
     assert_eq!(rebuilt.quarantined, vec![imported.id]);
 }
 
+async fn mark_reinstall_recovery_as_quarantined(db_url: &str, token: Ulid) {
+    let pool = sqlx::SqlitePool::connect(db_url)
+        .await
+        .expect("open DB to mark reinstall recovery quarantined");
+    sqlx::query(
+        "UPDATE reinstall_swaps
+         SET recovery_error = 'fixture recovery obstruction',
+             recovery_attempted_at = '2026-08-23T00:01:00Z', recovery_attempts = 1,
+             junction_withdrawn = 0, junction_withdrawal_error = NULL
+         WHERE token = ?",
+    )
+    .bind(token.to_string())
+    .execute(&pool)
+    .await
+    .expect("mark reinstall recovery quarantined");
+    pool.close().await;
+}
+
+/// Reconcile is a recovery path, not only a reporting path: a prior failed or
+/// interrupted withdrawal must be retried before the quarantined Mod is
+/// returned to the caller.
+///
+/// Mutation oracle: replacing the guarded withdrawal branch in
+/// `reconcile_junctions` with classification-only bookkeeping leaves the live
+/// deployment entry behind and fires the named entry-survival assertion.
+#[tokio::test]
+async fn reconcile_retries_quarantined_reinstall_junction_withdrawal() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Reconcile Withdrawal Guard").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy Mod before quarantine");
+    let deployment = env.game_mods.join("Reconcile Withdrawal Guard");
+    let (token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    mark_reinstall_recovery_as_quarantined(&env.db_url, token).await;
+
+    let result = core
+        .reconcile_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("reconcile quarantined Mod");
+
+    assert_eq!(result.quarantined, vec![imported.id]);
+    assert!(
+        matches!(
+            std::fs::symlink_metadata(&deployment),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ),
+        "reconcile must withdraw the quarantined Mod's surviving deployment entry",
+    );
+}
+
+/// Rebuild independently retries a pending quarantine withdrawal. It must not
+/// rely on startup or reconcile having removed the deployment first.
+///
+/// Mutation oracle: replacing the guarded withdrawal branch in
+/// `rebuild_junctions` with classification-only bookkeeping leaves the live
+/// deployment entry behind and fires the named entry-survival assertion.
+#[tokio::test]
+async fn rebuild_retries_quarantined_reinstall_junction_withdrawal() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Rebuild Withdrawal Guard").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy Mod before quarantine");
+    let deployment = env.game_mods.join("Rebuild Withdrawal Guard");
+    let (token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    mark_reinstall_recovery_as_quarantined(&env.db_url, token).await;
+
+    let result = core
+        .rebuild_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("rebuild quarantined Mod");
+
+    assert_eq!(result.quarantined, vec![imported.id]);
+    assert!(
+        matches!(
+            std::fs::symlink_metadata(&deployment),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ),
+        "rebuild must withdraw the quarantined Mod's surviving deployment entry",
+    );
+}
+
 /// Models a process death after the quarantine record committed but before
 /// Junction withdrawal. The default false/null state is intentionally
 /// conservative; startup retries the failed rollback and then resolves the
@@ -2615,6 +2702,126 @@ async fn corrupt_reinstall_witness_paths_still_abort_startup() {
             "corrupt {corrupt_field} must be reported as database state, got: {error}",
         );
     }
+}
+
+/// Durable directory identities have one canonical fixed-width format. A
+/// malformed value is corrupt database state, not evidence that one Mod's
+/// filesystem bytes changed or disappeared.
+///
+/// Mutation oracle: accepting either identity as an unvalidated `String`
+/// lets startup quarantine the Mod and fires the case-specific startup-fatal
+/// assertion.
+#[tokio::test]
+async fn corrupt_reinstall_witness_identities_abort_startup_before_filesystem_recovery() {
+    for corrupt_field in ["old_identity", "staged_identity"] {
+        let env = TestEnv::new();
+        let core = env.core().await;
+        let imported = env.seed_mod(&core, "Corrupt Recovery Identity").await;
+        let root = imported.library_path.parent().expect("game Library root");
+        let token = Ulid::new();
+        let stage = root.join(format!(".gmm-reinstall-{token}"));
+        let quarantine = root.join(format!(".gmm-delete-{token}"));
+        std::fs::create_dir(&stage).expect("reinstall stage");
+        let mut old_identity = durable_directory_key(&imported.library_path);
+        let mut staged_identity = durable_directory_key(&stage);
+        match corrupt_field {
+            "old_identity" => old_identity = "not-a-durable-identity".to_string(),
+            "staged_identity" => staged_identity = "not-a-durable-identity".to_string(),
+            _ => unreachable!(),
+        }
+
+        let pool = sqlx::SqlitePool::connect(&env.db_url)
+            .await
+            .expect("open DB for corrupt identity fixture");
+        sqlx::query(
+            "INSERT INTO reinstall_swaps (
+                token, mod_id, game_code, library_path, staged_path,
+                quarantine_path, old_identity, staged_identity, created_at
+             ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(token.to_string())
+        .bind(&imported.id)
+        .bind(imported.library_path.to_string_lossy().as_ref())
+        .bind(stage.to_string_lossy().as_ref())
+        .bind(quarantine.to_string_lossy().as_ref())
+        .bind(old_identity)
+        .bind(staged_identity)
+        .bind("2026-08-23T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert corrupt identity witness");
+        pool.close().await;
+        drop(core);
+
+        let startup = Core::new(env.library.clone(), &env.db_url).await;
+        let error = match startup {
+            Ok(_) => panic!(
+                "corrupt {corrupt_field} must abort startup as database corruption before filesystem recovery"
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("database corruption"),
+            "corrupt {corrupt_field} must be reported as database state, got: {error}",
+        );
+    }
+}
+
+/// Relocation must validate every witness before using its recorded path to
+/// decide whether that witness is in scope. Otherwise a corrupt path can place
+/// itself outside the move and silently bypass the active-reinstall refusal.
+///
+/// Mutation oracle: deleting `validate_paths` from `move_root` lets this move
+/// succeed and fires the named database-corruption assertion.
+#[tokio::test]
+async fn relocation_validates_the_complete_reinstall_witness_before_scope_decision() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Relocation Witness Validation").await;
+    let real_root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let corrupt_root = env.data_dir.join("outside-relocation-scope");
+    let corrupt_library_path = corrupt_root.join(&imported.id);
+    let corrupt_stage = corrupt_root.join(".gmm-reinstall-wrong-token");
+    let corrupt_quarantine = corrupt_root.join(format!(".gmm-delete-{token}"));
+    let actual_stage = real_root.join(format!(".gmm-reinstall-{token}"));
+    std::fs::create_dir(&actual_stage).expect("actual stage for identity evidence");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for relocation witness fixture");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(corrupt_library_path.to_string_lossy().as_ref())
+    .bind(corrupt_stage.to_string_lossy().as_ref())
+    .bind(corrupt_quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&actual_stage))
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert corrupt relocation witness");
+    pool.close().await;
+
+    let destination = env.data_dir.join("relocated-library");
+    let relocation = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&destination))
+        .await
+        .expect_err("relocation must validate a witness before deciding it is out of scope");
+    assert!(
+        relocation.to_string().contains("database corruption"),
+        "relocation must reject the corrupt witness row before moving bytes, got: {relocation}",
+    );
+    assert!(
+        imported.library_path.join("merged.ini").is_file(),
+        "a corrupt witness must stop relocation before Library bytes move",
+    );
 }
 
 /// Reinstall rollback and ordinary delete-quarantine reclamation are separate
