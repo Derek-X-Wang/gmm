@@ -3014,9 +3014,10 @@ impl Core {
     ) -> Result<reconcile::ReconcileResult> {
         let rows = sqlx::query(
             "SELECT m.id, m.junction_dir_name, m.library_path, m.enabled,
-                    rs.recovery_error
+                    rs.token AS reinstall_token, rs.recovery_error
              FROM mods m
-             LEFT JOIN reinstall_swaps rs ON rs.mod_id = m.id
+             LEFT JOIN reinstall_swaps rs
+               ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
              WHERE m.game_code = ?",
         )
         .bind(game.as_str())
@@ -3039,14 +3040,16 @@ impl Core {
             let library_path: String = row.try_get("library_path")?;
             let enabled: i64 = row.try_get("enabled")?;
 
-            if row
-                .try_get::<Option<String>, _>("recovery_error")?
-                .is_some()
-            {
+            if let Some(token) = row.try_get::<Option<String>, _>("reinstall_token")? {
                 let link = game_mods_dir.join(&junction_dir_name);
-                library_mutation::withdraw_reinstall_junction(&link)?;
-                result.quarantined.push(id);
-                continue;
+                if self
+                    .withdraw_quarantined_reinstall_junction(&token, Some(&link))
+                    .await?
+                    .is_some()
+                {
+                    result.quarantined.push(id);
+                    continue;
+                }
             }
 
             let link = game_mods_dir.join(&junction_dir_name);
@@ -3158,9 +3161,10 @@ impl Core {
     ) -> Result<reconcile::ReconcileResult> {
         let rows = sqlx::query(
             "SELECT m.id, m.junction_dir_name, m.library_path, m.enabled,
-                    rs.recovery_error
+                    rs.token AS reinstall_token, rs.recovery_error
              FROM mods m
-             LEFT JOIN reinstall_swaps rs ON rs.mod_id = m.id
+             LEFT JOIN reinstall_swaps rs
+               ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
              WHERE m.game_code = ?",
         )
         .bind(game.as_str())
@@ -3181,14 +3185,16 @@ impl Core {
             let id: String = row.try_get("id")?;
             let junction_dir_name: String = row.try_get("junction_dir_name")?;
             let library_path: String = row.try_get("library_path")?;
-            if row
-                .try_get::<Option<String>, _>("recovery_error")?
-                .is_some()
-            {
+            if let Some(token) = row.try_get::<Option<String>, _>("reinstall_token")? {
                 let link = game_mods_dir.join(&junction_dir_name);
-                library_mutation::withdraw_reinstall_junction(&link)?;
-                result.quarantined.push(id);
-                continue;
+                if self
+                    .withdraw_quarantined_reinstall_junction(&token, Some(&link))
+                    .await?
+                    .is_some()
+                {
+                    result.quarantined.push(id);
+                    continue;
+                }
             }
             let enabled = row.try_get::<i64, _>("enabled")? != 0;
             let target = if enabled {
@@ -3341,7 +3347,8 @@ impl Core {
             "SELECT m.id, m.game_code, m.name, m.source, m.library_path, m.enabled,
                     m.gamebanana_id, m.source_url, m.author, m.version, m.screenshot_url,
                     rs.recovery_error, rs.recovery_attempted_at, rs.recovery_attempts,
-                    rs.staged_path, rs.quarantine_path
+                    rs.staged_path, rs.quarantine_path, rs.junction_withdrawn,
+                    rs.junction_withdrawal_error
              FROM mods m
              LEFT JOIN reinstall_swaps rs
                ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
@@ -3372,6 +3379,8 @@ impl Core {
                             quarantine_path: PathBuf::from(
                                 row.try_get::<String, _>("quarantine_path")?,
                             ),
+                            junction_withdrawn: row.try_get::<i64, _>("junction_withdrawn")? != 0,
+                            junction_withdrawal_error: row.try_get("junction_withdrawal_error")?,
                         })
                     })
                     .transpose()?;

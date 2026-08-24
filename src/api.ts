@@ -11,10 +11,13 @@ export interface ReinstallRecovery {
   libraryPath: string;
   stagedPath: string;
   quarantinePath: string;
+  junctionWithdrawn: boolean;
+  junctionWithdrawalError: string | null;
 }
 
 export type ReinstallRecoveryOutcome =
   | { status: "recovered" }
+  | { status: "alreadyRecovered" }
   | { status: "quarantined"; recovery: ReinstallRecovery };
 
 export interface Mod {

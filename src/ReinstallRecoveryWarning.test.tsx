@@ -14,6 +14,8 @@ const RECOVERY = {
   libraryPath: "D:\\GMM\\gimi\\01MOD",
   stagedPath: "D:\\GMM\\gimi\\.gmm-reinstall-01SWAP",
   quarantinePath: "D:\\GMM\\gimi\\.gmm-delete-01SWAP",
+  junctionWithdrawn: true,
+  junctionWithdrawalError: null,
 };
 
 it("distinguishes a retryable obstruction from intervention without guessing", async () => {
@@ -36,11 +38,33 @@ it("distinguishes a retryable obstruction from intervention without guessing", a
   expect(warning).toHaveTextContent(/will not discard either recorded byte identity/i);
   expect(warning).toHaveTextContent(/witness says the old tree should be live/i);
   expect(warning).toHaveTextContent(/could not restore or verify it/i);
-  expect(warning).toHaveTextContent(/will not load until recovery succeeds/i);
+  expect(warning).toHaveTextContent(/withdrew the recorded deployment entry/i);
   expect(warning).toHaveTextContent(/enabled or disabled choice is unchanged/i);
 
   await userEvent.click(screen.getByRole("button", { name: /retry recovery/i }));
   expect(retry).toHaveBeenCalledTimes(1);
+});
+
+it("warns that a Mod may still load when Junction withdrawal failed", () => {
+  render(
+    <ReinstallRecoveryWarning
+      modName="Raiden"
+      recovery={{
+        ...RECOVERY,
+        junctionWithdrawn: false,
+        junctionWithdrawalError: "the deployment path is not a Junction",
+      }}
+      pending={false}
+      onRetry={() => {}}
+    />,
+  );
+
+  const warning = screen.getByRole("region", {
+    name: /interrupted reinstall recovery for raiden/i,
+  });
+  expect(warning).toHaveTextContent(/may still be loading in the game/i);
+  expect(warning).toHaveTextContent(/deployment path is not a Junction/i);
+  expect(warning).not.toHaveTextContent(/will not load/i);
 });
 
 it("shows every recorded path as evidence and never as a deletion instruction", async () => {
@@ -76,4 +100,12 @@ it("changes text inside live regions that were already mounted", () => {
   expect(screen.getByRole("status")).toBe(status);
   expect(status).toHaveTextContent(/usable again/i);
   expect(status).not.toHaveFocus();
+
+  view.rerender(
+    <ReinstallRecoveryNotices
+      feedback={{ kind: "alreadyRecovered", modName: "Raiden" }}
+    />,
+  );
+  expect(status).toHaveTextContent(/already completed/i);
+  expect(screen.getByRole("alert")).toBeEmptyDOMElement();
 });

@@ -277,6 +277,7 @@ impl Core {
                 .await?
             {
                 ReinstallRecoveryOutcome::Recovered => rolled_back += 1,
+                ReinstallRecoveryOutcome::AlreadyRecovered => {}
                 ReinstallRecoveryOutcome::Quarantined { recovery } => tracing::error!(
                     target: "gmm::library",
                     token,
@@ -299,8 +300,9 @@ impl Core {
                 .bind(mod_id)
                 .fetch_optional(&self.pool)
                 .await?;
+        self.crash_point(super::crash_points::RETRY_REINSTALL_AFTER_WITNESS_LOOKUP);
         let Some(token) = token else {
-            return Ok(ReinstallRecoveryOutcome::Recovered);
+            return Ok(ReinstallRecoveryOutcome::AlreadyRecovered);
         };
         let outcome = self
             .attempt_reinstall_recovery(&token, LibraryMutation::RetryReinstallRecovery)
@@ -329,35 +331,71 @@ impl Core {
         })?;
         let mut fence = self.begin_library_mutation(mutation).await?;
         let recovery = async {
-            let witness = self.reinstall_swap_witness(token, &mut fence).await?;
+            let Some(witness) = self
+                .reinstall_swap_witness_if_present(token, &mut fence)
+                .await?
+            else {
+                return Ok(None);
+            };
             self.rollback_reinstall_swap_in_mutation(&witness, &mut fence)
-                .await
+                .await?;
+            Ok(Some(()))
         }
         .await;
         match recovery {
-            Ok(()) => {
+            Ok(Some(())) => {
                 fence.commit().await?;
                 Ok(ReinstallRecoveryOutcome::Recovered)
+            }
+            Ok(None) => {
+                fence.commit().await?;
+                Ok(ReinstallRecoveryOutcome::AlreadyRecovered)
             }
             Err(error) if quarantinable_reinstall_failure(&error) => {
                 fence.transaction.rollback().await?;
                 let recovery = self
                     .record_reinstall_recovery_failure(token_raw, &error.to_string())
                     .await?;
-                Ok(ReinstallRecoveryOutcome::Quarantined { recovery })
+                match recovery {
+                    Some(recovery) => Ok(ReinstallRecoveryOutcome::Quarantined { recovery }),
+                    None => Ok(ReinstallRecoveryOutcome::AlreadyRecovered),
+                }
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn reinstall_swap_witness_if_present(
+        &self,
+        token: Ulid,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<Option<ReinstallSwapWitness>> {
+        let row = sqlx::query(
+            "SELECT token, mod_id, game_code, library_path, staged_path,
+                    quarantine_path, old_identity, staged_identity
+             FROM reinstall_swaps WHERE token = ?",
+        )
+        .bind(token.to_string())
+        .fetch_optional(&mut *fence.transaction)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let witness = ReinstallSwapWitness::from_row(&row)?;
+        witness.validate_paths()?;
+        self.rebase_reinstall_swap_witness(witness, fence)
+            .await
+            .map(Some)
     }
 
     async fn record_reinstall_recovery_failure(
         &self,
         token: &str,
         reason: &str,
-    ) -> Result<ReinstallRecovery> {
+    ) -> Result<Option<ReinstallRecovery>> {
         let attempted_at = chrono::Utc::now().to_rfc3339();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE reinstall_swaps
              SET recovery_error = ?, recovery_attempted_at = ?,
                  recovery_attempts = recovery_attempts + 1
@@ -368,6 +406,10 @@ impl Core {
         .bind(token)
         .execute(&mut *transaction)
         .await?;
+        if updated.rows_affected() == 0 {
+            transaction.commit().await?;
+            return Ok(None);
+        }
 
         let junction = sqlx::query(
             "SELECT m.junction_dir_name, g.install_path
@@ -379,27 +421,86 @@ impl Core {
         .bind(token)
         .fetch_one(&mut *transaction)
         .await?;
-        if let Some(install_path) = junction
+        let link = junction
             .try_get::<Option<String>, _>("install_path")?
             .map(PathBuf::from)
-        {
-            let link = install_path
-                .join("Mods")
-                .join(junction.try_get::<String, _>("junction_dir_name")?);
-            withdraw_reinstall_junction(&link)?;
-        }
+            .map(|install_path| {
+                Ok::<PathBuf, Error>(
+                    install_path
+                        .join("Mods")
+                        .join(junction.try_get::<String, _>("junction_dir_name")?),
+                )
+            })
+            .transpose()?;
+        transaction.commit().await?;
 
-        let row = sqlx::query(
-            "SELECT recovery_error, recovery_attempted_at, recovery_attempts,
-                    library_path, staged_path, quarantine_path
-             FROM reinstall_swaps WHERE token = ?",
+        // The quarantine is durable before the fallible Junction operation.
+        // A process death here leaves junction_withdrawn = 0, which startup,
+        // retry, reconcile, and rebuild all retry without losing the witness.
+        self.withdraw_quarantined_reinstall_junction(token, link.as_deref())
+            .await?;
+        self.reinstall_recovery_for_token(token).await
+    }
+
+    pub(super) async fn withdraw_quarantined_reinstall_junction(
+        &self,
+        token: &str,
+        link: Option<&Path>,
+    ) -> Result<Option<bool>> {
+        let state: Option<i64> = sqlx::query_scalar(
+            "SELECT junction_withdrawn FROM reinstall_swaps
+             WHERE token = ? AND recovery_error IS NOT NULL",
         )
         .bind(token)
-        .fetch_one(&mut *transaction)
+        .fetch_optional(&self.pool)
         .await?;
-        let recovery = reinstall_recovery_from_row(&row)?;
-        transaction.commit().await?;
-        Ok(recovery)
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        if state != 0 && link.is_none_or(|path| !super::link_exists(path)) {
+            return Ok(Some(true));
+        }
+
+        let withdrawal = link.map_or(Ok(()), withdraw_reinstall_junction);
+        let (withdrawn, withdrawal_error) = match withdrawal {
+            Ok(()) => (1_i64, None),
+            Err(error) => (0_i64, Some(error.to_string())),
+        };
+        let updated = sqlx::query(
+            "UPDATE reinstall_swaps
+             SET junction_withdrawn = ?, junction_withdrawal_error = ?
+             WHERE token = ? AND recovery_error IS NOT NULL",
+        )
+        .bind(withdrawn)
+        .bind(&withdrawal_error)
+        .bind(token)
+        .execute(&self.pool)
+        .await?;
+        if updated.rows_affected() == 0 {
+            return Ok(None);
+        }
+        if let Some(error) = withdrawal_error {
+            tracing::error!(
+                target: "gmm::library",
+                token,
+                error,
+                "quarantined reinstall may still be deployed because Junction withdrawal failed",
+            );
+        }
+        Ok(Some(withdrawn != 0))
+    }
+
+    async fn reinstall_recovery_for_token(&self, token: &str) -> Result<Option<ReinstallRecovery>> {
+        let row = sqlx::query(
+            "SELECT recovery_error, recovery_attempted_at, recovery_attempts,
+                    library_path, staged_path, quarantine_path,
+                    junction_withdrawn, junction_withdrawal_error
+             FROM reinstall_swaps WHERE token = ? AND recovery_error IS NOT NULL",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(reinstall_recovery_from_row).transpose()
     }
 
     /// Current relocation refuses to move a subtree with an active witness,
@@ -898,6 +999,8 @@ fn reinstall_recovery_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Reinstal
         library_path: PathBuf::from(row.try_get::<String, _>("library_path")?),
         staged_path: PathBuf::from(row.try_get::<String, _>("staged_path")?),
         quarantine_path: PathBuf::from(row.try_get::<String, _>("quarantine_path")?),
+        junction_withdrawn: row.try_get::<i64, _>("junction_withdrawn")? != 0,
+        junction_withdrawal_error: row.try_get("junction_withdrawal_error")?,
     })
 }
 

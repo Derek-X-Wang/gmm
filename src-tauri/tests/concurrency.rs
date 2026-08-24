@@ -666,6 +666,50 @@ fn write_reinstall_zip(path: &Path, body: &[u8]) {
     archive.finish().expect("finish reinstall ZIP");
 }
 
+async fn obstruct_reinstall_recovery(
+    env: &TestEnv,
+    imported: &gmm_lib::core::Mod,
+) -> (Ulid, PathBuf, PathBuf, PathBuf) {
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let held_stage = root.join(format!(".held-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("reinstall stage");
+    std::fs::write(stage.join("replacement.ini"), b"witnessed replacement")
+        .expect("replacement bytes");
+    let old_identity = durable_directory_key(&imported.library_path);
+    let staged_identity = durable_directory_key(&stage);
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for recovery witness");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(old_identity)
+    .bind(staged_identity)
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert reinstall witness");
+    pool.close().await;
+
+    std::fs::rename(&stage, &held_stage).expect("hold witnessed stage aside");
+    std::fs::create_dir(&stage).expect("substitute reserved stage name");
+    std::fs::write(stage.join("unknown.ini"), b"unproved stage bytes")
+        .expect("unproved stage bytes");
+    (token, stage, held_stage, quarantine)
+}
+
 #[cfg(unix)]
 fn durable_directory_key(path: &Path) -> String {
     use std::os::unix::fs::MetadataExt as _;
@@ -2163,6 +2207,186 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
     assert_eq!(
         witnesses, 0,
         "the successful in-app retry must retire the witness",
+    );
+}
+
+/// Quarantine is durable even when GMM cannot withdraw the recorded
+/// deployment entry. A non-link directory is a deterministic cross-platform
+/// stand-in for a locked Junction or permission refusal: the guard must refuse
+/// to delete it, startup must continue, and the UI model must say the Mod may
+/// still be loading.
+///
+/// Mutation oracle: propagating `withdraw_reinstall_junction` from
+/// `withdraw_quarantined_reinstall_junction` makes Core construction fail at
+/// the named startup assertion.
+#[tokio::test]
+async fn junction_withdrawal_failure_quarantines_as_possibly_deployed_without_aborting_startup() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Possibly Deployed Recovery").await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("record game install path");
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy Mod before interrupted reinstall");
+    let deployment = env.game_mods.join("Possibly Deployed Recovery");
+    gmm_lib::core::junction::remove(&deployment).expect("replace the Junction with a directory");
+    std::fs::create_dir(&deployment).expect("non-link deployment directory");
+    std::fs::write(deployment.join("still-loading.ini"), b"deployed bytes")
+        .expect("possibly loaded deployment bytes");
+    let (_token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    drop(core);
+
+    let started = Core::new(env.library.clone(), &env.db_url)
+        .await
+        .expect("a failed Junction withdrawal must not abort startup");
+    let listed = started
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list possibly deployed quarantine");
+    let recovery = listed[0]
+        .reinstall_recovery
+        .as_ref()
+        .expect("the failed rollback remains quarantined");
+    assert!(
+        !recovery.junction_withdrawn,
+        "the durable state must not claim Junction withdrawal succeeded",
+    );
+    assert!(
+        recovery
+            .junction_withdrawal_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not a Junction")),
+        "the user-visible state must retain why the Mod may still load: {recovery:?}",
+    );
+    assert_eq!(
+        std::fs::read(deployment.join("still-loading.ini"))
+            .expect("guarded deployment bytes survive"),
+        b"deployed bytes",
+        "refusing a non-Junction must never delete its bytes",
+    );
+
+    let reconciled = started
+        .reconcile_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("reconcile must report rather than propagate withdrawal failure");
+    assert_eq!(reconciled.quarantined, vec![imported.id.clone()]);
+    let rebuilt = started
+        .rebuild_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("rebuild must report rather than propagate withdrawal failure");
+    assert_eq!(rebuilt.quarantined, vec![imported.id]);
+}
+
+/// Models a process death after the quarantine record committed but before
+/// Junction withdrawal. The default false/null state is intentionally
+/// conservative; startup retries the failed rollback and then resolves the
+/// pending withdrawal without treating the missing entry as an error.
+#[tokio::test]
+async fn startup_resumes_pending_withdrawal_after_quarantine_record_commit() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Pending Withdrawal Recovery").await;
+    let (token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for crash-state fixture");
+    sqlx::query(
+        "UPDATE reinstall_swaps
+         SET recovery_error = 'previous recovery obstruction',
+             recovery_attempted_at = '2026-08-23T00:01:00Z', recovery_attempts = 1
+         WHERE token = ?",
+    )
+    .bind(token.to_string())
+    .execute(&pool)
+    .await
+    .expect("commit the pre-withdrawal crash state");
+    let pending: (i64, Option<String>) = sqlx::query_as(
+        "SELECT junction_withdrawn, junction_withdrawal_error
+         FROM reinstall_swaps WHERE token = ?",
+    )
+    .bind(token.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read pending withdrawal state");
+    assert_eq!(pending, (0, None));
+    pool.close().await;
+    drop(core);
+
+    let started = Core::new(env.library.clone(), &env.db_url)
+        .await
+        .expect("startup must resume the committed pre-withdrawal state");
+    let listed = started
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list resumed quarantine");
+    let recovery = listed[0]
+        .reinstall_recovery
+        .as_ref()
+        .expect("obstructed recovery remains quarantined");
+    assert!(
+        recovery.junction_withdrawn,
+        "startup must resolve the pending withdrawal when no deployment entry exists",
+    );
+    assert!(recovery.junction_withdrawal_error.is_none());
+}
+
+/// Both real processes observe the witness before either enters the serialized
+/// recovery fence. The winner retires it; the later caller must report success
+/// rather than turning the winner's recovery into a false intervention alert.
+///
+/// Mutation oracle: restoring `fetch_one`/RowNotFound propagation inside
+/// `attempt_reinstall_recovery` makes the later outcome fail the named
+/// assertion below.
+#[tokio::test]
+async fn concurrent_reinstall_retries_report_the_later_success_honestly() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Concurrent Recovery Retry").await;
+    let (_token, stage, held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    drop(core);
+
+    let pause = gmm_lib::core::crash_points::RETRY_REINSTALL_AFTER_WITNESS_LOOKUP;
+    let mut first = probe(&env)
+        .pausing_at(pause)
+        .op(["retry-reinstall-recovery", "--mod-id", imported.id.as_str()])
+        .spawn();
+    first.wait_for_pause(pause);
+    let mut later = probe(&env)
+        .pausing_at(pause)
+        .op(["retry-reinstall-recovery", "--mod-id", imported.id.as_str()])
+        .spawn();
+    later.wait_for_pause(pause);
+
+    std::fs::remove_dir_all(&stage).expect("remove unproved stage replacement");
+    std::fs::rename(&held_stage, &stage).expect("restore witnessed stage identity");
+
+    first.resume();
+    first
+        .wait_for_outcome()
+        .expect_ok("first concurrent recovery retry");
+    later.resume();
+    later
+        .wait_for_outcome()
+        .expect_ok("later concurrent retry must recognize recovery already succeeded");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB after concurrent retries");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps")
+        .fetch_one(&pool)
+        .await
+        .expect("count witnesses after concurrent retries");
+    assert_eq!(
+        witnesses, 0,
+        "the winner must retire the witness exactly once"
     );
 }
 

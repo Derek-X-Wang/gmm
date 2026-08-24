@@ -1076,6 +1076,9 @@ async fn every_crash_point_is_exercised_by_an_operation() {
     let gamebanana_id = 157_178;
     let imported = import_gamebanana_fixture(&env, &core, gamebanana_id).await;
     reinstall_gamebanana_fixture(&env, &core, gamebanana_id, &imported.id).await;
+    core.retry_reinstall_recovery(&imported.id)
+        .await
+        .expect("coverage retry after completed reinstall");
 
     // A missing source creates a staged destination and then forces the
     // identity-checked quarantine cleanup path.

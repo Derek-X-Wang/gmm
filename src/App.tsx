@@ -1052,8 +1052,11 @@ function ModList({ game }: { game: ApiGameCode }) {
       // stable section, while the separately mounted live region announces.
       sectionRef.current?.focus();
       setRecoveryFeedback(
-        outcome.status === "recovered"
-          ? { kind: "recovered", modName: mod.name }
+        outcome.status === "recovered" || outcome.status === "alreadyRecovered"
+          ? {
+              kind: outcome.status,
+              modName: mod.name,
+            }
           : {
               kind: "stillQuarantined",
               modName: mod.name,
@@ -1156,7 +1159,9 @@ function ModList({ game }: { game: ApiGameCode }) {
               />
               <span>
                 {m.reinstallRecovery
-                  ? "Unavailable"
+                  ? m.reinstallRecovery.junctionWithdrawn
+                    ? "Unavailable"
+                    : "Unavailable · may still be loading"
                   : m.enabled
                     ? "Enabled"
                     : "Disabled"}

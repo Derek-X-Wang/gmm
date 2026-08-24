@@ -2,6 +2,7 @@ import type { ReinstallRecovery } from "./api";
 
 export type ReinstallRecoveryFeedback =
   | { kind: "recovered"; modName: string }
+  | { kind: "alreadyRecovered"; modName: string }
   | { kind: "stillQuarantined"; modName: string; reason: string }
   | null;
 
@@ -20,7 +21,9 @@ export function ReinstallRecoveryNotices({
       <div className="reinstall-action-notice muted small" role="status">
         {feedback?.kind === "recovered"
           ? `Recovered the interrupted reinstall for ${feedback.modName}. The Mod is usable again.`
-          : null}
+          : feedback?.kind === "alreadyRecovered"
+            ? `Recovery had already completed for ${feedback.modName}. The Mod is usable again.`
+            : null}
       </div>
       <div className="reinstall-action-notice error" role="alert">
         {feedback?.kind === "stillQuarantined"
@@ -50,13 +53,24 @@ export function ReinstallRecoveryWarning({
       className="reinstall-recovery-warning"
       aria-label={`Interrupted reinstall recovery for ${modName}`}
     >
-      <strong>Unavailable — interrupted reinstall needs recovery</strong>
+      <strong>
+        {recovery.junctionWithdrawn
+          ? "Unavailable — interrupted reinstall needs recovery"
+          : "Unavailable — this Mod may still be loading"}
+      </strong>
       <p>
         The recovery witness says the old tree should be live, but GMM could not
-        restore or verify it. GMM left every directory it could not prove untouched
-        and removed this Mod&apos;s Junction; the Mod will not load until recovery
-        succeeds. Your enabled or disabled choice is unchanged, and ordinary cleanup
-        will not discard either recorded byte identity.
+        restore or verify it. GMM left every directory it could not prove untouched.
+        {recovery.junctionWithdrawn ? (
+          <> GMM withdrew the recorded deployment entry and will not recreate it until
+          recovery succeeds.</>
+        ) : (
+          <> GMM could not withdraw the recorded deployment entry, so this Mod may still
+          be loading in the game. Withdrawal failed because: {recovery.junctionWithdrawalError
+            ?? "the previous attempt ended before withdrawal was confirmed"}.</>
+        )}{" "}
+        Your enabled or disabled choice is unchanged, and ordinary cleanup will not
+        discard either recorded byte identity.
       </p>
       <p>
         <strong>Retry may work:</strong> if a file was briefly locked or the

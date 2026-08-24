@@ -20,12 +20,19 @@ pub struct ReinstallRecovery {
     pub library_path: PathBuf,
     pub staged_path: PathBuf,
     pub quarantine_path: PathBuf,
+    /// True only after GMM removed the recorded deployment entry, or proved
+    /// that no game install path was configured for one to exist under.
+    pub junction_withdrawn: bool,
+    /// Why the recorded deployment entry could not be withdrawn. `None` with
+    /// `junction_withdrawn == false` is the crash-resumable pending state.
+    pub junction_withdrawal_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum ReinstallRecoveryOutcome {
     Recovered,
+    AlreadyRecovered,
     Quarantined { recovery: ReinstallRecovery },
 }
 

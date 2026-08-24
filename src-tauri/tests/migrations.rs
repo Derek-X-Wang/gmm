@@ -331,6 +331,8 @@ async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
             "recovery_error",
             "recovery_attempted_at",
             "recovery_attempts",
+            "junction_withdrawn",
+            "junction_withdrawal_error",
         ],
         "the reinstall migrations must create every witness column in the expected order",
     );
