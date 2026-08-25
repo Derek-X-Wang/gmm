@@ -48,7 +48,7 @@ use ulid::Ulid;
 use super::library_audit::{directory_size_without_links, is_link_or_reparse_point};
 use super::library_identity::IdentifiedDirectory;
 use super::library_mutation::{unique_junction_dir_name, LibraryMutation, LibraryMutationFence};
-use super::{crash_points, variants, Core, Error, GameCode, Mod, Result, Source};
+use super::{crash_points, variants, Core, CrashHook, Error, GameCode, Mod, Result, Source};
 
 pub(super) const DELETE_QUARANTINE_PREFIX: &str = ".gmm-delete-";
 const DELETE_INTENT_SUFFIX: &str = ".intent";
@@ -95,6 +95,7 @@ struct GuardedLibraryMutation {
 pub(super) struct QuarantinedLibraryDirectory {
     pub(super) path: PathBuf,
     pub(super) intent: PathBuf,
+    after_root_handle_open: Option<CrashHook>,
 }
 
 pub(super) enum QuarantinePurgeOutcome {
@@ -114,6 +115,9 @@ impl QuarantinedLibraryDirectory {
         let Some(verified_after_measurement) = open_owned_delete_quarantine(&self.path)? else {
             return Ok(QuarantinePurgeOutcome::OwnershipLost);
         };
+        if let Some(hook) = &self.after_root_handle_open {
+            hook(crash_points::QUARANTINE_PURGE_AFTER_ROOT_HANDLE_OPEN);
+        }
         // Windows keeps a directory name visible while an open handle refers
         // to it even when that handle shares DELETE access. Measurement is
         // path-based, so prove the reserved name both before and after it and
@@ -512,6 +516,7 @@ impl Core {
         Ok(QuarantinedLibraryDirectory {
             path: quarantine,
             intent,
+            after_root_handle_open: self.crash_hook.clone(),
         })
     }
 
@@ -766,6 +771,7 @@ fn purge_delete_quarantines_with(
             match (QuarantinedLibraryDirectory {
                 path: quarantine,
                 intent,
+                after_root_handle_open: None,
             })
             .purge(false)
             {
