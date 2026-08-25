@@ -613,6 +613,7 @@ impl Core {
                 failures.push(JunctionRestoreFailure {
                     mod_id: id,
                     game,
+                    kind: error.surface_failure_kind(),
                     error: error.to_string(),
                 });
             }
@@ -3048,13 +3049,11 @@ impl Core {
     /// `install_path` is set. The per-game result is logged via tracing
     /// (NEW-LOG); the caller usually only cares about the aggregate
     /// vector for status reporting.
-    pub async fn reconcile_all_set_games(
-        &self,
-    ) -> Result<Vec<(GameCode, reconcile::ReconcileResult)>> {
+    pub async fn reconcile_all_set_games(&self) -> Result<reconcile::StartupReconcileReport> {
         let rows = sqlx::query("SELECT code, install_path FROM games")
             .fetch_all(&self.pool)
             .await?;
-        let mut out = Vec::new();
+        let mut report = reconcile::StartupReconcileReport::default();
         for row in rows {
             let code: String = row.try_get("code")?;
             let install_path: Option<String> = row.try_get("install_path")?;
@@ -3075,7 +3074,7 @@ impl Core {
                         quarantined = result.quarantined.len(),
                         "startup reconcile completed",
                     );
-                    out.push((game, result));
+                    report.reconciled.push((game, result));
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -3084,10 +3083,26 @@ impl Core {
                         error = %e,
                         "startup reconcile failed; falling back to lazy creation on enable",
                     );
+                    report
+                        .failures
+                        .push(reconcile::StartupReconcileFailure::from_error(game, &e));
                 }
             }
         }
-        Ok(out)
+        Ok(report)
+    }
+
+    /// Run the startup pass and publish every per-game failure to the
+    /// in-memory bridge read by React. Keeping report production and
+    /// publication together makes the user-visible handoff testable without a
+    /// Tauri window or a timing-sensitive event listener.
+    pub async fn reconcile_all_set_games_at_startup(
+        &self,
+        state: &reconcile::StartupReconcileState,
+    ) -> Result<()> {
+        let report = self.reconcile_all_set_games().await?;
+        state.finish(report.failures);
+        Ok(())
     }
 
     /// Walk every Mod row for `game` and reconcile its junction with
@@ -3874,6 +3889,7 @@ pub struct MoveReport {
 pub struct JunctionRestoreFailure {
     pub mod_id: String,
     pub game: GameCode,
+    pub kind: error::SurfaceFailureKind,
     pub error: String,
 }
 

@@ -34,6 +34,7 @@ import {
   getGameInstallPath,
   getLibraryPaths,
   getProxyConfig,
+  getStartupReconcileStatus,
   importGamebanana,
   importZip,
   installImporter,
@@ -181,6 +182,7 @@ function MainApp({
           <button onClick={onResumeWizard}>Resume setup</button>
         </section>
       ) : null}
+      <StartupReconcileNotice />
       <SessionBanner />
       <GameTabs games={list} active={activeGame} onChange={setActiveGame} />
       <LaunchGameButton game={activeGame} displayName={active.displayName} />
@@ -194,6 +196,58 @@ function MainApp({
       <Diagnostics />
       <ModList game={activeGame} />
     </main>
+  );
+}
+
+/**
+ * Fail closed at the smallest independently safe unit, then say what could
+ * not be computed and preserve the backend's repair route. Conflict checks,
+ * per-game startup reconcile, and per-Mod relocation restore all use this
+ * presentation so uncertainty never turns into an empty/healthy answer.
+ */
+function OperationFailureNotice({
+  heading,
+  detail,
+  errors,
+}: {
+  heading: string;
+  detail: string;
+  errors: string[];
+}) {
+  return (
+    <div className="error" role="alert">
+      <strong>{heading}</strong>
+      <p>{detail}</p>
+      <ul>
+        {errors.map((error, index) => (
+          <li key={`${index}:${error}`} className="small">
+            {error}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function StartupReconcileNotice() {
+  const status = useQuery({
+    queryKey: ["startupReconcileStatus"],
+    queryFn: getStartupReconcileStatus,
+    refetchInterval: (query) => (query.state.data?.finished ? false : 250),
+  });
+  const failures = status.data?.failures ?? [];
+  if (failures.length === 0) return null;
+
+  return (
+    <section className="card">
+      <OperationFailureNotice
+        heading="GMM could not finish checking your game links at startup."
+        detail="The affected game was left unchanged; other games were checked independently."
+        errors={failures.map(
+          (failure) => `${failure.game.toUpperCase()}: ${failure.error}`,
+        )}
+      />
+    </section>
   );
 }
 
@@ -854,22 +908,41 @@ function JunctionRestoreFailures({
   failures?: MoveReport["failed_junction_restores"];
 }) {
   if (!failures?.length) return null;
+  const invalidSelections = failures.filter(
+    (failure) => failure.kind === "invalidActiveVariant",
+  );
+  const retryableRestores = failures.filter(
+    (failure) => failure.kind !== "invalidActiveVariant",
+  );
   return (
-    <div className="error">
-      <p>
-        The Library moved, but {failures.length} enabled Mod
-        {failures.length === 1 ? "" : "s"} could not be linked back into the
-        game folder. Their files are safe. Use “Rebuild junctions” on the game
-        card below; if it keeps failing, the reason is shown here.
-      </p>
-      <ul>
-        {failures.map((failure) => (
-          <li key={`${failure.game}:${failure.mod_id}`} className="small">
-            <code>{failure.game}</code> {failure.mod_id}: {failure.error}
-          </li>
-        ))}
-      </ul>
-    </div>
+    <>
+      {invalidSelections.length > 0 ? (
+        <OperationFailureNotice
+          heading="The Library moved, but some Mods have an invalid Variant selection."
+          detail="GMM left those Mods unlinked. Rebuilding junctions cannot repair a saved Variant selection."
+          errors={invalidSelections.map(
+            (failure) => `${failure.game.toUpperCase()}: ${failure.error}`,
+          )}
+        />
+      ) : null}
+      {retryableRestores.length > 0 ? (
+        <div className="error">
+          <p>
+            The Library moved, but {retryableRestores.length} enabled Mod
+            {retryableRestores.length === 1 ? "" : "s"} could not be linked back into the
+            game folder. Their files are safe. Use “Rebuild junctions” on the game
+            card below; if it keeps failing, the reason is shown here.
+          </p>
+          <ul>
+            {retryableRestores.map((failure) => (
+              <li key={`${failure.game}:${failure.mod_id}`} className="small">
+                <code>{failure.game}</code> {failure.mod_id}: {failure.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -1125,6 +1198,13 @@ function ModList({ game }: { game: ApiGameCode }) {
 
       {mods.isLoading ? <p>Loading…</p> : null}
       {mods.isError ? <p className="error">{String(mods.error)}</p> : null}
+      {conflicts.isError ? (
+        <OperationFailureNotice
+          heading="GMM could not check this game's Mod conflicts."
+          detail="Conflict information is unavailable; this is not a “no conflicts” result."
+          errors={[String(conflicts.error)]}
+        />
+      ) : null}
 
       {mods.data && mods.data.length === 0 ? (
         <p className="muted">No mods yet — adopt a folder to get started.</p>

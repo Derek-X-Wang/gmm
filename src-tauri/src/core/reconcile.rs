@@ -14,8 +14,12 @@
 //!   resolves somewhere unexpected. The UI surfaces these as warnings.
 
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
+
+use super::error::{Error, SurfaceFailureKind};
+use super::games::GameCode;
 
 /// Summary of a reconcile or rebuild pass. The numbers are not meant
 /// to be authoritative; they're for the tracing log and the UI toast.
@@ -68,4 +72,64 @@ pub struct ConflictingJunction {
     pub mod_id: String,
     pub link: PathBuf,
     pub expected_target: PathBuf,
+}
+
+/// One game whose startup reconcile pass aborted. The operation stays
+/// fail-closed for that game while the remaining games continue, and the
+/// frontend receives the exact actionable error instead of inferring success.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupReconcileFailure {
+    pub game: GameCode,
+    pub kind: SurfaceFailureKind,
+    pub error: String,
+}
+
+impl StartupReconcileFailure {
+    pub fn from_error(game: GameCode, error: &Error) -> Self {
+        Self {
+            game,
+            kind: error.surface_failure_kind(),
+            error: error.to_string(),
+        }
+    }
+}
+
+/// Complete result of the best-effort startup pass. Failure is scoped to one
+/// game: that game's pass aborts, but no failure is discarded and other games
+/// are still reconciled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupReconcileReport {
+    pub reconciled: Vec<(GameCode, ReconcileResult)>,
+    pub failures: Vec<StartupReconcileFailure>,
+}
+
+/// In-memory bridge between the pre-window startup worker and React. It starts
+/// unfinished so the frontend can poll without racing the background pass.
+#[derive(Clone, Default)]
+pub struct StartupReconcileState(Arc<RwLock<StartupReconcileStatus>>);
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupReconcileStatus {
+    pub finished: bool,
+    pub failures: Vec<StartupReconcileFailure>,
+}
+
+impl StartupReconcileState {
+    pub fn finish(&self, failures: Vec<StartupReconcileFailure>) {
+        let mut status = self
+            .0
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        status.finished = true;
+        status.failures = failures;
+    }
+
+    pub fn snapshot(&self) -> StartupReconcileStatus {
+        self.0
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }

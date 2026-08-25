@@ -1,6 +1,17 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Stable classification for failures shown after an operation has already
+/// failed closed. Surfaces use this to choose an honest repair path without
+/// parsing user-facing error text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SurfaceFailureKind {
+    InvalidActiveVariant,
+    Other,
+}
 
 /// The one sentence that points a stuck user at the Importer Origin
 /// control, written down once.
@@ -398,3 +409,12 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    pub fn surface_failure_kind(&self) -> SurfaceFailureKind {
+        match self {
+            Self::InvalidActiveVariant { .. } => SurfaceFailureKind::InvalidActiveVariant,
+            _ => SurfaceFailureKind::Other,
+        }
+    }
+}
