@@ -74,6 +74,7 @@ pub fn remove(link: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn link_entry_exists(path: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
