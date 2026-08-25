@@ -244,9 +244,7 @@ fn open_for_traversal(parent: &File, name: &[u16]) -> io::Result<File> {
         parent,
         name,
         FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-        FILE_DIRECTORY_FILE
-            | FILE_OPEN_FOR_BACKUP_INTENT
-            | FILE_SYNCHRONOUS_IO_NONALERT,
+        FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
     )
 }
 
