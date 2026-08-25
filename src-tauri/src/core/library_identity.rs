@@ -51,6 +51,19 @@ impl DirectoryIdentity {
     pub(super) fn durable_key(&self) -> String {
         format!("{:016x}:{:016x}", self.volume, self.file)
     }
+
+    /// Parse the one canonical representation persisted as durable ownership
+    /// evidence. Re-serializing after the numeric parse rejects shortened,
+    /// upper-case, over-wide, or otherwise non-canonical strings rather than
+    /// letting multiple database spellings describe one identity.
+    pub(super) fn from_durable_key(value: &str) -> Option<Self> {
+        let (volume, file) = value.split_once(':')?;
+        let identity = Self {
+            volume: u64::from_str_radix(volume, 16).ok()?,
+            file: u64::from_str_radix(file, 16).ok()?,
+        };
+        (identity.durable_key() == value).then_some(identity)
+    }
 }
 
 #[cfg(windows)]
@@ -111,4 +124,28 @@ fn identity_from_handle(_handle: &File) -> io::Result<DirectoryIdentity> {
         io::ErrorKind::Unsupported,
         "directory identity is unsupported on this platform",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DirectoryIdentity;
+
+    #[test]
+    fn durable_key_parser_accepts_only_the_canonical_fixed_width_format() {
+        let canonical = "000000000000000a:00000000000000ff";
+        let identity = DirectoryIdentity::from_durable_key(canonical)
+            .expect("the canonical lower-case fixed-width key must be accepted");
+        assert_eq!(identity.durable_key(), canonical);
+
+        for malformed in [
+            "000000000000000A:00000000000000FF",
+            "a:ff",
+            "0000000000000000a:000000000000000ff",
+        ] {
+            assert!(
+                DirectoryIdentity::from_durable_key(malformed).is_none(),
+                "non-canonical durable identity {malformed:?} must be rejected",
+            );
+        }
+    }
 }

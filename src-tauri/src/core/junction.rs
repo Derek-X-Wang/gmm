@@ -35,23 +35,32 @@ pub fn remove(link: &Path) -> Result<()> {
         // Belt-and-suspenders: clear the reparse point, then fs::remove_dir
         // if anything is left.
         let primary = junction::delete(link);
-        if link.exists() {
+        if link_entry_exists(link)? {
             std::fs::remove_dir(link).map_err(|source| Error::Io {
                 path: link.to_path_buf(),
                 source,
             })?;
         }
-        // If the initial delete erroed but the path is now gone we treat
-        // that as success; if it errored AND the path is still gone above's
-        // remove_dir would have already errored, so this only forwards
-        // genuine reparse-point removal failures.
+        // A dangling directory symlink has an entry but `Path::exists` says
+        // false because it follows the missing target. Inspect the entry
+        // itself both before and after the fallback so success means the
+        // deployment name is truly absent.
+        let entry_survives = link_entry_exists(link)?;
         if let Err(source) = primary {
-            if link.exists() {
+            if entry_survives {
                 return Err(Error::Io {
                     path: link.to_path_buf(),
                     source,
                 });
             }
+        }
+        if entry_survives {
+            return Err(Error::Io {
+                path: link.to_path_buf(),
+                source: std::io::Error::other(
+                    "the Junction removal returned while the deployment entry still exists",
+                ),
+            });
         }
         Ok(())
     }
@@ -61,5 +70,17 @@ pub fn remove(link: &Path) -> Result<()> {
             path: link.to_path_buf(),
             source,
         })
+    }
+}
+
+#[cfg(windows)]
+fn link_entry_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }

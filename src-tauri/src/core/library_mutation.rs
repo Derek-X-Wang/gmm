@@ -22,11 +22,11 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::Utc;
-use sqlx::{Executor, Row, Sqlite};
+use sqlx::{Column, Executor, Row, Sqlite};
 use ulid::Ulid;
 
 use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
-use super::library_identity::IdentifiedDirectory;
+use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
 use super::mods::{ReinstallRecovery, ReinstallRecoveryOutcome};
 #[cfg(not(any(windows, unix)))]
@@ -110,51 +110,184 @@ pub(super) struct StagedLibraryDirectory {
 
 #[derive(Debug, Clone)]
 pub(super) struct ReinstallSwapWitness {
-    pub(super) token: Ulid,
-    pub(super) mod_id: String,
-    pub(super) game: GameCode,
-    pub(super) library_path: PathBuf,
-    pub(super) staged_path: PathBuf,
-    pub(super) quarantine_path: PathBuf,
-    pub(super) old_identity: String,
-    pub(super) staged_identity: String,
+    token: Ulid,
+    mod_id: String,
+    game: GameCode,
+    library_path: PathBuf,
+    staged_path: PathBuf,
+    quarantine_path: PathBuf,
+    old_identity: DirectoryIdentity,
+    staged_identity: DirectoryIdentity,
+}
+
+/// Define the raw witness once, deriving both its row decoder and the ordered
+/// SQLite column registry from the field identifiers.
+///
+/// The exhaustive destructure in `validate` is deliberately outside the macro:
+/// adding a field here therefore changes the accepted schema and the raw type
+/// together, but still cannot compile until that field receives a validation
+/// rule.
+macro_rules! define_unvalidated_reinstall_swap_witness {
+    ($($field:ident: $field_type:ty),+ $(,)?) => {
+        /// Ordered `reinstall_swaps` columns accepted at the trust boundary.
+        #[doc(hidden)]
+        pub const REINSTALL_SWAP_COLUMNS: &[&str] = &[$(stringify!($field)),+];
+
+        /// The database representation is deliberately separate from the
+        /// witness recovery is allowed to trust.
+        struct UnvalidatedReinstallSwapWitness {
+            $($field: $field_type),+
+        }
+
+        impl UnvalidatedReinstallSwapWitness {
+            fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
+                let mod_id: String = row.try_get(stringify!(mod_id))?;
+                let columns: Vec<_> = row.columns().iter().map(Column::name).collect();
+                if columns.as_slice() != REINSTALL_SWAP_COLUMNS {
+                    return Err(Error::ReinstallWitnessCorrupt {
+                        mod_id,
+                        reason: format!(
+                            "the reinstall_swaps schema columns changed from the ruled set: {columns:?}"
+                        ),
+                    });
+                }
+                Ok(Self {
+                    $($field: row.try_get(stringify!($field))?),+
+                })
+            }
+        }
+    };
+}
+
+define_unvalidated_reinstall_swap_witness! {
+    token: String,
+    mod_id: String,
+    game_code: String,
+    library_path: String,
+    staged_path: String,
+    quarantine_path: String,
+    old_identity: String,
+    staged_identity: String,
+    created_at: String,
+    recovery_error: Option<String>,
+    recovery_attempted_at: Option<String>,
+    recovery_attempts: i64,
+    junction_withdrawn: i64,
+    junction_withdrawal_error: Option<String>,
+}
+
+impl UnvalidatedReinstallSwapWitness {
+    fn validate(self) -> Result<ReinstallSwapWitness> {
+        let Self {
+            token,
+            mod_id,
+            game_code,
+            library_path,
+            staged_path,
+            quarantine_path,
+            old_identity,
+            staged_identity,
+            created_at: _created_at,
+            recovery_error: _recovery_error,
+            recovery_attempted_at: _recovery_attempted_at,
+            recovery_attempts: _recovery_attempts,
+            junction_withdrawn: _junction_withdrawn,
+            junction_withdrawal_error: _junction_withdrawal_error,
+        } = self;
+        let corrupt = |reason| Error::ReinstallWitnessCorrupt {
+            mod_id: mod_id.clone(),
+            reason,
+        };
+        let token = Ulid::from_string(&token)
+            .map_err(|_| corrupt(format!("the swap token {token:?} is not a ULID")))?;
+        Ulid::from_string(&mod_id)
+            .map_err(|_| corrupt(format!("the Mod ID {mod_id:?} is not a ULID")))?;
+        let game = GameCode::from_str(&game_code).map_err(|_| {
+            corrupt(format!(
+                "the recorded value {game_code:?} is an invalid game code"
+            ))
+        })?;
+        // These six fields order recovery and describe prior recovery attempts;
+        // they are not filesystem identity evidence. Their rule at this trust
+        // boundary is deliberate type decoding above, followed by exclusion
+        // from the trusted witness. Dedicated recovery-state loaders consume
+        // them where they affect user-visible retry and withdrawal status.
+        let old_identity = DirectoryIdentity::from_durable_key(&old_identity).ok_or_else(|| {
+            corrupt(format!(
+                "the old directory identity {old_identity:?} is not a canonical durable identity"
+            ))
+        })?;
+        let staged_identity = DirectoryIdentity::from_durable_key(&staged_identity).ok_or_else(|| {
+            corrupt(format!(
+                "the staged directory identity {staged_identity:?} is not a canonical durable identity"
+            ))
+        })?;
+        let witness = ReinstallSwapWitness {
+            token,
+            mod_id,
+            game,
+            library_path: PathBuf::from(library_path),
+            staged_path: PathBuf::from(staged_path),
+            quarantine_path: PathBuf::from(quarantine_path),
+            old_identity,
+            staged_identity,
+        };
+        witness.validate_paths()?;
+        Ok(witness)
+    }
 }
 
 impl ReinstallSwapWitness {
     pub(super) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
-        let token_raw: String = row.try_get("token")?;
-        let token = Ulid::from_string(&token_raw).map_err(|_| Error::ReinstallWitnessCorrupt {
-            mod_id: row
-                .try_get("mod_id")
-                .unwrap_or_else(|_| "<unknown>".to_string()),
-            reason: format!("the swap token {token_raw:?} is not a ULID"),
-        })?;
-        let game_raw: String = row.try_get("game_code")?;
-        Ok(Self {
-            token,
-            mod_id: row.try_get("mod_id")?,
-            game: GameCode::from_str(&game_raw)?,
-            library_path: PathBuf::from(row.try_get::<String, _>("library_path")?),
-            staged_path: PathBuf::from(row.try_get::<String, _>("staged_path")?),
-            quarantine_path: PathBuf::from(row.try_get::<String, _>("quarantine_path")?),
-            old_identity: row.try_get("old_identity")?,
-            staged_identity: row.try_get("staged_identity")?,
-        })
+        UnvalidatedReinstallSwapWitness::from_row(row)?.validate()
     }
 
-    pub(super) fn validate_paths(&self) -> Result<()> {
+    pub(super) fn mod_id(&self) -> &str {
+        &self.mod_id
+    }
+
+    pub(super) fn library_path(&self) -> &Path {
+        &self.library_path
+    }
+
+    pub(super) fn staged_path(&self) -> &Path {
+        &self.staged_path
+    }
+
+    pub(super) fn old_identity(&self) -> &DirectoryIdentity {
+        &self.old_identity
+    }
+
+    pub(super) fn staged_identity(&self) -> &DirectoryIdentity {
+        &self.staged_identity
+    }
+
+    fn validate_paths(&self) -> Result<()> {
         let Some(root) = self.library_path.parent() else {
             return self.corrupt("the recorded live path has no Library root");
         };
-        let expected_stage = root.join(format!("{REINSTALL_STAGING_PREFIX}{}", self.token));
-        let expected_quarantine = root.join(format!(
+        let Some(staged_root) = self.staged_path.parent() else {
+            return self.corrupt("the recorded staging path has no Library root");
+        };
+        let Some(quarantine_root) = self.quarantine_path.parent() else {
+            return self.corrupt("the recorded quarantine path has no Library root");
+        };
+        let expected_stage_name = format!("{REINSTALL_STAGING_PREFIX}{}", self.token);
+        let expected_quarantine_name = format!(
             "{}{}",
             super::library_recovery::DELETE_QUARANTINE_PREFIX,
             self.token
-        ));
+        );
         if self.library_path.file_name().and_then(|name| name.to_str()) != Some(&self.mod_id)
-            || self.staged_path != expected_stage
-            || self.quarantine_path != expected_quarantine
+            || self.staged_path.file_name().and_then(|name| name.to_str())
+                != Some(expected_stage_name.as_str())
+            || self
+                .quarantine_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(expected_quarantine_name.as_str())
+            || !super::same_path(staged_root, root)
+            || !super::same_path(quarantine_root, root)
         {
             return self.corrupt("the recorded swap paths do not match the Mod ID and token");
         }
@@ -708,16 +841,11 @@ impl Core {
         token: Ulid,
         fence: &mut LibraryMutationFence,
     ) -> Result<ReinstallSwapWitness> {
-        let row = sqlx::query(
-            "SELECT token, mod_id, game_code, library_path, staged_path,
-                    quarantine_path, old_identity, staged_identity
-             FROM reinstall_swaps WHERE token = ?",
-        )
-        .bind(token.to_string())
-        .fetch_one(&mut *fence.transaction)
-        .await?;
+        let row = sqlx::query("SELECT * FROM reinstall_swaps WHERE token = ?")
+            .bind(token.to_string())
+            .fetch_one(&mut *fence.transaction)
+            .await?;
         let witness = ReinstallSwapWitness::from_row(&row)?;
-        witness.validate_paths()?;
         self.rebase_reinstall_swap_witness(witness, fence).await
     }
 
@@ -831,19 +959,14 @@ impl Core {
         token: Ulid,
         fence: &mut LibraryMutationFence,
     ) -> Result<Option<ReinstallSwapWitness>> {
-        let row = sqlx::query(
-            "SELECT token, mod_id, game_code, library_path, staged_path,
-                    quarantine_path, old_identity, staged_identity
-             FROM reinstall_swaps WHERE token = ?",
-        )
-        .bind(token.to_string())
-        .fetch_optional(&mut *fence.transaction)
-        .await?;
+        let row = sqlx::query("SELECT * FROM reinstall_swaps WHERE token = ?")
+            .bind(token.to_string())
+            .fetch_optional(&mut *fence.transaction)
+            .await?;
         let Some(row) = row else {
             return Ok(None);
         };
         let witness = ReinstallSwapWitness::from_row(&row)?;
-        witness.validate_paths()?;
         self.rebase_reinstall_swap_witness(witness, fence)
             .await
             .map(Some)
@@ -971,11 +1094,12 @@ impl Core {
     }
 
     /// Current relocation refuses to move a subtree with an active witness,
-    /// because its cross-volume copy fallback cannot preserve identity. Keep
-    /// rebasing as a recovery boundary for a witness already carried to a new
-    /// root: only the three sibling names change, while the recorded identities
-    /// remain the ownership proof and still fail closed if a copy changed them.
-    async fn rebase_reinstall_swap_witness(
+    /// because its cross-volume copy fallback cannot preserve identity. A
+    /// recorded root different from the current effective root is therefore
+    /// corrupt durable state, not evidence that relocation legitimately carried
+    /// the witness elsewhere. Only after proving that root do we rebase the
+    /// sibling spellings to the current Mod row.
+    pub(super) async fn rebase_reinstall_swap_witness(
         &self,
         mut witness: ReinstallSwapWitness,
         fence: &mut LibraryMutationFence,
@@ -990,7 +1114,22 @@ impl Core {
         let current_root = self
             .resolved_library_root_for_in_mutation(witness.game, fence)
             .await?;
-        if current_library_path.parent() != Some(current_root.as_path())
+        let recorded_root = witness
+            .library_path
+            .parent()
+            .expect("validated witness paths always have a parent");
+        if !super::same_path(recorded_root, &current_root) {
+            return witness
+                .corrupt("the recorded swap root is not the Mod's effective Library root");
+        }
+        let current_mod_root =
+            current_library_path
+                .parent()
+                .ok_or_else(|| Error::ReinstallWitnessCorrupt {
+                    mod_id: witness.mod_id.clone(),
+                    reason: "the current Mod row's Library path has no parent".to_string(),
+                })?;
+        if !super::same_path(current_mod_root, &current_root)
             || current_library_path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1064,10 +1203,10 @@ impl Core {
 
         let old_is_live = live
             .as_ref()
-            .is_some_and(|directory| directory.identity().durable_key() == witness.old_identity);
+            .is_some_and(|directory| directory.identity() == &witness.old_identity);
         let old_is_quarantined = quarantine
             .as_ref()
-            .is_some_and(|directory| directory.identity().durable_key() == witness.old_identity);
+            .is_some_and(|directory| directory.identity() == &witness.old_identity);
         if old_is_live == old_is_quarantined {
             return witness.uncertain(if old_is_live {
                 "the old directory appears at both its live and quarantine names"
@@ -1084,21 +1223,7 @@ impl Core {
 
         if old_is_quarantined {
             if let Some(current_live) = identified_if_exists(&witness.library_path)? {
-                if current_live.identity().durable_key() != witness.staged_identity {
-                    return witness
-                        .uncertain("the live name no longer identifies the staged replacement");
-                }
-                if witness.staged_path.exists() {
-                    return witness
-                        .uncertain("both the live and staging names contain replacement bytes");
-                }
-                drop(current_live);
-                fs::rename(&witness.library_path, &witness.staged_path).map_err(|source| {
-                    Error::Io {
-                        path: witness.library_path.clone(),
-                        source,
-                    }
-                })?;
+                move_live_replacement_back_to_stage(witness, current_live)?;
             }
             fs::rename(&witness.quarantine_path, &witness.library_path).map_err(|source| {
                 Error::Io {
@@ -1128,7 +1253,7 @@ impl Core {
         }
 
         if let Some(replacement) = identified_if_exists(&witness.staged_path)? {
-            if replacement.identity().durable_key() != witness.staged_identity {
+            if replacement.identity() != &witness.staged_identity {
                 return witness.uncertain("the staging name changed identity during rollback");
             }
             let staged_quarantine =
@@ -1534,17 +1659,50 @@ fn identified_if_exists(path: &Path) -> Result<Option<IdentifiedDirectory>> {
     }
 }
 
+fn move_live_replacement_back_to_stage(
+    witness: &ReinstallSwapWitness,
+    current_live: IdentifiedDirectory,
+) -> Result<()> {
+    if current_live.identity() != &witness.staged_identity {
+        return witness.uncertain("the live name no longer identifies the staged replacement");
+    }
+    if entry_exists(&witness.staged_path)? {
+        return witness.uncertain("both the live and staging names contain replacement bytes");
+    }
+    drop(current_live);
+    fs::rename(&witness.library_path, &witness.staged_path).map_err(|source| Error::Io {
+        path: witness.library_path.clone(),
+        source,
+    })
+}
+
+/// Inspect the named entry itself. Only `NotFound` proves that a rename
+/// destination is free; target-following existence checks collapse every
+/// other metadata failure into the same false answer.
+fn entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 fn reject_unexpected_identity(
     witness: &ReinstallSwapWitness,
     name: &str,
     directory: Option<&IdentifiedDirectory>,
-    expected: &[&String],
+    expected: &[&DirectoryIdentity],
 ) -> Result<()> {
     let Some(directory) = directory else {
         return Ok(());
     };
-    let actual = directory.identity().durable_key();
-    if expected.iter().any(|expected| actual == expected.as_str()) {
+    if expected
+        .iter()
+        .any(|expected| directory.identity() == *expected)
+    {
         return Ok(());
     }
     witness.uncertain(format!(
@@ -1633,4 +1791,81 @@ pub(super) async fn unique_junction_dir_name(
         }
     }
     unreachable!("u32::MAX collisions on one display name is not a real scenario")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// A staging-name inspection error is uncertainty, never evidence that
+    /// the name is free for a rename. Mutation oracle: restoring
+    /// target-following `Path::exists` reaches the rename, attributes its
+    /// failure to the live path, and fires the named pre-rename assertion.
+    #[test]
+    fn reinstall_rollback_propagates_staging_metadata_error_before_rename() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = TempDir::new().expect("tmp");
+        let token = Ulid::new();
+        let mod_id = Ulid::new().to_string();
+        let library_path = tmp.path().join(&mod_id);
+        let staged_path = tmp
+            .path()
+            .join(format!("{REINSTALL_STAGING_PREFIX}{token}"));
+        let quarantine_path = tmp.path().join(format!(
+            "{}{}",
+            super::super::library_recovery::DELETE_QUARANTINE_PREFIX,
+            token
+        ));
+        std::fs::create_dir(&library_path).expect("live replacement");
+        std::fs::write(library_path.join("replacement.ini"), b"replacement")
+            .expect("live replacement bytes");
+        std::fs::create_dir(&quarantine_path).expect("old quarantine");
+        let current_live = IdentifiedDirectory::open(&library_path).expect("identify live");
+        let old = IdentifiedDirectory::open(&quarantine_path).expect("identify old");
+        let witness = ReinstallSwapWitness {
+            token,
+            mod_id,
+            game: GameCode::Gimi,
+            library_path: library_path.clone(),
+            staged_path: staged_path.clone(),
+            quarantine_path,
+            old_identity: old.identity().clone(),
+            staged_identity: current_live.identity().clone(),
+        };
+
+        let original_permissions = std::fs::metadata(tmp.path())
+            .expect("temporary root metadata")
+            .permissions();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o0))
+            .expect("make staging name unreadable");
+        let result = move_live_replacement_back_to_stage(&witness, current_live);
+        std::fs::set_permissions(tmp.path(), original_permissions)
+            .expect("restore temporary root permissions");
+        let error = result.expect_err("staging metadata errors must stop rollback before rename");
+
+        assert!(
+            matches!(
+                error,
+                Error::Io { ref path, ref source }
+                    if path == &staged_path
+                        && source.kind() == io::ErrorKind::PermissionDenied
+            ),
+            "staging metadata errors must stop rollback before rename: {error}",
+        );
+        assert_eq!(
+            std::fs::read(library_path.join("replacement.ini"))
+                .expect("live bytes remain before rename"),
+            b"replacement",
+            "a staging metadata error must not permit the live replacement rename",
+        );
+        assert!(
+            matches!(
+                std::fs::symlink_metadata(&staged_path),
+                Err(error) if error.kind() == io::ErrorKind::NotFound
+            ),
+            "a staging metadata error must leave the reserved name untouched",
+        );
+    }
 }

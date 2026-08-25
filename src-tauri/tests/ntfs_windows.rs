@@ -145,7 +145,9 @@ async fn short_name_alias_cannot_bypass_the_reinstall_relocation_guard() {
         "INSERT INTO reinstall_swaps (
             token, mod_id, game_code, library_path, staged_path,
             quarantine_path, old_identity, staged_identity, created_at
-         ) VALUES (?, ?, 'gimi', ?, ?, ?, 'old-id', 'staged-id', ?)",
+         ) VALUES (?, ?, 'gimi', ?, ?, ?,
+                   '0000000000000001:0000000000000001',
+                   '0000000000000002:0000000000000002', ?)",
     )
     .bind(&token)
     .bind(&adopted.id)
@@ -173,6 +175,93 @@ async fn short_name_alias_cannot_bypass_the_reinstall_relocation_guard() {
     assert!(
         adopted.library_path.join("merged.ini").is_file(),
         "the refused alias-spelled relocation must not touch Library bytes",
+    );
+}
+
+async fn record_quarantined_reinstall(
+    db_url: &str,
+    adopted: &gmm_lib::core::Mod,
+    token: ulid::Ulid,
+) {
+    let root = adopted.library_path.parent().expect("game Library root");
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    let pool = sqlx::SqlitePool::connect(db_url)
+        .await
+        .expect("open DB for quarantined reinstall fixture");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at,
+            recovery_error, recovery_attempted_at, recovery_attempts
+         ) VALUES (?, ?, 'gimi', ?, ?, ?,
+                   '0000000000000001:0000000000000001',
+                   '0000000000000002:0000000000000002', ?,
+                   'fixture recovery obstruction', ?, 1)",
+    )
+    .bind(token.to_string())
+    .bind(&adopted.id)
+    .bind(adopted.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind("2026-08-23T00:00:00Z")
+    .bind("2026-08-23T00:01:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert quarantined reinstall fixture");
+    pool.close().await;
+}
+
+/// A plain directory at the deployment name is not owned by GMM, even when it
+/// is empty. The structural link guard must refuse it before the junction
+/// crate's fallback can remove the directory and misreport success.
+///
+/// Mutation oracle: deleting the non-link guard from
+/// `withdraw_reinstall_junction` removes the empty directory and fires the
+/// named survival assertion.
+#[tokio::test]
+async fn quarantined_reinstall_withdrawal_refuses_an_empty_non_link_directory() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &db_url)
+        .await
+        .expect("core");
+    let mods_dir = tmp.path().join("game/Mods");
+    fs::create_dir_all(&mods_dir).expect("Mods directory");
+    let fixture = tmp.path().join("src/non-link-withdrawal");
+    make_mod_dir(&fixture, "non-link withdrawal");
+    let adopted = core
+        .adopt_folder(GameCode::Gimi, &fixture, "Non Link Withdrawal")
+        .await
+        .expect("adopt");
+    core.set_enabled(&adopted.id, true, &mods_dir)
+        .await
+        .expect("enable");
+    let deployment = mods_dir.join("Non Link Withdrawal");
+    gmm_lib::core::junction::remove(&deployment).expect("remove real Junction");
+    fs::create_dir(&deployment).expect("empty non-link deployment directory");
+    record_quarantined_reinstall(&db_url, &adopted, ulid::Ulid::new()).await;
+
+    let result = core
+        .reconcile_junctions(GameCode::Gimi, &mods_dir)
+        .await
+        .expect("reconcile quarantined non-link");
+    let recovery = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list quarantined Mod")[0]
+        .reinstall_recovery
+        .clone()
+        .expect("reinstall recovery state");
+
+    assert_eq!(result.quarantined, vec![adopted.id]);
+    assert!(
+        fs::symlink_metadata(&deployment).is_ok(),
+        "the non-link guard must preserve an empty deployment directory GMM does not own",
+    );
+    assert!(
+        !recovery.junction_withdrawn,
+        "refusing a non-link deployment must not record successful withdrawal",
     );
 }
 

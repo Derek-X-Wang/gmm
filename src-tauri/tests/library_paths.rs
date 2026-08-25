@@ -10,7 +10,7 @@
 
 use std::fs;
 
-use gmm_lib::core::{Core, GameCode};
+use gmm_lib::core::{Core, Error, GameCode};
 use tempfile::TempDir;
 
 async fn make_mod(
@@ -91,6 +91,63 @@ async fn changing_global_root_relocates_every_mod_and_rebuilds_junctions() {
 
     let resolved = core.resolved_library_root().await.expect("resolved");
     assert_eq!(resolved, library_new);
+}
+
+/// Relocation withdraws every enabled deployment before moving Library bytes.
+/// If that withdrawal fails, continuing would leave the game loading through a
+/// deployment entry whose target is about to move.
+///
+/// Mutation oracle: discarding `junction::remove`'s result in `move_root`
+/// makes relocation return `Ok` and fires the named refusal assertion below.
+#[tokio::test]
+async fn relocation_stops_when_a_deployment_entry_survives_withdrawal() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_default = tmp.path().join("default_library");
+    let library_new = tmp.path().join("relocated_library");
+    let game_install = tmp.path().join("Genshin");
+    let game_mods = game_install.join("Mods");
+    fs::create_dir_all(&game_mods).expect("mods dir");
+
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_default.clone(), &db_url)
+        .await
+        .expect("init core");
+    core.set_game_install_path(GameCode::Gimi, &game_install)
+        .await
+        .expect("install path");
+    let installed = make_mod(
+        &core,
+        GameCode::Gimi,
+        "Withdrawal Refusal",
+        &tmp.path().join("fixture"),
+    )
+    .await;
+    core.set_enabled(&installed.id, true, &game_mods)
+        .await
+        .expect("enable Mod");
+
+    let deployment = game_mods.join("Withdrawal Refusal");
+    gmm_lib::core::junction::remove(&deployment).expect("remove real deployment Junction");
+    fs::create_dir(&deployment).expect("plant non-link deployment entry");
+    fs::write(deployment.join("still-loading.ini"), b"hash=2\n")
+        .expect("make the deployment entry non-empty so removal must fail");
+
+    let error = core
+        .set_library_root(Some(&library_new))
+        .await
+        .expect_err("relocation must stop when a deployment entry survives withdrawal");
+    assert!(
+        matches!(error, Error::Io { ref path, .. } if path == &deployment),
+        "relocation must identify the deployment entry whose withdrawal failed, got: {error}",
+    );
+    assert!(
+        installed.library_path.join("merged.ini").is_file(),
+        "failed withdrawal must stop relocation before Library bytes move",
+    );
+    assert!(
+        deployment.join("still-loading.ini").is_file(),
+        "the surviving deployment entry must remain visible and unreported as removed",
+    );
 }
 
 #[tokio::test]
