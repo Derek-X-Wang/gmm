@@ -7,6 +7,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
+use gmm_lib::core::error::SurfaceFailureKind;
+use gmm_lib::core::reconcile::StartupReconcileState;
 use gmm_lib::core::variants::detect_variants;
 use gmm_lib::core::{Core, Error, GameCode};
 use sqlx::SqlitePool;
@@ -261,6 +263,149 @@ async fn a_foreign_persisted_active_variant_is_not_used_as_a_junction_target() {
         error.to_string(),
         "Mod \"First Mod\" has an invalid active Variant selection. Select a valid Variant for this Mod, or reinstall it.",
         "the corruption error must name the Mod and give the user both repair routes",
+    );
+}
+
+#[tokio::test]
+async fn startup_reconcile_reports_a_corrupt_variant_selection_for_the_affected_game() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_root = tmp.path().join("library");
+    let game_install = tmp.path().join("Genshin");
+    fs::create_dir_all(game_install.join("Mods")).expect("game Mods dir");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_root, &db_url).await.expect("init");
+    core.set_game_install_path(GameCode::Gimi, &game_install)
+        .await
+        .expect("install path");
+
+    let zip_path = tmp.path().join("variants.zip");
+    build_three_variant_zip(&zip_path);
+    let imported = core
+        .import_zip(
+            GameCode::Gimi,
+            &zip_path,
+            "Startup Variant Mod",
+            Default::default(),
+        )
+        .await
+        .expect("import");
+    let owner = core
+        .import_zip(
+            GameCode::Gimi,
+            &zip_path,
+            "Variant Owner",
+            Default::default(),
+        )
+        .await
+        .expect("import Variant owner");
+    let foreign_variant_id = core
+        .list_variants(&owner.id)
+        .await
+        .expect("list owner Variants")[0]
+        .id
+        .clone();
+
+    let pool = SqlitePool::connect(&db_url).await.expect("open fixture DB");
+    sqlx::query("UPDATE mods SET enabled = 1, active_variant_id = ? WHERE id = ?")
+        .bind(&foreign_variant_id)
+        .bind(&imported.id)
+        .execute(&pool)
+        .await
+        .expect("plant foreign active Variant ID");
+
+    let state = StartupReconcileState::default();
+    core.reconcile_all_set_games_at_startup(&state)
+        .await
+        .expect("startup reconcile pass");
+    let status = state.snapshot();
+    assert_eq!(
+        status.failures.len(),
+        1,
+        "startup reconcile must publish the affected game's failure to the UI, got: {status:?}",
+    );
+    let failure = &status.failures[0];
+    assert_eq!(failure.game, GameCode::Gimi);
+    assert_eq!(failure.kind, SurfaceFailureKind::InvalidActiveVariant);
+    assert!(
+        failure.error.contains("Startup Variant Mod")
+            && failure.error.contains("Select a valid Variant")
+            && failure.error.contains("reinstall it"),
+        "startup reconcile must preserve both user repair routes, got: {failure:?}",
+    );
+}
+
+#[tokio::test]
+async fn relocation_classifies_a_corrupt_variant_as_selection_repair_not_rebuild() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_root = tmp.path().join("library");
+    let relocated_root = tmp.path().join("relocated-gimi");
+    let game_install = tmp.path().join("Genshin");
+    let game_mods = game_install.join("Mods");
+    fs::create_dir_all(&game_mods).expect("game Mods dir");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_root, &db_url).await.expect("init");
+    core.set_game_install_path(GameCode::Gimi, &game_install)
+        .await
+        .expect("install path");
+
+    let zip_path = tmp.path().join("variants.zip");
+    build_three_variant_zip(&zip_path);
+    let imported = core
+        .import_zip(
+            GameCode::Gimi,
+            &zip_path,
+            "Relocated Variant Mod",
+            Default::default(),
+        )
+        .await
+        .expect("import");
+    let owner = core
+        .import_zip(
+            GameCode::Gimi,
+            &zip_path,
+            "Relocation Variant Owner",
+            Default::default(),
+        )
+        .await
+        .expect("import Variant owner");
+    let foreign_variant_id = core
+        .list_variants(&owner.id)
+        .await
+        .expect("list owner Variants")[0]
+        .id
+        .clone();
+    core.set_enabled(&imported.id, true, &game_mods)
+        .await
+        .expect("enable");
+
+    let pool = SqlitePool::connect(&db_url).await.expect("open fixture DB");
+    sqlx::query("UPDATE mods SET active_variant_id = ? WHERE id = ?")
+        .bind(&foreign_variant_id)
+        .bind(&imported.id)
+        .execute(&pool)
+        .await
+        .expect("plant foreign active Variant ID");
+
+    let report = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&relocated_root))
+        .await
+        .expect("the Library move itself still commits");
+    assert_eq!(
+        report.failed_junction_restores.len(),
+        1,
+        "relocation must retain the failed restore for the UI, got: {report:?}",
+    );
+    let failure = &report.failed_junction_restores[0];
+    assert_eq!(
+        failure.kind,
+        SurfaceFailureKind::InvalidActiveVariant,
+        "relocation must select Variant repair guidance instead of Rebuild junctions, got: {failure:?}",
+    );
+    assert!(
+        failure.error.contains("Relocated Variant Mod")
+            && failure.error.contains("Select a valid Variant")
+            && failure.error.contains("reinstall it"),
+        "relocation must preserve both user repair routes, got: {failure:?}",
     );
 }
 
