@@ -374,6 +374,19 @@ pub enum Error {
     )]
     SessionActive { game: String, since: String },
 
+    #[error(
+        "a {game} launch is still in progress (started {since}); Library changes stay locked until the launch finishes"
+    )]
+    SessionLaunchInProgress { game: String, since: String },
+
+    #[error(
+        "GMM cannot determine whether a game from the interrupted {game} launch (started {since}) is still running. Review the interrupted-launch warning and retire it only after confirming the game is closed."
+    )]
+    SessionLaunchInterrupted { game: String, since: String },
+
+    #[error("the launch reservation is still owned by the GMM process that created it")]
+    SessionLaunchStillOwned,
+
     #[error("the durable game-launch claim was lost before the session became active")]
     SessionLaunchClaimLost,
 }

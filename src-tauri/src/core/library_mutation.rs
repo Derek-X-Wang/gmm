@@ -1448,8 +1448,8 @@ impl Core {
         &self,
         transaction: &mut sqlx::Transaction<'_, Sqlite>,
     ) -> Result<()> {
-        if let Some((game, since)) = self.session_blocker_in_transaction(transaction).await? {
-            return Err(Error::SessionActive { game, since });
+        if let Some(blocker) = self.session_blocker_in_transaction(transaction).await? {
+            return Err(blocker.into_error());
         }
         Ok(())
     }

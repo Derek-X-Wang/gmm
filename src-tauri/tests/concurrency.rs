@@ -4812,7 +4812,7 @@ async fn launch_claim_blocks_library_mutation_before_child_pid_exists() {
         .run()
         .expect_refused(
             "a Library mutation after the launch claim committed",
-            "game session active",
+            "launch is still in progress",
         );
 
     launch.resume();
@@ -4861,7 +4861,7 @@ async fn crashed_launch_claim_blocks_until_its_recorded_child_exits() {
         .run()
         .expect_refused(
             "a Library mutation while the orphaned launch child is alive",
-            "game session active",
+            "cannot determine whether a game",
         );
 
     child.kill();

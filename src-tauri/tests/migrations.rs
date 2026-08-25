@@ -503,8 +503,16 @@ async fn session_launch_claim_migration_preserves_parallel_launch_ownership() {
         .collect();
     assert_eq!(
         column_names,
-        ["token", "game_code", "owner_pid", "child_pid", "started_at"],
-        "the launch witness must carry both process identities and its session message",
+        [
+            "token",
+            "game_code",
+            "owner_pid",
+            "owner_started_at",
+            "child_pid",
+            "child_started_at",
+            "started_at"
+        ],
+        "the launch witness must pair both PIDs with process start identities",
     );
 
     let insert = |token: &'static str, child_pid: Option<i64>| {

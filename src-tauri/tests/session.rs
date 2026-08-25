@@ -7,12 +7,49 @@ use std::fs;
 
 use chrono::Utc;
 use gmm_lib::core::{Core, GameCode, SessionInfo};
+use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use tempfile::TempDir;
 
 async fn fresh_core(tmp: &TempDir) -> Core {
     let library_root = tmp.path().join("library");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     Core::new(library_root, &db_url).await.expect("init core")
+}
+
+async fn raw_pool(tmp: &TempDir) -> SqlitePool {
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let options = db_url
+        .parse::<SqliteConnectOptions>()
+        .expect("parse test database URL");
+    SqlitePool::connect_with(options)
+        .await
+        .expect("open raw test database")
+}
+
+async fn insert_launch_claim(
+    tmp: &TempDir,
+    token: &str,
+    owner_pid: u32,
+    owner_started_at: Option<u64>,
+    child_pid: Option<u32>,
+    child_started_at: Option<u64>,
+) {
+    let pool = raw_pool(tmp).await;
+    sqlx::query(
+        "INSERT INTO session_launch_claims (
+            token, game_code, owner_pid, owner_started_at,
+            child_pid, child_started_at, started_at
+         ) VALUES (?, 'gimi', ?, ?, ?, ?, '2026-08-24T00:00:00Z')",
+    )
+    .bind(token)
+    .bind(owner_pid as i64)
+    .bind(owner_started_at.map(|value| value as i64))
+    .bind(child_pid.map(|value| value as i64))
+    .bind(child_started_at.map(|value| value as i64))
+    .execute(&pool)
+    .await
+    .expect("insert launch claim");
+    pool.close().await;
 }
 
 #[tokio::test]
@@ -223,6 +260,141 @@ async fn clean_stale_session_keeps_a_live_session() {
     assert!(
         core.session_info().await.expect("info").is_some(),
         "session row still there",
+    );
+}
+
+#[tokio::test]
+async fn dead_owner_without_recorded_child_survives_startup_and_is_retirable() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    drop(core);
+    let token = "01JINTERRUPTEDLAUNCH000001";
+    insert_launch_claim(&tmp, token, u32::MAX - 1, Some(1), None, None).await;
+
+    let core = fresh_core(&tmp).await;
+    let launches = core
+        .interrupted_session_launches()
+        .await
+        .expect("surface interrupted launch");
+    assert_eq!(
+        launches.len(),
+        1,
+        "a dead owner without a recorded child must remain surfaced because GMM cannot know whether spawn already happened",
+    );
+    assert_eq!(launches[0].id, token);
+    assert_eq!(launches[0].game, GameCode::Gimi);
+    assert_eq!(launches[0].child_pid, None);
+
+    core.retire_interrupted_session_launch(token)
+        .await
+        .expect("retire after the user confirms the game is closed");
+    assert!(
+        core.interrupted_session_launches()
+            .await
+            .expect("list after retire")
+            .is_empty(),
+        "the in-app retire action must release the otherwise permanent Library blocker",
+    );
+}
+
+#[tokio::test]
+async fn reused_pids_do_not_impersonate_launch_processes_or_make_the_message_claim_a_game_runs() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    drop(core);
+    let current_pid = std::process::id();
+
+    // Both rows use a live PID but pair it with an impossible historical
+    // identity. One covers a reused GMM owner slot; the other covers a reused
+    // game-child slot. Neither unrelated process may keep the Library locked.
+    insert_launch_claim(
+        &tmp,
+        "01JREUSEDOWNERPID000000001",
+        current_pid,
+        Some(1),
+        Some(u32::MAX - 1),
+        Some(1),
+    )
+    .await;
+    insert_launch_claim(
+        &tmp,
+        "01JREUSEDCHILDPID000000001",
+        u32::MAX - 1,
+        Some(1),
+        Some(current_pid),
+        Some(1),
+    )
+    .await;
+
+    // Identity can occasionally be unavailable even while a numeric PID is
+    // in use. Keep that third row conservatively so its refusal copy is also
+    // pinned: it must describe uncertainty, never claim a game is running.
+    let uncertain = "01JUNKNOWNCHILDIDENTITY0001";
+    insert_launch_claim(
+        &tmp,
+        uncertain,
+        u32::MAX - 1,
+        Some(1),
+        Some(current_pid),
+        None,
+    )
+    .await;
+
+    let core = fresh_core(&tmp).await;
+    let launches = core
+        .interrupted_session_launches()
+        .await
+        .expect("list interrupted launches");
+    assert_eq!(
+        launches
+            .iter()
+            .map(|launch| launch.id.as_str())
+            .collect::<Vec<_>>(),
+        [uncertain],
+        "a live PID with the wrong start identity must not impersonate either original process",
+    );
+
+    let fixture = tmp.path().join("fixture/reused-pid-message");
+    fs::create_dir_all(&fixture).expect("fixture");
+    fs::write(fixture.join("merged.ini"), "").expect("fixture ini");
+    let error = core
+        .adopt_folder(GameCode::Gimi, &fixture, "Blocked by uncertainty")
+        .await
+        .expect_err("the unknown identity must remain a conservative blocker")
+        .to_string();
+    assert!(
+        error.contains("cannot determine whether a game"),
+        "the blocker must state what GMM does and does not know: {error}",
+    );
+    assert!(
+        !error.contains("is running"),
+        "a PID in use without a matching process identity is not proof a game is running: {error}",
+    );
+}
+
+#[tokio::test]
+async fn retire_refuses_a_launch_still_owned_by_its_original_process() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    core.begin_session_launch(GameCode::Gimi)
+        .await
+        .expect("begin owned launch");
+    let pool = raw_pool(&tmp).await;
+    let id: String = sqlx::query("SELECT token FROM session_launch_claims")
+        .fetch_one(&pool)
+        .await
+        .expect("read claim")
+        .try_get("token")
+        .expect("claim token");
+    pool.close().await;
+
+    let error = core
+        .retire_interrupted_session_launch(&id)
+        .await
+        .expect_err("the recovery action must not cancel an active launch");
+    assert!(
+        error.to_string().contains("still owned"),
+        "the refusal must explain why an active launch cannot be retired: {error}",
     );
 }
 

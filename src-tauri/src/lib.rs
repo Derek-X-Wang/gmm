@@ -214,6 +214,8 @@ pub fn run() {
             commands::launch_game,
             commands::current_session,
             commands::clean_stale_session,
+            commands::interrupted_session_launches,
+            commands::retire_interrupted_session_launch,
             commands::av_guidance,
             commands::list_supported_games,
             commands::is_onboarding_complete,

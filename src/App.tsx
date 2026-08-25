@@ -10,12 +10,14 @@ import {
   avGuidance,
   cleanStaleSession,
   currentSession,
+  interruptedSessionLaunches,
   isOnboardingComplete,
   launchGame,
   listSupportedGames,
   partitionLaunchError,
   resetOnboarding,
   retryReinstallRecovery,
+  retireInterruptedSessionLaunch,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
   type AvGuidance,
@@ -54,6 +56,7 @@ import {
   type Conflict,
   type GameCode as ApiGameCode,
 } from "./api";
+import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarning";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { LibraryAuditWarning } from "./LibraryAuditWarning";
@@ -231,9 +234,8 @@ function GameTabs({
 }
 
 /**
- * Sticky banner that appears whenever a GameSession is active. Also
- * surfaces the "previous session ended unexpectedly" recovery prompt
- * via clean_stale_session on first render.
+ * Sticky session surface. It shows active sessions, an evicted stale session,
+ * and interrupted launch reservations that require user confirmation.
  */
 function SessionBanner() {
   const queryClient = useQueryClient();
@@ -243,6 +245,18 @@ function SessionBanner() {
     refetchOnWindowFocus: true,
   });
   const [staleSession, setStaleSession] = useState<SessionInfo | null>(null);
+  const interruptedLaunches = useQuery({
+    queryKey: ["interruptedSessionLaunches"],
+    queryFn: interruptedSessionLaunches,
+    refetchOnWindowFocus: true,
+  });
+  const retireLaunch = useMutation({
+    mutationFn: retireInterruptedSessionLaunch,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["interruptedSessionLaunches"] });
+      queryClient.invalidateQueries({ queryKey: ["session"] });
+    },
+  });
 
   // On first mount, ask the backend to clear any orphan row left by a
   // GMM crash mid-session. If we got something back, surface it.
@@ -251,6 +265,7 @@ function SessionBanner() {
       .then((evicted) => {
         if (evicted) setStaleSession(evicted);
         queryClient.invalidateQueries({ queryKey: ["session"] });
+        queryClient.invalidateQueries({ queryKey: ["interruptedSessionLaunches"] });
       })
       .catch(() => {
         /* best-effort */
@@ -274,27 +289,39 @@ function SessionBanner() {
     };
   }, [queryClient]);
 
-  if (staleSession && !session.data) {
-    return (
-      <section className="card session-banner session-banner--stale">
-        <strong>{staleSession.game.toUpperCase()} ended unexpectedly last time.</strong>
-        <span className="muted">
-          GMM cleaned up the orphaned session record (started {staleSession.startedAt}).
-        </span>
-        <button onClick={() => setStaleSession(null)}>Dismiss</button>
-      </section>
-    );
-  }
-
-  if (!session.data) return null;
-
   return (
-    <section className="card session-banner session-banner--active" role="status">
-      <strong>{session.data.game.toUpperCase()} is running</strong>
-      <span className="muted">
-        Mod changes are locked. Close the game to re-enable editing. (PID {session.data.pid})
-      </span>
-    </section>
+    <>
+      {(interruptedLaunches.data ?? []).map((launch) => (
+        <InterruptedSessionLaunchWarning
+          key={launch.id}
+          launch={launch}
+          pending={retireLaunch.isPending && retireLaunch.variables === launch.id}
+          error={
+            retireLaunch.isError && retireLaunch.variables === launch.id
+              ? String(retireLaunch.error)
+              : undefined
+          }
+          onRetire={() => retireLaunch.mutate(launch.id)}
+        />
+      ))}
+      {staleSession && !session.data ? (
+        <section className="card session-banner session-banner--stale">
+          <strong>{staleSession.game.toUpperCase()} ended unexpectedly last time.</strong>
+          <span className="muted">
+            GMM cleaned up the orphaned session record (started {staleSession.startedAt}).
+          </span>
+          <button onClick={() => setStaleSession(null)}>Dismiss</button>
+        </section>
+      ) : null}
+      {session.data ? (
+        <section className="card session-banner session-banner--active" role="status">
+          <strong>{session.data.game.toUpperCase()} is running</strong>
+          <span className="muted">
+            Mod changes are locked. Close the game to re-enable editing. (PID {session.data.pid})
+          </span>
+        </section>
+      ) : null}
+    </>
   );
 }
 

@@ -49,7 +49,7 @@ pub use library_audit::{
 };
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
-pub use session::{SessionInfo, SessionLaunchClaim};
+pub use session::{InterruptedSessionLaunch, SessionInfo, SessionLaunchClaim};
 pub use zip_import::ImportZipOptions;
 
 use settings::{get as get_setting, keys, put as put_setting};
@@ -77,6 +77,36 @@ enum ManifestRedirects {
 /// [`crash_points`].
 pub type CrashHook = Arc<dyn Fn(&str) + Send + Sync>;
 
+pub(super) enum SessionBlocker {
+    Active {
+        game: String,
+        since: String,
+    },
+    Launch {
+        game: String,
+        since: String,
+        interrupted: bool,
+    },
+}
+
+impl SessionBlocker {
+    pub(super) fn into_error(self) -> Error {
+        match self {
+            Self::Active { game, since } => Error::SessionActive { game, since },
+            Self::Launch {
+                game,
+                since,
+                interrupted: false,
+            } => Error::SessionLaunchInProgress { game, since },
+            Self::Launch {
+                game,
+                since,
+                interrupted: true,
+            } => Error::SessionLaunchInterrupted { game, since },
+        }
+    }
+}
+
 impl Core {
     /// Open (or create) the DB at `db_url`, run pending migrations, and
     /// ensure the Library root exists.
@@ -98,9 +128,10 @@ impl Core {
             crash_hook: None,
         };
         // A launch reservation is written before spawning and normally filled
-        // with the child PID immediately afterwards. Retire it when neither
-        // recorded process is live; if a crash left no child PID to inspect,
-        // the pre-spawn claim is abandoned during this startup.
+        // with the child PID immediately afterwards. Retire it when both
+        // recorded process identities are provably gone. If a crash left no
+        // child identity to inspect, keep the claim for the in-app recovery
+        // surface rather than reading uncertainty as "no game is running".
         core.clean_stale_session_launch_claims().await?;
         if core.has_live_session_blocker_at_startup().await? {
             // Core construction normally repairs interrupted Library work.
@@ -3339,17 +3370,20 @@ impl Core {
             game,
             started_at: Utc::now(),
         };
+        let owner_started_at = session::process_started_at(std::process::id());
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         self.prune_stale_session_launch_claims(&mut transaction)
             .await?;
         sqlx::query(
             "INSERT INTO session_launch_claims (
-                token, game_code, owner_pid, child_pid, started_at
-             ) VALUES (?, ?, ?, NULL, ?)",
+                token, game_code, owner_pid, owner_started_at,
+                child_pid, child_started_at, started_at
+             ) VALUES (?, ?, ?, ?, NULL, NULL, ?)",
         )
         .bind(&claim.token)
         .bind(claim.game.as_str())
         .bind(std::process::id() as i64)
+        .bind(owner_started_at.map(|started_at| started_at as i64))
         .bind(claim.started_at.to_rfc3339())
         .execute(&mut *transaction)
         .await?;
@@ -3365,11 +3399,13 @@ impl Core {
         claim: &SessionLaunchClaim,
         child_pid: u32,
     ) -> Result<()> {
+        let child_started_at = session::process_started_at(child_pid);
         let result = sqlx::query(
-            "UPDATE session_launch_claims SET child_pid = ?
+            "UPDATE session_launch_claims SET child_pid = ?, child_started_at = ?
              WHERE token = ? AND owner_pid = ? AND child_pid IS NULL",
         )
         .bind(child_pid as i64)
+        .bind(child_started_at.map(|started_at| started_at as i64))
         .bind(&claim.token)
         .bind(std::process::id() as i64)
         .execute(&self.pool)
@@ -3466,8 +3502,8 @@ impl Core {
             .session_blocker_in_transaction(&mut transaction)
             .await?;
         transaction.commit().await?;
-        if let Some((game, since)) = blocker {
-            return Err(Error::SessionActive { game, since });
+        if let Some(blocker) = blocker {
+            return Err(blocker.into_error());
         }
         Ok(())
     }
@@ -3508,15 +3544,40 @@ impl Core {
         &self,
         transaction: &mut sqlx::Transaction<'_, Sqlite>,
     ) -> Result<()> {
-        let rows = sqlx::query("SELECT token, owner_pid, child_pid FROM session_launch_claims")
-            .fetch_all(&mut **transaction)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT token, owner_pid, owner_started_at, child_pid, child_started_at
+             FROM session_launch_claims",
+        )
+        .fetch_all(&mut **transaction)
+        .await?;
         for row in rows {
             let owner_pid = row.try_get::<i64, _>("owner_pid")? as u32;
+            let owner_started_at = row
+                .try_get::<Option<i64>, _>("owner_started_at")?
+                .map(|value| value as u64);
             let child_pid = row
                 .try_get::<Option<i64>, _>("child_pid")?
                 .map(|pid| pid as u32);
-            if session::is_pid_alive(owner_pid) || child_pid.is_some_and(session::is_pid_alive) {
+            let child_started_at = row
+                .try_get::<Option<i64>, _>("child_started_at")?
+                .map(|value| value as u64);
+            if matches!(
+                session::process_identity_state(owner_pid, owner_started_at),
+                session::ProcessIdentityState::Matches | session::ProcessIdentityState::Unknown
+            ) {
+                continue;
+            }
+            let Some(child_pid) = child_pid else {
+                // GMM may have crashed after spawn but before it durably
+                // recorded the child. Absence of evidence is not evidence
+                // that the game never started; only the user can retire this
+                // claim after confirming the game is closed.
+                continue;
+            };
+            if matches!(
+                session::process_identity_state(child_pid, child_started_at),
+                session::ProcessIdentityState::Matches | session::ProcessIdentityState::Unknown
+            ) {
                 continue;
             }
             sqlx::query("DELETE FROM session_launch_claims WHERE token = ?")
@@ -3530,18 +3591,118 @@ impl Core {
     pub(super) async fn session_blocker_in_transaction(
         &self,
         transaction: &mut sqlx::Transaction<'_, Sqlite>,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<SessionBlocker>> {
         let row = sqlx::query(
-            "SELECT game_code, started_at FROM active_session WHERE id = 1
+            "SELECT 'active' AS kind, game_code, started_at, NULL AS owner_pid,
+                    NULL AS owner_started_at
+             FROM active_session WHERE id = 1
              UNION ALL
-             SELECT game_code, started_at FROM session_launch_claims
+             SELECT 'launch' AS kind, game_code, started_at, owner_pid,
+                    owner_started_at
+             FROM session_launch_claims
              ORDER BY started_at ASC
              LIMIT 1",
         )
         .fetch_optional(&mut **transaction)
         .await?;
-        row.map(|row| Ok((row.try_get("game_code")?, row.try_get("started_at")?)))
-            .transpose()
+        row.map(|row| {
+            let game = row.try_get("game_code")?;
+            let since = row.try_get("started_at")?;
+            if row.try_get::<String, _>("kind")? == "active" {
+                return Ok(SessionBlocker::Active { game, since });
+            }
+            let owner_pid = row.try_get::<i64, _>("owner_pid")? as u32;
+            let owner_started_at = row
+                .try_get::<Option<i64>, _>("owner_started_at")?
+                .map(|value| value as u64);
+            Ok(SessionBlocker::Launch {
+                game,
+                since,
+                interrupted: !matches!(
+                    session::process_identity_state(owner_pid, owner_started_at),
+                    session::ProcessIdentityState::Matches
+                ),
+            })
+        })
+        .transpose()
+    }
+
+    /// Return only launch reservations whose original GMM owner cannot be
+    /// established. Active launches stay internal; interrupted launches are
+    /// user-actionable because automatic recovery cannot know whether a child
+    /// escaped before its PID became durable.
+    pub async fn interrupted_session_launches(&self) -> Result<Vec<InterruptedSessionLaunch>> {
+        let rows = sqlx::query(
+            "SELECT token, game_code, owner_pid, owner_started_at, child_pid, started_at
+             FROM session_launch_claims ORDER BY started_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .filter_map(|row| {
+                let owner_pid = match row.try_get::<i64, _>("owner_pid") {
+                    Ok(value) => value as u32,
+                    Err(error) => return Some(Err(error.into())),
+                };
+                let owner_started_at = match row.try_get::<Option<i64>, _>("owner_started_at") {
+                    Ok(value) => value.map(|value| value as u64),
+                    Err(error) => return Some(Err(error.into())),
+                };
+                if matches!(
+                    session::process_identity_state(owner_pid, owner_started_at),
+                    session::ProcessIdentityState::Matches
+                ) {
+                    return None;
+                }
+                Some((|| {
+                    let game_code: String = row.try_get("game_code")?;
+                    let started_at: String = row.try_get("started_at")?;
+                    Ok(InterruptedSessionLaunch {
+                        id: row.try_get("token")?,
+                        game: GameCode::from_str(&game_code)?,
+                        child_pid: row
+                            .try_get::<Option<i64>, _>("child_pid")?
+                            .map(|pid| pid as u32),
+                        started_at: chrono::DateTime::parse_from_rfc3339(&started_at)
+                            .map(|date| date.with_timezone(&Utc))
+                            .unwrap_or_else(|_| Utc::now()),
+                    })
+                })())
+            })
+            .collect()
+    }
+
+    /// Retire one interrupted launch after the user confirms the game is
+    /// closed. Refuse to delete a reservation still owned by its original GMM
+    /// process so the recovery control cannot cancel a launch in progress.
+    pub async fn retire_interrupted_session_launch(&self, id: &str) -> Result<()> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row = sqlx::query(
+            "SELECT owner_pid, owner_started_at FROM session_launch_claims WHERE token = ?",
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(());
+        };
+        let owner_pid = row.try_get::<i64, _>("owner_pid")? as u32;
+        let owner_started_at = row
+            .try_get::<Option<i64>, _>("owner_started_at")?
+            .map(|value| value as u64);
+        if matches!(
+            session::process_identity_state(owner_pid, owner_started_at),
+            session::ProcessIdentityState::Matches
+        ) {
+            return Err(Error::SessionLaunchStillOwned);
+        }
+        sqlx::query("DELETE FROM session_launch_claims WHERE token = ?")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Enable or disable a Mod. On enable, a Junction is created at

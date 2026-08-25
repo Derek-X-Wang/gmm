@@ -33,6 +33,54 @@ pub struct SessionLaunchClaim {
     pub started_at: DateTime<Utc>,
 }
 
+/// A launch reservation whose original GMM process is no longer provably its
+/// owner. It remains a Library blocker until recovery proves the recorded game
+/// process is gone or the user confirms the game is closed and retires it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterruptedSessionLaunch {
+    pub id: String,
+    pub game: GameCode,
+    pub child_pid: Option<u32>,
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProcessIdentityState {
+    Matches,
+    Gone,
+    Reused,
+    Unknown,
+}
+
+/// Read one process's start time in seconds from the Unix epoch. Pairing this
+/// with the PID distinguishes the process that created a launch reservation
+/// from an unrelated process that later reused its numeric slot.
+pub(super) fn process_started_at(pid: u32) -> Option<u64> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(pid).map(|process| process.start_time())
+}
+
+pub(super) fn process_identity_state(
+    pid: u32,
+    expected_started_at: Option<u64>,
+) -> ProcessIdentityState {
+    match (process_started_at(pid), expected_started_at) {
+        (Some(actual), Some(expected)) if actual == expected => ProcessIdentityState::Matches,
+        (Some(_), Some(_)) => ProcessIdentityState::Reused,
+        (Some(_), None) => ProcessIdentityState::Unknown,
+        (None, _) if is_pid_alive(pid) => ProcessIdentityState::Unknown,
+        (None, _) => ProcessIdentityState::Gone,
+    }
+}
+
 /// Cross-platform "is this PID still alive" check.
 ///
 /// On Unix: `kill(pid, 0)` returns 0 if a signal would be deliverable;
