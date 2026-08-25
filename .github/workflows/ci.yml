@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The fixture regeneration guard compares the complete PR range.
+          fetch-depth: 0
 
       # Pin the analyzer because both its rules and defaults change over time.
       # The in-repo settings select Warning-or-higher correctness rules; that
@@ -55,6 +58,16 @@ jobs:
 
       - name: Prove Bash parses non-first files
         run: .github/scripts/test-parse-shell-scripts.sh
+
+      - name: Test migration fixture regeneration record guard
+        run: .github/scripts/test-migration-fixture-regeneration-record.sh
+
+      - name: Require a migration fixture regeneration record
+        if: github.event_name == 'pull_request'
+        run: |
+          .github/scripts/check-migration-fixture-regeneration-record.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}"
 
       - name: Test dead-origin alerting
         run: .github/scripts/test-dead-origin-issues.sh
