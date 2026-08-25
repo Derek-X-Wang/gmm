@@ -397,15 +397,12 @@ impl Core {
         // alias or differently-cased drive spelling for the same root.
         // This check is under the same writer fence as witness creation, so it
         // happens before any Junction or Library byte is touched.
-        let active_reinstalls = sqlx::query(
-            "SELECT token, mod_id, game_code, library_path, staged_path,
-                    quarantine_path, old_identity, staged_identity
-             FROM reinstall_swaps",
-        )
-        .fetch_all(&mut *fence.transaction)
-        .await?;
+        let active_reinstalls = sqlx::query("SELECT * FROM reinstall_swaps")
+            .fetch_all(&mut *fence.transaction)
+            .await?;
         for reinstall in active_reinstalls {
             let witness = library_mutation::ReinstallSwapWitness::from_row(&reinstall)?;
+            let witness = self.rebase_reinstall_swap_witness(witness, fence).await?;
             if path_within(witness.library_path(), previous) {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
                     mod_id: witness.mod_id().to_string(),
@@ -461,7 +458,7 @@ impl Core {
                 let junction_dir_name: String = junction_row.try_get("junction_dir_name")?;
                 let link = mods_dir.join(junction_dir_name);
                 if link_exists(&link)? {
-                    let _ = junction::remove(&link);
+                    junction::remove(&link)?;
                 }
             }
             previously_enabled.push((id, game));
@@ -885,7 +882,7 @@ impl Core {
             })?;
         let parent = library_path
             .parent()
-            .ok_or_else(|| Error::ReinstallRecoveryUncertain {
+            .ok_or_else(|| Error::ReinstallWitnessCorrupt {
                 mod_id: mod_id.to_string(),
                 reason: "the installed Library path has no parent".to_string(),
             })?;
@@ -897,7 +894,7 @@ impl Core {
         if parent_directory.identity() != root_directory.identity()
             || library_path.file_name().and_then(|name| name.to_str()) != Some(mod_id)
         {
-            return Err(Error::ReinstallRecoveryUncertain {
+            return Err(Error::ReinstallWitnessCorrupt {
                 mod_id: mod_id.to_string(),
                 reason: "the installed Mod is not the expected direct child of its effective Library root".to_string(),
             });
@@ -979,7 +976,10 @@ impl Core {
             let rollback = match witness_exists {
                 Ok(1) => self.rollback_reinstall_swap(token).await,
                 Ok(0) => remove_reinstall_stage_if_identity_matches(&staged_path, &staged_identity),
-                Ok(count) => Err(Error::ReinstallRecoveryUncertain {
+                // `token` is the table's primary key, so any cardinality other
+                // than zero or one is impossible under the ruled schema. It is
+                // database corruption, not filesystem uncertainty.
+                Ok(count) => Err(Error::ReinstallWitnessCorrupt {
                     mod_id: mod_id.to_string(),
                     reason: format!("the swap token matched {count} recovery witnesses"),
                 }),
@@ -3230,7 +3230,7 @@ impl Core {
             // the Library, the old link would resolve to thin air.
             let had_link = link_exists(&link)?;
             if had_link {
-                let _ = junction::remove(&link);
+                junction::remove(&link)?;
             }
 
             if !enabled {

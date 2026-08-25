@@ -169,6 +169,53 @@ async fn rebuild_skips_disabled_mods() {
     assert!(!game_mods.join("Disabled Mod").exists());
 }
 
+/// A deployment entry that survives removal can still load even though the
+/// Mod row is disabled. Rebuild must propagate that failed withdrawal instead
+/// of returning a report that lists the Mod as removed.
+///
+/// Mutation oracle: discarding `junction::remove`'s result in
+/// `rebuild_junctions` makes Rebuild return `Ok` and fires the named
+/// false-success assertion below.
+#[tokio::test]
+async fn rebuild_does_not_report_a_surviving_deployment_entry_as_removed() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, _, game_mods) = fresh_core(&tmp).await;
+
+    let fixture = tmp.path().join("fixture/Surviving");
+    fs::create_dir_all(&fixture).expect("fixture dir");
+    fs::write(fixture.join("merged.ini"), b"hash=1\n").expect("ini");
+    let disabled = core
+        .adopt_folder(GameCode::Gimi, &fixture, "Surviving Deployment")
+        .await
+        .expect("adopt");
+
+    let deployment = game_mods.join("Surviving Deployment");
+    fs::create_dir(&deployment).expect("plant non-link deployment entry");
+    fs::write(deployment.join("still-loading.ini"), b"hash=2\n")
+        .expect("make the deployment entry non-empty so removal must fail");
+
+    let error = core
+        .rebuild_junctions(GameCode::Gimi, &game_mods)
+        .await
+        .expect_err("a surviving deployment entry must not be reported as removed");
+    assert!(
+        matches!(error, Error::Io { ref path, .. } if path == &deployment),
+        "rebuild must identify the deployment entry whose withdrawal failed, got: {error}",
+    );
+    assert!(
+        deployment.is_dir(),
+        "the failed withdrawal fixture must still be present",
+    );
+    assert!(
+        core.list_mods(GameCode::Gimi)
+            .await
+            .expect("list disabled Mod")
+            .iter()
+            .any(|candidate| candidate.id == disabled.id && !candidate.enabled),
+        "the database must still describe the Mod as disabled",
+    );
+}
+
 #[tokio::test]
 async fn rebuild_preserves_an_enabled_mods_junction_when_its_active_variant_is_foreign() {
     let tmp = TempDir::new().expect("tmp");

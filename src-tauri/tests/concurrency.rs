@@ -42,7 +42,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
-use gmm_lib::core::{Core, GameCode, SessionInfo};
+use gmm_lib::core::{Core, Error, GameCode, SessionInfo};
 use sqlx::Connection;
 use tempfile::TempDir;
 use ulid::Ulid;
@@ -1766,6 +1766,109 @@ async fn recovery_revalidates_the_directory_identity_before_commit() {
     );
 }
 
+/// The Mod row's Library path is durable database structure, not an observation
+/// about the filesystem. A root path has no parent, and a differently named
+/// child violates the schema-level `<root>/<mod-id>` invariant; neither may be
+/// downgraded to a retryable per-Mod filesystem quarantine.
+///
+/// Mutation oracle: changing either direct-child guard in reinstall preparation
+/// back to `ReinstallRecoveryUncertain` fires that case's typed-corruption
+/// assertion below.
+#[tokio::test]
+async fn reinstall_rejects_structurally_impossible_mod_paths_as_corruption() {
+    for (case, corrupt_path, expected_reason) in [
+        (
+            "parentless",
+            PathBuf::from(std::path::MAIN_SEPARATOR_STR),
+            "has no parent",
+        ),
+        (
+            "wrong filename",
+            PathBuf::from("not-the-mod-id"),
+            "not the expected direct child",
+        ),
+    ] {
+        let env = TestEnv::new();
+        let core = env.core().await;
+        let gamebanana_id = if case == "parentless" {
+            166_101_u64
+        } else {
+            166_102_u64
+        };
+        let (imported, _) = seed_enabled_gamebanana_mod(&env, &core, gamebanana_id).await;
+        let corrupt_path = if case == "wrong filename" {
+            imported
+                .library_path
+                .parent()
+                .expect("game Library root")
+                .join(corrupt_path)
+        } else {
+            corrupt_path
+        };
+        let pool = sqlx::SqlitePool::connect(&env.db_url)
+            .await
+            .expect("open DB for structurally corrupt Mod path");
+        sqlx::query("UPDATE mods SET library_path = ? WHERE id = ?")
+            .bind(corrupt_path.to_string_lossy().as_ref())
+            .bind(&imported.id)
+            .execute(&pool)
+            .await
+            .expect("plant structurally impossible Mod path");
+        pool.close().await;
+
+        let update_zip = env._tmp.path().join(format!("{case}-update.zip"));
+        write_reinstall_zip(&update_zip, b"[TextureOverrideNew]\nhash=new\n");
+        let update_bytes = std::fs::read(&update_zip).expect("update ZIP bytes");
+        let mut server = mockito::Server::new_async().await;
+        let api_path = format!("/apiv11/Mod/{gamebanana_id}");
+        let file_path = format!("/file/{gamebanana_id}/new.zip");
+        let _api = server
+            .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{
+                    "_idRow": {gamebanana_id}, "_sName": "Corrupt Path Update",
+                    "_sProfileUrl": "https://gamebanana.com/mods/{gamebanana_id}", "_sVersion": "2.0.0",
+                    "_aSubmitter": {{ "_sName": "Author" }},
+                    "_aPreviewMedia": {{ "_aImages": [] }},
+                    "_aFiles": [{{ "_sFile": "new.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+                }}"#,
+                base = server.url(),
+            ))
+            .create_async()
+            .await;
+        let _file = server
+            .mock("GET", file_path.as_str())
+            .with_status(200)
+            .with_body(update_bytes)
+            .create_async()
+            .await;
+
+        let error = core
+            .reinstall_gamebanana_mod_with_endpoints(
+                &imported.id,
+                &gmm_lib::core::gamebanana::Endpoints {
+                    api_base: server.url(),
+                },
+            )
+            .await
+            .expect_err("a structurally impossible Mod path must stop reinstall");
+        assert!(
+            matches!(
+                error,
+                Error::ReinstallWitnessCorrupt { ref mod_id, ref reason }
+                    if mod_id == &imported.id && reason.contains(expected_reason)
+            ),
+            "{case} Mod path must be classified as database corruption, got: {error}",
+        );
+        assert!(
+            imported.library_path.join("Red/merged.ini").is_file(),
+            "{case} corruption must leave the installed Library bytes untouched",
+        );
+    }
+}
+
 /// The first rename has hidden the old tree under the shared durable
 /// quarantine, but the replacement has not taken the live name. A real process
 /// death must leave the witness for ordinary startup to restore bytes, row
@@ -2893,13 +2996,15 @@ async fn corrupt_reinstall_witness_identities_abort_startup_before_filesystem_re
     }
 }
 
-/// Relocation must validate every witness before using its recorded path to
-/// decide whether that witness is in scope. Otherwise a corrupt path can place
-/// itself outside the move and silently bypass the active-reinstall refusal.
+/// Relocation must validate every witness against the effective Library root
+/// before using its recorded path to decide whether that witness is in scope.
+/// Sibling-only validation is insufficient: a self-consistent witness rooted
+/// somewhere else can place itself outside the move and silently bypass the
+/// active-reinstall refusal.
 ///
-/// Mutation oracle: deleting `validate_paths` from the sole witness row
-/// constructor lets this move succeed and fires the named database-corruption
-/// assertion.
+/// Mutation oracle: deleting the recorded-root comparison from
+/// `rebase_reinstall_swap_witness` lets this move succeed and fires the named
+/// database-corruption assertion.
 #[tokio::test]
 async fn relocation_validates_the_complete_reinstall_witness_before_scope_decision() {
     let env = TestEnv::new();
@@ -2909,7 +3014,7 @@ async fn relocation_validates_the_complete_reinstall_witness_before_scope_decisi
     let token = Ulid::new();
     let corrupt_root = env.data_dir.join("outside-relocation-scope");
     let corrupt_library_path = corrupt_root.join(&imported.id);
-    let corrupt_stage = corrupt_root.join(".gmm-reinstall-wrong-token");
+    let corrupt_stage = corrupt_root.join(format!(".gmm-reinstall-{token}"));
     let corrupt_quarantine = corrupt_root.join(format!(".gmm-delete-{token}"));
     let actual_stage = real_root.join(format!(".gmm-reinstall-{token}"));
     std::fs::create_dir(&actual_stage).expect("actual stage for identity evidence");
@@ -2948,6 +3053,66 @@ async fn relocation_validates_the_complete_reinstall_witness_before_scope_decisi
     assert!(
         imported.library_path.join("merged.ini").is_file(),
         "a corrupt witness must stop relocation before Library bytes move",
+    );
+}
+
+/// The typed witness shape is not the database boundary: a migration can add
+/// a column while named-column SELECTs keep compiling. Loading a witness must
+/// compare the actual SQLite row shape with the complete ruled column list so
+/// a future column cannot silently bypass a validation decision.
+///
+/// Mutation oracle: adding `unruled_future_state` to the accepted column list
+/// without giving it a witness rule lets relocation reach the ordinary active
+/// reinstall refusal and fires the named schema-boundary assertion.
+#[tokio::test]
+async fn reinstall_witness_loader_rejects_a_column_without_a_validation_rule() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Unruled Witness Column").await;
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("reinstall stage");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for future-column fixture");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert valid reinstall witness");
+    sqlx::query("ALTER TABLE reinstall_swaps ADD COLUMN unruled_future_state TEXT")
+        .execute(&pool)
+        .await
+        .expect("simulate a future migration adding an unruled column");
+    pool.close().await;
+
+    let destination = env.data_dir.join("future-column-relocation");
+    let error = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&destination))
+        .await
+        .expect_err("an unknown reinstall_swaps column must fail at the row boundary");
+    assert!(
+        error.to_string().contains("schema columns changed"),
+        "the unknown column must demand a validation decision before relocation scope is evaluated, got: {error}",
+    );
+    assert!(
+        imported.library_path.join("merged.ini").is_file(),
+        "an unruled witness column must stop relocation before Library bytes move",
     );
 }
 

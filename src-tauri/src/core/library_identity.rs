@@ -125,3 +125,27 @@ fn identity_from_handle(_handle: &File) -> io::Result<DirectoryIdentity> {
         "directory identity is unsupported on this platform",
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::DirectoryIdentity;
+
+    #[test]
+    fn durable_key_parser_accepts_only_the_canonical_fixed_width_format() {
+        let canonical = "000000000000000a:00000000000000ff";
+        let identity = DirectoryIdentity::from_durable_key(canonical)
+            .expect("the canonical lower-case fixed-width key must be accepted");
+        assert_eq!(identity.durable_key(), canonical);
+
+        for malformed in [
+            "000000000000000A:00000000000000FF",
+            "a:ff",
+            "0000000000000000a:000000000000000ff",
+        ] {
+            assert!(
+                DirectoryIdentity::from_durable_key(malformed).is_none(),
+                "non-canonical durable identity {malformed:?} must be rejected",
+            );
+        }
+    }
+}

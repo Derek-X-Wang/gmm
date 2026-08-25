@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::Utc;
-use sqlx::{Executor, Row, Sqlite};
+use sqlx::{Column, Executor, Row, Sqlite};
 use ulid::Ulid;
 
 use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
@@ -38,6 +38,23 @@ use super::{
 };
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
+
+const REINSTALL_SWAP_COLUMNS: [&str; 14] = [
+    "token",
+    "mod_id",
+    "game_code",
+    "library_path",
+    "staged_path",
+    "quarantine_path",
+    "old_identity",
+    "staged_identity",
+    "created_at",
+    "recovery_error",
+    "recovery_attempted_at",
+    "recovery_attempts",
+    "junction_withdrawn",
+    "junction_withdrawal_error",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryMutation {
@@ -119,10 +136,12 @@ pub(super) struct ReinstallSwapWitness {
 }
 
 /// The database representation is deliberately a separate type from the
-/// witness recovery is allowed to trust. The exhaustive destructure in
-/// `validate` makes adding a field to this row a compile error until its
-/// construction rule is decided; typed identities keep malformed durable keys
-/// out of every downstream filesystem classification by construction.
+/// witness recovery is allowed to trust. Every loader selects the complete row
+/// and checks its SQLite columns against `REINSTALL_SWAP_COLUMNS`; the
+/// exhaustive destructure in `validate` then makes adding a ruled field a
+/// compile error until its construction rule is decided. Typed identities keep
+/// malformed durable keys out of every downstream filesystem classification by
+/// construction.
 struct UnvalidatedReinstallSwapWitness {
     token: String,
     mod_id: String,
@@ -132,19 +151,41 @@ struct UnvalidatedReinstallSwapWitness {
     quarantine_path: String,
     old_identity: String,
     staged_identity: String,
+    created_at: String,
+    recovery_error: Option<String>,
+    recovery_attempted_at: Option<String>,
+    recovery_attempts: i64,
+    junction_withdrawn: i64,
+    junction_withdrawal_error: Option<String>,
 }
 
 impl UnvalidatedReinstallSwapWitness {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
+        let mod_id: String = row.try_get("mod_id")?;
+        let columns: Vec<_> = row.columns().iter().map(Column::name).collect();
+        if columns.as_slice() != REINSTALL_SWAP_COLUMNS {
+            return Err(Error::ReinstallWitnessCorrupt {
+                mod_id,
+                reason: format!(
+                    "the reinstall_swaps schema columns changed from the ruled set: {columns:?}"
+                ),
+            });
+        }
         Ok(Self {
             token: row.try_get("token")?,
-            mod_id: row.try_get("mod_id")?,
+            mod_id,
             game_code: row.try_get("game_code")?,
             library_path: row.try_get("library_path")?,
             staged_path: row.try_get("staged_path")?,
             quarantine_path: row.try_get("quarantine_path")?,
             old_identity: row.try_get("old_identity")?,
             staged_identity: row.try_get("staged_identity")?,
+            created_at: row.try_get("created_at")?,
+            recovery_error: row.try_get("recovery_error")?,
+            recovery_attempted_at: row.try_get("recovery_attempted_at")?,
+            recovery_attempts: row.try_get("recovery_attempts")?,
+            junction_withdrawn: row.try_get("junction_withdrawn")?,
+            junction_withdrawal_error: row.try_get("junction_withdrawal_error")?,
         })
     }
 
@@ -158,6 +199,12 @@ impl UnvalidatedReinstallSwapWitness {
             quarantine_path,
             old_identity,
             staged_identity,
+            created_at: _created_at,
+            recovery_error: _recovery_error,
+            recovery_attempted_at: _recovery_attempted_at,
+            recovery_attempts: _recovery_attempts,
+            junction_withdrawn: _junction_withdrawn,
+            junction_withdrawal_error: _junction_withdrawal_error,
         } = self;
         let corrupt = |reason| Error::ReinstallWitnessCorrupt {
             mod_id: mod_id.clone(),
@@ -172,6 +219,11 @@ impl UnvalidatedReinstallSwapWitness {
                 "the recorded value {game_code:?} is an invalid game code"
             ))
         })?;
+        // These six fields order recovery and describe prior recovery attempts;
+        // they are not filesystem identity evidence. Their rule at this trust
+        // boundary is deliberate type decoding above, followed by exclusion
+        // from the trusted witness. Dedicated recovery-state loaders consume
+        // them where they affect user-visible retry and withdrawal status.
         let old_identity = DirectoryIdentity::from_durable_key(&old_identity).ok_or_else(|| {
             corrupt(format!(
                 "the old directory identity {old_identity:?} is not a canonical durable identity"
@@ -786,14 +838,10 @@ impl Core {
         token: Ulid,
         fence: &mut LibraryMutationFence,
     ) -> Result<ReinstallSwapWitness> {
-        let row = sqlx::query(
-            "SELECT token, mod_id, game_code, library_path, staged_path,
-                    quarantine_path, old_identity, staged_identity
-             FROM reinstall_swaps WHERE token = ?",
-        )
-        .bind(token.to_string())
-        .fetch_one(&mut *fence.transaction)
-        .await?;
+        let row = sqlx::query("SELECT * FROM reinstall_swaps WHERE token = ?")
+            .bind(token.to_string())
+            .fetch_one(&mut *fence.transaction)
+            .await?;
         let witness = ReinstallSwapWitness::from_row(&row)?;
         self.rebase_reinstall_swap_witness(witness, fence).await
     }
@@ -908,14 +956,10 @@ impl Core {
         token: Ulid,
         fence: &mut LibraryMutationFence,
     ) -> Result<Option<ReinstallSwapWitness>> {
-        let row = sqlx::query(
-            "SELECT token, mod_id, game_code, library_path, staged_path,
-                    quarantine_path, old_identity, staged_identity
-             FROM reinstall_swaps WHERE token = ?",
-        )
-        .bind(token.to_string())
-        .fetch_optional(&mut *fence.transaction)
-        .await?;
+        let row = sqlx::query("SELECT * FROM reinstall_swaps WHERE token = ?")
+            .bind(token.to_string())
+            .fetch_optional(&mut *fence.transaction)
+            .await?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -1047,11 +1091,12 @@ impl Core {
     }
 
     /// Current relocation refuses to move a subtree with an active witness,
-    /// because its cross-volume copy fallback cannot preserve identity. Keep
-    /// rebasing as a recovery boundary for a witness already carried to a new
-    /// root: only the three sibling names change, while the recorded identities
-    /// remain the ownership proof and still fail closed if a copy changed them.
-    async fn rebase_reinstall_swap_witness(
+    /// because its cross-volume copy fallback cannot preserve identity. A
+    /// recorded root different from the current effective root is therefore
+    /// corrupt durable state, not evidence that relocation legitimately carried
+    /// the witness elsewhere. Only after proving that root do we rebase the
+    /// sibling spellings to the current Mod row.
+    pub(super) async fn rebase_reinstall_swap_witness(
         &self,
         mut witness: ReinstallSwapWitness,
         fence: &mut LibraryMutationFence,
@@ -1066,7 +1111,22 @@ impl Core {
         let current_root = self
             .resolved_library_root_for_in_mutation(witness.game, fence)
             .await?;
-        if current_library_path.parent() != Some(current_root.as_path())
+        let recorded_root = witness
+            .library_path
+            .parent()
+            .expect("validated witness paths always have a parent");
+        if !super::same_path(recorded_root, &current_root) {
+            return witness
+                .corrupt("the recorded swap root is not the Mod's effective Library root");
+        }
+        let current_mod_root =
+            current_library_path
+                .parent()
+                .ok_or_else(|| Error::ReinstallWitnessCorrupt {
+                    mod_id: witness.mod_id.clone(),
+                    reason: "the current Mod row's Library path has no parent".to_string(),
+                })?;
+        if !super::same_path(current_mod_root, &current_root)
             || current_library_path
                 .file_name()
                 .and_then(|name| name.to_str())
