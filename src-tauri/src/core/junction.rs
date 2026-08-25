@@ -35,7 +35,7 @@ pub fn remove(link: &Path) -> Result<()> {
         // Belt-and-suspenders: clear the reparse point, then fs::remove_dir
         // if anything is left.
         let primary = junction::delete(link);
-        if link.exists() {
+        if link_entry_exists(link)? {
             std::fs::remove_dir(link).map_err(|source| Error::Io {
                 path: link.to_path_buf(),
                 source,
@@ -45,7 +45,7 @@ pub fn remove(link: &Path) -> Result<()> {
         // false because it follows the missing target. Inspect the entry
         // itself both before and after the fallback so success means the
         // deployment name is truly absent.
-        let entry_survives = link.exists();
+        let entry_survives = link_entry_exists(link)?;
         if let Err(source) = primary {
             if entry_survives {
                 return Err(Error::Io {
@@ -74,7 +74,6 @@ pub fn remove(link: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
 fn link_entry_exists(path: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
