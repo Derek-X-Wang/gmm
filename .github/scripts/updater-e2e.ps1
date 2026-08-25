@@ -51,11 +51,15 @@ New-Item -ItemType Directory -Force -Path $Work, $LogDir | Out-Null
 # ordering is unambiguous no matter what the repo's version is.
 $OldVersion = "9.9.0"
 $NewVersion = "9.9.1"
-$Port = 18317
+# The latest passing Windows rerun measured 6.5s from process launch to the
+# first accepted connection. Twice that measured cold start gives a 13s
+# ceiling without leaving the job at an unexplained round number.
+$ServerStartupTimeoutSeconds = 13
 $Canary = "updater-e2e-canary.txt"
 $CanaryText = "user data must survive the update"
 # Must match `IPC_READY_MARKER` in src-tauri/src/core/diagnostics.rs.
 $IpcReadyMarker = "gmm-ipc-ready"
+$server = $null
 
 function Write-Section($msg) {
     Write-Host ""
@@ -122,6 +126,9 @@ function Assert-AppStarts($exe) {
 }
 
 trap {
+    if ($null -ne $server -and -not $server.HasExited) {
+        Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+    }
     Write-Host "UPDATER E2E FAILED: $_" -ForegroundColor Red
     if (Test-Path (Join-Path $AppData "logs")) {
         Get-ChildItem (Join-Path $AppData "logs") -Filter *.log | ForEach-Object {
@@ -214,6 +221,52 @@ function Build-Version($version, $destDir) {
     Get-ChildItem $destDir | ForEach-Object { Write-Host "  $($_.Name)" }
 }
 
+# ---------------------------------------------------------------------
+Write-Section "Bind update server to an ephemeral port"
+
+$Serve = Join-Path $Work "serve"
+New-Item -ItemType Directory -Force -Path $Serve | Out-Null
+$serverScript = Join-Path $Work "updater-server.py"
+@'
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import sys
+
+handler = partial(SimpleHTTPRequestHandler, directory=sys.argv[1])
+try:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+except OSError as error:
+    print(f"local update server bind failed: {error}", file=sys.stderr, flush=True)
+    raise SystemExit(1) from error
+
+host, port = server.server_address[:2]
+print(f"local update server bound to {host}:{port}", flush=True)
+server.serve_forever()
+'@ | Set-Content -Path $serverScript -Encoding utf8
+
+$serverStdOut = Join-Path $LogDir "updater-server.stdout.log"
+$serverStdErr = Join-Path $LogDir "updater-server.stderr.log"
+Remove-Item $serverStdOut, $serverStdErr -Force -ErrorAction SilentlyContinue
+$server = Start-Process python `
+    -ArgumentList "-u", "`"$serverScript`"", "`"$Serve`"" `
+    -RedirectStandardOutput $serverStdOut `
+    -RedirectStandardError $serverStdErr `
+    -PassThru `
+    -WindowStyle Hidden
+
+$Port = Wait-ForUpdateServerBind `
+    -ServerProcess $server `
+    -StandardOutputPath $serverStdOut `
+    -StandardErrorPath $serverStdErr `
+    -TimeoutSeconds $ServerStartupTimeoutSeconds
+
+Wait-ForUpdateServer `
+    -Port $Port `
+    -TimeoutSeconds $ServerStartupTimeoutSeconds `
+    -ServerProcess $server `
+    -StandardOutputPath $serverStdOut `
+    -StandardErrorPath $serverStdErr
+
 $OldDir = Join-Path $Work "old"
 $NewDir = Join-Path $Work "new"
 Build-Version $OldVersion $OldDir
@@ -264,8 +317,6 @@ if (-not $oldMsi -or -not $newMsi) { throw "expected one MSI per build" }
 # ---------------------------------------------------------------------
 Write-Section "Serve the update over 127.0.0.1"
 
-$Serve = Join-Path $Work "serve"
-New-Item -ItemType Directory -Force -Path $Serve | Out-Null
 Copy-Item $artifact.FullName $Serve -Force
 Copy-Item $sig.FullName $Serve -Force
 
@@ -282,20 +333,10 @@ $latest = [ordered]@{
 }
 $latest | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $Serve "latest.json") -Encoding utf8
 
-$serverStdOut = Join-Path $LogDir "updater-server.stdout.log"
-$serverStdErr = Join-Path $LogDir "updater-server.stderr.log"
-Remove-Item $serverStdOut, $serverStdErr -Force -ErrorAction SilentlyContinue
-$server = Start-Process python -ArgumentList "-m", "http.server", "$Port", "--bind", "127.0.0.1" `
-    -WorkingDirectory $Serve `
-    -RedirectStandardOutput $serverStdOut `
-    -RedirectStandardError $serverStdErr `
-    -PassThru `
-    -WindowStyle Hidden
-
 try {
     Wait-ForUpdateServer `
         -Port $Port `
-        -TimeoutSeconds 15 `
+        -TimeoutSeconds $ServerStartupTimeoutSeconds `
         -ServerProcess $server `
         -StandardOutputPath $serverStdOut `
         -StandardErrorPath $serverStdErr

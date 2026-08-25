@@ -31,19 +31,25 @@
 //! drift apart:
 //!
 //! ```bash
-//! cd src-tauri
-//! cargo test --test migrations -- --ignored --exact regenerate_the_migration_corpus
-//! git add tests/fixtures/migrations
+//! cargo xtask migration-fixture
+//! git add src-tauri/tests/fixtures/migrations
 //! ```
 //!
-//! It writes one fixture per migration and leaves the existing ones
-//! byte-identical unless their migration SQL changed — which, again, it
-//! must not.
+//! Historical fixtures are immutable evidence, not build output. The
+//! generator creates only the newest missing fixture and refuses to touch
+//! every existing byte. An exceptional repair requires the explicit
+//! `--regenerate-existing NNN --reason "..."` flags; the generator records
+//! that reason in `REGENERATIONS.md` so a binary rewrite cannot hide in a
+//! diff. `SHA256SUMS` makes an unrecorded byte change fail this test suite.
 
+use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use gmm_lib::core::settings::keys;
-use gmm_lib::core::{Core, GameCode, Source};
+use gmm_lib::core::{Core, GameCode, Source, REINSTALL_SWAP_COLUMNS};
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Row, SqlitePool};
 use tempfile::TempDir;
@@ -51,9 +57,9 @@ use tempfile::TempDir;
 // ---- the seed -------------------------------------------------------
 //
 // Written by `regenerate_the_migration_corpus`, asserted by the tests
-// below. Keep the two in step: a value changed here needs the corpus
-// regenerated, and a stale corpus fails loudly rather than silently
-// asserting nothing.
+// below. Values already present in a committed fixture are themselves
+// historical and must not be edited; extend the version-aware seed when a
+// new schema needs representative data instead of rewriting older members.
 
 const SEEDED_INSTALL_PATH: &str = r"C:\Games\Genshin Impact\Genshin Impact Game";
 const SEEDED_LIBRARY_ROOT: &str = r"D:\gmm-library";
@@ -102,6 +108,14 @@ fn fixture_dir() -> PathBuf {
     src_tauri_dir().join("tests/fixtures/migrations")
 }
 
+fn fixture_checksum_path() -> PathBuf {
+    fixture_dir().join("SHA256SUMS")
+}
+
+fn fixture_regeneration_log_path() -> PathBuf {
+    fixture_dir().join("REGENERATIONS.md")
+}
+
 /// Every migration the app ships, in order.
 fn all_migrations() -> Vec<sqlx::migrate::Migration> {
     sqlx::migrate!("./migrations").iter().cloned().collect()
@@ -109,6 +123,43 @@ fn all_migrations() -> Vec<sqlx::migrate::Migration> {
 
 fn db_url(path: &Path) -> String {
     format!("sqlite://{}?mode=rwc", path.display())
+}
+
+fn fixture_name(version: usize, migration: &sqlx::migrate::Migration) -> String {
+    // Spaces in the description would land in the filename, and a path
+    // with spaces has to be escaped in a sqlite:// URL.
+    let slug = migration.description.replace(' ', "_");
+    format!("{version:03}_{slug}.db")
+}
+
+fn sha256(path: &Path) -> String {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn read_fixture_checksums() -> BTreeMap<String, String> {
+    let path = fixture_checksum_path();
+    let contents =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (hash, name) = line
+                .split_once("  ")
+                .unwrap_or_else(|| panic!("{}: malformed checksum line {line:?}", path.display()));
+            assert_eq!(hash.len(), 64, "{name}: SHA-256 must have 64 hex digits");
+            (name.to_string(), hash.to_string())
+        })
+        .collect()
+}
+
+fn write_fixture_checksums(checksums: &BTreeMap<String, String>) {
+    let contents = checksums
+        .iter()
+        .map(|(name, hash)| format!("{hash}  {name}\n"))
+        .collect::<String>();
+    std::fs::write(fixture_checksum_path(), contents).expect("write fixture checksums");
 }
 
 /// The checked-in corpus, ordered by schema version. Each entry is
@@ -317,23 +368,7 @@ async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
         .map(|row| row.try_get("name").expect("column name"))
         .collect();
     assert_eq!(
-        column_names,
-        [
-            "token",
-            "mod_id",
-            "game_code",
-            "library_path",
-            "staged_path",
-            "quarantine_path",
-            "old_identity",
-            "staged_identity",
-            "created_at",
-            "recovery_error",
-            "recovery_attempted_at",
-            "recovery_attempts",
-            "junction_withdrawn",
-            "junction_withdrawal_error",
-        ],
+        column_names, REINSTALL_SWAP_COLUMNS,
         "the reinstall migrations must create every witness column in the expected order",
     );
 
@@ -810,42 +845,214 @@ async fn an_interrupted_migration_leaves_a_database_startup_can_finish() {
 
 // ---- the generator --------------------------------------------------
 
-/// Writes the corpus. Ignored — run it deliberately after adding a
-/// migration; see this file's module docs.
+const REGENERATE_VERSION_ENV: &str = "GMM_REGENERATE_MIGRATION_FIXTURE";
+const REGENERATION_REASON_ENV: &str = "GMM_MIGRATION_FIXTURE_REASON";
+
+enum GenerationPlan {
+    Create {
+        version: usize,
+        path: PathBuf,
+    },
+    Regenerate {
+        version: usize,
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+fn plan_fixture_generation(
+    migrations: &[sqlx::migrate::Migration],
+    regenerate_version: Option<usize>,
+    regeneration_reason: Option<String>,
+) -> Result<GenerationPlan, String> {
+    let dir = fixture_dir();
+    let expected: Vec<PathBuf> = migrations
+        .iter()
+        .enumerate()
+        .map(|(idx, migration)| dir.join(fixture_name(idx + 1, migration)))
+        .collect();
+
+    if let Some(version) = regenerate_version {
+        let reason = regeneration_reason
+            .filter(|reason| !reason.trim().is_empty() && !reason.contains(['\r', '\n']))
+            .ok_or_else(|| {
+                "regenerating history requires --reason so the exceptional rewrite is recorded"
+                    .to_string()
+            })?;
+        let path = expected.get(version.saturating_sub(1)).ok_or_else(|| {
+            format!(
+                "cannot regenerate schema {version}: current migrations end at schema {}",
+                migrations.len()
+            )
+        })?;
+        if !path.is_file() {
+            return Err(format!(
+                "cannot regenerate {}: it does not exist; default generation creates only the newest missing fixture",
+                path.display()
+            ));
+        }
+        return Ok(GenerationPlan::Regenerate {
+            version,
+            path: path.clone(),
+            reason,
+        });
+    }
+
+    if regeneration_reason.is_some() {
+        return Err("--reason is valid only with --regenerate-existing".to_string());
+    }
+
+    let missing: Vec<(usize, PathBuf)> = expected
+        .iter()
+        .enumerate()
+        .filter(|(_, path)| !path.is_file())
+        .map(|(idx, path)| (idx + 1, path.clone()))
+        .collect();
+    if missing.is_empty() {
+        let latest = expected
+            .last()
+            .ok_or_else(|| "no migrations exist".to_string())?;
+        return Err(format!(
+            "fixture {} already exists and is immutable; default generation only creates the newest missing fixture",
+            latest.file_name().expect("fixture filename").to_string_lossy()
+        ));
+    }
+    let newest_version = migrations.len();
+    if missing.len() != 1 || missing[0].0 != newest_version {
+        let names = missing
+            .iter()
+            .map(|(_, path)| {
+                path.file_name()
+                    .expect("fixture filename")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "refusing to reconstruct historical gaps ({names}); only the newest missing fixture may be created"
+        ));
+    }
+    Ok(GenerationPlan::Create {
+        version: newest_version,
+        path: missing[0].1.clone(),
+    })
+}
+
+async fn write_fixture(path: &Path, version: usize, all: &[sqlx::migrate::Migration]) {
+    let partial = sqlx::migrate::Migrator {
+        migrations: std::borrow::Cow::Owned(all[..version].to_vec()),
+        ignore_missing: false,
+        locking: true,
+        no_tx: false,
+    };
+    let pool = raw_pool(path).await;
+    partial.run(&pool).await.expect("apply partial migrations");
+    seed(&pool, version).await;
+    sqlx::query("VACUUM").execute(&pool).await.expect("vacuum");
+    pool.close().await;
+}
+
+/// Creates only the newest missing fixture. Existing fixtures are historical
+/// evidence and are immutable unless the xtask's explicit regeneration flags
+/// carry a reason that is recorded beside the byte checksums.
 #[tokio::test]
-#[ignore = "regenerates checked-in fixtures; run deliberately"]
+#[ignore = "creates the newest missing fixture; run deliberately through cargo xtask"]
 async fn regenerate_the_migration_corpus() {
     let dir = fixture_dir();
     std::fs::create_dir_all(&dir).expect("create fixture dir");
-    for entry in std::fs::read_dir(&dir).expect("read fixture dir") {
-        let p = entry.expect("entry").path();
-        if p.extension().is_some_and(|x| x == "db") {
-            std::fs::remove_file(&p).expect("remove stale fixture");
-        }
-    }
-
     let all = all_migrations();
-    for (idx, migration) in all.iter().enumerate() {
-        let version = idx + 1;
-        // Spaces in the description would land in the filename, and a
-        // path with spaces has to be escaped in a sqlite:// URL.
-        let slug = migration.description.replace(' ', "_");
-        let path = dir.join(format!("{version:03}_{slug}.db"));
+    let regenerate_version = std::env::var(REGENERATE_VERSION_ENV)
+        .ok()
+        .map(|raw| raw.parse::<usize>().expect("numeric regeneration version"));
+    let regeneration_reason = std::env::var(REGENERATION_REASON_ENV).ok();
+    let plan = plan_fixture_generation(&all, regenerate_version, regeneration_reason)
+        .unwrap_or_else(|message| panic!("{message}"));
 
-        // Apply migrations 1..=version, and nothing after.
-        let partial = sqlx::migrate::Migrator {
-            migrations: std::borrow::Cow::Owned(all[..version].to_vec()),
-            ignore_missing: false,
-            locking: true,
-            no_tx: false,
-        };
-        let pool = raw_pool(&path).await;
-        partial.run(&pool).await.expect("apply partial migrations");
-        seed(&pool, version).await;
-        // Compact, so the corpus stays small in git.
-        sqlx::query("VACUUM").execute(&pool).await.expect("vacuum");
-        pool.close().await;
-        eprintln!("wrote {}", path.display());
+    let (version, path, reason) = match plan {
+        GenerationPlan::Create { version, path } => (version, path, None),
+        GenerationPlan::Regenerate {
+            version,
+            path,
+            reason,
+        } => (version, path, Some(reason)),
+    };
+    let staging_dir = TempDir::new_in(&dir).expect("create fixture staging directory");
+    let staged_path = staging_dir.path().join("fixture.db");
+    write_fixture(&staged_path, version, &all).await;
+
+    if reason.is_some() {
+        std::fs::remove_file(&path).unwrap_or_else(|e| {
+            panic!("remove explicitly selected fixture {}: {e}", path.display())
+        });
+    }
+    std::fs::rename(&staged_path, &path)
+        .unwrap_or_else(|e| panic!("install generated fixture {}: {e}", path.display()));
+
+    let name = path
+        .file_name()
+        .expect("fixture filename")
+        .to_string_lossy()
+        .into_owned();
+    let hash = sha256(&path);
+    let mut checksums = read_fixture_checksums();
+    checksums.insert(name.clone(), hash.clone());
+    write_fixture_checksums(&checksums);
+    if let Some(reason) = reason {
+        let mut log = OpenOptions::new()
+            .append(true)
+            .open(fixture_regeneration_log_path())
+            .expect("open fixture regeneration log");
+        writeln!(log, "- `{name}` (`{hash}`): {reason}")
+            .expect("record fixture regeneration reason");
+    }
+    eprintln!("wrote {}", path.display());
+}
+
+#[test]
+fn regenerating_existing_fixture_without_opt_in_is_rejected() {
+    let error = plan_fixture_generation(&all_migrations(), None, None)
+        .err()
+        .expect("a complete corpus must not be regenerated by default");
+    let latest = corpus()
+        .last()
+        .expect("latest fixture")
+        .1
+        .file_name()
+        .expect("fixture filename")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        error,
+        format!(
+            "fixture {latest} already exists and is immutable; default generation only creates the newest missing fixture"
+        ),
+        "the generator must fail loudly before it can overwrite historical bytes",
+    );
+}
+
+#[test]
+fn committed_fixtures_match_their_immutable_checksums() {
+    let checksums = read_fixture_checksums();
+    let fixtures = corpus();
+    assert_eq!(
+        checksums.len(),
+        fixtures.len(),
+        "SHA256SUMS must contain exactly one entry per historical fixture",
+    );
+    for (_, fixture) in fixtures {
+        let name = fixture
+            .file_name()
+            .expect("fixture filename")
+            .to_string_lossy();
+        let expected = checksums
+            .get(name.as_ref())
+            .unwrap_or_else(|| panic!("{name}: missing immutable checksum"));
+        assert_eq!(
+            sha256(&fixture),
+            *expected,
+            "{name}: committed historical fixture bytes changed; restore the fixture or use cargo xtask migration-fixture --regenerate-existing NNN --reason \"...\" so the exceptional rewrite is explicit and recorded",
+        );
     }
 }
 

@@ -24,6 +24,69 @@ function Get-UpdateServerOutput {
     return $output -join [Environment]::NewLine
 }
 
+function Wait-ForUpdateServerBind {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Diagnostics.Process]$ServerProcess,
+
+        [Parameter(Mandatory)]
+        [string]$StandardOutputPath,
+
+        [string]$StandardErrorPath,
+
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSeconds = 13
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $serverOutput = Get-UpdateServerOutput $StandardOutputPath $StandardErrorPath
+        $bindFailure = [Regex]::Match(
+            $serverOutput,
+            "(?m)^local update server bind failed: .+$"
+        )
+        if ($bindFailure.Success) {
+            $elapsed = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+            throw "$($bindFailure.Value) after ${elapsed}s"
+        }
+
+        $bindSuccess = [Regex]::Match(
+            $serverOutput,
+            "(?m)^local update server bound to 127\.0\.0\.1:(?<Port>\d+)\r?$"
+        )
+        if ($bindSuccess.Success) {
+            $port = [int]$bindSuccess.Groups["Port"].Value
+            $elapsed = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+            Write-Host "$($bindSuccess.Value) after ${elapsed}s"
+            return $port
+        }
+
+        $ServerProcess.Refresh()
+        if ($ServerProcess.HasExited) {
+            $serverOutput = Get-UpdateServerOutput $StandardOutputPath $StandardErrorPath
+            $elapsed = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+            throw "local update server process exited before reporting a successful " +
+                  "bind with code $($ServerProcess.ExitCode) after ${elapsed}s. " +
+                  "Server output: $serverOutput"
+        }
+
+        Start-Sleep -Milliseconds 50
+    }
+
+    $ServerProcess.Refresh()
+    $serverOutput = Get-UpdateServerOutput $StandardOutputPath $StandardErrorPath
+    $elapsed = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+    if ($ServerProcess.HasExited) {
+        throw "local update server process exited before reporting a successful " +
+              "bind with code $($ServerProcess.ExitCode) after ${elapsed}s. " +
+              "Server output: $serverOutput"
+    }
+    throw "timed out after ${elapsed}s waiting for local update server to report " +
+          "a successful bind. Server output: $serverOutput"
+}
+
 function Wait-ForUpdateServer {
     [CmdletBinding()]
     param(

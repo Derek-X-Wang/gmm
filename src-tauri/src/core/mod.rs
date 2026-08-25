@@ -47,6 +47,8 @@ pub use library_audit::{
     DuplicateModGroup, DuplicateModRecord, DuplicateModVariant, DuplicateResolution,
     LibraryAuditReport, ReviewedDuplicateMod, UnreferencedLibraryDir,
 };
+#[doc(hidden)]
+pub use library_mutation::REINSTALL_SWAP_COLUMNS;
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
 pub use session::{InterruptedSessionLaunch, SessionInfo, SessionLaunchClaim};
@@ -111,6 +113,25 @@ impl Core {
     /// Open (or create) the DB at `db_url`, run pending migrations, and
     /// ensure the Library root exists.
     pub async fn new(default_library_root: PathBuf, db_url: &str) -> Result<Self> {
+        Self::new_inner(default_library_root, db_url, None).await
+    }
+
+    /// Test seam for startup crash points. Production callers use [`Core::new`]
+    /// and therefore install no hook while startup recovery runs.
+    #[doc(hidden)]
+    pub async fn new_with_crash_hook(
+        default_library_root: PathBuf,
+        db_url: &str,
+        crash_hook: CrashHook,
+    ) -> Result<Self> {
+        Self::new_inner(default_library_root, db_url, Some(crash_hook)).await
+    }
+
+    async fn new_inner(
+        default_library_root: PathBuf,
+        db_url: &str,
+        crash_hook: Option<CrashHook>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&default_library_root).map_err(|source| Error::Io {
             path: default_library_root.clone(),
             source,
@@ -125,7 +146,7 @@ impl Core {
         let core = Self {
             pool,
             default_library_root,
-            crash_hook: None,
+            crash_hook,
         };
         // A launch reservation is written before spawning and normally filled
         // with the child PID immediately afterwards. Retire it when both
@@ -148,6 +169,7 @@ impl Core {
             );
         }
         core.recover_interrupted_reinstalls_at_startup().await?;
+        core.crash_point(crash_points::STARTUP_AFTER_REINSTALL_RECOVERY);
         if let Err(recovery) = core.finish_interrupted_library_deletes().await {
             tracing::warn!(
                 target: "gmm::library",
@@ -433,6 +455,17 @@ impl Core {
         per_game: Option<GameCode>,
         fence: &mut library_mutation::LibraryMutationFence,
     ) -> Result<(MoveReport, Vec<(String, GameCode)>)> {
+        let cleanup_roots: Vec<PathBuf> = match per_game {
+            Some(_) => vec![previous.to_path_buf()],
+            None => games::GAME_PROFILES
+                .iter()
+                .map(|profile| previous.join(profile.code.as_str()))
+                .collect(),
+        };
+        if library_recovery::has_owned_delete_quarantine(&cleanup_roots)? {
+            return Err(Error::LibraryRelocationBlockedByCleanup);
+        }
+
         // A same-volume rename preserves the filesystem identities recorded by
         // an in-flight reinstall witness, but the cross-volume copy fallback
         // does not. Refuse every relocation that would carry such a witness.
@@ -440,19 +473,15 @@ impl Core {
         // alias or differently-cased drive spelling for the same root.
         // This check is under the same writer fence as witness creation, so it
         // happens before any Junction or Library byte is touched.
-        let active_reinstalls = sqlx::query(
-            "SELECT token, mod_id, game_code, library_path, staged_path,
-                    quarantine_path, old_identity, staged_identity
-             FROM reinstall_swaps",
-        )
-        .fetch_all(&mut *fence.transaction)
-        .await?;
+        let active_reinstalls = sqlx::query("SELECT * FROM reinstall_swaps")
+            .fetch_all(&mut *fence.transaction)
+            .await?;
         for reinstall in active_reinstalls {
             let witness = library_mutation::ReinstallSwapWitness::from_row(&reinstall)?;
-            witness.validate_paths()?;
-            if path_within(&witness.library_path, previous) {
+            let witness = self.rebase_reinstall_swap_witness(witness, fence).await?;
+            if path_within(witness.library_path(), previous) {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
-                    mod_id: witness.mod_id,
+                    mod_id: witness.mod_id().to_string(),
                 });
             }
         }
@@ -505,7 +534,7 @@ impl Core {
                 let junction_dir_name: String = junction_row.try_get("junction_dir_name")?;
                 let link = mods_dir.join(junction_dir_name);
                 if link_exists(&link)? {
-                    let _ = junction::remove(&link);
+                    junction::remove(&link)?;
                 }
             }
             previously_enabled.push((id, game));
@@ -929,7 +958,7 @@ impl Core {
             })?;
         let parent = library_path
             .parent()
-            .ok_or_else(|| Error::ReinstallRecoveryUncertain {
+            .ok_or_else(|| Error::ReinstallWitnessCorrupt {
                 mod_id: mod_id.to_string(),
                 reason: "the installed Library path has no parent".to_string(),
             })?;
@@ -941,7 +970,7 @@ impl Core {
         if parent_directory.identity() != root_directory.identity()
             || library_path.file_name().and_then(|name| name.to_str()) != Some(mod_id)
         {
-            return Err(Error::ReinstallRecoveryUncertain {
+            return Err(Error::ReinstallWitnessCorrupt {
                 mod_id: mod_id.to_string(),
                 reason: "the installed Mod is not the expected direct child of its effective Library root".to_string(),
             });
@@ -1023,7 +1052,10 @@ impl Core {
             let rollback = match witness_exists {
                 Ok(1) => self.rollback_reinstall_swap(token).await,
                 Ok(0) => remove_reinstall_stage_if_identity_matches(&staged_path, &staged_identity),
-                Ok(count) => Err(Error::ReinstallRecoveryUncertain {
+                // `token` is the table's primary key, so any cardinality other
+                // than zero or one is impossible under the ruled schema. It is
+                // database corruption, not filesystem uncertainty.
+                Ok(count) => Err(Error::ReinstallWitnessCorrupt {
                     mod_id: mod_id.to_string(),
                     reason: format!("the swap token matched {count} recovery witnesses"),
                 }),
@@ -1074,19 +1106,18 @@ impl Core {
                 .begin_library_mutation(library_mutation::LibraryMutation::ReinstallGamebananaMod)
                 .await?;
             let witness = self.reinstall_swap_witness(token, &mut commit).await?;
-            let live = library_identity::IdentifiedDirectory::open(&witness.library_path).map_err(
-                |source| Error::Io {
-                    path: witness.library_path.clone(),
-                    source,
-                },
-            )?;
-            let staged = library_identity::IdentifiedDirectory::open(&witness.staged_path)
+            let live = library_identity::IdentifiedDirectory::open(witness.library_path())
                 .map_err(|source| Error::Io {
-                    path: witness.staged_path.clone(),
+                    path: witness.library_path().to_path_buf(),
                     source,
                 })?;
-            if live.identity().durable_key() != witness.old_identity
-                || staged.identity().durable_key() != witness.staged_identity
+            let staged = library_identity::IdentifiedDirectory::open(witness.staged_path())
+                .map_err(|source| Error::Io {
+                    path: witness.staged_path().to_path_buf(),
+                    source,
+                })?;
+            if live.identity() != witness.old_identity()
+                || staged.identity() != witness.staged_identity()
             {
                 return Err(Error::ReinstallRecoveryUncertain {
                     mod_id: mod_id.to_string(),
@@ -1110,7 +1141,7 @@ impl Core {
                 .map(|install| install.join("Mods"));
 
             let quarantined = self.quarantine_library_directory_with_token(
-                &witness.library_path,
+                witness.library_path(),
                 &live,
                 token,
                 None,
@@ -1118,19 +1149,19 @@ impl Core {
             )?;
             drop(live);
             self.crash_point(crash_points::REINSTALL_AFTER_OLD_QUARANTINE_MOVE);
-            std::fs::rename(&witness.staged_path, &witness.library_path).map_err(|source| {
+            std::fs::rename(witness.staged_path(), witness.library_path()).map_err(|source| {
                 Error::Io {
-                    path: witness.staged_path.clone(),
+                    path: witness.staged_path().to_path_buf(),
                     source,
                 }
             })?;
             drop(staged);
-            let installed = library_identity::IdentifiedDirectory::open(&witness.library_path)
+            let installed = library_identity::IdentifiedDirectory::open(witness.library_path())
                 .map_err(|source| Error::Io {
-                    path: witness.library_path.clone(),
+                    path: witness.library_path().to_path_buf(),
                     source,
                 })?;
-            if installed.identity().durable_key() != witness.staged_identity {
+            if installed.identity() != witness.staged_identity() {
                 return Err(Error::ReinstallRecoveryUncertain {
                     mod_id: mod_id.to_string(),
                     reason: "the replacement changed identity during its final rename".to_string(),
@@ -1142,8 +1173,8 @@ impl Core {
             let first_variant_id = detected_variants.first().map(|_| Ulid::new().to_string());
             let new_target = detected_variants
                 .first()
-                .map(|variant| witness.library_path.join(&variant.subpath))
-                .unwrap_or_else(|| witness.library_path.clone());
+                .map(|variant| witness.library_path().join(&variant.subpath))
+                .unwrap_or_else(|| witness.library_path().to_path_buf());
             if enabled {
                 if let Some(mods_dir) = mods_dir.as_ref() {
                     std::fs::create_dir_all(mods_dir).map_err(|source| Error::Io {
@@ -3275,7 +3306,7 @@ impl Core {
             // the Library, the old link would resolve to thin air.
             let had_link = link_exists(&link)?;
             if had_link {
-                let _ = junction::remove(&link);
+                junction::remove(&link)?;
             }
 
             if !enabled {

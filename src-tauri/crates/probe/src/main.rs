@@ -115,10 +115,6 @@ async fn run(args: &Args) -> Result<(), String> {
         wait_until(args.at);
     }
 
-    let mut core = Core::new(args.library.clone(), &args.db_url)
-        .await
-        .map_err(|e| e.to_string())?;
-
     // Failure injection (issue #59). `abort` rather than `exit`: no
     // unwinding, no destructors, no buffered writes flushed — the point
     // is to model a process that stopped existing, not one that shut
@@ -126,35 +122,63 @@ async fn run(args: &Args) -> Result<(), String> {
     // exactly the situation the recovery path has to survive.
     let crash_at = args.get("--crash-at").cloned();
     let pause_at = args.get("--pause-at").cloned();
-    if crash_at.is_some() || pause_at.is_some() {
-        core = core.with_crash_hook(std::sync::Arc::new(move |reached: &str| {
-            if pause_at.as_deref() == Some(reached) {
-                let line = serde_json::json!({ "pausedAt": reached });
-                let mut stdout = std::io::stdout();
-                if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
-                    eprintln!("failed to report pause at crash point {reached}: {error}");
-                    std::process::exit(3);
-                }
+    let crash_hook: Option<gmm_lib::core::CrashHook> = (crash_at.is_some() || pause_at.is_some())
+        .then(|| {
+            std::sync::Arc::new(move |reached: &str| {
+                if pause_at.as_deref() == Some(reached) {
+                    let line = serde_json::json!({ "pausedAt": reached });
+                    let mut stdout = std::io::stdout();
+                    if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+                        eprintln!("failed to report pause at crash point {reached}: {error}");
+                        std::process::exit(3);
+                    }
 
-                // The parent closes or writes to stdin to release this exact
-                // crash-point rendezvous. This is deliberately event-driven:
-                // concurrency tests must not guess that the child reached the
-                // vulnerable window after an arbitrary sleep.
-                let mut release = String::new();
-                let _ = std::io::stdin().read_line(&mut release);
-            }
-            if crash_at.as_deref() == Some(reached) {
-                std::process::abort();
-            }
-        }));
-    }
+                    // The parent closes or writes to stdin to release this exact
+                    // crash-point rendezvous. This is deliberately event-driven:
+                    // concurrency tests must not guess that the child reached the
+                    // vulnerable window after an arbitrary sleep.
+                    let mut release = String::new();
+                    let _ = std::io::stdin().read_line(&mut release);
+                }
+                if crash_at.as_deref() == Some(reached) {
+                    std::process::abort();
+                }
+            }) as gmm_lib::core::CrashHook
+        });
+    let startup = args.op == "startup";
+    let core = if startup {
+        match crash_hook {
+            Some(hook) => Core::new_with_crash_hook(args.library.clone(), &args.db_url, hook).await,
+            None => Core::new(args.library.clone(), &args.db_url).await,
+        }
+        .map_err(|e| e.to_string())?
+    } else {
+        let core = Core::new(args.library.clone(), &args.db_url)
+            .await
+            .map_err(|e| e.to_string())?;
+        match crash_hook {
+            Some(hook) => core.with_crash_hook(hook),
+            None => core,
+        }
+    };
 
     if !migrating {
         wait_until(args.at);
     }
 
+    if args.ready_before_op {
+        let line = serde_json::json!({ "readyBeforeOp": true });
+        let mut stdout = std::io::stdout();
+        writeln!(stdout, "{line}")
+            .and_then(|()| stdout.flush())
+            .map_err(|error| format!("failed to report pre-operation readiness: {error}"))?;
+        let mut release = String::new();
+        let _ = std::io::stdin().read_line(&mut release);
+    }
+
     match args.op.as_str() {
         "migrate" => Ok(()),
+        "startup" => Ok(()),
 
         "adopt" => {
             let from = args.req("--from")?;
@@ -227,6 +251,21 @@ async fn run(args: &Args) -> Result<(), String> {
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
+        }
+
+        "audit" => {
+            let report = core
+                .audit_library(args.game()?)
+                .await
+                .map_err(|e| e.to_string())?;
+            if report.unreferenced.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "audit reported directories owned by the concurrent producer: {:?}",
+                    report.unreferenced
+                ))
+            }
         }
 
         // Recovering an unreferenced Library directory (#72). Only the
@@ -355,6 +394,7 @@ struct Args {
     db_url: String,
     library: PathBuf,
     take_lock: bool,
+    ready_before_op: bool,
     at: Option<u128>,
     op: String,
     flags: HashMap<String, String>,
@@ -370,8 +410,8 @@ impl Args {
         while i < argv.len() {
             let a = &argv[i];
             if let Some(name) = a.strip_prefix("--") {
-                // `--take-lock` is the only valueless flag.
-                if name == "take-lock" {
+                // These process-control flags carry no value.
+                if matches!(name, "take-lock" | "ready-before-op") {
                     flags.insert(a.clone(), "1".to_string());
                     i += 1;
                     continue;
@@ -403,6 +443,7 @@ impl Args {
             db_url: take("--db")?,
             library: PathBuf::from(take("--library")?),
             take_lock: flags.contains_key("--take-lock"),
+            ready_before_op: flags.contains_key("--ready-before-op"),
             at: flags.get("--at").and_then(|v| v.parse().ok()),
             op: op.ok_or_else(|| "missing operation".to_string())?,
             flags,

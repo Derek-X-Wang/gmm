@@ -42,7 +42,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
-use gmm_lib::core::{crash_points, Core, GameCode, SessionInfo};
+use gmm_lib::core::{crash_points, Core, Error, GameCode, SessionInfo};
 use sqlx::Connection;
 use tempfile::TempDir;
 use ulid::Ulid;
@@ -129,6 +129,7 @@ struct Probe {
     db_url: String,
     library: PathBuf,
     take_lock: bool,
+    ready_before_op: bool,
     at: Option<u128>,
     pause_at: Option<&'static str>,
     crash_at: Option<&'static str>,
@@ -146,6 +147,7 @@ fn probe(env: &TestEnv) -> Probe {
         db_url: env.db_url.clone(),
         library: env.library.clone(),
         take_lock: false,
+        ready_before_op: false,
         at: None,
         pause_at: None,
         crash_at: None,
@@ -164,6 +166,15 @@ impl Probe {
     /// layer underneath it.
     fn honouring_the_lock(mut self) -> Self {
         self.take_lock = true;
+        self
+    }
+
+    /// Initialize the real Core and stop immediately before invoking the
+    /// selected public operation. This keeps startup recovery outside the
+    /// interleaving while the vulnerable boundaries remain production crash
+    /// points inside the two operations under test.
+    fn ready_before_operation(mut self) -> Self {
+        self.ready_before_op = true;
         self
     }
 
@@ -229,6 +240,9 @@ impl Probe {
             .arg(&self.library);
         if self.take_lock {
             cmd.arg("--take-lock");
+        }
+        if self.ready_before_op {
+            cmd.arg("--ready-before-op");
         }
         if let Some(at) = self.at {
             cmd.arg("--at").arg(at.to_string());
@@ -545,6 +559,17 @@ impl RunningProbe {
             event["pausedAt"].as_str(),
             Some(expected_crash_point),
             "probe paused at the wrong crash point: {event}",
+        );
+    }
+
+    fn wait_until_ready_before_operation(&mut self) {
+        let line = self.recv_stdout_line("become ready before its operation", None);
+        let event: serde_json::Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|error| panic!("probe printed non-JSON readiness {line:?}: {error}"));
+        assert_eq!(
+            event["readyBeforeOp"].as_bool(),
+            Some(true),
+            "probe reported the wrong pre-operation event: {event}",
         );
     }
 
@@ -1770,6 +1795,109 @@ async fn recovery_revalidates_the_directory_identity_before_commit() {
     );
 }
 
+/// The Mod row's Library path is durable database structure, not an observation
+/// about the filesystem. A root path has no parent, and a differently named
+/// child violates the schema-level `<root>/<mod-id>` invariant; neither may be
+/// downgraded to a retryable per-Mod filesystem quarantine.
+///
+/// Mutation oracle: changing either direct-child guard in reinstall preparation
+/// back to `ReinstallRecoveryUncertain` fires that case's typed-corruption
+/// assertion below.
+#[tokio::test]
+async fn reinstall_rejects_structurally_impossible_mod_paths_as_corruption() {
+    for (case, corrupt_path, expected_reason) in [
+        (
+            "parentless",
+            PathBuf::from(std::path::MAIN_SEPARATOR_STR),
+            "has no parent",
+        ),
+        (
+            "wrong filename",
+            PathBuf::from("not-the-mod-id"),
+            "not the expected direct child",
+        ),
+    ] {
+        let env = TestEnv::new();
+        let core = env.core().await;
+        let gamebanana_id = if case == "parentless" {
+            166_101_u64
+        } else {
+            166_102_u64
+        };
+        let (imported, _) = seed_enabled_gamebanana_mod(&env, &core, gamebanana_id).await;
+        let corrupt_path = if case == "wrong filename" {
+            imported
+                .library_path
+                .parent()
+                .expect("game Library root")
+                .join(corrupt_path)
+        } else {
+            corrupt_path
+        };
+        let pool = sqlx::SqlitePool::connect(&env.db_url)
+            .await
+            .expect("open DB for structurally corrupt Mod path");
+        sqlx::query("UPDATE mods SET library_path = ? WHERE id = ?")
+            .bind(corrupt_path.to_string_lossy().as_ref())
+            .bind(&imported.id)
+            .execute(&pool)
+            .await
+            .expect("plant structurally impossible Mod path");
+        pool.close().await;
+
+        let update_zip = env._tmp.path().join(format!("{case}-update.zip"));
+        write_reinstall_zip(&update_zip, b"[TextureOverrideNew]\nhash=new\n");
+        let update_bytes = std::fs::read(&update_zip).expect("update ZIP bytes");
+        let mut server = mockito::Server::new_async().await;
+        let api_path = format!("/apiv11/Mod/{gamebanana_id}");
+        let file_path = format!("/file/{gamebanana_id}/new.zip");
+        let _api = server
+            .mock("GET", mockito::Matcher::Regex(format!("{api_path}.*")))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{
+                    "_idRow": {gamebanana_id}, "_sName": "Corrupt Path Update",
+                    "_sProfileUrl": "https://gamebanana.com/mods/{gamebanana_id}", "_sVersion": "2.0.0",
+                    "_aSubmitter": {{ "_sName": "Author" }},
+                    "_aPreviewMedia": {{ "_aImages": [] }},
+                    "_aFiles": [{{ "_sFile": "new.zip", "_sDownloadUrl": "{base}{file_path}" }}]
+                }}"#,
+                base = server.url(),
+            ))
+            .create_async()
+            .await;
+        let _file = server
+            .mock("GET", file_path.as_str())
+            .with_status(200)
+            .with_body(update_bytes)
+            .create_async()
+            .await;
+
+        let error = core
+            .reinstall_gamebanana_mod_with_endpoints(
+                &imported.id,
+                &gmm_lib::core::gamebanana::Endpoints {
+                    api_base: server.url(),
+                },
+            )
+            .await
+            .expect_err("a structurally impossible Mod path must stop reinstall");
+        assert!(
+            matches!(
+                error,
+                Error::ReinstallWitnessCorrupt { ref mod_id, ref reason }
+                    if mod_id == &imported.id && reason.contains(expected_reason)
+            ),
+            "{case} Mod path must be classified as database corruption, got: {error}",
+        );
+        assert!(
+            imported.library_path.join("Red/merged.ini").is_file(),
+            "{case} corruption must leave the installed Library bytes untouched",
+        );
+    }
+}
+
 /// The first rename has hidden the old tree under the shared durable
 /// quarantine, but the replacement has not taken the live name. A real process
 /// death must leave the witness for ordinary startup to restore bytes, row
@@ -2314,9 +2442,9 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
 /// to delete it, startup must continue, and the UI model must say the Mod may
 /// still be loading.
 ///
-/// Mutation oracle: propagating `withdraw_reinstall_junction` from
-/// `withdraw_quarantined_reinstall_junction` makes Core construction fail at
-/// the named startup assertion.
+/// Mutation oracle: deleting the non-link refusal in
+/// `withdraw_reinstall_junction` changes the durable withdrawal reason and
+/// fires the named user-visible evidence assertion below.
 #[tokio::test]
 async fn junction_withdrawal_failure_quarantines_as_possibly_deployed_without_aborting_startup() {
     let env = TestEnv::new();
@@ -2379,6 +2507,138 @@ async fn junction_withdrawal_failure_quarantines_as_possibly_deployed_without_ab
         .await
         .expect("rebuild must report rather than propagate withdrawal failure");
     assert_eq!(rebuilt.quarantined, vec![imported.id]);
+}
+
+async fn mark_reinstall_recovery_as_quarantined(db_url: &str, token: Ulid) {
+    let pool = sqlx::SqlitePool::connect(db_url)
+        .await
+        .expect("open DB to mark reinstall recovery quarantined");
+    sqlx::query(
+        "UPDATE reinstall_swaps
+         SET recovery_error = 'fixture recovery obstruction',
+             recovery_attempted_at = '2026-08-23T00:01:00Z', recovery_attempts = 1,
+             junction_withdrawn = 0, junction_withdrawal_error = NULL
+         WHERE token = ?",
+    )
+    .bind(token.to_string())
+    .execute(&pool)
+    .await
+    .expect("mark reinstall recovery quarantined");
+    pool.close().await;
+}
+
+/// Reconcile is a recovery path, not only a reporting path: a prior failed or
+/// interrupted withdrawal must be retried before the quarantined Mod is
+/// returned to the caller.
+///
+/// Mutation oracle: replacing the guarded withdrawal branch in
+/// `reconcile_junctions` with classification-only bookkeeping leaves the live
+/// deployment entry behind and fires the named entry-survival assertion.
+#[tokio::test]
+async fn reconcile_retries_quarantined_reinstall_junction_withdrawal() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Reconcile Withdrawal Guard").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy Mod before quarantine");
+    let deployment = env.game_mods.join("Reconcile Withdrawal Guard");
+    let (token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    mark_reinstall_recovery_as_quarantined(&env.db_url, token).await;
+
+    let result = core
+        .reconcile_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("reconcile quarantined Mod");
+
+    assert_eq!(result.quarantined, vec![imported.id]);
+    assert!(
+        matches!(
+            std::fs::symlink_metadata(&deployment),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ),
+        "reconcile must withdraw the quarantined Mod's surviving deployment entry",
+    );
+}
+
+/// Rebuild independently retries a pending quarantine withdrawal. It must not
+/// rely on startup or reconcile having removed the deployment first.
+///
+/// Mutation oracle: replacing the guarded withdrawal branch in
+/// `rebuild_junctions` with classification-only bookkeeping leaves the live
+/// deployment entry behind and fires the named entry-survival assertion.
+#[tokio::test]
+async fn rebuild_retries_quarantined_reinstall_junction_withdrawal() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Rebuild Withdrawal Guard").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy Mod before quarantine");
+    let deployment = env.game_mods.join("Rebuild Withdrawal Guard");
+    let (token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    mark_reinstall_recovery_as_quarantined(&env.db_url, token).await;
+
+    let result = core
+        .rebuild_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("rebuild quarantined Mod");
+
+    assert_eq!(result.quarantined, vec![imported.id]);
+    assert!(
+        matches!(
+            std::fs::symlink_metadata(&deployment),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ),
+        "rebuild must withdraw the quarantined Mod's surviving deployment entry",
+    );
+}
+
+/// `read_link` accepts a Windows directory symlink, while the junction crate
+/// initially attempts to delete only MOUNT_POINT reparse tags. A dangling
+/// target must not turn the target-following existence check into false proof
+/// that the link entry disappeared. Keeping this native case in the
+/// concurrency target ensures it still runs when another boundary regression
+/// in the same suite also fails.
+///
+/// Mutation oracle: restoring the target-following `Path::exists` checks in
+/// `junction::remove` fires the named false-success assertion on Windows CI.
+#[cfg(windows)]
+#[tokio::test]
+async fn dangling_directory_symlink_cannot_survive_a_successful_quarantine_withdrawal() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Dangling Symlink Withdrawal").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy Mod before quarantine");
+    let deployment = env.game_mods.join("Dangling Symlink Withdrawal");
+    gmm_lib::core::junction::remove(&deployment).expect("remove real Junction");
+    let missing_target = env.data_dir.join("missing-symlink-target");
+    std::os::windows::fs::symlink_dir(&missing_target, &deployment)
+        .expect("create dangling directory symlink");
+    let (token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    mark_reinstall_recovery_as_quarantined(&env.db_url, token).await;
+
+    core.reconcile_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("reconcile quarantined dangling symlink");
+    let recovery = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list quarantined Mod")[0]
+        .reinstall_recovery
+        .clone()
+        .expect("reinstall recovery state");
+    let entry_survives = std::fs::symlink_metadata(&deployment).is_ok();
+
+    assert!(
+        !recovery.junction_withdrawn || !entry_survives,
+        "withdrawal reported success while the dangling directory-symlink entry survived",
+    );
 }
 
 /// Models a process death after the quarantine record committed but before
@@ -2702,6 +2962,190 @@ async fn corrupt_reinstall_witness_paths_still_abort_startup() {
     }
 }
 
+/// Durable directory identities have one canonical fixed-width format. A
+/// malformed value is corrupt database state, not evidence that one Mod's
+/// filesystem bytes changed or disappeared.
+///
+/// Mutation oracle: accepting either identity as an unvalidated `String`
+/// lets startup quarantine the Mod and fires the case-specific startup-fatal
+/// assertion.
+#[tokio::test]
+async fn corrupt_reinstall_witness_identities_abort_startup_before_filesystem_recovery() {
+    for corrupt_field in ["old_identity", "staged_identity"] {
+        let env = TestEnv::new();
+        let core = env.core().await;
+        let imported = env.seed_mod(&core, "Corrupt Recovery Identity").await;
+        let root = imported.library_path.parent().expect("game Library root");
+        let token = Ulid::new();
+        let stage = root.join(format!(".gmm-reinstall-{token}"));
+        let quarantine = root.join(format!(".gmm-delete-{token}"));
+        std::fs::create_dir(&stage).expect("reinstall stage");
+        let mut old_identity = durable_directory_key(&imported.library_path);
+        let mut staged_identity = durable_directory_key(&stage);
+        match corrupt_field {
+            "old_identity" => old_identity = "not-a-durable-identity".to_string(),
+            "staged_identity" => staged_identity = "not-a-durable-identity".to_string(),
+            _ => unreachable!(),
+        }
+
+        let pool = sqlx::SqlitePool::connect(&env.db_url)
+            .await
+            .expect("open DB for corrupt identity fixture");
+        sqlx::query(
+            "INSERT INTO reinstall_swaps (
+                token, mod_id, game_code, library_path, staged_path,
+                quarantine_path, old_identity, staged_identity, created_at
+             ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(token.to_string())
+        .bind(&imported.id)
+        .bind(imported.library_path.to_string_lossy().as_ref())
+        .bind(stage.to_string_lossy().as_ref())
+        .bind(quarantine.to_string_lossy().as_ref())
+        .bind(old_identity)
+        .bind(staged_identity)
+        .bind("2026-08-23T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert corrupt identity witness");
+        pool.close().await;
+        drop(core);
+
+        let startup = Core::new(env.library.clone(), &env.db_url).await;
+        let error = match startup {
+            Ok(_) => panic!(
+                "corrupt {corrupt_field} must abort startup as database corruption before filesystem recovery"
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("database corruption"),
+            "corrupt {corrupt_field} must be reported as database state, got: {error}",
+        );
+    }
+}
+
+/// Relocation must validate every witness against the effective Library root
+/// before using its recorded path to decide whether that witness is in scope.
+/// Sibling-only validation is insufficient: a self-consistent witness rooted
+/// somewhere else can place itself outside the move and silently bypass the
+/// active-reinstall refusal.
+///
+/// Mutation oracle: deleting the recorded-root comparison from
+/// `rebase_reinstall_swap_witness` lets this move succeed and fires the named
+/// database-corruption assertion.
+#[tokio::test]
+async fn relocation_validates_the_complete_reinstall_witness_before_scope_decision() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Relocation Witness Validation").await;
+    let real_root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let corrupt_root = env.data_dir.join("outside-relocation-scope");
+    let corrupt_library_path = corrupt_root.join(&imported.id);
+    let corrupt_stage = corrupt_root.join(format!(".gmm-reinstall-{token}"));
+    let corrupt_quarantine = corrupt_root.join(format!(".gmm-delete-{token}"));
+    let actual_stage = real_root.join(format!(".gmm-reinstall-{token}"));
+    std::fs::create_dir(&actual_stage).expect("actual stage for identity evidence");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for relocation witness fixture");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(corrupt_library_path.to_string_lossy().as_ref())
+    .bind(corrupt_stage.to_string_lossy().as_ref())
+    .bind(corrupt_quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&actual_stage))
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert corrupt relocation witness");
+    pool.close().await;
+
+    let destination = env.data_dir.join("relocated-library");
+    let relocation = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&destination))
+        .await
+        .expect_err("relocation must validate a witness before deciding it is out of scope");
+    assert!(
+        relocation.to_string().contains("database corruption"),
+        "relocation must reject the corrupt witness row before moving bytes, got: {relocation}",
+    );
+    assert!(
+        imported.library_path.join("merged.ini").is_file(),
+        "a corrupt witness must stop relocation before Library bytes move",
+    );
+}
+
+/// The typed witness shape is not the database boundary: a migration can add
+/// a column while named-column SELECTs keep compiling. Loading a witness must
+/// compare the actual SQLite row shape with the column registry derived from
+/// the raw witness declaration so a future column cannot silently bypass a
+/// validation decision.
+///
+/// Mutation oracle: removing the row-shape comparison lets relocation reach
+/// the ordinary active reinstall refusal and fires the named schema-boundary
+/// assertion.
+#[tokio::test]
+async fn reinstall_witness_loader_rejects_a_column_without_a_validation_rule() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Unruled Witness Column").await;
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("reinstall stage");
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for future-column fixture");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-23T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert valid reinstall witness");
+    sqlx::query("ALTER TABLE reinstall_swaps ADD COLUMN unruled_future_state TEXT")
+        .execute(&pool)
+        .await
+        .expect("simulate a future migration adding an unruled column");
+    pool.close().await;
+
+    let destination = env.data_dir.join("future-column-relocation");
+    let error = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&destination))
+        .await
+        .expect_err("an unknown reinstall_swaps column must fail at the row boundary");
+    assert!(
+        error.to_string().contains("schema columns changed"),
+        "the unknown column must demand a validation decision before relocation scope is evaluated, got: {error}",
+    );
+    assert!(
+        imported.library_path.join("merged.ini").is_file(),
+        "an unruled witness column must stop relocation before Library bytes move",
+    );
+}
+
 /// Reinstall rollback and ordinary delete-quarantine reclamation are separate
 /// startup phases. If rollback succeeds but a later root cannot be inspected,
 /// the committed witness deletion must survive so routine cleanup remains
@@ -2768,6 +3212,110 @@ async fn purge_failure_after_successful_reinstall_rollback_does_not_stop_startup
     assert_eq!(
         witnesses, 0,
         "successful rollback must stay committed when ordinary purge later fails",
+    );
+}
+
+/// A relocation process is initialized before an interrupted reinstall is
+/// seeded, so its own startup cannot consume the fixture. Real startup then
+/// pauses after rollback committed and before ordinary quarantine cleanup.
+/// A copy-fallback relocation in that gap must refuse; otherwise it gives the
+/// rolled-back replacement a new filesystem identity while copying its old
+/// intent marker.
+///
+/// Mutation oracle: removing the owned-delete-quarantine relocation guard
+/// makes `relocation between startup recovery phases` succeed and fail the
+/// explicit refusal assertion below.
+#[tokio::test]
+async fn copy_relocation_between_startup_recovery_phases_waits_for_cleanup() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env
+        .seed_mod(&core, "Relocation Between Startup Phases")
+        .await;
+    let new_root = env._tmp.path().join("copy-relocated-after-rollback");
+    std::fs::create_dir(&new_root).expect("pre-existing relocation destination");
+    std::fs::write(new_root.join("force-copy-fallback"), b"destination marker")
+        .expect("make rename replacement impossible");
+    let mut relocating = probe(&env)
+        .ready_before_operation()
+        .op([
+            "set-library-path",
+            "--path",
+            &new_root.display().to_string(),
+        ])
+        .spawn();
+    relocating.wait_until_ready_before_operation();
+
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("reinstall stage");
+    std::fs::write(stage.join("replacement.ini"), b"rolled-back replacement")
+        .expect("replacement bytes");
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for startup witness");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-24T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("commit interrupted reinstall witness");
+    pool.close().await;
+    drop(core);
+
+    let startup_pause = gmm_lib::core::crash_points::STARTUP_AFTER_REINSTALL_RECOVERY;
+    let mut startup = probe(&env)
+        .pausing_at(startup_pause)
+        .op(["startup"])
+        .spawn();
+    startup.wait_for_pause(startup_pause);
+
+    relocating.resume();
+    relocating.wait_for_outcome().expect_refused(
+        "relocation between startup recovery phases",
+        "cleanup is pending",
+    );
+
+    startup.resume();
+    startup
+        .wait_for_outcome()
+        .expect_ok("startup quarantine cleanup after refused relocation");
+
+    probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &new_root.display().to_string(),
+        ])
+        .run()
+        .expect_ok("relocation after startup cleanup completed");
+    assert_eq!(
+        std::fs::read(new_root.join(&imported.id).join("merged.ini"))
+            .expect("installed Mod bytes after relocation retry"),
+        b"[TextureOverride]\nhash=42\n",
+    );
+    assert!(
+        std::fs::read_dir(&new_root)
+            .expect("relocated root")
+            .filter_map(std::result::Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gmm-delete-")),
+        "cleanup must retire every rollback quarantine before relocation retries",
     );
 }
 
@@ -3003,6 +3551,51 @@ fn staged_adopt_source(env: &TestEnv, name: &str) -> PathBuf {
         .expect("staged adopt Variant file");
     }
     source
+}
+
+/// The audit pauses after releasing its first ownership snapshot, then a real
+/// producer commits its witness and pauses after its first copied file. The
+/// audit scans that live staging directory and must drop it after rechecking
+/// ownership under a second, short writer fence.
+///
+/// Mutation oracle: removing the second ownership snapshot makes `audit whose
+/// producer began after the snapshot` fail with the live staged directory in
+/// the probe's error.
+#[tokio::test]
+async fn audit_excludes_a_staging_operation_that_begins_during_its_scan() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    drop(core);
+    let source = staged_adopt_source(&env, "audit-overlapping-staged-adopt");
+    let copy_pause = gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY;
+    let mut producer = probe(&env)
+        .ready_before_operation()
+        .pausing_at(copy_pause)
+        .op([
+            "adopt",
+            "--from",
+            &source.display().to_string(),
+            "--name",
+            "Audit Overlap Stage",
+        ])
+        .spawn();
+    producer.wait_until_ready_before_operation();
+
+    let audit_pause = gmm_lib::core::crash_points::AUDIT_AFTER_OWNERSHIP_SNAPSHOT;
+    let mut auditing = probe(&env).pausing_at(audit_pause).op(["audit"]).spawn();
+    auditing.wait_for_pause(audit_pause);
+
+    producer.resume();
+    producer.wait_for_pause(copy_pause);
+    auditing.resume();
+    auditing
+        .wait_for_outcome()
+        .expect_ok("audit whose producer began after the ownership snapshot");
+
+    producer.resume();
+    producer
+        .wait_for_outcome()
+        .expect_ok("producer after the audit released its fence");
 }
 
 async fn only_staged_directory(core: &Core) -> PathBuf {
