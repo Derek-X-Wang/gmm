@@ -16,21 +16,20 @@ use std::ptr;
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    NtOpenFile, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_FOR_BACKUP_INTENT,
-    FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+    NtOpenFile, FILE_DIRECTORY_FILE, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT,
+    FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use windows_sys::Win32::Foundation::{
     RtlNtStatusToDosError, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FileDispositionInfoEx, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, ReOpenFile,
-    SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_ID_BOTH_DIR_INFO,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -46,29 +45,28 @@ const DIRECTORY_BUFFER_U64S: usize = 8 * 1024;
 pub(super) struct HandleAnchoredDirectoryRemoval {
     verified: IdentifiedDirectory,
     root: File,
+    root_delete: File,
 }
 
 impl HandleAnchoredDirectoryRemoval {
     pub(super) fn new(verified: IdentifiedDirectory) -> io::Result<Self> {
-        let desired_access = DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
-        let share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
-        let raw = unsafe {
-            ReOpenFile(
-                verified.handle().as_raw_handle(),
-                desired_access,
-                share_mode,
-                flags,
-            )
-        };
-        if raw == INVALID_HANDLE_VALUE {
-            return Err(with_context(
-                "reopen the verified root for handle-anchored deletion",
-                io::Error::last_os_error(),
+        let root = open_for_traversal(verified.handle(), &[])
+            .map_err(|source| with_context("open the verified root for traversal", source))?;
+        let root_delete = open_for_delete(verified.handle(), &[])
+            .map_err(|source| with_context("open the verified root for deletion", source))?;
+        let verified_id = file_id(&file_information(verified.handle())?);
+        let root_id = file_id(&file_information(&root)?);
+        let root_delete_id = file_id(&file_information(&root_delete)?);
+        if root_id != verified_id || root_delete_id != verified_id {
+            return Err(io::Error::other(
+                "root handles derived from the identity proof describe different objects",
             ));
         }
-        let root = unsafe { File::from_raw_handle(raw as RawHandle) };
-        Ok(Self { verified, root })
+        Ok(Self {
+            verified,
+            root,
+            root_delete,
+        })
     }
 
     pub(super) fn remove(
@@ -78,12 +76,13 @@ impl HandleAnchoredDirectoryRemoval {
     ) -> io::Result<Option<u64>> {
         let size = remove_children(&self.root, measure_size, crash_hook)
             .map_err(|source| with_context("remove the verified root's children", source))?;
-        mark_delete(&self.root)
+        drop(self.root);
+        mark_delete(&self.root_delete)
             .map_err(|source| with_context("mark the verified root for deletion", source))?;
         // Both handles close before the caller retires the durable intent.
         // POSIX disposition removes the name immediately; closing the proof
         // also releases the final handle GMM itself holds on the object.
-        drop(self.root);
+        drop(self.root_delete);
         drop(self.verified);
         Ok(measure_size.then_some(size))
     }
@@ -93,7 +92,6 @@ impl HandleAnchoredDirectoryRemoval {
 struct DirectoryEntry {
     name: Vec<u16>,
     file_id: u64,
-    attributes: u32,
 }
 
 fn remove_children(
@@ -114,28 +112,45 @@ fn remove_children(
         }
 
         for entry in entries {
-            let (child, information) = open_child(parent, &entry).map_err(|source| {
-                with_context(
-                    "open an enumerated child relative to its parent handle",
-                    source,
-                )
-            })?;
+            let (child_delete, information) = open_for_delete(parent, &entry.name)
+                .and_then(|child| {
+                    let information = file_information(&child)?;
+                    ensure_file_id(entry.file_id, &information)?;
+                    Ok((child, information))
+                })
+                .map_err(|source| {
+                    with_context(
+                        "open an enumerated child for deletion relative to its parent handle",
+                        source,
+                    )
+                })?;
             let is_directory = information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
             let is_reparse = information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
 
             let child_size = if is_directory && !is_reparse {
-                remove_children(&child, measure_size, crash_hook).map_err(|source| {
+                let child = open_for_traversal(parent, &entry.name)
+                    .and_then(|child| {
+                        let traversal_information = file_information(&child)?;
+                        ensure_file_id(file_id(&information), &traversal_information)?;
+                        Ok(child)
+                    })
+                    .map_err(|source| {
+                        with_context("open a verified child directory for traversal", source)
+                    })?;
+                let size = remove_children(&child, measure_size, crash_hook).map_err(|source| {
                     with_context("remove a verified child directory's contents", source)
-                })?
+                })?;
+                drop(child);
+                size
             } else if measure_size && !is_directory && !is_reparse {
                 (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow)
             } else {
                 0
             };
 
-            mark_delete(&child)
+            mark_delete(&child_delete)
                 .map_err(|source| with_context("mark a verified child for deletion", source))?;
-            drop(child);
+            drop(child_delete);
             total = total.saturating_add(child_size);
         }
     }
@@ -208,7 +223,6 @@ fn parse_directory_batch(
             entries.push(DirectoryEntry {
                 name,
                 file_id: record.FileId as u64,
-                attributes: record.FileAttributes,
             });
         }
 
@@ -226,12 +240,34 @@ fn parse_directory_batch(
     }
 }
 
-fn open_child(
+fn open_for_traversal(parent: &File, name: &[u16]) -> io::Result<File> {
+    open_relative(
+        parent,
+        name,
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_DIRECTORY_FILE
+            | FILE_OPEN_REPARSE_POINT
+            | FILE_OPEN_FOR_BACKUP_INTENT
+            | FILE_SYNCHRONOUS_IO_NONALERT,
+    )
+}
+
+fn open_for_delete(parent: &File, name: &[u16]) -> io::Result<File> {
+    open_relative(
+        parent,
+        name,
+        DELETE | FILE_READ_ATTRIBUTES,
+        FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT,
+    )
+}
+
+fn open_relative(
     parent: &File,
-    entry: &DirectoryEntry,
-) -> io::Result<(File, BY_HANDLE_FILE_INFORMATION)> {
-    let name_bytes = entry
-        .name
+    name: &[u16],
+    desired_access: u32,
+    options: u32,
+) -> io::Result<File> {
+    let name_bytes = name
         .len()
         .checked_mul(size_of::<u16>())
         .and_then(|length| u16::try_from(length).ok())
@@ -239,7 +275,7 @@ fn open_child(
     let unicode_name = UNICODE_STRING {
         Length: name_bytes,
         MaximumLength: name_bytes,
-        Buffer: entry.name.as_ptr().cast_mut(),
+        Buffer: name.as_ptr().cast_mut(),
     };
     let object_attributes = OBJECT_ATTRIBUTES {
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
@@ -249,24 +285,6 @@ fn open_child(
         SecurityDescriptor: ptr::null(),
         SecurityQualityOfService: ptr::null(),
     };
-    let is_directory = entry.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-    let is_reparse = entry.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    let desired_access = DELETE
-        | FILE_READ_ATTRIBUTES
-        | SYNCHRONIZE
-        | if is_directory && !is_reparse {
-            FILE_LIST_DIRECTORY
-        } else {
-            0
-        };
-    let open_options = FILE_OPEN_REPARSE_POINT
-        | FILE_OPEN_FOR_BACKUP_INTENT
-        | FILE_SYNCHRONOUS_IO_NONALERT
-        | if is_directory {
-            FILE_DIRECTORY_FILE
-        } else {
-            FILE_NON_DIRECTORY_FILE
-        };
     let share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
     let mut raw: HANDLE = ptr::null_mut();
     let mut io_status = MaybeUninit::<IO_STATUS_BLOCK>::zeroed();
@@ -277,7 +295,7 @@ fn open_child(
             &object_attributes,
             io_status.as_mut_ptr(),
             share_mode,
-            open_options,
+            options,
         )
     };
     if status < 0 {
@@ -291,24 +309,32 @@ fn open_child(
             "NtOpenFile succeeded without returning a child handle",
         ));
     }
-    let child = unsafe { File::from_raw_handle(raw as RawHandle) };
+    Ok(unsafe { File::from_raw_handle(raw as RawHandle) })
+}
+
+fn file_information(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
     let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-    let ok = unsafe { GetFileInformationByHandle(child.as_raw_handle(), information.as_mut_ptr()) };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
     if ok == 0 {
         return Err(with_context(
-            "read the opened child's file ID and attributes",
+            "read an opened handle's file ID and attributes",
             io::Error::last_os_error(),
         ));
     }
-    let information = unsafe { information.assume_init() };
-    let opened_file_id =
-        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
-    if opened_file_id != entry.file_id {
+    Ok(unsafe { information.assume_init() })
+}
+
+fn file_id(information: &BY_HANDLE_FILE_INFORMATION) -> u64 {
+    (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow)
+}
+
+fn ensure_file_id(expected: u64, information: &BY_HANDLE_FILE_INFORMATION) -> io::Result<()> {
+    if file_id(information) != expected {
         return Err(io::Error::other(
             "a directory entry changed before handle-anchored deletion",
         ));
     }
-    Ok((child, information))
+    Ok(())
 }
 
 fn mark_delete(file: &File) -> io::Result<()> {
