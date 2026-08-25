@@ -80,12 +80,13 @@ git add src-tauri/tests/fixtures/migrations
 The generator creates only the newest missing fixture. Existing fixtures are
 immutable historical evidence: a normal run fails rather than overwriting one,
 and `SHA256SUMS` pins their exact committed bytes in the migration test suite.
-On pull requests, CI also requires `REGENERATIONS.md` to change whenever
-`SHA256SUMS` changes, so the ordinary review path cannot accept a hurried
-rewrite without a stated reason. This is not tamper-proof: a determined person
-can edit the fixture, checksum, and record together, and review must still judge
-the explanation. An exceptional repair requires both an explicit target and a
-recorded reason:
+On pull requests, CI also requires `REGENERATIONS.md` to change when an existing
+checksum is changed or removed, so the ordinary review path cannot accept a
+hurried rewrite without a stated reason. Appending the checksum for a genuinely
+new fixture does not require a regeneration entry. This is not tamper-proof: a
+determined person can edit the fixture, checksum, and record together, and
+review must still judge the explanation. An exceptional repair requires both
+an explicit target and a recorded reason:
 
 ```bash
 cargo xtask migration-fixture --regenerate-existing NNN --reason "why the historical artifact is invalid"

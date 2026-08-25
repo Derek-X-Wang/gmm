@@ -26,6 +26,19 @@ if git diff --quiet "$BASE_COMMIT" "$HEAD_COMMIT" -- "$CHECKSUMS"; then
   exit 0
 fi
 
+# A newly generated fixture only appends a checksum. Rewriting or removing
+# historical evidence deletes an existing checksum line, which is the event
+# that needs a regeneration record.
+CHECKSUM_DIFF="$(git diff --no-color --unified=0 "$BASE_COMMIT" "$HEAD_COMMIT" -- "$CHECKSUMS")"
+if ! printf '%s\n' "$CHECKSUM_DIFF" | awk '
+  /^--- / { next }
+  /^-/ { found = 1 }
+  END { exit(found ? 0 : 1) }
+'; then
+  echo "Migration fixture checksums only add new entries; no regeneration record is required."
+  exit 0
+fi
+
 if git diff --quiet "$BASE_COMMIT" "$HEAD_COMMIT" -- "$REGENERATIONS"; then
   echo "::error file=${CHECKSUMS}::${CHECKSUMS} changed, but ${REGENERATIONS} did not. Historical migration fixtures are immutable evidence; record which fixture changed and why the rewrite was legitimate."
   echo "This gate makes the reason mandatory on the ordinary pull-request path; it is not a tamper-proof check."

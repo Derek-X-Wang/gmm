@@ -20,6 +20,23 @@ git -C "$TMP" add .
 git -C "$TMP" commit --quiet -m "baseline"
 BASE_COMMIT="$(git -C "$TMP" rev-parse HEAD)"
 
+printf '%s\n' "new-fixture-checksum  new-fixture.db" >>"$TMP/src-tauri/tests/fixtures/migrations/SHA256SUMS"
+git -C "$TMP" add src-tauri/tests/fixtures/migrations/SHA256SUMS
+git -C "$TMP" commit --quiet -m "add a new fixture checksum"
+ADDITION_COMMIT="$(git -C "$TMP" rev-parse HEAD)"
+
+output="$(cd "$TMP" && .github/scripts/check-migration-fixture-regeneration-record.sh \
+  "$BASE_COMMIT" "$ADDITION_COMMIT" 2>&1)"
+case "$output" in
+  *"checksums only add new entries; no regeneration record is required"*) ;;
+  *)
+    echo "guard did not accept a new fixture checksum without a regeneration record: $output" >&2
+    exit 1
+    ;;
+esac
+echo "new fixture checksum was accepted without a regeneration record"
+
+git -C "$TMP" checkout --quiet "$BASE_COMMIT"
 printf '%s\n' "new-checksum  fixture.db" >"$TMP/src-tauri/tests/fixtures/migrations/SHA256SUMS"
 git -C "$TMP" add src-tauri/tests/fixtures/migrations/SHA256SUMS
 git -C "$TMP" commit --quiet -m "change checksum only"
