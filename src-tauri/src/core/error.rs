@@ -345,6 +345,12 @@ pub enum Error {
     LibraryRelocationBlockedByReinstall { mod_id: String },
 
     #[error(
+        "GMM cannot relocate this Library while verified cleanup is pending. \
+         Let cleanup finish, then try the Library move again. No Library bytes were moved."
+    )]
+    LibraryRelocationBlockedByCleanup,
+
+    #[error(
         "GMM found interrupted reinstall state for Mod {mod_id} that it could not safely resolve: \
          {reason}. GMM left every directory it could not prove untouched."
     )]

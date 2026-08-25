@@ -1326,6 +1326,23 @@ async fn every_crash_point_is_exercised_by_an_operation() {
         }))
     };
 
+    // Startup recovery runs before `with_crash_hook` can decorate an
+    // initialized Core, so install the observer while constructing one.
+    let env = TestEnv::new();
+    let startup_reached = Arc::clone(&reached);
+    Core::new_with_crash_hook(
+        env.library.clone(),
+        &env.db_url,
+        Arc::new(move |point| {
+            startup_reached
+                .lock()
+                .expect("startup crash-point observation lock")
+                .insert(point.to_owned());
+        }),
+    )
+    .await
+    .expect("coverage startup recovery");
+
     // Adopt, enable, switch Variant, and disable cover both filesystem/row
     // orderings on the common Mod mutation paths.
     let env = TestEnv::new();

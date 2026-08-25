@@ -1,6 +1,7 @@
 //! The single database-to-filesystem ownership rule for Library directories.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 
@@ -14,6 +15,13 @@ pub(super) enum LibraryDirectoryOwner {
     Mod,
     ActiveReinstall,
     ActiveStaging,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LibraryDirectoryDisposition {
+    Owned(LibraryDirectoryOwner),
+    IgnorableEmptyReinstallStage,
+    Unreferenced,
 }
 
 /// A point-in-time view of every filesystem object GMM currently owns.
@@ -132,6 +140,32 @@ impl LibraryOwnershipSnapshot {
         self.mods
             .contains_key(identity)
             .then_some(LibraryDirectoryOwner::Mod)
+    }
+
+    /// The one report/action rule for an immediate Library-root directory.
+    ///
+    /// A database witness owns an exact filesystem identity. Without one, a
+    /// reserved reinstall name is ignorable only when GMM can prove it empty;
+    /// a non-empty or uninspectable directory remains user-visible. Keeping
+    /// that distinction here prevents audit, Reveal, Recover, and Delete from
+    /// independently redefining what “unreferenced” means.
+    pub(super) fn disposition_of(
+        &self,
+        directory: &IdentifiedDirectory,
+    ) -> LibraryDirectoryDisposition {
+        if let Some(owner) = self.owner_of(directory.identity()) {
+            return LibraryDirectoryDisposition::Owned(owner);
+        }
+        let empty_reinstall_stage = directory.path().file_name().is_some_and(|name| {
+            name.to_string_lossy()
+                .starts_with(super::library_mutation::REINSTALL_STAGING_PREFIX)
+        }) && fs::read_dir(directory.path())
+            .is_ok_and(|mut entries| entries.next().is_none());
+        if empty_reinstall_stage {
+            LibraryDirectoryDisposition::IgnorableEmptyReinstallStage
+        } else {
+            LibraryDirectoryDisposition::Unreferenced
+        }
     }
 
     /// Mod rows that currently resolve to `identity`.

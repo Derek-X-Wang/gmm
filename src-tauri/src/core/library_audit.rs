@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, Row, Sqlite};
 
-use super::library_identity::IdentifiedDirectory;
-use super::library_ownership::LibraryOwnershipSnapshot;
+use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
+use super::library_mutation::LibraryMutation;
+use super::library_ownership::{LibraryDirectoryDisposition, LibraryOwnershipSnapshot};
 use super::{Core, Error, GameCode, Result, Source};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,19 +100,55 @@ pub struct LibraryAuditReport {
     pub total_bytes: u64,
 }
 
+struct ScannedUnreferencedLibraryDir {
+    reported: UnreferencedLibraryDir,
+    identity: Option<DirectoryIdentity>,
+}
+
 impl Core {
     /// Report immediate child directories of this game's resolved Library
-    /// root that no Mod row references. Filesystem traversal runs on the
-    /// blocking pool and never follows links.
+    /// root that no ownership witness references. Two short writer-fenced
+    /// snapshots bracket the unbounded filesystem traversal, which runs on the
+    /// blocking pool and never follows links. The second snapshot is required
+    /// so the report and its Reveal/Recover/Delete guard agree when a directory
+    /// gains an owner during the scan; only candidates unreferenced in both
+    /// snapshots are returned. Identity-open uncertainty remains visible with
+    /// an unknown size so later actions continue to fail closed.
     pub async fn audit_library(&self, game: GameCode) -> Result<LibraryAuditReport> {
-        let root = self.resolved_library_root_for(game).await?;
-        let mut transaction = self.pool.begin().await?;
-        let ownership = LibraryOwnershipSnapshot::load(&mut *transaction).await?;
-        let duplicate_ids = ownership.duplicate_mod_ids();
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::AuditLibrary)
+            .await?;
+        let root = self
+            .resolved_library_root_for_in_mutation(game, &mut fence)
+            .await?;
+        let ownership = LibraryOwnershipSnapshot::load(&mut *fence.transaction).await?;
+        fence.commit().await?;
+        self.crash_point(super::crash_points::AUDIT_AFTER_OWNERSHIP_SNAPSHOT);
+
+        let join_error_path = root.clone();
+        let scan_ownership = ownership.clone();
+        let candidates =
+            tokio::task::spawn_blocking(move || scan_game_root(&root, &scan_ownership))
+                .await
+                .map_err(|join_error| Error::Io {
+                    path: join_error_path.clone(),
+                    source: io::Error::other(format!("Library audit worker failed: {join_error}")),
+                })??;
+
+        let mut recheck_fence = self
+            .begin_library_mutation(LibraryMutation::AuditLibrary)
+            .await?;
+        let current_root = self
+            .resolved_library_root_for_in_mutation(game, &mut recheck_fence)
+            .await?;
+        let current_ownership =
+            LibraryOwnershipSnapshot::load(&mut *recheck_fence.transaction).await?;
+        let duplicate_ids = current_ownership.duplicate_mod_ids();
         let duplicate_records =
-            load_duplicate_mod_records(&mut *transaction, &duplicate_ids).await?;
-        transaction.commit().await?;
-        let mut duplicates: Vec<_> = ownership
+            load_duplicate_mod_records(&mut *recheck_fence.transaction, &duplicate_ids).await?;
+        recheck_fence.commit().await?;
+
+        let mut duplicates: Vec<_> = current_ownership
             .duplicate_mod_groups()
             .into_iter()
             .filter_map(|ids| {
@@ -135,32 +172,43 @@ impl Core {
             .collect();
         duplicates.sort_by(|left, right| left.path.cmp(&right.path));
 
-        let join_error_path = root.clone();
-        tokio::task::spawn_blocking(move || scan_game_root(game, &root, &ownership, duplicates))
+        // Relocation changed which root the action guard would accept. Do not
+        // report candidates scanned under the previous spelling; a refresh
+        // will scan the current root instead.
+        let unreferenced = if current_root == join_error_path {
+            tokio::task::spawn_blocking(move || {
+                recheck_unreferenced_candidates(candidates, &current_ownership)
+            })
             .await
             .map_err(|join_error| Error::Io {
-                path: join_error_path,
-                source: io::Error::other(format!("Library audit worker failed: {join_error}")),
-            })?
+                path: current_root,
+                source: io::Error::other(format!(
+                    "Library audit recheck worker failed: {join_error}"
+                )),
+            })??
+        } else {
+            Vec::new()
+        };
+        let total_bytes = unreferenced
+            .iter()
+            .filter_map(|directory| directory.size_bytes)
+            .sum();
+        Ok(LibraryAuditReport {
+            game,
+            unreferenced,
+            duplicates,
+            total_bytes,
+        })
     }
 }
 
 fn scan_game_root(
-    game: GameCode,
     root: &Path,
     ownership: &LibraryOwnershipSnapshot,
-    duplicates: Vec<DuplicateModGroup>,
-) -> Result<LibraryAuditReport> {
+) -> Result<Vec<ScannedUnreferencedLibraryDir>> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(LibraryAuditReport {
-                game,
-                unreferenced: Vec::new(),
-                duplicates,
-                total_bytes: 0,
-            });
-        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => {
             return Err(Error::Io {
                 path: root.to_path_buf(),
@@ -186,41 +234,91 @@ fn scan_game_root(
         if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
             continue;
         }
-        let directory = IdentifiedDirectory::open(&path).map_err(|source| Error::Io {
-            path: path.clone(),
-            source,
-        })?;
-        if ownership.owner_of(directory.identity()).is_some() {
-            continue;
+        let directory = match IdentifiedDirectory::open(&path) {
+            Ok(directory) => directory,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                // Identity uncertainty is not evidence that user bytes are
+                // absent. Keep the directory visible with an unknown size;
+                // the action guard will still fail closed until it can open
+                // and identify the object.
+                unreferenced.push(ScannedUnreferencedLibraryDir {
+                    reported: UnreferencedLibraryDir {
+                        directory_name: entry.file_name().to_string_lossy().into_owned(),
+                        path,
+                        size_bytes: None,
+                    },
+                    identity: None,
+                });
+                continue;
+            }
+        };
+        match ownership.disposition_of(&directory) {
+            LibraryDirectoryDisposition::Owned(_)
+            | LibraryDirectoryDisposition::IgnorableEmptyReinstallStage => continue,
+            LibraryDirectoryDisposition::Unreferenced => {}
         }
-        // A process can die after creating reinstall's reserved stage but
-        // before its witness transaction commits. Only a directory proven
-        // empty is harmless internal residue. A reserved name containing any
-        // entry (or one we cannot inspect) remains visible because names alone
-        // are not ownership evidence for user bytes.
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(super::library_mutation::REINSTALL_STAGING_PREFIX)
-            && fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_none())
-        {
-            continue;
-        }
-        unreferenced.push(UnreferencedLibraryDir {
-            directory_name: entry.file_name().to_string_lossy().into_owned(),
-            size_bytes: directory_size_without_links(&path).ok(),
-            path,
+        unreferenced.push(ScannedUnreferencedLibraryDir {
+            reported: UnreferencedLibraryDir {
+                directory_name: entry.file_name().to_string_lossy().into_owned(),
+                size_bytes: directory_size_without_links(&path).ok(),
+                path,
+            },
+            identity: Some(directory.identity().clone()),
         });
     }
-    unreferenced.sort_by(|left, right| left.path.cmp(&right.path));
-    let total_bytes = unreferenced.iter().filter_map(|dir| dir.size_bytes).sum();
+    Ok(unreferenced)
+}
 
-    Ok(LibraryAuditReport {
-        game,
-        unreferenced,
-        duplicates,
-        total_bytes,
-    })
+fn recheck_unreferenced_candidates(
+    candidates: Vec<ScannedUnreferencedLibraryDir>,
+    ownership: &LibraryOwnershipSnapshot,
+) -> Result<Vec<UnreferencedLibraryDir>> {
+    let mut unreferenced = Vec::new();
+    for mut candidate in candidates {
+        let path = &candidate.reported.path;
+        if super::library_recovery::is_owned_delete_quarantine(path)? {
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                candidate.reported.size_bytes = None;
+                unreferenced.push(candidate.reported);
+                continue;
+            }
+        };
+        if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
+            continue;
+        }
+        let directory = match IdentifiedDirectory::open(path) {
+            Ok(directory) => directory,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                candidate.reported.size_bytes = None;
+                unreferenced.push(candidate.reported);
+                continue;
+            }
+        };
+        if candidate
+            .identity
+            .as_ref()
+            .is_some_and(|identity| identity != directory.identity())
+        {
+            // This spelling now names an object the first snapshot and scan
+            // never classified. Leave it for a fresh audit rather than attach
+            // stale size or ownership evidence to the replacement.
+            continue;
+        }
+        match ownership.disposition_of(&directory) {
+            LibraryDirectoryDisposition::Owned(_)
+            | LibraryDirectoryDisposition::IgnorableEmptyReinstallStage => continue,
+            LibraryDirectoryDisposition::Unreferenced => unreferenced.push(candidate.reported),
+        }
+    }
+    unreferenced.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(unreferenced)
 }
 
 pub(super) async fn load_duplicate_mod_records<'e, E>(
