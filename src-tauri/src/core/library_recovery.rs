@@ -960,6 +960,36 @@ mod tests {
         (quarantine, intent)
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn handle_anchored_purge_reclaims_an_owned_quarantine() {
+        let temp = tempfile::tempdir().expect("temporary Library");
+        let (quarantine, intent) = owned_quarantine(&temp.path().join("gimi"));
+
+        match (QuarantinedLibraryDirectory {
+            path: quarantine.clone(),
+            intent: intent.clone(),
+            after_root_handle_open: None,
+        })
+        .purge(false)
+        .expect("purge owned quarantine")
+        {
+            QuarantinePurgeOutcome::Reclaimed(None) => {}
+            QuarantinePurgeOutcome::Reclaimed(Some(size)) => {
+                panic!("unmeasured purge unexpectedly reported {size} bytes")
+            }
+            QuarantinePurgeOutcome::Deferred { error, .. } => {
+                panic!("handle-anchored purge was deferred: {error}")
+            }
+            QuarantinePurgeOutcome::OwnershipLost => {
+                panic!("handle-anchored purge unexpectedly lost ownership")
+            }
+        }
+
+        assert!(!quarantine.exists(), "the quarantine must be removed");
+        assert!(!intent.exists(), "the durable intent must be retired");
+    }
+
     #[test]
     fn vanished_quarantine_does_not_abort_later_cleanup() {
         let temp = tempfile::tempdir().expect("temporary Library");
