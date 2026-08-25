@@ -260,6 +260,50 @@ async fn quarantine_purge_handles_a_tree_beyond_max_path() {
     assert!(!orphan.exists(), "the long quarantine tree must be gone");
 }
 
+/// Recursive removal deliberately stops before a pathologically deep tree can
+/// exhaust the process stack during startup recovery. The
+/// existing quarantine and its intent must remain available for a later retry.
+///
+/// Mutation oracle: removing the production depth check reports `Reclaimed`
+/// and fires the named deferred-reclamation assertion.
+#[tokio::test]
+async fn quarantine_purge_defers_tree_deeper_than_the_recursion_limit() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = core_with_library(tmp.path().join("library"), tmp.path()).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    let mut deep = orphan.clone();
+    for _ in 0..65 {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).expect("deep quarantine tree");
+    fs::write(deep.join("survivor.bin"), b"defer these bytes").expect("deep survivor");
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("the visible Library delete was already committed");
+    let quarantine = match deleted.reclamation {
+        LibraryReclamationOutcome::Deferred { path } => path,
+        outcome => panic!(
+            "a quarantine deeper than the recursion limit must defer reclamation, got {outcome:?}",
+        ),
+    };
+
+    assert!(
+        quarantine.is_dir(),
+        "deferred reclamation must leave the quarantine directory present",
+    );
+    assert!(
+        quarantine.with_extension("intent").is_file(),
+        "deferred reclamation must retain the durable delete intent",
+    );
+}
+
 fn make_mod_dir(dir: &Path, marker: &str) {
     fs::create_dir_all(dir).expect("mod dir");
     fs::write(dir.join("merged.ini"), format!("; {marker}\nhash = 1234\n")).expect("ini");

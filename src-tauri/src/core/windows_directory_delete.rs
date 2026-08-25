@@ -38,6 +38,10 @@ use super::{crash_points, CrashHook};
 
 const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 const DIRECTORY_BUFFER_U64S: usize = 8 * 1024;
+/// Bounds both Rust stack use and the child handles retained by recursive
+/// descent. A deeper tree is left for deferred reclamation rather than risking
+/// a process abort during startup recovery.
+const MAX_DIRECTORY_DEPTH: usize = usize::MAX;
 
 /// Owns both the original identity proof and a delete-capable handle derived
 /// from that same filesystem object. Neither handle resolves the pathname
@@ -74,7 +78,7 @@ impl HandleAnchoredDirectoryRemoval {
         measure_size: bool,
         crash_hook: Option<&CrashHook>,
     ) -> io::Result<Option<u64>> {
-        let size = remove_children(&self.root, measure_size, crash_hook)
+        let size = remove_children(&self.root, measure_size, crash_hook, 0)
             .map_err(|source| with_context("remove the verified root's children", source))?;
         drop(self.root);
         mark_delete(&self.root_delete)
@@ -98,6 +102,7 @@ fn remove_children(
     parent: &File,
     measure_size: bool,
     crash_hook: Option<&CrashHook>,
+    depth: usize,
 ) -> io::Result<u64> {
     let mut total = 0u64;
     loop {
@@ -128,6 +133,11 @@ fn remove_children(
             let is_reparse = information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
 
             let child_size = if is_directory && !is_reparse {
+                if depth >= MAX_DIRECTORY_DEPTH {
+                    return Err(io::Error::other(format!(
+                        "directory nesting exceeds the supported depth of {MAX_DIRECTORY_DEPTH}",
+                    )));
+                }
                 let child = open_for_traversal(parent, &entry.name)
                     .and_then(|child| {
                         let traversal_information = file_information(&child)?;
@@ -137,9 +147,9 @@ fn remove_children(
                     .map_err(|source| {
                         with_context("open a verified child directory for traversal", source)
                     })?;
-                let size = remove_children(&child, measure_size, crash_hook).map_err(|source| {
-                    with_context("remove a verified child directory's contents", source)
-                })?;
+                let size = remove_children(&child, measure_size, crash_hook, depth + 1).map_err(
+                    |source| with_context("remove a verified child directory's contents", source),
+                )?;
                 drop(child);
                 size
             } else if measure_size && !is_directory && !is_reparse {
