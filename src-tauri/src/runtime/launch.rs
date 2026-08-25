@@ -151,8 +151,8 @@ fn resolve_game_exe(game: GameCode, install: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-/// Spawn `game`, get the Model Importer injected, claim the Game Session,
-/// and start the exit watcher.
+/// Reserve the launch, spawn `game`, inject the Model Importer, claim the
+/// active Game Session, and start the exit watcher.
 ///
 /// Every failure is routed through [`av::wrap_launch_error`], which
 /// prefixes the wire message with `AV-PATTERN: ` when the error text
@@ -184,138 +184,173 @@ pub async fn launch<R: Runtime>(
             ));
         }
 
-        let install = core
-            .game_install_path(game)
+        // Commit the durable Library blocker before any loader setup or
+        // process spawn. This short writer transaction orders the launch
+        // against an already-running Library mutation; its committed row then
+        // bridges the unbounded hook/injection work without holding SQLite's
+        // writer lock for up to a minute.
+        let claim = core
+            .begin_session_launch(game)
             .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Set the game install path in Settings before launching.".to_string())?;
+            .map_err(|e| format!("begin_session_launch: {e}"))?;
 
-        let game_exe = resolve_game_exe(game, &install)?;
-        let dll_to_inject = install.join("d3d11.dll");
-        if !dll_to_inject.exists() {
-            return Err(format!(
-                "Model Importer DLL not found at {}. Install the importer for this game first.",
-                dll_to_inject.display()
-            ));
-        }
-        let loader_dll = locate_loader_dll()?;
+        let launch_result: Result<LaunchOutcome, String> = async {
+            let install = core
+                .game_install_path(game)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| {
+                    "Set the game install path in Settings before launching.".to_string()
+                })?;
 
-        // Loading the 3dmloader DLL is the most common AV-quarantine
-        // target (Defender frequently flags the vendored DLL on first
-        // run); errors from this step land in the AV classifier via
-        // the outer `wrap_launch_error`.
-        let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
-
-        let inject_mode = game.profile().inject_mode;
-        let child_guard = match inject_mode {
-            InjectMode::Hook => {
-                // CBT hook MUST be installed before spawning so it
-                // catches the window-creation event the game fires on
-                // startup.
-                let hook = loader
-                    .hook(&dll_to_inject)
-                    .map_err(|e| format!("install hook: {e}"))?;
-
-                let child = std::process::Command::new(&game_exe)
-                    .current_dir(&install)
-                    .spawn()
-                    .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
-                let child_guard = ChildGuard::new(child);
-
-                // Block until the importer DLL lands in a process
-                // whose image name matches the game exe, then DROP
-                // the hook session — holding the global CBT hook for
-                // the whole game session would inject the DLL into
-                // every unrelated process that creates a window.
-                let target_process = game_exe
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "GenshinImpact.exe".to_string());
-                hook.wait_for_injection(&target_process, opts.injection_timeout_secs)
-                    .map_err(|e| format!("wait_for_injection: {e}"))?;
-                // Explicitly drop so the unhook runs immediately
-                // rather than at end-of-scope. clippy::drop_non_drop
-                // fires on the non-Windows stub HookSession (no Drop
-                // impl); silence it — on Windows this is the
-                // load-bearing line that takes the CBT hook back
-                // down.
-                #[allow(clippy::drop_non_drop)]
-                drop(hook);
-
-                child_guard
+            let game_exe = resolve_game_exe(game, &install)?;
+            let dll_to_inject = install.join("d3d11.dll");
+            if !dll_to_inject.exists() {
+                return Err(format!(
+                    "Model Importer DLL not found at {}. Install the importer for this game first.",
+                    dll_to_inject.display()
+                ));
             }
-            InjectMode::Inject => {
-                // EFMI path (slice 10 / #20): spawn first, then call
-                // `Loader::inject` against the live PID. Upstream
-                // XXMI uses `custom_launch_inject_mode = 'Inject'`
-                // here; the CBT-hook path doesn't fire for EFMI's
-                // launch sequence.
-                let child = std::process::Command::new(&game_exe)
-                    .current_dir(&install)
-                    .spawn()
-                    .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
-                let child_guard = ChildGuard::new(child);
+            let loader_dll = locate_loader_dll()?;
 
-                // Give the process a beat to start its main module
-                // before injecting; injecting into a process that has
-                // not finished creating its main thread is fragile.
-                tokio::time::sleep(opts.inject_settle).await;
+            // Loading the 3dmloader DLL is the most common AV-quarantine
+            // target (Defender frequently flags the vendored DLL on first
+            // run); errors from this step land in the AV classifier via
+            // the outer `wrap_launch_error`.
+            let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
 
-                let pid = child_guard.pid();
-                loader
-                    .inject(pid, &dll_to_inject)
-                    .map_err(|e| format!("inject into pid {pid}: {e}"))?;
+            let inject_mode = game.profile().inject_mode;
+            let child_guard = match inject_mode {
+                InjectMode::Hook => {
+                    // CBT hook MUST be installed before spawning so it
+                    // catches the window-creation event the game fires on
+                    // startup.
+                    let hook = loader
+                        .hook(&dll_to_inject)
+                        .map_err(|e| format!("install hook: {e}"))?;
 
-                child_guard
-            }
-        };
+                    let child = std::process::Command::new(&game_exe)
+                        .current_dir(&install)
+                        .spawn()
+                        .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+                    let child_guard = ChildGuard::new(child);
+                    core.record_session_launch_child(&claim, child_guard.pid())
+                        .await
+                        .map_err(|e| format!("record_session_launch_child: {e}"))?;
 
-        let info = SessionInfo {
-            game,
-            pid: child_guard.pid(),
-            started_at: chrono::Utc::now(),
-        };
+                    // Block until the importer DLL lands in a process
+                    // whose image name matches the game exe, then DROP
+                    // the hook session — holding the global CBT hook for
+                    // the whole game session would inject the DLL into
+                    // every unrelated process that creates a window.
+                    let target_process = game_exe
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "GenshinImpact.exe".to_string());
+                    hook.wait_for_injection(&target_process, opts.injection_timeout_secs)
+                        .map_err(|e| format!("wait_for_injection: {e}"))?;
+                    // Explicitly drop so the unhook runs immediately
+                    // rather than at end-of-scope. clippy::drop_non_drop
+                    // fires on the non-Windows stub HookSession (no Drop
+                    // impl); silence it — on Windows this is the
+                    // load-bearing line that takes the CBT hook back
+                    // down.
+                    #[allow(clippy::drop_non_drop)]
+                    drop(hook);
 
-        // Atomic claim: plain INSERT, no OR REPLACE. If anyone raced
-        // past the pre-check above, the singleton CHECK gives us a
-        // unique-constraint error and ChildGuard's drop kills our
-        // spawned game.
-        core.start_session(&info)
-            .await
-            .map_err(|e| format!("start_session: {e}"))?;
+                    child_guard
+                }
+                InjectMode::Inject => {
+                    // EFMI path (slice 10 / #20): spawn first, then call
+                    // `Loader::inject` against the live PID. Upstream
+                    // XXMI uses `custom_launch_inject_mode = 'Inject'`
+                    // here; the CBT-hook path doesn't fire for EFMI's
+                    // launch sequence.
+                    let child = std::process::Command::new(&game_exe)
+                        .current_dir(&install)
+                        .spawn()
+                        .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+                    let child_guard = ChildGuard::new(child);
+                    core.record_session_launch_child(&claim, child_guard.pid())
+                        .await
+                        .map_err(|e| format!("record_session_launch_child: {e}"))?;
 
-        let child = child_guard.into_inner();
+                    // Give the process a beat to start its main module
+                    // before injecting; injecting into a process that has
+                    // not finished creating its main thread is fragile.
+                    tokio::time::sleep(opts.inject_settle).await;
 
-        if let Err(mut rejected) = runtime.install(LiveSession {
-            info: info.clone(),
-            child,
-            _loader: loader,
-        }) {
-            // Someone installed a session between `reconcile_live_slot`
-            // and here. The game we just spawned is ours to clean up —
-            // the ChildGuard is already consumed, so kill it by hand and
-            // release the row we claimed a moment ago.
-            let _ = rejected.child.kill();
-            let _ = rejected.child.wait();
-            if let Err(e) = core.end_session().await {
-                tracing::warn!(error = %e, "end_session failed after a rejected session install");
-            }
-            return Err(
+                    let pid = child_guard.pid();
+                    loader
+                        .inject(pid, &dll_to_inject)
+                        .map_err(|e| format!("inject into pid {pid}: {e}"))?;
+
+                    child_guard
+                }
+            };
+
+            let info = SessionInfo {
+                game,
+                pid: child_guard.pid(),
+                started_at: claim.started_at,
+            };
+
+            // Atomic claim: plain INSERT, no OR REPLACE. Multiple durable
+            // launch reservations may reach this point, but the singleton
+            // active_session row picks exactly one winner and ChildGuard's
+            // drop kills every losing launch's spawned game.
+            core.complete_session_launch(&claim, &info)
+                .await
+                .map_err(|e| format!("complete_session_launch: {e}"))?;
+
+            let child = child_guard.into_inner();
+
+            if let Err(mut rejected) = runtime.install(LiveSession {
+                info: info.clone(),
+                child,
+                _loader: loader,
+            }) {
+                // Someone installed a session between `reconcile_live_slot`
+                // and here. The game we just spawned is ours to clean up —
+                // the ChildGuard is already consumed, so kill it by hand and
+                // release the row we claimed a moment ago.
+                let _ = rejected.child.kill();
+                let _ = rejected.child.wait();
+                if let Err(e) = core.end_session().await {
+                    tracing::warn!(error = %e, "end_session failed after a rejected session install");
+                }
+                return Err(
                 "Another game session was installed while this one was starting. \
                  The game was closed again; try launching once it has settled."
                     .to_string(),
-            );
+                );
+            }
+
+            // Emit to the frontend so the banner appears immediately.
+            let _ = app.emit(SESSION_STARTED_EVENT, &info);
+
+            // Spawn the exit watcher. It polls until the child exits, then
+            // drops the LiveSession (which unhooks via RAII), clears the DB
+            // row, and emits SESSION_ENDED_EVENT.
+            let watcher = spawn_exit_watcher(app.clone(), core.clone(), runtime.inner_clone(), opts);
+
+            Ok(LaunchOutcome { info, watcher })
         }
+        .await;
 
-        // Emit to the frontend so the banner appears immediately.
-        let _ = app.emit(SESSION_STARTED_EVENT, &info);
-
-        // Spawn the exit watcher. It polls until the child exits, then
-        // drops the LiveSession (which unhooks via RAII), clears the DB
-        // row, and emits SESSION_ENDED_EVENT.
-        let watcher = spawn_exit_watcher(app.clone(), core.clone(), runtime.inner_clone(), opts);
-
-        Ok(LaunchOutcome { info, watcher })
+        if launch_result.is_err() {
+            // ChildGuard has already killed and reaped any spawned process by
+            // the time the inner future returns. Retire only this launch's
+            // reservation; if SQLite itself is unavailable, startup recovery
+            // will remove it once both recorded PIDs are gone.
+            if let Err(error) = core.abandon_session_launch(&claim).await {
+                tracing::warn!(
+                    error = %error,
+                    "could not retire failed game-launch claim; startup will retry",
+                );
+            }
+        }
+        launch_result
     }
     .await;
 

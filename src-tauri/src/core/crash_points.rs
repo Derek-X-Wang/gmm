@@ -62,6 +62,15 @@ macro_rules! define_crash_points {
 
 define_crash_points! {
 
+/// `launch_game`: the durable pre-spawn claim has committed, so every later
+/// Library writer must refuse even though no child PID or active session exists.
+pub const SESSION_LAUNCH_AFTER_CLAIM: &str = "session_launch.after_claim";
+
+/// `launch_game`: the spawned child PID is durable while injection and the
+/// singleton active-session race are still outstanding. Startup preserves an
+/// orphaned claim until this child exits.
+pub const SESSION_LAUNCH_AFTER_CHILD_RECORD: &str = "session_launch.after_child_record";
+
 /// `audit_library`: every database-backed ownership witness has been loaded,
 /// while the immediate Library-root directory scan has not started yet.
 pub const AUDIT_AFTER_OWNERSHIP_SNAPSHOT: &str = "audit.after_ownership_snapshot";

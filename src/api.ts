@@ -563,6 +563,34 @@ export async function cleanStaleSession(): Promise<SessionInfo | null> {
   return raw ? fromRawSession(raw) : null;
 }
 
+export interface InterruptedSessionLaunch {
+  id: string;
+  game: GameCode;
+  childPid: number | null;
+  startedAt: string;
+}
+
+interface RawInterruptedSessionLaunch {
+  id: string;
+  game: GameCode;
+  child_pid: number | null;
+  started_at: string;
+}
+
+export async function interruptedSessionLaunches(): Promise<InterruptedSessionLaunch[]> {
+  const rows = await invoke<RawInterruptedSessionLaunch[]>("interrupted_session_launches");
+  return rows.map((row) => ({
+    id: row.id,
+    game: row.game,
+    childPid: row.child_pid,
+    startedAt: row.started_at,
+  }));
+}
+
+export async function retireInterruptedSessionLaunch(id: string): Promise<void> {
+  return invoke<void>("retire_interrupted_session_launch", { id });
+}
+
 export async function launchGame(game: GameCode): Promise<SessionInfo> {
   const raw = await invoke<RawSessionInfo>("launch_game", { game });
   return fromRawSession(raw);

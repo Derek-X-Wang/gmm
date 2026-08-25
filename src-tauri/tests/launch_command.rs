@@ -74,6 +74,9 @@ async fn assert_nothing_started(core: &Core, runtime: &SessionRuntime, events: &
         "a refused launch emits nothing, got: {:?}",
         events.names(),
     );
+    core.set_library_root(None)
+        .await
+        .expect("a refused launch must retire its pre-spawn Library blocker");
 }
 
 #[tokio::test]
