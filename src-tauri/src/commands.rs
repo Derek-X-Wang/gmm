@@ -19,12 +19,13 @@ use crate::core::importer::{InstallReport, LatestRelease};
 use crate::core::importer_origin::{ImporterOrigin, OriginStatus};
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
-use crate::core::reconcile::ReconcileResult;
+use crate::core::reconcile::{ReconcileResult, StartupReconcileState, StartupReconcileStatus};
 use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
-    Core, DeletedLibraryDir, DuplicateResolution, GameCode, ImportZipOptions, LibraryAuditReport,
-    Mod, MoveReport, ReinstallRecoveryOutcome, ReviewedDuplicateMod, SessionInfo,
+    Core, DeletedLibraryDir, DuplicateResolution, GameCode, ImportZipOptions,
+    InterruptedSessionLaunch, LibraryAuditReport, Mod, MoveReport, ReinstallRecoveryOutcome,
+    ReviewedDuplicateMod, SessionInfo,
 };
 use crate::runtime::launch::{self, LaunchOptions};
 use crate::runtime::SessionRuntime;
@@ -743,6 +744,15 @@ pub async fn reconcile_junctions(
         .map_err(|e| e.to_string())
 }
 
+/// Snapshot the best-effort startup reconcile pass. React polls until
+/// `finished` so a fast backend pass cannot race the first render.
+#[tauri::command]
+pub fn get_startup_reconcile_status(
+    state: State<'_, StartupReconcileState>,
+) -> StartupReconcileStatus {
+    state.snapshot()
+}
+
 /// Tauri command — drop and recreate every junction for `game` against
 /// the current Library. Use after the user relocates the Library
 /// directory.
@@ -818,6 +828,25 @@ pub async fn current_session(core: State<'_, Core>) -> Result<Option<SessionInfo
 #[tauri::command]
 pub async fn clean_stale_session(core: State<'_, Core>) -> Result<Option<SessionInfo>, String> {
     core.clean_stale_session().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn interrupted_session_launches(
+    core: State<'_, Core>,
+) -> Result<Vec<InterruptedSessionLaunch>, String> {
+    core.interrupted_session_launches()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn retire_interrupted_session_launch(
+    core: State<'_, Core>,
+    id: String,
+) -> Result<(), String> {
+    core.retire_interrupted_session_launch(&id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::core::diagnostics;
 use crate::core::instance_lock::{self, InstanceLockError};
+use crate::core::reconcile::StartupReconcileState;
 use crate::core::Core;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -70,15 +71,18 @@ pub fn run() {
         }
     };
 
-    // Best-effort startup reconcile across every game whose install
-    // path is set. Logs per-game via tracing (NEW-LOG); never fatal.
+    // Best-effort startup reconcile across every game whose install path is
+    // set. It is never fatal, but per-game failures are retained for React so
+    // "could not determine" cannot become an apparently healthy screen.
     //
     // Pre-pass: clear any orphan active_session row left by a crashed
     // GMM. If after cleanup a session is STILL marked active (meaning
     // the PID happens to be alive), skip reconcile — yanking junctions
     // out from under a running game corrupts it.
+    let startup_reconcile_state = StartupReconcileState::default();
     {
         let core_for_pass = core.clone();
+        let state_for_pass = startup_reconcile_state.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -95,6 +99,7 @@ pub fn run() {
                             pid = info.pid,
                             "skipping startup reconcile — a game session is active",
                         );
+                        state_for_pass.finish(Vec::new());
                         return;
                     }
                     Ok(None) => {}
@@ -102,8 +107,15 @@ pub fn run() {
                         tracing::warn!(error = %e, "startup session_info errored");
                     }
                 }
-                if let Err(e) = core_for_pass.reconcile_all_set_games().await {
-                    tracing::warn!(error = %e, "startup reconcile pass errored");
+                match core_for_pass
+                    .reconcile_all_set_games_at_startup(&state_for_pass)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "startup reconcile pass errored");
+                        state_for_pass.finish(Vec::new());
+                    }
                 }
             });
         });
@@ -162,6 +174,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(core)
+        .manage(startup_reconcile_state)
         .manage(crate::runtime::SessionRuntime::new())
         .invoke_handler(tauri::generate_handler![
             commands::list_mods,
@@ -176,6 +189,7 @@ pub fn run() {
             commands::diagnostics_log_dir,
             commands::detect_game_install_path,
             commands::reconcile_junctions,
+            commands::get_startup_reconcile_status,
             commands::rebuild_junctions,
             commands::get_library_paths,
             commands::audit_library,
@@ -214,6 +228,8 @@ pub fn run() {
             commands::launch_game,
             commands::current_session,
             commands::clean_stale_session,
+            commands::interrupted_session_launches,
+            commands::retire_interrupted_session_launch,
             commands::av_guidance,
             commands::list_supported_games,
             commands::is_onboarding_complete,

@@ -47,6 +47,11 @@ use tempfile::TempDir;
 /// serialise on the global HKCU scan.)
 static HOOK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Direct-injection tests share the Endfield fixture image name. Serialise
+/// their process-snapshot assertions so one test cannot mistake the other's
+/// intentionally live child for a leak.
+static DIRECT_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Timings for the tests: short enough that a failure path costs
 /// seconds, long enough that a loaded CI runner still gets there.
 fn fast_options() -> LaunchOptions {
@@ -292,6 +297,7 @@ async fn launches_a_session_then_the_watcher_tears_it_down_when_the_game_exits()
 async fn launches_an_efmi_session_via_direct_injection() {
     const EXE: &str = "Endfield-Win64-Shipping.exe";
 
+    let _inject_guard = DIRECT_INJECT_LOCK.lock().await;
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let core = fresh_core(tmp.path()).await;
@@ -332,6 +338,84 @@ async fn launches_an_efmi_session_via_direct_injection() {
     );
     assert_eq!(core.session_info().await.expect("session info"), None);
     assert!(!runtime.has_session());
+    assert_no_process_named(EXE);
+}
+
+/// Two launch callers may both reserve and spawn, preserving the existing
+/// spawn-then-atomic-claim contract. Exactly one active_session INSERT wins;
+/// the losing future returns only after its ChildGuard has killed and reaped
+/// the other real process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_launches_keep_one_child_and_kill_the_loser() {
+    const EXE: &str = "Endfield-Win64-Shipping.exe";
+
+    let _inject_guard = DIRECT_INJECT_LOCK.lock().await;
+    let tmp = TempDir::new().expect("tmp");
+    let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
+    let base = fresh_core(tmp.path()).await;
+    base.set_game_install_path(GameCode::Efmi, &install)
+        .await
+        .expect("persist install path");
+
+    let rendezvous = Arc::new(std::sync::Barrier::new(2));
+    let core_a = base.clone().with_crash_hook({
+        let rendezvous = rendezvous.clone();
+        Arc::new(move |point| {
+            if point == gmm_lib::core::crash_points::SESSION_LAUNCH_AFTER_CLAIM {
+                rendezvous.wait();
+            }
+        })
+    });
+    let core_b = base.clone().with_crash_hook({
+        let rendezvous = rendezvous.clone();
+        Arc::new(move |point| {
+            if point == gmm_lib::core::crash_points::SESSION_LAUNCH_AFTER_CLAIM {
+                rendezvous.wait();
+            }
+        })
+    });
+    let app_a = mock_app();
+    let app_b = mock_app();
+    let handle_a = app_a.handle().clone();
+    let handle_b = app_b.handle().clone();
+    let runtime_a = SessionRuntime::new();
+    let runtime_b = SessionRuntime::new();
+    let options_a = fast_options();
+    let options_b = fast_options();
+
+    let a = tokio::spawn(async move {
+        launch::launch(&handle_a, &core_a, &runtime_a, GameCode::Efmi, &options_a).await
+    });
+    let b = tokio::spawn(async move {
+        launch::launch(&handle_b, &core_b, &runtime_b, GameCode::Efmi, &options_b).await
+    });
+    let (a, b) = (
+        a.await.expect("first launch task"),
+        b.await.expect("second launch task"),
+    );
+    assert_ne!(
+        a.is_ok(),
+        b.is_ok(),
+        "exactly one simultaneous launch must win, got {a:?} / {b:?}",
+    );
+    let winner = a.or(b).expect("one launch wins");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let live = pids_named(EXE);
+        if live == [winner.info.pid] {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the losing spawned process must be killed; expected only winner pid {}, got {live:?}",
+            winner.info.pid,
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    kill_pid(winner.info.pid);
+    winner.watcher.await.expect("winner watcher");
     assert_no_process_named(EXE);
 }
 
@@ -382,6 +466,9 @@ async fn an_injection_timeout_leaves_no_session_and_no_stray_process() {
         "a failed launch emits nothing, got: {:?}",
         events.names(),
     );
+    core.set_library_root(None)
+        .await
+        .expect("an injection failure must retire its durable launch claim");
     assert_no_process_named(EXE);
 }
 

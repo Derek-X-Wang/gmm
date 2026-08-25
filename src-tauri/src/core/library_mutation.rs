@@ -331,6 +331,8 @@ impl Core {
                 | LibraryMutation::FinishInterruptedDeletes
                 | LibraryMutation::ResolveInterruptedStaging
         ) {
+            self.prune_stale_session_launch_claims(&mut transaction)
+                .await?;
             self.ensure_no_active_session_in_library_mutation(&mut transaction)
                 .await?;
         }
@@ -1575,14 +1577,8 @@ impl Core {
         &self,
         transaction: &mut sqlx::Transaction<'_, Sqlite>,
     ) -> Result<()> {
-        let row = sqlx::query("SELECT game_code, started_at FROM active_session WHERE id = 1")
-            .fetch_optional(&mut **transaction)
-            .await?;
-        if let Some(row) = row {
-            return Err(Error::SessionActive {
-                game: row.try_get("game_code")?,
-                since: row.try_get("started_at")?,
-            });
+        if let Some(blocker) = self.session_blocker_in_transaction(transaction).await? {
+            return Err(blocker.into_error());
         }
         Ok(())
     }

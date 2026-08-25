@@ -1,6 +1,17 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Stable classification for failures shown after an operation has already
+/// failed closed. Surfaces use this to choose an honest repair path without
+/// parsing user-facing error text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SurfaceFailureKind {
+    InvalidActiveVariant,
+    Other,
+}
 
 /// The one sentence that points a stuck user at the Importer Origin
 /// control, written down once.
@@ -379,6 +390,31 @@ pub enum Error {
         "{game} is running (game session active since {since}); close the game before changing mods."
     )]
     SessionActive { game: String, since: String },
+
+    #[error(
+        "a {game} launch is still in progress (started {since}); Library changes stay locked until the launch finishes"
+    )]
+    SessionLaunchInProgress { game: String, since: String },
+
+    #[error(
+        "GMM cannot determine whether a game from the interrupted {game} launch (started {since}) is still running. Review the interrupted-launch warning and retire it only after confirming the game is closed."
+    )]
+    SessionLaunchInterrupted { game: String, since: String },
+
+    #[error("the launch reservation is still owned by the GMM process that created it")]
+    SessionLaunchStillOwned,
+
+    #[error("the durable game-launch claim was lost before the session became active")]
+    SessionLaunchClaimLost,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    pub fn surface_failure_kind(&self) -> SurfaceFailureKind {
+        match self {
+            Self::InvalidActiveVariant { .. } => SurfaceFailureKind::InvalidActiveVariant,
+            _ => SurfaceFailureKind::Other,
+        }
+    }
+}

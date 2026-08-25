@@ -142,6 +142,23 @@ export interface ReconcileResult {
   quarantined: string[];
 }
 
+export type SurfaceFailureKind = "invalidActiveVariant" | "other";
+
+export interface StartupReconcileFailure {
+  game: GameCode;
+  kind: SurfaceFailureKind;
+  error: string;
+}
+
+export interface StartupReconcileStatus {
+  finished: boolean;
+  failures: StartupReconcileFailure[];
+}
+
+export async function getStartupReconcileStatus(): Promise<StartupReconcileStatus> {
+  return invoke<StartupReconcileStatus>("get_startup_reconcile_status");
+}
+
 interface RawReconcile {
   recreated: string[];
   healthy: string[];
@@ -190,6 +207,7 @@ export interface MoveReport {
   failed_junction_restores: Array<{
     mod_id: string;
     game: GameCode;
+    kind: SurfaceFailureKind;
     error: string;
   }>;
 }
@@ -543,6 +561,34 @@ export async function currentSession(): Promise<SessionInfo | null> {
 export async function cleanStaleSession(): Promise<SessionInfo | null> {
   const raw = await invoke<RawSessionInfo | null>("clean_stale_session");
   return raw ? fromRawSession(raw) : null;
+}
+
+export interface InterruptedSessionLaunch {
+  id: string;
+  game: GameCode;
+  childPid: number | null;
+  startedAt: string;
+}
+
+interface RawInterruptedSessionLaunch {
+  id: string;
+  game: GameCode;
+  child_pid: number | null;
+  started_at: string;
+}
+
+export async function interruptedSessionLaunches(): Promise<InterruptedSessionLaunch[]> {
+  const rows = await invoke<RawInterruptedSessionLaunch[]>("interrupted_session_launches");
+  return rows.map((row) => ({
+    id: row.id,
+    game: row.game,
+    childPid: row.child_pid,
+    startedAt: row.started_at,
+  }));
+}
+
+export async function retireInterruptedSessionLaunch(id: string): Promise<void> {
+  return invoke<void>("retire_interrupted_session_launch", { id });
 }
 
 export async function launchGame(game: GameCode): Promise<SessionInfo> {
