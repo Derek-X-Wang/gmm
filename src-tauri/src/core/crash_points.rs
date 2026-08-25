@@ -250,4 +250,10 @@ pub const DELETE_BEFORE_QUARANTINE_PURGE: &str = "delete.before_quarantine_purge
 /// resolves that name again.
 pub const QUARANTINE_PURGE_AFTER_ROOT_HANDLE_OPEN: &str =
     "quarantine_purge.after_root_handle_open";
+
+/// Windows handle-anchored quarantine purge: one directory batch has been
+/// enumerated from a proved parent handle, immediately before those names are
+/// opened relative to that parent and their file IDs are compared.
+pub const QUARANTINE_PURGE_AFTER_ENTRY_ENUMERATION: &str =
+    "quarantine_purge.after_entry_enumeration";
 }

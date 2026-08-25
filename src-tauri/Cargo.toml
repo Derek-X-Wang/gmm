@@ -76,8 +76,11 @@ libc = "0.2"
 junction = "1"
 winreg = "0.55"
 windows-sys = { version = "0.59", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Storage_FileSystem",
     "Win32_Foundation",
+    "Win32_System_IO",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Threading",
     # `MessageBoxW`: the only way to tell the user why a second instance

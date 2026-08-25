@@ -113,6 +113,87 @@ async fn quarantine_purge_stays_anchored_after_the_root_name_is_swapped() {
     );
 }
 
+/// Parent-relative opens still resolve one child name. Comparing the file ID
+/// from handle-based enumeration with the opened handle prevents a swap in
+/// that narrow per-entry window from redirecting deletion.
+///
+/// Mutation oracle: removing the file-ID comparison from `open_child` deletes
+/// `replacement.bin` and fires the named replacement-survival assertion.
+#[tokio::test]
+async fn quarantine_purge_refuses_a_child_replaced_after_handle_enumeration() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = core_with_library(tmp.path().join("library"), tmp.path()).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    fs::create_dir_all(&orphan).expect("orphan");
+    fs::write(orphan.join("swappable.bin"), b"enumerated original").expect("original child");
+
+    let observed = Arc::new(Mutex::new(None));
+    let hook_observed = Arc::clone(&observed);
+    let hook_root = root.clone();
+    let swapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_swapped = Arc::clone(&swapped);
+    let deleting = core.with_crash_hook(Arc::new(move |point| {
+        if point != gmm_lib::core::crash_points::QUARANTINE_PURGE_AFTER_ENTRY_ENUMERATION
+            || hook_swapped.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let quarantine = fs::read_dir(&hook_root)
+            .expect("Library root after child enumeration")
+            .filter_map(std::result::Result::ok)
+            .find(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gmm-delete-")
+            })
+            .expect("enumerated delete quarantine")
+            .path();
+        let original = quarantine.join("swappable.bin");
+        let held_original = quarantine.join("enumerated-original-held-aside.bin");
+        fs::rename(&original, &held_original).expect("move enumerated child aside");
+        fs::write(&original, b"replacement").expect("replacement child");
+        *hook_observed.lock().expect("record child swap") =
+            Some((quarantine, original, held_original));
+    }));
+
+    let deleted = deleting
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("the visible Library delete was already committed");
+    let (quarantine, replacement, held_original) = observed
+        .lock()
+        .expect("read child swap")
+        .clone()
+        .expect("purge reached the post-enumeration seam");
+
+    assert!(
+        replacement.is_file(),
+        "file-ID verification must preserve a child replacement installed after enumeration",
+    );
+    assert!(
+        held_original.is_file(),
+        "a refused child swap must preserve the enumerated original too",
+    );
+    assert_eq!(
+        deleted.reclamation,
+        LibraryReclamationOutcome::Deferred {
+            path: quarantine.clone(),
+        },
+        "a child identity mismatch must remain retryable while the quarantine root is still proved",
+    );
+    assert!(
+        quarantine.with_extension("intent").is_file(),
+        "a partial purge must retain the durable intent for the surviving quarantine bytes",
+    );
+}
+
 /// A Junction inside a quarantine is a leaf owned by the quarantine, not an
 /// invitation to walk into the user's only copy of a Mod.
 #[tokio::test]
