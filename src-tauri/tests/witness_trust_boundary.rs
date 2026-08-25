@@ -15,8 +15,9 @@ const OWNER: &str = "core/library_mutation.rs";
 /// direct references, `const` and runtime concatenation of literal fragments,
 /// helper-macro bodies, `stringify!` identifiers, and SQL loaded by the SQLx
 /// `query_file!` family. It deliberately does not claim to prove SQL assembled
-/// from runtime input, generated into `OUT_DIR`, or imported from a non-literal
-/// path; those require review at the owning-module boundary.
+/// from runtime input, generated into `OUT_DIR`, imported from a non-literal
+/// path, pulled in through `include_str!`, or written as a byte-string literal;
+/// those require review at the owning-module boundary.
 #[test]
 fn durable_witness_tables_are_only_queried_by_their_owning_module() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
