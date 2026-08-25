@@ -220,11 +220,11 @@ async fn quarantine_purge_removes_a_junction_without_traversing_its_target() {
         .await
         .expect("delete quarantine containing Junction");
 
-    assert_eq!(deleted.size_bytes, Some(5));
     assert!(
         target.join("nested/only-copy.bin").is_file(),
         "quarantine purge traversed a Junction into bytes outside the proved directory",
     );
+    assert_eq!(deleted.size_bytes, Some(5));
     assert!(!orphan.exists(), "the quarantine itself must be removed");
 }
 

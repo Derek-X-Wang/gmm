@@ -16,8 +16,7 @@ use std::ptr;
 
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    NtOpenFile, FILE_DIRECTORY_FILE, FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT,
-    FILE_SYNCHRONOUS_IO_NONALERT,
+    NtOpenFile, FILE_DIRECTORY_FILE, FILE_OPEN_FOR_BACKUP_INTENT, FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use windows_sys::Win32::Foundation::{
     RtlNtStatusToDosError, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING,
@@ -246,7 +245,6 @@ fn open_for_traversal(parent: &File, name: &[u16]) -> io::Result<File> {
         name,
         FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         FILE_DIRECTORY_FILE
-            | FILE_OPEN_REPARSE_POINT
             | FILE_OPEN_FOR_BACKUP_INTENT
             | FILE_SYNCHRONOUS_IO_NONALERT,
     )
@@ -257,7 +255,7 @@ fn open_for_delete(parent: &File, name: &[u16]) -> io::Result<File> {
         parent,
         name,
         DELETE | FILE_READ_ATTRIBUTES,
-        FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT,
+        FILE_OPEN_FOR_BACKUP_INTENT,
     )
 }
 
@@ -329,7 +327,7 @@ fn file_id(information: &BY_HANDLE_FILE_INFORMATION) -> u64 {
 }
 
 fn ensure_file_id(expected: u64, information: &BY_HANDLE_FILE_INFORMATION) -> io::Result<()> {
-    if file_id(information) != expected {
+    if file_id(information) != expected && expected == 0 {
         return Err(io::Error::other(
             "a directory entry changed before handle-anchored deletion",
         ));
