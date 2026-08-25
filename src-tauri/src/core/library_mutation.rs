@@ -543,13 +543,38 @@ pub(super) async fn load_reinstall_swap_witnesses(
     connection: &mut SqliteConnection,
 ) -> Result<Vec<ReinstallSwapWitness>> {
     let query = format!("SELECT * FROM {REINSTALL_SWAPS_TABLE}");
-    sqlx::query(&query)
+    let witnesses: Vec<_> = sqlx::query(&query)
         .persistent(false)
         .fetch_all(connection)
         .await?
         .iter()
         .map(ReinstallSwapWitness::from_row)
-        .collect()
+        .collect::<Result<_>>()?;
+    let mut tokens = HashMap::new();
+    let mut mod_ids = HashMap::new();
+    for witness in &witnesses {
+        if let Some(first_mod_id) = tokens.insert(witness.token(), witness.mod_id().to_string()) {
+            return Err(Error::ReinstallWitnessCorrupt {
+                mod_id: witness.mod_id().to_string(),
+                reason: format!(
+                    "the swap token {} appears more than once, for Mods {first_mod_id} and {}",
+                    witness.token(),
+                    witness.mod_id(),
+                ),
+            });
+        }
+        if let Some(first_token) = mod_ids.insert(witness.mod_id().to_string(), witness.token()) {
+            return Err(Error::ReinstallWitnessCorrupt {
+                mod_id: witness.mod_id().to_string(),
+                reason: format!(
+                    "the Mod ID {} has more than one reinstall witness, with tokens {first_token} and {}",
+                    witness.mod_id(),
+                    witness.token(),
+                ),
+            });
+        }
+    }
+    Ok(witnesses)
 }
 
 pub(super) async fn load_staged_library_operation_witnesses(

@@ -146,6 +146,42 @@ async fn committed_reinstall_stage(tmp: &TempDir) -> (Core, std::path::PathBuf) 
     (core, stage)
 }
 
+async fn remove_reinstall_cardinality_constraints(pool: &sqlx::SqlitePool) {
+    sqlx::query("ALTER TABLE reinstall_swaps RENAME TO constrained_reinstall_swaps")
+        .execute(pool)
+        .await
+        .expect("move constrained witness table aside");
+    sqlx::query(
+        "CREATE TABLE reinstall_swaps (
+            token TEXT NOT NULL,
+            mod_id TEXT NOT NULL,
+            game_code TEXT NOT NULL,
+            library_path TEXT NOT NULL,
+            staged_path TEXT NOT NULL,
+            quarantine_path TEXT NOT NULL,
+            old_identity TEXT NOT NULL,
+            staged_identity TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            recovery_error TEXT,
+            recovery_attempted_at TEXT,
+            recovery_attempts INTEGER NOT NULL DEFAULT 0,
+            junction_withdrawn INTEGER NOT NULL DEFAULT 0,
+            junction_withdrawal_error TEXT
+         )",
+    )
+    .execute(pool)
+    .await
+    .expect("create same-column witness table without cardinality constraints");
+    sqlx::query("INSERT INTO reinstall_swaps SELECT * FROM constrained_reinstall_swaps")
+        .execute(pool)
+        .await
+        .expect("copy the original witness into unconstrained table");
+    sqlx::query("DROP TABLE constrained_reinstall_swaps")
+        .execute(pool)
+        .await
+        .expect("drop constrained witness table");
+}
+
 #[tokio::test]
 async fn audit_reports_only_unreferenced_directories_without_changing_them() {
     let tmp = TempDir::new().expect("tmp");
@@ -561,6 +597,141 @@ async fn delete_refuses_a_malformed_reinstall_identity_before_classifying_bytes(
         fs::read(stage.join("replacement.ini")).expect("witnessed bytes after refused Delete"),
         b"replacement still extracting",
         "a malformed durable identity must not make active reinstall bytes deletable",
+    );
+}
+
+/// The migration normally enforces one row per token, but the validated
+/// loader must not silently trust that schema invariant. A same-column table
+/// without its primary key can contain two valid rows sharing a token; every
+/// consumer must reject that cardinality before choosing or deleting rows.
+#[tokio::test]
+async fn delete_refuses_duplicate_reinstall_tokens_at_the_loader_boundary() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, stage) = committed_reinstall_stage(&tmp).await;
+    let source = tmp.path().join("second-token-owner-source");
+    fs::create_dir(&source).expect("second Mod source");
+    fs::write(source.join("merged.ini"), b"second installed bytes").expect("second Mod bytes");
+    let second = core
+        .adopt_folder(GameCode::Gimi, &source, "Second Token Owner")
+        .await
+        .expect("adopt second Mod");
+    let token = stage
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".gmm-reinstall-"))
+        .expect("token in staged name");
+    let root = stage.parent().expect("game Library root");
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open DB for duplicate token fixture");
+    remove_reinstall_cardinality_constraints(&pool).await;
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token)
+    .bind(&second.id)
+    .bind(second.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&second.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-25T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert second witness with duplicate token");
+    pool.close().await;
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &stage)
+        .await;
+    assert!(
+        matches!(
+            deleted,
+            Err(Error::ReinstallWitnessCorrupt { ref reason, .. })
+                if reason.contains("swap token") && reason.contains("appears more than once")
+        ),
+        "duplicate reinstall tokens must be rejected before any caller chooses a witness: {deleted:?}",
+    );
+    assert!(
+        stage.join("replacement.ini").is_file(),
+        "duplicate durable rows must not make witnessed bytes deletable",
+    );
+}
+
+/// The migration also normally enforces one witness per Mod. The loader owns
+/// that assumption too: two valid tokens for one Mod are corrupt durable state,
+/// never permission for `.find()` to choose one while rollback deletes both.
+#[tokio::test]
+async fn delete_refuses_duplicate_reinstall_mods_at_the_loader_boundary() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, first_stage) = committed_reinstall_stage(&tmp).await;
+    let first_token = first_stage
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".gmm-reinstall-"))
+        .expect("first token in staged name");
+    let root = first_stage.parent().expect("game Library root");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open DB for duplicate Mod fixture");
+    let mod_id: String = sqlx::query_scalar("SELECT mod_id FROM reinstall_swaps WHERE token = ?")
+        .bind(first_token)
+        .fetch_one(&pool)
+        .await
+        .expect("read witnessed Mod ID");
+    let library_path: String =
+        sqlx::query_scalar("SELECT library_path FROM reinstall_swaps WHERE token = ?")
+            .bind(first_token)
+            .fetch_one(&pool)
+            .await
+            .expect("read witnessed Library path");
+    remove_reinstall_cardinality_constraints(&pool).await;
+    let second_token = Ulid::new();
+    let second_stage = root.join(format!(".gmm-reinstall-{second_token}"));
+    let second_quarantine = root.join(format!(".gmm-delete-{second_token}"));
+    fs::create_dir(&second_stage).expect("second reinstall stage");
+    fs::write(second_stage.join("replacement.ini"), b"second replacement")
+        .expect("second replacement bytes");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(second_token.to_string())
+    .bind(&mod_id)
+    .bind(&library_path)
+    .bind(second_stage.to_string_lossy().as_ref())
+    .bind(second_quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(Path::new(&library_path)))
+    .bind(durable_directory_key(&second_stage))
+    .bind("2026-08-25T00:00:01Z")
+    .execute(&pool)
+    .await
+    .expect("insert second witness for the same Mod");
+    pool.close().await;
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &second_stage)
+        .await;
+    assert!(
+        matches!(
+            deleted,
+            Err(Error::ReinstallWitnessCorrupt { ref reason, .. })
+                if reason.contains("has more than one reinstall witness")
+        ),
+        "duplicate reinstall Mod witnesses must be rejected before any caller chooses a row: {deleted:?}",
+    );
+    assert!(
+        first_stage.join("replacement.ini").is_file()
+            && second_stage.join("replacement.ini").is_file(),
+        "impossible Mod cardinality must preserve every witnessed byte tree",
     );
 }
 

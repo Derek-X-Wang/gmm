@@ -469,8 +469,10 @@ impl Core {
         }
 
         // A same-volume rename preserves the filesystem identities recorded by
-        // an in-flight reinstall witness, but the cross-volume copy fallback
-        // does not. Refuse every relocation that would carry such a witness.
+        // an in-flight reinstall or staged-import witness, but the cross-volume
+        // copy fallback does not. Refuse every relocation that would carry an
+        // active witness. Rebasing cannot make the copy fallback safe because
+        // the producer still holds the identity of the original directory.
         // `path_within` is required because the Mod row can retain an NTFS
         // alias or differently-cased drive spelling for the same root.
         // This check is under the same writer fence as witness creation, so it
@@ -484,6 +486,15 @@ impl Core {
                     mod_id: witness.mod_id().to_string(),
                 });
             }
+        }
+        let active_staging =
+            library_mutation::load_staged_library_operation_witnesses(&mut fence.transaction)
+                .await?;
+        if active_staging
+            .iter()
+            .any(|witness| witness.is_active() && path_within(witness.staged_path(), previous))
+        {
+            return Err(Error::LibraryRelocationBlockedByStaging);
         }
 
         // Snapshot mods that need their library_path rewritten. For the

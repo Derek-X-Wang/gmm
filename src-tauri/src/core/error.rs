@@ -363,6 +363,12 @@ pub enum Error {
     LibraryRelocationBlockedByReinstall { mod_id: String },
 
     #[error(
+        "GMM cannot relocate this Library while a folder or ZIP import is still running. \
+         Let the import finish, then try the Library move again. No Library bytes were moved."
+    )]
+    LibraryRelocationBlockedByStaging,
+
+    #[error(
         "GMM cannot relocate this Library while verified cleanup is pending. \
          Let cleanup finish, then try the Library move again. No Library bytes were moved."
     )]

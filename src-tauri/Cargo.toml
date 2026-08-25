@@ -114,3 +114,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 filetime = "0.2"
 mockito = "1"
+# The durable-witness trust-boundary test parses production Rust so table SQL
+# cannot escape through another module, split literals, or a helper macro.
+proc-macro2 = "1"
+syn = { version = "2", features = ["full", "visit"] }

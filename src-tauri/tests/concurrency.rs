@@ -3620,6 +3620,100 @@ async fn only_staged_directory(core: &Core) -> PathBuf {
         .expect("one staged directory")
 }
 
+/// A real adopt producer pauses after committing its durable witness and
+/// copying its first file, while the remaining copy is still outside the
+/// writer fence. Relocation must observe that witness under its own fence and
+/// refuse before moving the subtree. The unchanged staged identity must remain
+/// owned by the producer, so the same public Delete guard still refuses it.
+///
+/// Mutation oracle: removing the staged-witness relocation guard makes the
+/// explicit relocation refusal fail while the producer is paused in its
+/// unbounded copy window.
+#[tokio::test]
+async fn relocation_waits_for_a_staged_adopt_and_preserves_its_owned_bytes() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let source = staged_adopt_source(&env, "relocation-refused-staged-adopt");
+    let new_root = env._tmp.path().join("relocated-after-staged-adopt");
+    let copy_pause = gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY;
+    let mut adopting = probe(&env)
+        .pausing_at(copy_pause)
+        .op([
+            "adopt",
+            "--from",
+            &source.display().to_string(),
+            "--name",
+            "Relocation Guarded Stage",
+        ])
+        .spawn();
+    adopting.wait_for_pause(copy_pause);
+    let staged = only_staged_directory(&core).await;
+    assert!(
+        std::fs::read_dir(&staged)
+            .expect("read partially copied stage")
+            .next()
+            .is_some(),
+        "the pause must sit after the first copied entry, not before the bytes under test",
+    );
+
+    let relocation = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&new_root))
+        .await
+        .expect_err("Library relocation during a staged import must be refused");
+    assert!(
+        matches!(
+            relocation,
+            gmm_lib::core::Error::LibraryRelocationBlockedByStaging
+        ),
+        "relocation must refuse specifically because the producer owns the stage: {relocation}",
+    );
+    assert!(
+        relocation.to_string().contains("Let the import finish"),
+        "relocation refusal must tell the user how to proceed: {relocation}",
+    );
+    assert!(
+        staged.is_dir(),
+        "refused relocation must leave the partially copied stage at its witnessed path",
+    );
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &staged)
+        .await;
+    assert!(
+        matches!(
+            deleted,
+            Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { ref reason, .. })
+                if reason.contains("active staging operation")
+        ),
+        "Delete must still refuse the producer-owned bytes after relocation is refused: {deleted:?}",
+    );
+    assert!(
+        staged.is_dir(),
+        "Delete refusal must preserve the producer-owned bytes",
+    );
+
+    adopting.resume();
+    adopting
+        .wait_for_outcome()
+        .expect_ok("staged adopt after the competing relocation was refused");
+    let report = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&new_root))
+        .await
+        .expect("retry relocation after the staged adopt settles");
+    assert_eq!(report.relocated.len(), 1);
+    let mods = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list relocated Mod");
+    assert_eq!(mods.len(), 1, "the producer must commit exactly one Mod");
+    assert!(
+        mods[0].library_path.starts_with(&new_root)
+            && mods[0].library_path.join("Red/merged.ini").is_file()
+            && mods[0].library_path.join("Blue/merged.ini").is_file(),
+        "the completed producer bytes must relocate only after its witness retires",
+    );
+}
+
 /// A real adopt producer pauses after its first file copy. Recovery observes
 /// the committed staging identity through the shared ownership snapshot and
 /// must refuse before it can claim a partial Variant tree.
