@@ -67,6 +67,7 @@ hex = "0.4"
 # (#79). Patterns also arrive from the recommended-importers manifest
 # (ADR 0005), so they are compiled at runtime rather than baked in.
 regex = "1"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 gmm-loader = { path = "crates/loader" }
 
 [target.'cfg(unix)'.dependencies]

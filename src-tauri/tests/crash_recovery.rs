@@ -1326,6 +1326,21 @@ async fn every_crash_point_is_exercised_by_an_operation() {
         }))
     };
 
+    // The launch reservation has two durable boundaries before the ordinary
+    // active_session row exists: claim commit, then spawned-child recording.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let claim = core
+        .begin_session_launch(GameCode::Gimi)
+        .await
+        .expect("coverage launch claim");
+    core.record_session_launch_child(&claim, std::process::id())
+        .await
+        .expect("coverage launch child");
+    core.abandon_session_launch(&claim)
+        .await
+        .expect("coverage abandon launch");
+
     // Startup recovery runs before `with_crash_hook` can decorate an
     // initialized Core, so install the observer while constructing one.
     let env = TestEnv::new();
