@@ -39,23 +39,6 @@ use super::{
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 
-const REINSTALL_SWAP_COLUMNS: [&str; 14] = [
-    "token",
-    "mod_id",
-    "game_code",
-    "library_path",
-    "staged_path",
-    "quarantine_path",
-    "old_identity",
-    "staged_identity",
-    "created_at",
-    "recovery_error",
-    "recovery_attempted_at",
-    "recovery_attempts",
-    "junction_withdrawn",
-    "junction_withdrawal_error",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryMutation {
     FinishInterruptedDeletes,
@@ -135,14 +118,46 @@ pub(super) struct ReinstallSwapWitness {
     staged_identity: DirectoryIdentity,
 }
 
-/// The database representation is deliberately a separate type from the
-/// witness recovery is allowed to trust. Every loader selects the complete row
-/// and checks its SQLite columns against `REINSTALL_SWAP_COLUMNS`; the
-/// exhaustive destructure in `validate` then makes adding a ruled field a
-/// compile error until its construction rule is decided. Typed identities keep
-/// malformed durable keys out of every downstream filesystem classification by
-/// construction.
-struct UnvalidatedReinstallSwapWitness {
+/// Define the raw witness once, deriving both its row decoder and the ordered
+/// SQLite column registry from the field identifiers.
+///
+/// The exhaustive destructure in `validate` is deliberately outside the macro:
+/// adding a field here therefore changes the accepted schema and the raw type
+/// together, but still cannot compile until that field receives a validation
+/// rule.
+macro_rules! define_unvalidated_reinstall_swap_witness {
+    ($($field:ident: $field_type:ty),+ $(,)?) => {
+        /// Ordered `reinstall_swaps` columns accepted at the trust boundary.
+        #[doc(hidden)]
+        pub const REINSTALL_SWAP_COLUMNS: &[&str] = &[$(stringify!($field)),+];
+
+        /// The database representation is deliberately separate from the
+        /// witness recovery is allowed to trust.
+        struct UnvalidatedReinstallSwapWitness {
+            $($field: $field_type),+
+        }
+
+        impl UnvalidatedReinstallSwapWitness {
+            fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
+                let mod_id: String = row.try_get(stringify!(mod_id))?;
+                let columns: Vec<_> = row.columns().iter().map(Column::name).collect();
+                if columns.as_slice() != REINSTALL_SWAP_COLUMNS {
+                    return Err(Error::ReinstallWitnessCorrupt {
+                        mod_id,
+                        reason: format!(
+                            "the reinstall_swaps schema columns changed from the ruled set: {columns:?}"
+                        ),
+                    });
+                }
+                Ok(Self {
+                    $($field: row.try_get(stringify!($field))?),+
+                })
+            }
+        }
+    };
+}
+
+define_unvalidated_reinstall_swap_witness! {
     token: String,
     mod_id: String,
     game_code: String,
@@ -160,35 +175,6 @@ struct UnvalidatedReinstallSwapWitness {
 }
 
 impl UnvalidatedReinstallSwapWitness {
-    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
-        let mod_id: String = row.try_get("mod_id")?;
-        let columns: Vec<_> = row.columns().iter().map(Column::name).collect();
-        if columns.as_slice() != REINSTALL_SWAP_COLUMNS {
-            return Err(Error::ReinstallWitnessCorrupt {
-                mod_id,
-                reason: format!(
-                    "the reinstall_swaps schema columns changed from the ruled set: {columns:?}"
-                ),
-            });
-        }
-        Ok(Self {
-            token: row.try_get("token")?,
-            mod_id,
-            game_code: row.try_get("game_code")?,
-            library_path: row.try_get("library_path")?,
-            staged_path: row.try_get("staged_path")?,
-            quarantine_path: row.try_get("quarantine_path")?,
-            old_identity: row.try_get("old_identity")?,
-            staged_identity: row.try_get("staged_identity")?,
-            created_at: row.try_get("created_at")?,
-            recovery_error: row.try_get("recovery_error")?,
-            recovery_attempted_at: row.try_get("recovery_attempted_at")?,
-            recovery_attempts: row.try_get("recovery_attempts")?,
-            junction_withdrawn: row.try_get("junction_withdrawn")?,
-            junction_withdrawal_error: row.try_get("junction_withdrawal_error")?,
-        })
-    }
-
     fn validate(self) -> Result<ReinstallSwapWitness> {
         let Self {
             token,

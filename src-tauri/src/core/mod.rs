@@ -47,6 +47,8 @@ pub use library_audit::{
     DuplicateModGroup, DuplicateModRecord, DuplicateModVariant, DuplicateResolution,
     LibraryAuditReport, ReviewedDuplicateMod, UnreferencedLibraryDir,
 };
+#[doc(hidden)]
+pub use library_mutation::REINSTALL_SWAP_COLUMNS;
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
 pub use session::SessionInfo;

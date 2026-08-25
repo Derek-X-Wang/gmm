@@ -3058,12 +3058,13 @@ async fn relocation_validates_the_complete_reinstall_witness_before_scope_decisi
 
 /// The typed witness shape is not the database boundary: a migration can add
 /// a column while named-column SELECTs keep compiling. Loading a witness must
-/// compare the actual SQLite row shape with the complete ruled column list so
-/// a future column cannot silently bypass a validation decision.
+/// compare the actual SQLite row shape with the column registry derived from
+/// the raw witness declaration so a future column cannot silently bypass a
+/// validation decision.
 ///
-/// Mutation oracle: adding `unruled_future_state` to the accepted column list
-/// without giving it a witness rule lets relocation reach the ordinary active
-/// reinstall refusal and fires the named schema-boundary assertion.
+/// Mutation oracle: removing the row-shape comparison lets relocation reach
+/// the ordinary active reinstall refusal and fires the named schema-boundary
+/// assertion.
 #[tokio::test]
 async fn reinstall_witness_loader_rejects_a_column_without_a_validation_rule() {
     let env = TestEnv::new();

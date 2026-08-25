@@ -43,7 +43,7 @@
 use std::path::{Path, PathBuf};
 
 use gmm_lib::core::settings::keys;
-use gmm_lib::core::{Core, GameCode, Source};
+use gmm_lib::core::{Core, GameCode, Source, REINSTALL_SWAP_COLUMNS};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Row, SqlitePool};
 use tempfile::TempDir;
@@ -317,23 +317,7 @@ async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
         .map(|row| row.try_get("name").expect("column name"))
         .collect();
     assert_eq!(
-        column_names,
-        [
-            "token",
-            "mod_id",
-            "game_code",
-            "library_path",
-            "staged_path",
-            "quarantine_path",
-            "old_identity",
-            "staged_identity",
-            "created_at",
-            "recovery_error",
-            "recovery_attempted_at",
-            "recovery_attempts",
-            "junction_withdrawn",
-            "junction_withdrawal_error",
-        ],
+        column_names, REINSTALL_SWAP_COLUMNS,
         "the reinstall migrations must create every witness column in the expected order",
     );
 
