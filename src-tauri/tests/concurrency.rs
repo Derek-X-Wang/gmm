@@ -3416,7 +3416,7 @@ fn current_known_library_content_mutations_declare_their_fence_policy() {
             &[
                 "begin_library_mutation",
                 "LibraryMutation::ReinstallGamebananaMod",
-                "reinstall_swaps",
+                "insert_reinstall_swap_witness",
                 "quarantine_library_directory_with_token",
             ],
         ),
@@ -3708,7 +3708,7 @@ async fn delete_refuses_a_directory_while_adopt_is_copying() {
             Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { ref reason, .. })
                 if reason.contains("active staging operation")
         ),
-        "delete must refuse specifically because the producer owns the stage: {deleted:?}",
+        "delete must refuse specifically because the producer owns the stage",
     );
     assert!(
         staged.is_dir(),

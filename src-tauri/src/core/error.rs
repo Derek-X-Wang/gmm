@@ -294,6 +294,13 @@ pub enum Error {
     StagingWitnessChanged { path: PathBuf },
 
     #[error(
+        "GMM found corrupt staged Library state for operation {id}: {reason}. \
+         GMM stopped the operation because database corruption is not evidence that Library \
+         bytes are unowned."
+    )]
+    StagingWitnessCorrupt { id: String, reason: String },
+
+    #[error(
         "{prefix} {reason}. {guidance}",
         prefix = DUPLICATE_RESOLUTION_CHANGED_PREFIX,
         guidance = DUPLICATE_RESOLUTION_REVIEW_AGAIN

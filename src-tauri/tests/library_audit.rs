@@ -525,11 +525,140 @@ async fn delete_refuses_a_witnessed_reinstall_stage() {
             deleted,
             Err(gmm_lib::core::Error::NotAnUnreferencedLibraryDir { .. })
         ),
-        "Delete must refuse a committed reinstall stage, got {deleted:?}",
+        "Delete must refuse a committed reinstall stage",
     );
     assert_eq!(
         fs::read(stage.join("replacement.ini")).expect("live stage after refused Delete"),
         b"replacement still extracting",
+    );
+}
+
+/// A malformed durable identity is corrupt state, never evidence that the
+/// active reinstall owns nothing. This drives the public Delete seam so the
+/// regression cannot pass by validating only startup recovery's row shape.
+#[tokio::test]
+async fn delete_refuses_a_malformed_reinstall_identity_before_classifying_bytes() {
+    let tmp = TempDir::new().expect("tmp");
+    let (core, stage) = committed_reinstall_stage(&tmp).await;
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open DB for corrupt reinstall identity");
+    sqlx::query("UPDATE reinstall_swaps SET staged_identity = 'not-a-durable-identity'")
+        .execute(&pool)
+        .await
+        .expect("corrupt reinstall identity fixture");
+    pool.close().await;
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &stage)
+        .await;
+    assert!(
+        matches!(deleted, Err(Error::ReinstallWitnessCorrupt { .. })),
+        "a malformed reinstall identity must refuse Delete before bytes are classified as unreferenced",
+    );
+    assert_eq!(
+        fs::read(stage.join("replacement.ini")).expect("witnessed bytes after refused Delete"),
+        b"replacement still extracting",
+        "a malformed durable identity must not make active reinstall bytes deletable",
+    );
+}
+
+/// The staged adopt/import table crosses the same trust boundary as reinstall
+/// recovery. Its identity must be parsed by the shared loader before Delete
+/// can decide the staged directory is unowned.
+#[tokio::test]
+async fn delete_refuses_a_malformed_staging_identity_before_classifying_bytes() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("resolve staging Library root");
+    fs::create_dir_all(&root).expect("create staging Library root");
+    let id = Ulid::new();
+    let stage = root.join(id.to_string());
+    fs::create_dir(&stage).expect("corrupt witnessed stage");
+    fs::write(stage.join("partial.ini"), b"partial import bytes").expect("partial bytes");
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open DB for corrupt staging identity");
+    sqlx::query(
+        "INSERT INTO staged_library_operations (
+            id, game_code, operation, staged_path, staged_identity, created_at
+         ) VALUES (?, 'gimi', 'adopt', ?, 'not-a-durable-identity', ?)",
+    )
+    .bind(id.to_string())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind("2026-08-24T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert corrupt staging witness");
+    pool.close().await;
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &stage)
+        .await;
+    assert!(
+        matches!(deleted, Err(Error::StagingWitnessCorrupt { .. })),
+        "a malformed staging identity must refuse Delete before bytes are classified as unreferenced",
+    );
+    assert_eq!(
+        fs::read(stage.join("partial.ini")).expect("partial bytes after refused Delete"),
+        b"partial import bytes",
+        "a malformed durable identity must not make active staging bytes deletable",
+    );
+}
+
+/// Adding a durable column must force a validation decision in the same macro
+/// declaration that defines the staged raw row. Named-column queries alone do
+/// not detect this drift, so exercise the complete row through Delete.
+#[tokio::test]
+async fn delete_refuses_a_staging_witness_column_without_a_validation_rule() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("resolve staging Library root");
+    fs::create_dir_all(&root).expect("create staging Library root");
+    let id = Ulid::new();
+    let stage = root.join(id.to_string());
+    fs::create_dir(&stage).expect("future-column witnessed stage");
+    fs::write(stage.join("partial.ini"), b"partial import bytes").expect("partial bytes");
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open DB for future staged column");
+    sqlx::query(
+        "INSERT INTO staged_library_operations (
+            id, game_code, operation, staged_path, staged_identity, created_at
+         ) VALUES (?, 'gimi', 'adopt', ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-24T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert valid staging witness");
+    sqlx::query("ALTER TABLE staged_library_operations ADD COLUMN unruled_future_state TEXT")
+        .execute(&pool)
+        .await
+        .expect("simulate a future staged-witness migration");
+    pool.close().await;
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &stage)
+        .await;
+    assert!(
+        matches!(deleted, Err(Error::StagingWitnessCorrupt { .. })),
+        "an unruled staged-witness column must refuse Delete at the validated row boundary",
+    );
+    assert!(
+        stage.join("partial.ini").is_file(),
+        "schema drift must stop Delete before staged bytes move",
     );
 }
 
@@ -850,7 +979,7 @@ async fn duplicate_resolution_refuses_an_active_reinstall_witness_without_changi
          ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
     )
     .bind(token.to_string())
-    .bind(&fixture.duplicate_id)
+    .bind(&fixture.keeper_id)
     .bind(fixture.library_path.to_string_lossy().as_ref())
     .bind(stage.to_string_lossy().as_ref())
     .bind(quarantine.to_string_lossy().as_ref())
@@ -869,7 +998,7 @@ async fn duplicate_resolution_refuses_an_active_reinstall_witness_without_changi
         matches!(
             result,
             Err(Error::DuplicateModResolutionBlockedByReinstall { ref mod_id })
-                if mod_id == &fixture.duplicate_id
+                if mod_id == &fixture.keeper_id
         ),
         "the witness must refuse row deletion, got {result:?}",
     );

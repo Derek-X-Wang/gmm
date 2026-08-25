@@ -3,9 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use sqlx::{Executor, Row, Sqlite};
+use sqlx::{Row, SqliteConnection};
 
 use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
 use super::{Error, Result};
@@ -40,8 +40,8 @@ pub(super) enum LibraryDirectoryDisposition {
 #[derive(Debug, Clone)]
 pub(super) struct LibraryOwnershipSnapshot {
     mods: HashMap<DirectoryIdentity, Vec<String>>,
-    active_reinstall_directories: HashSet<String>,
-    active_staging_directories: HashSet<String>,
+    active_reinstall_directories: HashSet<DirectoryIdentity>,
+    active_staging_directories: HashSet<DirectoryIdentity>,
 }
 
 impl LibraryOwnershipSnapshot {
@@ -54,55 +54,12 @@ impl LibraryOwnershipSnapshot {
         }
     }
 
-    pub(super) async fn load<'e, E>(executor: E) -> Result<Self>
-    where
-        E: Executor<'e, Database = Sqlite>,
-    {
-        let rows = sqlx::query(
-            "SELECT id AS mod_id, library_path, NULL AS reinstall_identity,
-                    NULL AS staging_identity
-             FROM mods
-             UNION ALL
-             SELECT NULL AS mod_id, staged_path AS library_path,
-                    staged_identity AS reinstall_identity, NULL AS staging_identity
-             FROM reinstall_swaps
-             UNION ALL
-             SELECT NULL AS mod_id, quarantine_path AS library_path,
-                    old_identity AS reinstall_identity, NULL AS staging_identity
-             FROM reinstall_swaps
-             UNION ALL
-             SELECT NULL AS mod_id, staged_path AS library_path, NULL AS reinstall_identity,
-                    staged_identity AS staging_identity
-             FROM staged_library_operations
-             WHERE recovery_error IS NULL",
-        )
-        .fetch_all(executor)
-        .await?;
+    pub(super) async fn load(connection: &mut SqliteConnection) -> Result<Self> {
+        let rows = sqlx::query("SELECT id AS mod_id, library_path FROM mods")
+            .fetch_all(&mut *connection)
+            .await?;
         let mut mods: HashMap<DirectoryIdentity, Vec<String>> = HashMap::new();
-        let mut active_reinstall_directories = HashSet::new();
-        let mut active_staging_directories = HashSet::new();
         for row in rows {
-            if let Some(identity) = row.try_get::<Option<String>, _>("reinstall_identity")? {
-                active_reinstall_directories.insert(identity);
-                continue;
-            }
-            if let Some(identity) = row.try_get::<Option<String>, _>("staging_identity")? {
-                let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
-                match IdentifiedDirectory::open(&path) {
-                    Ok(directory) if directory.identity().durable_key() == identity => {
-                        active_staging_directories.insert(identity);
-                    }
-                    // The witness owns its recorded object only while it still
-                    // occupies the recorded spelling.
-                    Ok(_) => {}
-                    // Preserve the ownership contract's NotFound caveat: a
-                    // missing spelling contributes no filesystem identity.
-                    Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-                    Err(source) => return Err(Error::Io { path, source }),
-                }
-                continue;
-            }
-
             let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
             match IdentifiedDirectory::open(&path) {
                 Ok(directory) => {
@@ -117,6 +74,40 @@ impl LibraryOwnershipSnapshot {
             }
         }
 
+        let mut active_reinstall_directories = HashSet::new();
+        for witness in
+            super::library_mutation::load_reinstall_swap_witnesses(&mut *connection).await?
+        {
+            if let Some(identity) = witnessed_identity_at_recorded_spelling(
+                witness.staged_path(),
+                witness.staged_identity(),
+            )? {
+                active_reinstall_directories.insert(identity);
+            }
+            if let Some(identity) = witnessed_identity_at_recorded_spelling(
+                witness.quarantine_path(),
+                witness.old_identity(),
+            )? {
+                active_reinstall_directories.insert(identity);
+            }
+        }
+
+        let mut active_staging_directories = HashSet::new();
+        for witness in
+            super::library_mutation::load_staged_library_operation_witnesses(&mut *connection)
+                .await?
+        {
+            if !witness.is_active() {
+                continue;
+            }
+            if let Some(identity) = witnessed_identity_at_recorded_spelling(
+                witness.staged_path(),
+                witness.staged_identity(),
+            )? {
+                active_staging_directories.insert(identity);
+            }
+        }
+
         Ok(Self {
             mods,
             active_reinstall_directories,
@@ -125,16 +116,10 @@ impl LibraryOwnershipSnapshot {
     }
 
     pub(super) fn owner_of(&self, identity: &DirectoryIdentity) -> Option<LibraryDirectoryOwner> {
-        if self
-            .active_reinstall_directories
-            .contains(&identity.durable_key())
-        {
+        if self.active_reinstall_directories.contains(identity) {
             return Some(LibraryDirectoryOwner::ActiveReinstall);
         }
-        if self
-            .active_staging_directories
-            .contains(&identity.durable_key())
-        {
+        if self.active_staging_directories.contains(identity) {
             return Some(LibraryDirectoryOwner::ActiveStaging);
         }
         self.mods
@@ -195,5 +180,23 @@ impl LibraryOwnershipSnapshot {
             .filter(|ids| ids.len() > 1)
             .cloned()
             .collect()
+    }
+}
+
+/// A durable identity owns bytes only while the recorded pathname still names
+/// that exact filesystem object. `NotFound` contributes no owner; every other
+/// inspection failure keeps audit and destructive actions fail-closed.
+fn witnessed_identity_at_recorded_spelling(
+    path: &Path,
+    expected: &DirectoryIdentity,
+) -> Result<Option<DirectoryIdentity>> {
+    match IdentifiedDirectory::open(path) {
+        Ok(directory) if directory.identity() == expected => Ok(Some(expected.clone())),
+        Ok(_) => Ok(None),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
