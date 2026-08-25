@@ -31,6 +31,8 @@ pub mod settings;
 pub mod updates;
 pub mod variants;
 pub mod volume;
+#[cfg(windows)]
+mod windows_directory_delete;
 pub mod zip_import;
 
 use std::path::{Path, PathBuf};

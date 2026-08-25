@@ -45,10 +45,12 @@ use serde::Serialize;
 use sqlx::{Executor, Sqlite};
 use ulid::Ulid;
 
-use super::library_audit::{directory_size_without_links, is_link_or_reparse_point};
+#[cfg(not(windows))]
+use super::library_audit::directory_size_without_links;
+use super::library_audit::is_link_or_reparse_point;
 use super::library_identity::IdentifiedDirectory;
 use super::library_mutation::{unique_junction_dir_name, LibraryMutation, LibraryMutationFence};
-use super::{crash_points, variants, Core, Error, GameCode, Mod, Result, Source};
+use super::{crash_points, variants, Core, CrashHook, Error, GameCode, Mod, Result, Source};
 
 pub(super) const DELETE_QUARANTINE_PREFIX: &str = ".gmm-delete-";
 const DELETE_INTENT_SUFFIX: &str = ".intent";
@@ -57,8 +59,9 @@ const DELETE_INTENT_SUFFIX: &str = ".intent";
 /// measured only after the quarantine identity is proved and is omitted when
 /// byte reclamation is deferred or ownership is lost. Only a deferred outcome
 /// names a reclamation path, because only then has GMM proved its bytes remain
-/// there. The traversal and final removal are still path-based pending #172,
-/// so the size is not object-anchored accounting.
+/// there. On Windows, both traversal and measurement are derived from the
+/// verified quarantine handle, so the count describes the object removed
+/// even if its reserved pathname is replaced after proof.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeletedLibraryDir {
@@ -95,6 +98,7 @@ struct GuardedLibraryMutation {
 pub(super) struct QuarantinedLibraryDirectory {
     pub(super) path: PathBuf,
     pub(super) intent: PathBuf,
+    after_root_handle_open: Option<CrashHook>,
 }
 
 pub(super) enum QuarantinePurgeOutcome {
@@ -108,24 +112,42 @@ impl QuarantinedLibraryDirectory {
         let Some(verified) = open_owned_delete_quarantine(&self.path)? else {
             return Ok(QuarantinePurgeOutcome::OwnershipLost);
         };
-        let size = measure_size
-            .then(|| directory_size_without_links(&self.path).ok())
-            .flatten();
-        let Some(verified_after_measurement) = open_owned_delete_quarantine(&self.path)? else {
-            return Ok(QuarantinePurgeOutcome::OwnershipLost);
+
+        #[cfg(windows)]
+        let removal =
+            match super::windows_directory_delete::HandleAnchoredDirectoryRemoval::new(verified) {
+                Ok(removal) => {
+                    if let Some(hook) = &self.after_root_handle_open {
+                        hook(crash_points::QUARANTINE_PURGE_AFTER_ROOT_HANDLE_OPEN);
+                    }
+                    removal.remove(measure_size, self.after_root_handle_open.as_ref())
+                }
+                Err(source) => Err(source),
+            };
+
+        #[cfg(not(windows))]
+        let removal = {
+            let size = measure_size
+                .then(|| directory_size_without_links(&self.path).ok())
+                .flatten();
+            let Some(verified_after_measurement) = open_owned_delete_quarantine(&self.path)? else {
+                return Ok(QuarantinePurgeOutcome::OwnershipLost);
+            };
+            if let Some(hook) = &self.after_root_handle_open {
+                hook(crash_points::QUARANTINE_PURGE_AFTER_ROOT_HANDLE_OPEN);
+                // The per-entry boundary exists only in the Windows walker.
+                // Fire its registry observer at the equivalent last
+                // pre-removal point on non-Windows so the cross-platform
+                // crash-point inventory still proves the seam is reachable.
+                hook(crash_points::QUARANTINE_PURGE_AFTER_ENTRY_ENUMERATION);
+            }
+            drop(verified);
+            drop(verified_after_measurement);
+            fs::remove_dir_all(&self.path).map(|()| size)
         };
-        // Windows keeps a directory name visible while an open handle refers
-        // to it even when that handle shares DELETE access. Measurement is
-        // path-based, so prove the reserved name both before and after it and
-        // release both handles before recursive removal.
-        drop(verified);
-        drop(verified_after_measurement);
-        // The final recursive removal still re-resolves `self.path`; a swap
-        // after the proof can therefore remove a replacement. #172 tracks
-        // handle-anchored recursive deletion. This check narrows that window
-        // but does not claim the removal itself is anchored to either handle.
-        match fs::remove_dir_all(&self.path) {
-            Ok(()) => {
+
+        match removal {
+            Ok(size) => {
                 if let Err(source) = fs::remove_file(&self.intent) {
                     if source.kind() != io::ErrorKind::NotFound {
                         tracing::warn!(
@@ -512,6 +534,7 @@ impl Core {
         Ok(QuarantinedLibraryDirectory {
             path: quarantine,
             intent,
+            after_root_handle_open: self.crash_hook.clone(),
         })
     }
 
@@ -766,6 +789,7 @@ fn purge_delete_quarantines_with(
             match (QuarantinedLibraryDirectory {
                 path: quarantine,
                 intent,
+                after_root_handle_open: None,
             })
             .purge(false)
             {
@@ -934,6 +958,36 @@ mod tests {
             .durable_key();
         fs::write(&intent, identity).expect("write ownership intent");
         (quarantine, intent)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn handle_anchored_purge_reclaims_an_owned_quarantine() {
+        let temp = tempfile::tempdir().expect("temporary Library");
+        let (quarantine, intent) = owned_quarantine(&temp.path().join("gimi"));
+
+        match (QuarantinedLibraryDirectory {
+            path: quarantine.clone(),
+            intent: intent.clone(),
+            after_root_handle_open: None,
+        })
+        .purge(false)
+        .expect("purge owned quarantine")
+        {
+            QuarantinePurgeOutcome::Reclaimed(None) => {}
+            QuarantinePurgeOutcome::Reclaimed(Some(size)) => {
+                panic!("unmeasured purge unexpectedly reported {size} bytes")
+            }
+            QuarantinePurgeOutcome::Deferred { error, .. } => {
+                panic!("handle-anchored purge was deferred: {error}")
+            }
+            QuarantinePurgeOutcome::OwnershipLost => {
+                panic!("handle-anchored purge unexpectedly lost ownership")
+            }
+        }
+
+        assert!(!quarantine.exists(), "the quarantine must be removed");
+        assert!(!intent.exists(), "the durable intent must be retired");
     }
 
     #[test]

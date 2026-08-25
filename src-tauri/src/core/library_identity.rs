@@ -45,6 +45,11 @@ impl IdentifiedDirectory {
     pub(super) fn identity(&self) -> &DirectoryIdentity {
         &self.identity
     }
+
+    #[cfg(windows)]
+    pub(super) fn handle(&self) -> &File {
+        &self._handle
+    }
 }
 
 impl DirectoryIdentity {
