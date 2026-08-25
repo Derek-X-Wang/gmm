@@ -373,6 +373,9 @@ pub enum Error {
         "{game} is running (game session active since {since}); close the game before changing mods."
     )]
     SessionActive { game: String, since: String },
+
+    #[error("the durable game-launch claim was lost before the session became active")]
+    SessionLaunchClaimLost,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

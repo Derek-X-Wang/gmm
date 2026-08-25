@@ -68,6 +68,16 @@ fn main() {
         return;
     }
 
+    // A deterministic live PID for launch-claim recovery tests. Report only
+    // after the process is ready, then let the parent close stdin or kill us;
+    // no timing guess decides whether the witness is alive.
+    if args.op == "hold-process" {
+        report(true, "");
+        let mut release = String::new();
+        let _ = std::io::stdin().read_line(&mut release);
+        return;
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -268,6 +278,24 @@ async fn run(args: &Args) -> Result<(), String> {
             })
             .await
             .map_err(|e| e.to_string())
+        }
+
+        "begin-session-launch" => {
+            let claim = core
+                .begin_session_launch(args.game()?)
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Some(child_pid) = args.get("--child-pid") {
+                let child_pid = child_pid
+                    .parse()
+                    .map_err(|_| "--child-pid must be a number".to_string())?;
+                core.record_session_launch_child(&claim, child_pid)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            core.abandon_session_launch(&claim)
+                .await
+                .map_err(|e| e.to_string())
         }
 
         // Mirrors what the `install_importer` command does after the

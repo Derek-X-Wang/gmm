@@ -481,6 +481,73 @@ async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
     pool.close().await;
 }
 
+#[tokio::test]
+async fn session_launch_claim_migration_preserves_parallel_launch_ownership() {
+    let (_, fixture) = corpus()
+        .into_iter()
+        .find(|(version, _)| *version == 6)
+        .expect("schema-6 fixture");
+    let tmp = TempDir::new().expect("tmp");
+    let db = stage(&fixture, &tmp);
+    let core = open_core(&db, &tmp).await;
+    drop(core);
+    let pool = raw_pool(&db).await;
+
+    let columns = sqlx::query("PRAGMA table_info(session_launch_claims)")
+        .fetch_all(&pool)
+        .await
+        .expect("inspect session_launch_claims columns");
+    let column_names: Vec<String> = columns
+        .iter()
+        .map(|row| row.try_get("name").expect("column name"))
+        .collect();
+    assert_eq!(
+        column_names,
+        ["token", "game_code", "owner_pid", "child_pid", "started_at"],
+        "the launch witness must carry both process identities and its session message",
+    );
+
+    let insert = |token: &'static str, child_pid: Option<i64>| {
+        sqlx::query(
+            "INSERT INTO session_launch_claims (
+                token, game_code, owner_pid, child_pid, started_at
+             ) VALUES (?, 'gimi', 1001, ?, '2026-08-24T00:00:00Z')",
+        )
+        .bind(token)
+        .bind(child_pid)
+    };
+    insert("01JSESSIONLAUNCHCLAIM00001", None)
+        .execute(&pool)
+        .await
+        .expect("insert pre-spawn launch claim");
+    insert("01JSESSIONLAUNCHCLAIM00002", Some(2002))
+        .execute(&pool)
+        .await
+        .expect("parallel launches must have independent claims");
+    let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_launch_claims")
+        .fetch_one(&pool)
+        .await
+        .expect("count launch claims");
+    assert_eq!(
+        claims, 2,
+        "the table must not pick a launch winner before spawn"
+    );
+
+    let invalid_game = sqlx::query(
+        "INSERT INTO session_launch_claims (
+            token, game_code, owner_pid, child_pid, started_at
+         ) VALUES ('01JSESSIONLAUNCHCLAIM00003', 'nope', 1001, NULL,
+                   '2026-08-24T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        invalid_game.is_err(),
+        "a launch claim must reference a real Game",
+    );
+    pool.close().await;
+}
+
 /// Duplicate Mod rows are user state, not input for a migration-time survivor
 /// policy. Stage the last schema that predates issue #185 with all four states
 /// the reverted attempt would have destroyed, then run every current migration.

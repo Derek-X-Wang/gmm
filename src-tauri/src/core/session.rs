@@ -20,6 +20,19 @@ pub struct SessionInfo {
     pub started_at: DateTime<Utc>,
 }
 
+/// Durable ownership of the interval between deciding to launch and winning
+/// the singleton [`SessionInfo`] row.
+///
+/// The token is deliberately opaque outside the Core. It lets failure cleanup
+/// retire only its own launch when several callers are starting games at the
+/// same time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLaunchClaim {
+    pub(super) token: String,
+    pub game: GameCode,
+    pub started_at: DateTime<Utc>,
+}
+
 /// Cross-platform "is this PID still alive" check.
 ///
 /// On Unix: `kill(pid, 0)` returns 0 if a signal would be deliverable;

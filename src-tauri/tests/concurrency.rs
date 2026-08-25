@@ -42,7 +42,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
-use gmm_lib::core::{Core, GameCode, SessionInfo};
+use gmm_lib::core::{crash_points, Core, GameCode, SessionInfo};
 use sqlx::Connection;
 use tempfile::TempDir;
 use ulid::Ulid;
@@ -349,6 +349,10 @@ struct RunningProbe {
 }
 
 impl RunningProbe {
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     fn expected_crash_point(&self) -> Option<&'static str> {
         self.crash_at.or(self.pause_at)
     }
@@ -4771,4 +4775,104 @@ async fn only_one_process_can_claim_the_game_session() {
         "the surviving session belongs to one of the two claimants, got pid {}",
         info.pid,
     );
+}
+
+/// A launch claim commits before the child exists. Pause on that exact
+/// production boundary and prove a separately running process cannot enter a
+/// fenced Library mutation while `active_session` is still empty.
+#[tokio::test]
+async fn launch_claim_blocks_library_mutation_before_child_pid_exists() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let source = env._tmp.path().join("launch-claim-source");
+    std::fs::create_dir_all(&source).expect("launch-claim source");
+    std::fs::write(source.join("merged.ini"), b"hash=launch-claim\n")
+        .expect("launch-claim fixture");
+    let source_s = source.to_string_lossy().to_string();
+
+    let mut launch = probe(&env)
+        .pausing_at(crash_points::SESSION_LAUNCH_AFTER_CLAIM)
+        .op(["begin-session-launch"])
+        .spawn();
+    launch.wait_for_pause(crash_points::SESSION_LAUNCH_AFTER_CLAIM);
+
+    assert_eq!(
+        core.session_info().await.expect("active session query"),
+        None,
+        "the barrier must be before active_session, or it cannot prove issue #192",
+    );
+    probe(&env)
+        .op([
+            "adopt",
+            "--from",
+            &source_s,
+            "--name",
+            "Blocked During Launch",
+        ])
+        .run()
+        .expect_refused(
+            "a Library mutation after the launch claim committed",
+            "game session active",
+        );
+
+    launch.resume();
+    launch
+        .wait_for_outcome()
+        .expect_ok("abandoning the launch reservation");
+    probe(&env)
+        .op([
+            "adopt",
+            "--from",
+            &source_s,
+            "--name",
+            "Allowed After Launch",
+        ])
+        .run()
+        .expect_ok("the Library mutation after the launch was abandoned");
+}
+
+/// A process crash after spawn leaves a durable child PID. Startup and the
+/// ordinary Library fence preserve that claim while the real child is alive,
+/// then retire it without user intervention once the child exits.
+#[tokio::test]
+async fn crashed_launch_claim_blocks_until_its_recorded_child_exits() {
+    let env = TestEnv::new();
+    let _core = env.core().await;
+    let source = env._tmp.path().join("orphaned-launch-source");
+    std::fs::create_dir_all(&source).expect("orphaned-launch source");
+    std::fs::write(source.join("merged.ini"), b"hash=orphaned-launch\n")
+        .expect("orphaned-launch fixture");
+    let source_s = source.to_string_lossy().to_string();
+
+    let mut child = probe(&env).op(["hold-process"]).spawn();
+    child
+        .wait_for_outcome()
+        .expect_ok("starting the stand-in game process");
+    let child_pid = child.pid().to_string();
+
+    let mut launch = probe(&env)
+        .crashing_at(crash_points::SESSION_LAUNCH_AFTER_CHILD_RECORD)
+        .op(["begin-session-launch", "--child-pid", &child_pid])
+        .spawn();
+    launch.wait_for_crash();
+
+    probe(&env)
+        .op(["adopt", "--from", &source_s, "--name", "Blocked By Orphan"])
+        .run()
+        .expect_refused(
+            "a Library mutation while the orphaned launch child is alive",
+            "game session active",
+        );
+
+    child.kill();
+    probe(&env)
+        .op([
+            "adopt",
+            "--from",
+            &source_s,
+            "--name",
+            "Allowed After Child Exit",
+        ])
+        .run()
+        .expect_ok("the first Library mutation after the orphaned child exited");
 }

@@ -49,7 +49,7 @@ pub use library_audit::{
 };
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
-pub use session::SessionInfo;
+pub use session::{SessionInfo, SessionLaunchClaim};
 pub use zip_import::ImportZipOptions;
 
 use settings::{get as get_setting, keys, put as put_setting};
@@ -97,6 +97,18 @@ impl Core {
             default_library_root,
             crash_hook: None,
         };
+        // A launch reservation is written before spawning and normally filled
+        // with the child PID immediately afterwards. Retire it when neither
+        // recorded process is live; if a crash left no child PID to inspect,
+        // the pre-spawn claim is abandoned during this startup.
+        core.clean_stale_session_launch_claims().await?;
+        if core.has_live_session_blocker_at_startup().await? {
+            // Core construction normally repairs interrupted Library work.
+            // A surviving game or launch child makes that unsafe: keep every
+            // durable witness for the next startup instead of moving Library
+            // bytes while the process may still be loading them.
+            return Ok(core);
+        }
         if let Err(recovery) = core.resolve_interrupted_staging_at_startup().await {
             tracing::warn!(
                 target: "gmm::library",
@@ -3315,6 +3327,113 @@ impl Core {
         Ok(())
     }
 
+    /// Durably reserve the launch interval before any process is spawned.
+    ///
+    /// This is intentionally a short SQLite writer claim rather than holding
+    /// [`library_mutation::LibraryMutationFence`] across loader setup and a
+    /// bounded injection wait. The committed row is the durable bridge across
+    /// that unbounded work; every ordinary Library fence observes it.
+    pub async fn begin_session_launch(&self, game: GameCode) -> Result<SessionLaunchClaim> {
+        let claim = SessionLaunchClaim {
+            token: Ulid::new().to_string(),
+            game,
+            started_at: Utc::now(),
+        };
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.prune_stale_session_launch_claims(&mut transaction)
+            .await?;
+        sqlx::query(
+            "INSERT INTO session_launch_claims (
+                token, game_code, owner_pid, child_pid, started_at
+             ) VALUES (?, ?, ?, NULL, ?)",
+        )
+        .bind(&claim.token)
+        .bind(claim.game.as_str())
+        .bind(std::process::id() as i64)
+        .bind(claim.started_at.to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        self.crash_point(crash_points::SESSION_LAUNCH_AFTER_CLAIM);
+        Ok(claim)
+    }
+
+    /// Attach the spawned PID to this launch's durable reservation before
+    /// injection or any startup wait begins.
+    pub async fn record_session_launch_child(
+        &self,
+        claim: &SessionLaunchClaim,
+        child_pid: u32,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE session_launch_claims SET child_pid = ?
+             WHERE token = ? AND owner_pid = ? AND child_pid IS NULL",
+        )
+        .bind(child_pid as i64)
+        .bind(&claim.token)
+        .bind(std::process::id() as i64)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(Error::SessionLaunchClaimLost);
+        }
+        self.crash_point(crash_points::SESSION_LAUNCH_AFTER_CHILD_RECORD);
+        Ok(())
+    }
+
+    /// Atomically compete for the singleton active session and retire only
+    /// this launch's reservation. A losing INSERT rolls the transaction back,
+    /// leaving the reservation in place until its ChildGuard has killed the
+    /// spawned process and failure cleanup retires it.
+    pub async fn complete_session_launch(
+        &self,
+        claim: &SessionLaunchClaim,
+        info: &SessionInfo,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let owned: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM session_launch_claims
+             WHERE token = ? AND owner_pid = ? AND child_pid = ?",
+        )
+        .bind(&claim.token)
+        .bind(std::process::id() as i64)
+        .bind(info.pid as i64)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if owned != 1 {
+            return Err(Error::SessionLaunchClaimLost);
+        }
+        sqlx::query(
+            "INSERT INTO active_session (id, game_code, pid, started_at)
+             VALUES (1, ?, ?, ?)",
+        )
+        .bind(info.game.as_str())
+        .bind(info.pid as i64)
+        .bind(info.started_at.to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM session_launch_claims WHERE token = ?")
+            .bind(&claim.token)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Retire this launch's own reservation. Idempotent so every error path
+    /// can call it, including one after the successful transition deleted it.
+    pub async fn abandon_session_launch(&self, claim: &SessionLaunchClaim) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM session_launch_claims
+             WHERE token = ? AND owner_pid = ?",
+        )
+        .bind(&claim.token)
+        .bind(std::process::id() as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Clear the persisted active GameSession. Idempotent.
     pub async fn end_session(&self) -> Result<()> {
         sqlx::query("DELETE FROM active_session WHERE id = 1")
@@ -3328,6 +3447,7 @@ impl Core {
     /// "Genshin ended unexpectedly last time". Idempotent — returns
     /// `Ok(None)` when no stale row exists.
     pub async fn clean_stale_session(&self) -> Result<Option<SessionInfo>> {
+        self.clean_stale_session_launch_claims().await?;
         let Some(info) = self.session_info().await? else {
             return Ok(None);
         };
@@ -3339,13 +3459,89 @@ impl Core {
     }
 
     async fn ensure_no_active_session(&self) -> Result<()> {
-        if let Some(info) = self.session_info().await? {
-            return Err(Error::SessionActive {
-                game: info.game.as_str().to_string(),
-                since: info.started_at.to_rfc3339(),
-            });
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.prune_stale_session_launch_claims(&mut transaction)
+            .await?;
+        let blocker = self
+            .session_blocker_in_transaction(&mut transaction)
+            .await?;
+        transaction.commit().await?;
+        if let Some((game, since)) = blocker {
+            return Err(Error::SessionActive { game, since });
         }
         Ok(())
+    }
+
+    async fn clean_stale_session_launch_claims(&self) -> Result<()> {
+        // Avoid taking an otherwise-pointless writer claim on the common
+        // startup path. In particular, another process may be paused inside a
+        // bounded Library mutation while a cold Core opens the same database;
+        // no launch rows means there is nothing for this cleanup to serialize.
+        let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_launch_claims")
+            .fetch_one(&self.pool)
+            .await?;
+        if claims == 0 {
+            return Ok(());
+        }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        self.prune_stale_session_launch_claims(&mut transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn has_live_session_blocker_at_startup(&self) -> Result<bool> {
+        if self
+            .session_info()
+            .await?
+            .is_some_and(|info| session::is_pid_alive(info.pid))
+        {
+            return Ok(true);
+        }
+        let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_launch_claims")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(claims != 0)
+    }
+
+    pub(super) async fn prune_stale_session_launch_claims(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<()> {
+        let rows = sqlx::query("SELECT token, owner_pid, child_pid FROM session_launch_claims")
+            .fetch_all(&mut **transaction)
+            .await?;
+        for row in rows {
+            let owner_pid = row.try_get::<i64, _>("owner_pid")? as u32;
+            let child_pid = row
+                .try_get::<Option<i64>, _>("child_pid")?
+                .map(|pid| pid as u32);
+            if session::is_pid_alive(owner_pid) || child_pid.is_some_and(session::is_pid_alive) {
+                continue;
+            }
+            sqlx::query("DELETE FROM session_launch_claims WHERE token = ?")
+                .bind(row.try_get::<String, _>("token")?)
+                .execute(&mut **transaction)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn session_blocker_in_transaction(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> Result<Option<(String, String)>> {
+        let row = sqlx::query(
+            "SELECT game_code, started_at FROM active_session WHERE id = 1
+             UNION ALL
+             SELECT game_code, started_at FROM session_launch_claims
+             ORDER BY started_at ASC
+             LIMIT 1",
+        )
+        .fetch_optional(&mut **transaction)
+        .await?;
+        row.map(|row| Ok((row.try_get("game_code")?, row.try_get("started_at")?)))
+            .transpose()
     }
 
     /// Enable or disable a Mod. On enable, a Junction is created at
