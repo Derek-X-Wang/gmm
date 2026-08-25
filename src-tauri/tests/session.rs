@@ -373,6 +373,59 @@ async fn reused_pids_do_not_impersonate_launch_processes_or_make_the_message_cla
 }
 
 #[tokio::test]
+async fn live_pre_migration_owner_without_start_identity_survives_startup_and_blocks_library_mutations_uncertainly(
+) {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    drop(core);
+    let token = "01JUNKNOWNOWNERIDENTITY0001";
+
+    // Rows written before owner_started_at was introduced have NULL here.
+    // A live owner PID still makes that reservation a conservative blocker;
+    // the dead child identity ensures only the owner-side Unknown arm keeps it.
+    insert_launch_claim(
+        &tmp,
+        token,
+        std::process::id(),
+        None,
+        Some(u32::MAX - 1),
+        Some(1),
+    )
+    .await;
+
+    let core = fresh_core(&tmp).await;
+    let launches = core
+        .interrupted_session_launches()
+        .await
+        .expect("list interrupted launches");
+    assert_eq!(
+        launches
+            .iter()
+            .map(|launch| launch.id.as_str())
+            .collect::<Vec<_>>(),
+        [token],
+        "a live pre-migration owner with no start identity must keep its launch reservation",
+    );
+
+    let fixture = tmp.path().join("fixture/unknown-owner-message");
+    fs::create_dir_all(&fixture).expect("fixture");
+    fs::write(fixture.join("merged.ini"), "").expect("fixture ini");
+    let error = core
+        .adopt_folder(GameCode::Gimi, &fixture, "Blocked by owner uncertainty")
+        .await
+        .expect_err("the unknown owner identity must remain a conservative blocker")
+        .to_string();
+    assert!(
+        error.contains("cannot determine whether a game"),
+        "the owner-side blocker must state what GMM does and does not know: {error}",
+    );
+    assert!(
+        !error.contains("is running"),
+        "a live owner PID without a start identity is not proof a game is running: {error}",
+    );
+}
+
+#[tokio::test]
 async fn retire_refuses_a_launch_still_owned_by_its_original_process() {
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
