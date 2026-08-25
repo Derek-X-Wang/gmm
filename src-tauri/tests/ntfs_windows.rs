@@ -24,8 +24,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use gmm_lib::core::{Core, GameCode};
+use gmm_lib::core::{Core, GameCode, LibraryReclamationOutcome};
 use tempfile::TempDir;
 use windows_sys::Win32::Storage::FileSystem::{
     SetFileShortNameW, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
@@ -34,6 +35,273 @@ use windows_sys::Win32::Storage::FileSystem::{
 async fn core_with_library(library_root: PathBuf, tmp: &Path) -> Core {
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.display());
     Core::new(library_root, &db_url).await.expect("core")
+}
+
+/// The durable quarantine identity has been proved and its handle is still
+/// open. Replacing the reserved pathname after that boundary must not redirect
+/// recursive removal or the measured byte count to the replacement.
+///
+/// Mutation oracle: path-based `remove_dir_all(&self.path)` removes
+/// `replacement-marker` and fires the named replacement-survival assertion.
+#[tokio::test]
+async fn quarantine_purge_stays_anchored_after_the_root_name_is_swapped() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = core_with_library(tmp.path().join("library"), tmp.path()).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    fs::create_dir_all(orphan.join("nested")).expect("orphan tree");
+    fs::write(orphan.join("nested/original.bin"), b"original thirteen").expect("original bytes");
+
+    let observed = Arc::new(Mutex::new(None));
+    let hook_observed = Arc::clone(&observed);
+    let hook_root = root.clone();
+    let deleting = core.with_crash_hook(Arc::new(move |point| {
+        if point != gmm_lib::core::crash_points::QUARANTINE_PURGE_AFTER_ROOT_HANDLE_OPEN {
+            return;
+        }
+        let quarantine = fs::read_dir(&hook_root)
+            .expect("Library root after quarantine proof")
+            .filter_map(std::result::Result::ok)
+            .find(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gmm-delete-")
+            })
+            .expect("proved delete quarantine")
+            .path();
+        let moved_original = hook_root.join("proved-quarantine-moved-after-handle-open");
+        fs::rename(&quarantine, &moved_original).expect("move proved quarantine aside");
+        fs::create_dir(&quarantine).expect("replacement quarantine");
+        fs::write(quarantine.join("replacement-marker"), b"replacement")
+            .expect("replacement bytes");
+        *hook_observed.lock().expect("record post-proof swap") = Some((quarantine, moved_original));
+    }));
+
+    let deleted = deleting
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("the committed Library delete must finish");
+    let (quarantine, moved_original) = observed
+        .lock()
+        .expect("read post-proof swap")
+        .clone()
+        .expect("purge reached the post-handle-open seam");
+
+    assert!(
+        quarantine.join("replacement-marker").is_file(),
+        "handle-anchored quarantine purge must not delete the replacement installed after the root handle opened",
+    );
+    assert!(
+        !moved_original.exists(),
+        "handle-anchored quarantine purge must remove the proved object even after its name changes",
+    );
+    assert_eq!(
+        deleted.size_bytes,
+        Some(b"original thirteen".len() as u64),
+        "the reported size must describe the proved object, not the replacement pathname",
+    );
+    assert_eq!(deleted.reclamation, LibraryReclamationOutcome::Reclaimed,);
+    assert!(
+        !quarantine.with_extension("intent").exists(),
+        "a fully reclaimed proved object must retire its durable intent",
+    );
+}
+
+/// Parent-relative opens still resolve one child name. Comparing the file ID
+/// from handle-based enumeration with the opened handle prevents a swap in
+/// that narrow per-entry window from redirecting deletion.
+///
+/// Mutation oracle: removing the file-ID comparison from `open_child` deletes
+/// `replacement.bin` and fires the named replacement-survival assertion.
+#[tokio::test]
+async fn quarantine_purge_refuses_a_child_replaced_after_handle_enumeration() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = core_with_library(tmp.path().join("library"), tmp.path()).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    fs::create_dir_all(&orphan).expect("orphan");
+    fs::write(orphan.join("swappable.bin"), b"enumerated original").expect("original child");
+
+    let observed = Arc::new(Mutex::new(None));
+    let hook_observed = Arc::clone(&observed);
+    let hook_root = root.clone();
+    let swapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_swapped = Arc::clone(&swapped);
+    let deleting = core.with_crash_hook(Arc::new(move |point| {
+        if point != gmm_lib::core::crash_points::QUARANTINE_PURGE_AFTER_ENTRY_ENUMERATION
+            || hook_swapped.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let quarantine = fs::read_dir(&hook_root)
+            .expect("Library root after child enumeration")
+            .filter_map(std::result::Result::ok)
+            .find(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gmm-delete-")
+            })
+            .expect("enumerated delete quarantine")
+            .path();
+        let original = quarantine.join("swappable.bin");
+        let held_original = quarantine.join("enumerated-original-held-aside.bin");
+        fs::rename(&original, &held_original).expect("move enumerated child aside");
+        fs::write(&original, b"replacement").expect("replacement child");
+        *hook_observed.lock().expect("record child swap") =
+            Some((quarantine, original, held_original));
+    }));
+
+    let deleted = deleting
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("the visible Library delete was already committed");
+    let (quarantine, replacement, held_original) = observed
+        .lock()
+        .expect("read child swap")
+        .clone()
+        .expect("purge reached the post-enumeration seam");
+
+    assert!(
+        replacement.is_file(),
+        "file-ID verification must preserve a child replacement installed after enumeration",
+    );
+    assert!(
+        held_original.is_file(),
+        "a refused child swap must preserve the enumerated original too",
+    );
+    assert_eq!(
+        deleted.reclamation,
+        LibraryReclamationOutcome::Deferred {
+            path: quarantine.clone(),
+        },
+        "a child identity mismatch must remain retryable while the quarantine root is still proved",
+    );
+    assert!(
+        quarantine.with_extension("intent").is_file(),
+        "a partial purge must retain the durable intent for the surviving quarantine bytes",
+    );
+}
+
+/// A Junction inside a quarantine is a leaf owned by the quarantine, not an
+/// invitation to walk into the user's only copy of a Mod.
+#[tokio::test]
+async fn quarantine_purge_removes_a_junction_without_traversing_its_target() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = core_with_library(tmp.path().join("library"), tmp.path()).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let target = tmp.path().join("user-game-mod");
+    fs::create_dir_all(target.join("nested")).expect("Junction target tree");
+    fs::write(target.join("nested/only-copy.bin"), b"never traverse")
+        .expect("Junction target sentinel");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    fs::create_dir_all(&orphan).expect("orphan");
+    fs::write(orphan.join("owned.bin"), b"owned").expect("owned quarantine file");
+    gmm_lib::core::junction::create(&orphan.join("game-folder-junction"), &target)
+        .expect("Junction inside quarantine");
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("delete quarantine containing Junction");
+
+    assert!(
+        target.join("nested/only-copy.bin").is_file(),
+        "quarantine purge traversed a Junction into bytes outside the proved directory",
+    );
+    assert_eq!(deleted.size_bytes, Some(5));
+    assert!(!orphan.exists(), "the quarantine itself must be removed");
+}
+
+/// The rooted walker never constructs an absolute child pathname, so a tree
+/// beyond legacy MAX_PATH remains deletable.
+#[tokio::test]
+async fn quarantine_purge_handles_a_tree_beyond_max_path() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = core_with_library(tmp.path().join("library"), tmp.path()).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    let mut deep = orphan.clone();
+    for index in 0..8 {
+        deep.push(format!("segment-{index}-{}", "x".repeat(32)));
+    }
+    assert!(
+        deep.as_os_str().encode_wide().count() > 260,
+        "fixture must exceed legacy MAX_PATH: {deep:?}",
+    );
+    fs::create_dir_all(&deep).expect("long quarantine tree");
+    fs::write(deep.join("deep.bin"), b"long path bytes").expect("long-path file");
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("delete quarantine beyond MAX_PATH");
+
+    assert_eq!(deleted.size_bytes, Some(b"long path bytes".len() as u64));
+    assert!(!orphan.exists(), "the long quarantine tree must be gone");
+}
+
+/// Recursive removal deliberately stops before a pathologically deep tree can
+/// exhaust the process stack during startup recovery. The
+/// existing quarantine and its intent must remain available for a later retry.
+///
+/// Mutation oracle: removing the production depth check reports `Reclaimed`
+/// and fires the named deferred-reclamation assertion.
+#[tokio::test]
+async fn quarantine_purge_defers_tree_deeper_than_the_recursion_limit() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = core_with_library(tmp.path().join("library"), tmp.path()).await;
+    let root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game Library root");
+    fs::create_dir_all(&root).expect("create game Library root");
+    let orphan = root.join(ulid::Ulid::new().to_string());
+    let mut deep = orphan.clone();
+    for _ in 0..65 {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).expect("deep quarantine tree");
+    fs::write(deep.join("survivor.bin"), b"defer these bytes").expect("deep survivor");
+
+    let deleted = core
+        .delete_unreferenced_library_dir(GameCode::Gimi, &orphan)
+        .await
+        .expect("the visible Library delete was already committed");
+    let quarantine = match deleted.reclamation {
+        LibraryReclamationOutcome::Deferred { path } => path,
+        outcome => panic!(
+            "a quarantine deeper than the recursion limit must defer reclamation, got {outcome:?}",
+        ),
+    };
+
+    assert!(
+        quarantine.is_dir(),
+        "deferred reclamation must leave the quarantine directory present",
+    );
+    assert!(
+        quarantine.with_extension("intent").is_file(),
+        "deferred reclamation must retain the durable delete intent",
+    );
 }
 
 fn make_mod_dir(dir: &Path, marker: &str) {
