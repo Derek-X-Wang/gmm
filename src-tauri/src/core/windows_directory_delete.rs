@@ -41,7 +41,7 @@ const DIRECTORY_BUFFER_U64S: usize = 8 * 1024;
 /// Bounds both Rust stack use and the child handles retained by recursive
 /// descent. A deeper tree is left for deferred reclamation rather than risking
 /// a process abort during startup recovery.
-const MAX_DIRECTORY_DEPTH: usize = 65;
+const MAX_DIRECTORY_DEPTH: usize = 64;
 
 /// Owns both the original identity proof and a delete-capable handle derived
 /// from that same filesystem object. Neither handle resolves the pathname
