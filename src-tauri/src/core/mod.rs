@@ -83,6 +83,25 @@ impl Core {
     /// Open (or create) the DB at `db_url`, run pending migrations, and
     /// ensure the Library root exists.
     pub async fn new(default_library_root: PathBuf, db_url: &str) -> Result<Self> {
+        Self::new_inner(default_library_root, db_url, None).await
+    }
+
+    /// Test seam for startup crash points. Production callers use [`Core::new`]
+    /// and therefore install no hook while startup recovery runs.
+    #[doc(hidden)]
+    pub async fn new_with_crash_hook(
+        default_library_root: PathBuf,
+        db_url: &str,
+        crash_hook: CrashHook,
+    ) -> Result<Self> {
+        Self::new_inner(default_library_root, db_url, Some(crash_hook)).await
+    }
+
+    async fn new_inner(
+        default_library_root: PathBuf,
+        db_url: &str,
+        crash_hook: Option<CrashHook>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&default_library_root).map_err(|source| Error::Io {
             path: default_library_root.clone(),
             source,
@@ -97,7 +116,7 @@ impl Core {
         let core = Self {
             pool,
             default_library_root,
-            crash_hook: None,
+            crash_hook,
         };
         if let Err(recovery) = core.resolve_interrupted_staging_at_startup().await {
             tracing::warn!(
@@ -107,6 +126,7 @@ impl Core {
             );
         }
         core.recover_interrupted_reinstalls_at_startup().await?;
+        core.crash_point(crash_points::STARTUP_AFTER_REINSTALL_RECOVERY);
         if let Err(recovery) = core.finish_interrupted_library_deletes().await {
             tracing::warn!(
                 target: "gmm::library",
@@ -392,6 +412,17 @@ impl Core {
         per_game: Option<GameCode>,
         fence: &mut library_mutation::LibraryMutationFence,
     ) -> Result<(MoveReport, Vec<(String, GameCode)>)> {
+        let cleanup_roots: Vec<PathBuf> = match per_game {
+            Some(_) => vec![previous.to_path_buf()],
+            None => games::GAME_PROFILES
+                .iter()
+                .map(|profile| previous.join(profile.code.as_str()))
+                .collect(),
+        };
+        if library_recovery::has_owned_delete_quarantine(&cleanup_roots)? {
+            return Err(Error::LibraryRelocationBlockedByCleanup);
+        }
+
         // A same-volume rename preserves the filesystem identities recorded by
         // an in-flight reinstall witness, but the cross-volume copy fallback
         // does not. Refuse every relocation that would carry such a witness.

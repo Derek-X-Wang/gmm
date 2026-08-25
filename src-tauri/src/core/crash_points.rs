@@ -62,6 +62,14 @@ macro_rules! define_crash_points {
 
 define_crash_points! {
 
+/// `audit_library`: every database-backed ownership witness has been loaded,
+/// while the immediate Library-root directory scan has not started yet.
+pub const AUDIT_AFTER_OWNERSHIP_SNAPSHOT: &str = "audit.after_ownership_snapshot";
+
+/// Startup has committed every recoverable reinstall rollback, while ordinary
+/// intent-backed delete-quarantine cleanup has not started yet.
+pub const STARTUP_AFTER_REINSTALL_RECOVERY: &str = "startup.after_reinstall_recovery";
+
 /// Shared staged adopt/import setup: the empty ULID directory exists and its
 /// durable ownership witness has committed, while no source byte has been
 /// copied or extracted yet.
