@@ -62,7 +62,10 @@ impl HandleAnchoredDirectoryRemoval {
             )
         };
         if raw == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
+            return Err(with_context(
+                "reopen the verified root for handle-anchored deletion",
+                io::Error::last_os_error(),
+            ));
         }
         let root = unsafe { File::from_raw_handle(raw as RawHandle) };
         Ok(Self { verified, root })
@@ -73,8 +76,10 @@ impl HandleAnchoredDirectoryRemoval {
         measure_size: bool,
         crash_hook: Option<&CrashHook>,
     ) -> io::Result<Option<u64>> {
-        let size = remove_children(&self.root, measure_size, crash_hook)?;
-        mark_delete(&self.root)?;
+        let size = remove_children(&self.root, measure_size, crash_hook)
+            .map_err(|source| with_context("remove the verified root's children", source))?;
+        mark_delete(&self.root)
+            .map_err(|source| with_context("mark the verified root for deletion", source))?;
         // Both handles close before the caller retires the durable intent.
         // POSIX disposition removes the name immediately; closing the proof
         // also releases the final handle GMM itself holds on the object.
@@ -98,7 +103,9 @@ fn remove_children(
 ) -> io::Result<u64> {
     let mut total = 0u64;
     loop {
-        let entries = enumerate_children(parent)?;
+        let entries = enumerate_children(parent).map_err(|source| {
+            with_context("enumerate children through a directory handle", source)
+        })?;
         if entries.is_empty() {
             return Ok(total);
         }
@@ -107,19 +114,27 @@ fn remove_children(
         }
 
         for entry in entries {
-            let (child, information) = open_child(parent, &entry)?;
+            let (child, information) = open_child(parent, &entry).map_err(|source| {
+                with_context(
+                    "open an enumerated child relative to its parent handle",
+                    source,
+                )
+            })?;
             let is_directory = information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
             let is_reparse = information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
 
             let child_size = if is_directory && !is_reparse {
-                remove_children(&child, measure_size, crash_hook)?
+                remove_children(&child, measure_size, crash_hook).map_err(|source| {
+                    with_context("remove a verified child directory's contents", source)
+                })?
             } else if measure_size && !is_directory && !is_reparse {
                 (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow)
             } else {
                 0
             };
 
-            mark_delete(&child)?;
+            mark_delete(&child)
+                .map_err(|source| with_context("mark a verified child for deletion", source))?;
             drop(child);
             total = total.saturating_add(child_size);
         }
@@ -266,7 +281,10 @@ fn open_child(
         )
     };
     if status < 0 {
-        return Err(ntstatus_error(status));
+        return Err(with_context(
+            "NtOpenFile on the child name",
+            ntstatus_error(status),
+        ));
     }
     if raw.is_null() || raw == INVALID_HANDLE_VALUE {
         return Err(io::Error::other(
@@ -277,7 +295,10 @@ fn open_child(
     let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     let ok = unsafe { GetFileInformationByHandle(child.as_raw_handle(), information.as_mut_ptr()) };
     if ok == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(with_context(
+            "read the opened child's file ID and attributes",
+            io::Error::last_os_error(),
+        ));
     }
     let information = unsafe { information.assume_init() };
     let opened_file_id =
@@ -318,4 +339,8 @@ fn ntstatus_error(status: i32) -> io::Error {
 fn size_of_val_u32<T>(value: &T) -> io::Result<u32> {
     u32::try_from(std::mem::size_of_val(value))
         .map_err(|_| io::Error::other("Windows directory buffer exceeds u32"))
+}
+
+fn with_context(operation: &str, source: io::Error) -> io::Error {
+    io::Error::new(source.kind(), format!("{operation}: {source}"))
 }
