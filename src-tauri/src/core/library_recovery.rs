@@ -654,25 +654,33 @@ impl Core {
         })?;
 
         let ownership = super::library_ownership::LibraryOwnershipSnapshot::load(executor).await?;
-        if let Some(owner) = ownership.owner_of(directory.identity()) {
-            let reason = match owner {
-                super::library_ownership::LibraryDirectoryOwner::Mod => {
-                    "a Mod now references it — refresh the report"
-                }
-                super::library_ownership::LibraryDirectoryOwner::ActiveReinstall => {
-                    "it is interrupted reinstall state owned by GMM"
-                }
-                super::library_ownership::LibraryDirectoryOwner::ActiveStaging => {
-                    "it is an active staging operation owned by GMM"
-                }
-            };
-            return Err(Error::NotAnUnreferencedLibraryDir {
-                path,
-                reason: reason.to_string(),
-            });
+        match ownership.disposition_of(&directory) {
+            super::library_ownership::LibraryDirectoryDisposition::Owned(owner) => {
+                let reason = match owner {
+                    super::library_ownership::LibraryDirectoryOwner::Mod => {
+                        "a Mod now references it — refresh the report"
+                    }
+                    super::library_ownership::LibraryDirectoryOwner::ActiveReinstall => {
+                        "it is interrupted reinstall state owned by GMM"
+                    }
+                    super::library_ownership::LibraryDirectoryOwner::ActiveStaging => {
+                        "it is an active staging operation owned by GMM"
+                    }
+                };
+                Err(Error::NotAnUnreferencedLibraryDir {
+                    path,
+                    reason: reason.to_string(),
+                })
+            }
+            super::library_ownership::LibraryDirectoryDisposition::IgnorableEmptyReinstallStage => {
+                Err(Error::NotAnUnreferencedLibraryDir {
+                    path,
+                    reason: "it is an empty interrupted reinstall stage with no user bytes"
+                        .to_string(),
+                })
+            }
+            super::library_ownership::LibraryDirectoryDisposition::Unreferenced => Ok(directory),
         }
-
-        Ok(directory)
     }
 }
 
@@ -806,6 +814,36 @@ fn write_delete_intent(tmp: &Path, intent: &Path, contents: &[u8]) -> Result<()>
 
 pub(super) fn is_owned_delete_quarantine(path: &Path) -> Result<bool> {
     Ok(open_owned_delete_quarantine(path)?.is_some())
+}
+
+/// Whether relocation would carry an identity-backed delete quarantine.
+/// Cross-volume fallback copies directory contents and therefore changes the
+/// quarantine's filesystem identity while preserving its old intent marker.
+/// Callers hold the Library writer fence so cleanup cannot create or retire a
+/// quarantine between this check and the relocation decision.
+pub(super) fn has_owned_delete_quarantine(roots: &[PathBuf]) -> Result<bool> {
+    for root in roots {
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(Error::Io {
+                    path: root.clone(),
+                    source,
+                })
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|source| Error::Io {
+                path: root.clone(),
+                source,
+            })?;
+            if is_owned_delete_quarantine(&entry.path())? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn open_owned_delete_quarantine(path: &Path) -> Result<Option<IdentifiedDirectory>> {

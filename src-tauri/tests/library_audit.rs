@@ -291,6 +291,17 @@ async fn audit_ignores_an_unwitnessed_empty_reinstall_stage() {
         stage.is_dir(),
         "the read-only audit must not mutate the stage"
     );
+    let revealed = core
+        .unreferenced_library_dir_for_reveal(GameCode::Gimi, &stage)
+        .await;
+    assert!(
+        matches!(
+            revealed,
+            Err(Error::NotAnUnreferencedLibraryDir { ref reason, .. })
+                if reason.contains("empty interrupted reinstall stage")
+        ),
+        "the shared orphan guard must reject the same harmless empty stage: {revealed:?}",
+    );
 }
 
 /// A reserved name is not ownership evidence. If a reinstall stage contains
@@ -326,6 +337,131 @@ async fn audit_surfaces_a_non_empty_unwitnessed_reinstall_stage() {
         fs::read(stage.join("merged.ini")).expect("stranded stage bytes after audit"),
         b"user bytes",
         "the read-only audit must not mutate surfaced bytes",
+    );
+    assert_eq!(
+        core.unreferenced_library_dir_for_reveal(GameCode::Gimi, &stage)
+            .await
+            .expect("the shared guard accepts the same stranded bytes"),
+        stage,
+    );
+}
+
+/// If GMM cannot inspect a reserved-looking directory, it has no evidence the
+/// directory is the harmless empty residue case. Both report and guard must
+/// preserve visibility instead of converting uncertainty into absence.
+#[cfg(unix)]
+#[tokio::test]
+async fn audit_and_guard_keep_an_uninspectable_reinstall_stage_visible() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let game_root = core
+        .resolved_library_root_for(GameCode::Gimi)
+        .await
+        .expect("game root");
+    fs::create_dir_all(&game_root).expect("game root directory");
+    let stage = game_root.join(".gmm-reinstall-01JUNINSPECTABLE00000000");
+    fs::create_dir(&stage).expect("uninspectable reinstall stage");
+    let original = fs::metadata(&stage).expect("stage metadata").permissions();
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o000))
+        .expect("make the stage uninspectable");
+    assert!(
+        fs::read_dir(&stage).is_err(),
+        "fixture must deny directory inspection"
+    );
+
+    let report = core
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit an uninspectable reserved stage");
+    assert!(
+        report
+            .unreferenced
+            .iter()
+            .any(|directory| directory.path == stage && directory.size_bytes.is_none()),
+        "uncertain reserved bytes must remain visible with an unknown size: {report:?}",
+    );
+    let reveal = core
+        .unreferenced_library_dir_for_reveal(GameCode::Gimi, &stage)
+        .await;
+    assert!(
+        matches!(reveal, Err(Error::Io { .. })),
+        "the guard must fail closed until it can establish the directory identity: {reveal:?}",
+    );
+
+    fs::set_permissions(&stage, original).expect("restore stage permissions");
+}
+
+/// Ownership is global because per-game overrides may legitimately share one
+/// root. A GIMI reinstall stage must therefore be hidden from an SRMI audit,
+/// just as the action guard already refuses it across Games.
+#[tokio::test]
+async fn audit_hides_another_games_reinstall_stage_in_a_shared_library_root() {
+    let tmp = TempDir::new().expect("tmp");
+    let core = fresh_core(&tmp).await;
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let shared_root = tmp.path().join("shared-reinstall-root");
+    core.set_library_path_for_game(GameCode::Gimi, Some(&shared_root))
+        .await
+        .expect("share GIMI root");
+    core.set_library_path_for_game(GameCode::Srmi, Some(&shared_root))
+        .await
+        .expect("share SRMI root");
+
+    let source = tmp.path().join("shared-reinstall-source");
+    fs::create_dir(&source).expect("shared reinstall source");
+    fs::write(source.join("merged.ini"), b"installed bytes").expect("installed bytes");
+    let installed = core
+        .adopt_folder(GameCode::Gimi, &source, "Other Game Reinstall")
+        .await
+        .expect("adopt GIMI Mod");
+    let token = Ulid::new();
+    let stage = shared_root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = shared_root.join(format!(".gmm-delete-{token}"));
+    fs::create_dir(&stage).expect("other Game reinstall stage");
+    fs::write(stage.join("replacement.ini"), b"still extracting").expect("other Game staged bytes");
+
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open shared-root DB");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&installed.id)
+    .bind(installed.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&installed.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-24T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("commit other Game reinstall witness");
+    pool.close().await;
+
+    let report = core
+        .audit_library(GameCode::Srmi)
+        .await
+        .expect("audit shared root as SRMI");
+    assert!(
+        report.unreferenced.is_empty(),
+        "either Game's active reinstall owns its stage in the shared root: {report:?}",
+    );
+    let revealed = core
+        .unreferenced_library_dir_for_reveal(GameCode::Srmi, &stage)
+        .await;
+    assert!(
+        matches!(
+            revealed,
+            Err(Error::NotAnUnreferencedLibraryDir { ref reason, .. })
+                if reason.contains("interrupted reinstall state")
+        ),
+        "the shared guard must refuse the same other-Game stage: {revealed:?}",
     );
 }
 

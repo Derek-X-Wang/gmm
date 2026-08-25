@@ -129,6 +129,7 @@ struct Probe {
     db_url: String,
     library: PathBuf,
     take_lock: bool,
+    ready_before_op: bool,
     at: Option<u128>,
     pause_at: Option<&'static str>,
     crash_at: Option<&'static str>,
@@ -146,6 +147,7 @@ fn probe(env: &TestEnv) -> Probe {
         db_url: env.db_url.clone(),
         library: env.library.clone(),
         take_lock: false,
+        ready_before_op: false,
         at: None,
         pause_at: None,
         crash_at: None,
@@ -164,6 +166,15 @@ impl Probe {
     /// layer underneath it.
     fn honouring_the_lock(mut self) -> Self {
         self.take_lock = true;
+        self
+    }
+
+    /// Initialize the real Core and stop immediately before invoking the
+    /// selected public operation. This keeps startup recovery outside the
+    /// interleaving while the vulnerable boundaries remain production crash
+    /// points inside the two operations under test.
+    fn ready_before_operation(mut self) -> Self {
+        self.ready_before_op = true;
         self
     }
 
@@ -229,6 +240,9 @@ impl Probe {
             .arg(&self.library);
         if self.take_lock {
             cmd.arg("--take-lock");
+        }
+        if self.ready_before_op {
+            cmd.arg("--ready-before-op");
         }
         if let Some(at) = self.at {
             cmd.arg("--at").arg(at.to_string());
@@ -541,6 +555,17 @@ impl RunningProbe {
             event["pausedAt"].as_str(),
             Some(expected_crash_point),
             "probe paused at the wrong crash point: {event}",
+        );
+    }
+
+    fn wait_until_ready_before_operation(&mut self) {
+        let line = self.recv_stdout_line("become ready before its operation", None);
+        let event: serde_json::Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|error| panic!("probe printed non-JSON readiness {line:?}: {error}"));
+        assert_eq!(
+            event["readyBeforeOp"].as_bool(),
+            Some(true),
+            "probe reported the wrong pre-operation event: {event}",
         );
     }
 
@@ -2767,6 +2792,110 @@ async fn purge_failure_after_successful_reinstall_rollback_does_not_stop_startup
     );
 }
 
+/// A relocation process is initialized before an interrupted reinstall is
+/// seeded, so its own startup cannot consume the fixture. Real startup then
+/// pauses after rollback committed and before ordinary quarantine cleanup.
+/// A copy-fallback relocation in that gap must refuse; otherwise it gives the
+/// rolled-back replacement a new filesystem identity while copying its old
+/// intent marker.
+///
+/// Mutation oracle: removing the owned-delete-quarantine relocation guard
+/// makes `relocation between startup recovery phases` succeed and fail the
+/// explicit refusal assertion below.
+#[tokio::test]
+async fn copy_relocation_between_startup_recovery_phases_waits_for_cleanup() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env
+        .seed_mod(&core, "Relocation Between Startup Phases")
+        .await;
+    let new_root = env._tmp.path().join("copy-relocated-after-rollback");
+    std::fs::create_dir(&new_root).expect("pre-existing relocation destination");
+    std::fs::write(new_root.join("force-copy-fallback"), b"destination marker")
+        .expect("make rename replacement impossible");
+    let mut relocating = probe(&env)
+        .ready_before_operation()
+        .op([
+            "set-library-path",
+            "--path",
+            &new_root.display().to_string(),
+        ])
+        .spawn();
+    relocating.wait_until_ready_before_operation();
+
+    let root = imported.library_path.parent().expect("game Library root");
+    let token = Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("reinstall stage");
+    std::fs::write(stage.join("replacement.ini"), b"rolled-back replacement")
+        .expect("replacement bytes");
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB for startup witness");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(token.to_string())
+    .bind(&imported.id)
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-24T00:00:00Z")
+    .execute(&pool)
+    .await
+    .expect("commit interrupted reinstall witness");
+    pool.close().await;
+    drop(core);
+
+    let startup_pause = gmm_lib::core::crash_points::STARTUP_AFTER_REINSTALL_RECOVERY;
+    let mut startup = probe(&env)
+        .pausing_at(startup_pause)
+        .op(["startup"])
+        .spawn();
+    startup.wait_for_pause(startup_pause);
+
+    relocating.resume();
+    relocating.wait_for_outcome().expect_refused(
+        "relocation between startup recovery phases",
+        "cleanup is pending",
+    );
+
+    startup.resume();
+    startup
+        .wait_for_outcome()
+        .expect_ok("startup quarantine cleanup after refused relocation");
+
+    probe(&env)
+        .op([
+            "set-library-path",
+            "--path",
+            &new_root.display().to_string(),
+        ])
+        .run()
+        .expect_ok("relocation after startup cleanup completed");
+    assert_eq!(
+        std::fs::read(new_root.join(&imported.id).join("merged.ini"))
+            .expect("installed Mod bytes after relocation retry"),
+        b"[TextureOverride]\nhash=42\n",
+    );
+    assert!(
+        std::fs::read_dir(&new_root)
+            .expect("relocated root")
+            .filter_map(std::result::Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gmm-delete-")),
+        "cleanup must retire every rollback quarantine before relocation retries",
+    );
+}
+
 fn write_single_file_mod_zip(path: &Path) {
     let file = std::fs::File::create(path).expect("create zip");
     let mut archive = zip::ZipWriter::new(file);
@@ -2999,6 +3128,51 @@ fn staged_adopt_source(env: &TestEnv, name: &str) -> PathBuf {
         .expect("staged adopt Variant file");
     }
     source
+}
+
+/// The audit pauses after releasing its first ownership snapshot, then a real
+/// producer commits its witness and pauses after its first copied file. The
+/// audit scans that live staging directory and must drop it after rechecking
+/// ownership under a second, short writer fence.
+///
+/// Mutation oracle: removing the second ownership snapshot makes `audit whose
+/// producer began after the snapshot` fail with the live staged directory in
+/// the probe's error.
+#[tokio::test]
+async fn audit_excludes_a_staging_operation_that_begins_during_its_scan() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    drop(core);
+    let source = staged_adopt_source(&env, "audit-overlapping-staged-adopt");
+    let copy_pause = gmm_lib::core::crash_points::ADOPT_DURING_LIBRARY_COPY;
+    let mut producer = probe(&env)
+        .ready_before_operation()
+        .pausing_at(copy_pause)
+        .op([
+            "adopt",
+            "--from",
+            &source.display().to_string(),
+            "--name",
+            "Audit Overlap Stage",
+        ])
+        .spawn();
+    producer.wait_until_ready_before_operation();
+
+    let audit_pause = gmm_lib::core::crash_points::AUDIT_AFTER_OWNERSHIP_SNAPSHOT;
+    let mut auditing = probe(&env).pausing_at(audit_pause).op(["audit"]).spawn();
+    auditing.wait_for_pause(audit_pause);
+
+    producer.resume();
+    producer.wait_for_pause(copy_pause);
+    auditing.resume();
+    auditing
+        .wait_for_outcome()
+        .expect_ok("audit whose producer began after the ownership snapshot");
+
+    producer.resume();
+    producer
+        .wait_for_outcome()
+        .expect_ok("producer after the audit released its fence");
 }
 
 async fn only_staged_directory(core: &Core) -> PathBuf {

@@ -41,6 +41,7 @@ pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryMutation {
+    AuditLibrary,
     FinishInterruptedDeletes,
     ResolveInterruptedStaging,
     RetryReinstallRecovery,
@@ -59,6 +60,7 @@ pub(super) enum LibraryMutation {
 impl LibraryMutation {
     pub(super) const fn function_name(self) -> &'static str {
         match self {
+            Self::AuditLibrary => "audit_library",
             Self::FinishInterruptedDeletes => "finish_interrupted_library_deletes",
             Self::ResolveInterruptedStaging => "resolve_interrupted_staging_at_startup",
             Self::RetryReinstallRecovery => "retry_reinstall_recovery",
@@ -192,7 +194,9 @@ impl Core {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if !matches!(
             mutation,
-            LibraryMutation::FinishInterruptedDeletes | LibraryMutation::ResolveInterruptedStaging
+            LibraryMutation::AuditLibrary
+                | LibraryMutation::FinishInterruptedDeletes
+                | LibraryMutation::ResolveInterruptedStaging
         ) {
             self.ensure_no_active_session_in_library_mutation(&mut transaction)
                 .await?;
