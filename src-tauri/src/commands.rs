@@ -19,7 +19,7 @@ use crate::core::importer::{InstallReport, LatestRelease};
 use crate::core::importer_origin::{ImporterOrigin, OriginStatus};
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{ProxyConfig, ProxyConfigPublic};
-use crate::core::reconcile::ReconcileResult;
+use crate::core::reconcile::{ReconcileResult, StartupReconcileState, StartupReconcileStatus};
 use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
@@ -741,6 +741,15 @@ pub async fn reconcile_junctions(
     core.reconcile_junctions(game, &mods_dir)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Snapshot the best-effort startup reconcile pass. React polls until
+/// `finished` so a fast backend pass cannot race the first render.
+#[tauri::command]
+pub fn get_startup_reconcile_status(
+    state: State<'_, StartupReconcileState>,
+) -> StartupReconcileStatus {
+    state.snapshot()
 }
 
 /// Tauri command — drop and recreate every junction for `game` against

@@ -142,6 +142,23 @@ export interface ReconcileResult {
   quarantined: string[];
 }
 
+export type SurfaceFailureKind = "invalidActiveVariant" | "other";
+
+export interface StartupReconcileFailure {
+  game: GameCode;
+  kind: SurfaceFailureKind;
+  error: string;
+}
+
+export interface StartupReconcileStatus {
+  finished: boolean;
+  failures: StartupReconcileFailure[];
+}
+
+export async function getStartupReconcileStatus(): Promise<StartupReconcileStatus> {
+  return invoke<StartupReconcileStatus>("get_startup_reconcile_status");
+}
+
 interface RawReconcile {
   recreated: string[];
   healthy: string[];
@@ -190,6 +207,7 @@ export interface MoveReport {
   failed_junction_restores: Array<{
     mod_id: string;
     game: GameCode;
+    kind: SurfaceFailureKind;
     error: string;
   }>;
 }
