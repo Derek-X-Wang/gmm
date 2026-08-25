@@ -73,14 +73,28 @@ ignored test in the same file, so the seed data and the assertions
 cannot drift apart:
 
 ```bash
-cd src-tauri
-cargo test --test migrations -- --ignored --exact regenerate_the_migration_corpus
-git add tests/fixtures/migrations
+cargo xtask migration-fixture
+git add src-tauri/tests/fixtures/migrations
 ```
 
-It rewrites every fixture from the checked-in migration SQL, so run it
-only when the corpus is genuinely out of date — and check the diff:
-existing fixtures changing means a shipped migration changed.
+The generator creates only the newest missing fixture. Existing fixtures are
+immutable historical evidence: a normal run fails rather than overwriting one,
+and `SHA256SUMS` pins their exact committed bytes in the migration test suite.
+On pull requests, CI also requires `REGENERATIONS.md` to change when an existing
+checksum is changed or removed, so the ordinary review path cannot accept a
+hurried rewrite without a stated reason. Appending the checksum for a genuinely
+new fixture does not require a regeneration entry. This is not tamper-proof: a
+determined person can edit the fixture, checksum, and record together, and
+review must still judge the explanation. An exceptional repair requires both
+an explicit target and a recorded reason:
+
+```bash
+cargo xtask migration-fixture --regenerate-existing NNN --reason "why the historical artifact is invalid"
+```
+
+That path records the supplied reason in `REGENERATIONS.md`. See
+`tests/fixtures/migrations/PROVENANCE.md` for the verified origin and limits of
+the current corpus.
 
 ## 2. Tauri command IPC contract (`src-tauri/tests/commands_ipc.rs`)
 

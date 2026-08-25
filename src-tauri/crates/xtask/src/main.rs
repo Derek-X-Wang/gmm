@@ -1,12 +1,13 @@
 //! `cargo xtask <subcommand>` — project-internal task runner.
 //!
 //! Subcommands:
+//! - `migration-fixture` — create only the newest missing historical fixture.
 //! - `test-loader` — smoke-test the `gmm-loader` FFI binding against
 //!   `vendor/3dmloader/3dmloader.dll`. Requires Windows.
 
 use std::env;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -15,12 +16,20 @@ fn main() -> ExitCode {
         None => {
             eprintln!("usage: cargo xtask <subcommand>");
             eprintln!("subcommands:");
+            eprintln!("  migration-fixture   create the newest missing migration fixture");
             eprintln!("  test-loader   smoke-test the 3dmloader.dll FFI binding (Windows only)");
             return ExitCode::FAILURE;
         }
     };
 
     match cmd.as_str() {
+        "migration-fixture" => match migration_fixture::run(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(msg) => {
+                eprintln!("migration-fixture: {msg}");
+                ExitCode::FAILURE
+            }
+        },
         "test-loader" => match test_loader::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(msg) => {
@@ -31,6 +40,125 @@ fn main() -> ExitCode {
         other => {
             eprintln!("unknown subcommand: {other}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+mod migration_fixture {
+    use super::{workspace_root, Command};
+    use std::env;
+
+    const REGENERATE_VERSION_ENV: &str = "GMM_REGENERATE_MIGRATION_FIXTURE";
+    const REGENERATION_REASON_ENV: &str = "GMM_MIGRATION_FIXTURE_REASON";
+
+    struct Options {
+        regenerate_version: Option<usize>,
+        reason: Option<String>,
+    }
+
+    fn parse(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
+        let mut regenerate_version = None;
+        let mut reason = None;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--regenerate-existing" => {
+                    let raw = args.next().ok_or_else(|| {
+                        "--regenerate-existing requires a schema version".to_string()
+                    })?;
+                    let version = raw.parse::<usize>().map_err(|_| {
+                        format!(
+                            "--regenerate-existing requires a numeric schema version, got {raw:?}"
+                        )
+                    })?;
+                    if regenerate_version.replace(version).is_some() {
+                        return Err("--regenerate-existing may be supplied only once".to_string());
+                    }
+                }
+                "--reason" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "--reason requires an explanation".to_string())?;
+                    if value.trim().is_empty() || value.contains(['\r', '\n']) {
+                        return Err(
+                            "--reason must be a non-empty, single-line explanation".to_string()
+                        );
+                    }
+                    if reason.replace(value).is_some() {
+                        return Err("--reason may be supplied only once".to_string());
+                    }
+                }
+                other => return Err(format!("unknown migration-fixture option: {other}")),
+            }
+        }
+
+        match (regenerate_version, reason.as_ref()) {
+            (None, Some(_)) => Err("--reason requires --regenerate-existing".to_string()),
+            (Some(_), None) => Err(
+                "regenerating history requires --reason so the exceptional rewrite is recorded"
+                    .to_string(),
+            ),
+            _ => Ok(Options {
+                regenerate_version,
+                reason,
+            }),
+        }
+    }
+
+    pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
+        let options = parse(args)?;
+        let mut command = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()));
+        command.current_dir(workspace_root()).args([
+            "test",
+            "--test",
+            "migrations",
+            "--",
+            "--ignored",
+            "--exact",
+            "regenerate_the_migration_corpus",
+            "--nocapture",
+        ]);
+        if let Some(version) = options.regenerate_version {
+            command.env(REGENERATE_VERSION_ENV, version.to_string());
+        }
+        if let Some(reason) = options.reason {
+            command.env(REGENERATION_REASON_ENV, reason);
+        }
+        let status = command
+            .status()
+            .map_err(|e| format!("start migration fixture generator: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("generator exited with {status}"))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::parse;
+
+        #[test]
+        fn regeneration_requires_a_recorded_reason() {
+            let error = parse(["--regenerate-existing".to_string(), "3".to_string()].into_iter())
+                .err()
+                .expect("missing reason must be rejected");
+            assert!(error.contains("requires --reason"), "{error}");
+        }
+
+        #[test]
+        fn explicit_regeneration_accepts_a_single_line_reason() {
+            let options = parse(
+                [
+                    "--reason".to_string(),
+                    "repair fixture provenance".to_string(),
+                    "--regenerate-existing".to_string(),
+                    "3".to_string(),
+                ]
+                .into_iter(),
+            )
+            .expect("valid explicit regeneration options");
+            assert_eq!(options.regenerate_version, Some(3));
+            assert_eq!(options.reason.as_deref(), Some("repair fixture provenance"));
         }
     }
 }
