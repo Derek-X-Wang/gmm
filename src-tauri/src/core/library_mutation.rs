@@ -278,15 +278,28 @@ impl ReinstallSwapWitness {
         let Some(root) = self.library_path.parent() else {
             return self.corrupt("the recorded live path has no Library root");
         };
-        let expected_stage = root.join(format!("{REINSTALL_STAGING_PREFIX}{}", self.token));
-        let expected_quarantine = root.join(format!(
+        let Some(staged_root) = self.staged_path.parent() else {
+            return self.corrupt("the recorded staging path has no Library root");
+        };
+        let Some(quarantine_root) = self.quarantine_path.parent() else {
+            return self.corrupt("the recorded quarantine path has no Library root");
+        };
+        let expected_stage_name = format!("{REINSTALL_STAGING_PREFIX}{}", self.token);
+        let expected_quarantine_name = format!(
             "{}{}",
             super::library_recovery::DELETE_QUARANTINE_PREFIX,
             self.token
-        ));
+        );
         if self.library_path.file_name().and_then(|name| name.to_str()) != Some(&self.mod_id)
-            || self.staged_path != expected_stage
-            || self.quarantine_path != expected_quarantine
+            || self.staged_path.file_name().and_then(|name| name.to_str())
+                != Some(expected_stage_name.as_str())
+            || self
+                .quarantine_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(expected_quarantine_name.as_str())
+            || !super::same_path(staged_root, root)
+            || !super::same_path(quarantine_root, root)
         {
             return self.corrupt("the recorded swap paths do not match the Mod ID and token");
         }
