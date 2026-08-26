@@ -70,6 +70,13 @@ in which each round fixed the code correctly and then misdescribed the result â€
 promising a retry that would never happen, naming a cleanup path that was not the
 user's. The code being right is half the job.
 
+**Fail closed on filesystem uncertainty.** For destructive filesystem decisions, only
+an explicit `NotFound` proves absence. Permission errors, sharing violations, I/O
+failures, unavailable storage, and every other error mean unknown or failed state;
+propagate them. Do not delete, overwrite, choose a surviving duplicate, discard bytes,
+or report cleanup success under uncertainty. Preserve durable intent and data so
+recovery remains possible.
+
 **State what you could not verify.** "No manual screen-reader session was run." "I could
 not mount a second volume." An honest gap is worth more than a confident summary,
 because the coordinator can act on it.
