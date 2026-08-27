@@ -700,8 +700,15 @@ async fn obstruct_reinstall_recovery(
     env: &TestEnv,
     imported: &gmm_lib::core::Mod,
 ) -> (Ulid, PathBuf, PathBuf, PathBuf) {
+    obstruct_reinstall_recovery_with_token(env, imported, Ulid::new()).await
+}
+
+async fn obstruct_reinstall_recovery_with_token(
+    env: &TestEnv,
+    imported: &gmm_lib::core::Mod,
+    token: Ulid,
+) -> (Ulid, PathBuf, PathBuf, PathBuf) {
     let root = imported.library_path.parent().expect("game Library root");
-    let token = Ulid::new();
     let stage = root.join(format!(".gmm-reinstall-{token}"));
     let held_stage = root.join(format!(".held-reinstall-{token}"));
     let quarantine = root.join(format!(".gmm-delete-{token}"));
@@ -2876,6 +2883,105 @@ async fn quarantined_withdrawal_racing_retry_leaves_enabled_mod_deployed() {
             .join("merged.ini")
             .is_file(),
         "successful recovery left the enabled Mod without its deployed Junction",
+    );
+}
+
+/// Junction withdrawal and retry recovery serialize on the same Library
+/// writer fence. This narrower oracle invokes withdrawal directly, so the
+/// absent-witness repair in `retry_reinstall_recovery` cannot conceal a stale
+/// withdrawal that runs after the competing retry retires the witness.
+///
+/// Mutation oracle: releasing the withdrawal writer fence across its witness
+/// read and Junction removal makes the final-deployment assertion fail.
+#[tokio::test]
+async fn direct_quarantined_withdrawal_cannot_remove_a_recovered_deployment() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("record game install path");
+    let imported = env.seed_mod(&core, "Direct Withdrawal Fence").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy enabled Mod before recovery race");
+    let deployment = env.game_mods.join("Direct Withdrawal Fence");
+    let token = Ulid::new();
+
+    // Construct both real processes before the witness exists so startup
+    // recovery cannot consume the fixture before the controlled operations.
+    let mut withdrawing = probe(&env)
+        .ready_before_operation()
+        .pausing_at(gmm_lib::core::crash_points::WITHDRAW_REINSTALL_AFTER_WITNESS_LOOKUP)
+        .op([
+            "withdraw-quarantined-reinstall-junction",
+            "--token",
+            token.to_string().as_str(),
+            "--link",
+            deployment.to_string_lossy().as_ref(),
+        ])
+        .spawn();
+    withdrawing.wait_until_ready_before_operation();
+    let mut retrying = probe(&env)
+        .ready_before_operation()
+        .pausing_at(gmm_lib::core::crash_points::RETRY_REINSTALL_AFTER_WITNESS_LOOKUP)
+        .op(["retry-reinstall-recovery", "--mod-id", imported.id.as_str()])
+        .spawn();
+    retrying.wait_until_ready_before_operation();
+
+    let (_token, stage, held_stage, _quarantine) =
+        obstruct_reinstall_recovery_with_token(&env, &imported, token).await;
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("open DB to quarantine recovery witness");
+    sqlx::query(
+        "UPDATE reinstall_swaps
+         SET recovery_error = 'fixture recovery obstruction',
+             recovery_attempted_at = '2026-08-27T00:00:00Z',
+             recovery_attempts = 1
+         WHERE token = ?",
+    )
+    .bind(token.to_string())
+    .execute(&pool)
+    .await
+    .expect("quarantine recovery witness");
+    pool.close().await;
+
+    retrying.resume();
+    retrying.wait_for_pause(gmm_lib::core::crash_points::RETRY_REINSTALL_AFTER_WITNESS_LOOKUP);
+    withdrawing.resume();
+    withdrawing
+        .wait_for_pause(gmm_lib::core::crash_points::WITHDRAW_REINSTALL_AFTER_WITNESS_LOOKUP);
+
+    std::fs::remove_dir_all(&stage).expect("remove unproved stage replacement");
+    std::fs::rename(&held_stage, &stage).expect("restore witnessed stage identity");
+    retrying.resume();
+    let first_retry = retrying.wait_for_outcome();
+
+    withdrawing.resume();
+    withdrawing
+        .wait_for_outcome()
+        .expect_ok("direct serialized Junction withdrawal");
+
+    if !first_retry.ok {
+        assert!(
+            first_retry
+                .error
+                .to_lowercase()
+                .contains("database is locked"),
+            "the competing retry must be excluded by the withdrawal writer fence, got: {}",
+            first_retry.error,
+        );
+        core.retry_reinstall_recovery(&imported.id)
+            .await
+            .expect("retry witness recovery after serialized withdrawal");
+    }
+
+    assert!(
+        deployment.join("merged.ini").is_file(),
+        "stale direct withdrawal removed the recovered enabled Mod deployment",
     );
 }
 

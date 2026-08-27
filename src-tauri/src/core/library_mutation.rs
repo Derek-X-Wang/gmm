@@ -1373,6 +1373,11 @@ impl Core {
                     reason: "the enabled Mod has no configured game install path".to_string(),
                 });
             }
+            // A disabled Mod with no configured install path has no persisted
+            // deployment namespace to inspect: `install_path` is GMM's only
+            // durable route to this Mod's Junction. With no witness and no
+            // expected deployment location, the disabled intent leaves no
+            // recovery work to prove or perform.
             return Ok(ReinstallRecoveryOutcome::AlreadyRecovered);
         };
         let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
@@ -1538,7 +1543,10 @@ impl Core {
         self.reinstall_recovery_for_token(token).await
     }
 
-    pub(super) async fn withdraw_quarantined_reinstall_junction(
+    /// Public only for the test-only concurrency probe, which must exercise
+    /// this fence without passing through caller-level recovery repair.
+    #[doc(hidden)]
+    pub async fn withdraw_quarantined_reinstall_junction(
         &self,
         token: &str,
         link: Option<&Path>,

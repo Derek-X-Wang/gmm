@@ -253,6 +253,15 @@ async fn run(args: &Args) -> Result<(), String> {
                 .map_err(|e| e.to_string())
         }
 
+        "withdraw-quarantined-reinstall-junction" => {
+            let token = args.req("--token")?;
+            let link = PathBuf::from(args.req("--link")?);
+            core.withdraw_quarantined_reinstall_junction(&token, Some(&link))
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
         "audit" => {
             let report = core
                 .audit_library(args.game()?)
