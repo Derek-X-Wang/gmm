@@ -294,6 +294,13 @@ pub enum Error {
     StagingWitnessChanged { path: PathBuf },
 
     #[error(
+        "GMM found corrupt staged Library state for operation {id}: {reason}. \
+         GMM stopped the operation because database corruption is not evidence that Library \
+         bytes are unowned."
+    )]
+    StagingWitnessCorrupt { id: String, reason: String },
+
+    #[error(
         "{prefix} {reason}. {guidance}",
         prefix = DUPLICATE_RESOLUTION_CHANGED_PREFIX,
         guidance = DUPLICATE_RESOLUTION_REVIEW_AGAIN
@@ -354,6 +361,12 @@ pub enum Error {
          Let the reinstall finish, then try the Library move again. No Library bytes were moved."
     )]
     LibraryRelocationBlockedByReinstall { mod_id: String },
+
+    #[error(
+        "GMM cannot relocate this Library while a folder or ZIP import is still running. \
+         Let the import finish, then try the Library move again. No Library bytes were moved."
+    )]
+    LibraryRelocationBlockedByStaging,
 
     #[error(
         "GMM cannot relocate this Library while verified cleanup is pending. \

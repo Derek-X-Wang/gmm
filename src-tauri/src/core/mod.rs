@@ -50,7 +50,9 @@ pub use library_audit::{
     LibraryAuditReport, ReviewedDuplicateMod, UnreferencedLibraryDir,
 };
 #[doc(hidden)]
-pub use library_mutation::REINSTALL_SWAP_COLUMNS;
+pub use library_mutation::{
+    DURABLE_WITNESS_TABLES, REINSTALL_SWAP_COLUMNS, STAGED_LIBRARY_OPERATION_COLUMNS,
+};
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
 pub use session::{InterruptedSessionLaunch, SessionInfo, SessionLaunchClaim};
@@ -469,23 +471,32 @@ impl Core {
         }
 
         // A same-volume rename preserves the filesystem identities recorded by
-        // an in-flight reinstall witness, but the cross-volume copy fallback
-        // does not. Refuse every relocation that would carry such a witness.
+        // an in-flight reinstall or staged-import witness, but the cross-volume
+        // copy fallback does not. Refuse every relocation that would carry an
+        // active witness. Rebasing cannot make the copy fallback safe because
+        // the producer still holds the identity of the original directory.
         // `path_within` is required because the Mod row can retain an NTFS
         // alias or differently-cased drive spelling for the same root.
         // This check is under the same writer fence as witness creation, so it
         // happens before any Junction or Library byte is touched.
-        let active_reinstalls = sqlx::query("SELECT * FROM reinstall_swaps")
-            .fetch_all(&mut *fence.transaction)
-            .await?;
-        for reinstall in active_reinstalls {
-            let witness = library_mutation::ReinstallSwapWitness::from_row(&reinstall)?;
+        let active_reinstalls =
+            library_mutation::load_reinstall_swap_witnesses(&mut fence.transaction).await?;
+        for witness in active_reinstalls {
             let witness = self.rebase_reinstall_swap_witness(witness, fence).await?;
             if path_within(witness.library_path(), previous) {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
                     mod_id: witness.mod_id().to_string(),
                 });
             }
+        }
+        let active_staging =
+            library_mutation::load_staged_library_operation_witnesses(&mut fence.transaction)
+                .await?;
+        if active_staging
+            .iter()
+            .any(|witness| witness.is_active() && path_within(witness.staged_path(), previous))
+        {
+            return Err(Error::LibraryRelocationBlockedByStaging);
         }
 
         // Snapshot mods that need their library_path rewritten. For the
@@ -1003,28 +1014,26 @@ impl Core {
                 });
             }
         };
-        let staged_identity = staged_directory.identity().durable_key();
+        let staged_identity = staged_directory.identity().clone();
+        let staged_identity_key = staged_identity.durable_key();
         let quarantine_path = root.join(format!(
             "{}{}",
             library_recovery::DELETE_QUARANTINE_PREFIX,
             token
         ));
-        let witness_insert = sqlx::query(
-            "INSERT INTO reinstall_swaps (
-                token, mod_id, game_code, library_path, staged_path,
-                quarantine_path, old_identity, staged_identity, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        let witness_insert = library_mutation::insert_reinstall_swap_witness(
+            &mut preparation.transaction,
+            library_mutation::NewReinstallSwapWitness {
+                token,
+                mod_id,
+                game,
+                library_path: &library_path,
+                staged_path: &staged_path,
+                quarantine_path: &quarantine_path,
+                old_identity: old_directory.identity(),
+                staged_identity: &staged_identity,
+            },
         )
-        .bind(token.to_string())
-        .bind(mod_id)
-        .bind(game.as_str())
-        .bind(library_path.to_string_lossy().as_ref())
-        .bind(staged_path.to_string_lossy().as_ref())
-        .bind(quarantine_path.to_string_lossy().as_ref())
-        .bind(old_directory.identity().durable_key())
-        .bind(&staged_identity)
-        .bind(Utc::now().to_rfc3339())
-        .execute(&mut *preparation.transaction)
         .await;
         if let Err(reinstall) = witness_insert {
             drop(root_directory);
@@ -1032,9 +1041,11 @@ impl Core {
             drop(old_directory);
             drop(staged_directory);
             let _ = preparation.transaction.rollback().await;
-            return match remove_reinstall_stage_if_identity_matches(&staged_path, &staged_identity)
-            {
-                Ok(()) => Err(reinstall.into()),
+            return match remove_reinstall_stage_if_identity_matches(
+                &staged_path,
+                &staged_identity_key,
+            ) {
+                Ok(()) => Err(reinstall),
                 Err(rollback) => Err(Error::ReinstallRollbackFailed {
                     reinstall: reinstall.to_string(),
                     rollback: rollback.to_string(),
@@ -1046,23 +1057,22 @@ impl Core {
         drop(old_directory);
         drop(staged_directory);
         if let Err(reinstall) = preparation.commit().await {
-            let witness_exists = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM reinstall_swaps WHERE token = ?",
-            )
-            .bind(token.to_string())
-            .fetch_one(&self.pool)
+            let witness_exists = async {
+                let mut connection = self.pool.acquire().await?;
+                Ok::<bool, Error>(
+                    library_mutation::load_reinstall_swap_witnesses(&mut connection)
+                        .await?
+                        .into_iter()
+                        .any(|witness| witness.token() == token),
+                )
+            }
             .await;
             let rollback = match witness_exists {
-                Ok(1) => self.rollback_reinstall_swap(token).await,
-                Ok(0) => remove_reinstall_stage_if_identity_matches(&staged_path, &staged_identity),
-                // `token` is the table's primary key, so any cardinality other
-                // than zero or one is impossible under the ruled schema. It is
-                // database corruption, not filesystem uncertainty.
-                Ok(count) => Err(Error::ReinstallWitnessCorrupt {
-                    mod_id: mod_id.to_string(),
-                    reason: format!("the swap token matched {count} recovery witnesses"),
-                }),
-                Err(error) => Err(error.into()),
+                Ok(true) => self.rollback_reinstall_swap(token).await,
+                Ok(false) => {
+                    remove_reinstall_stage_if_identity_matches(&staged_path, &staged_identity_key)
+                }
+                Err(error) => Err(error),
             };
             return match rollback {
                 Ok(()) => Err(reinstall),
@@ -1232,10 +1242,7 @@ impl Core {
             .bind(mod_id)
             .execute(&mut *commit.transaction)
             .await?;
-            sqlx::query("DELETE FROM reinstall_swaps WHERE token = ?")
-                .bind(token.to_string())
-                .execute(&mut *commit.transaction)
-                .await?;
+            library_mutation::delete_reinstall_swap_witness(&mut commit.transaction, token).await?;
             commit.commit().await?;
             Ok(quarantined)
         }
@@ -2959,13 +2966,16 @@ impl Core {
     /// extracts `[TextureOverride*]` / `[ResourceOverride*]` hash
     /// bindings, and reports every hash bound by two or more Mods.
     pub async fn detect_conflicts(&self, game: GameCode) -> Result<conflicts::ConflictReport> {
+        let quarantined: std::collections::HashSet<_> = self
+            .reinstall_swap_witnesses()
+            .await?
+            .into_iter()
+            .filter(|witness| witness.is_quarantined())
+            .map(|witness| witness.mod_id().to_string())
+            .collect();
         let rows = sqlx::query(
             "SELECT id, library_path, active_variant_id, enabled FROM mods
-             WHERE game_code = ?
-               AND NOT EXISTS (
-                   SELECT 1 FROM reinstall_swaps rs
-                   WHERE rs.mod_id = mods.id AND rs.recovery_error IS NOT NULL
-               )",
+             WHERE game_code = ?",
         )
         .bind(game.as_str())
         .fetch_all(&self.pool)
@@ -2978,6 +2988,9 @@ impl Core {
                 continue;
             }
             let id: String = row.try_get("id")?;
+            if quarantined.contains(&id) {
+                continue;
+            }
             let library_path: String = row.try_get("library_path")?;
             let library_path = PathBuf::from(library_path);
             let effective = self
@@ -3119,13 +3132,16 @@ impl Core {
         game: GameCode,
         game_mods_dir: &Path,
     ) -> Result<reconcile::ReconcileResult> {
+        let quarantined: std::collections::HashMap<_, _> = self
+            .reinstall_swap_witnesses()
+            .await?
+            .into_iter()
+            .filter(|witness| witness.is_quarantined())
+            .map(|witness| (witness.mod_id().to_string(), witness.token().to_string()))
+            .collect();
         let rows = sqlx::query(
-            "SELECT m.id, m.junction_dir_name, m.library_path, m.enabled,
-                    rs.token AS reinstall_token, rs.recovery_error
-             FROM mods m
-             LEFT JOIN reinstall_swaps rs
-               ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
-             WHERE m.game_code = ?",
+            "SELECT id, junction_dir_name, library_path, enabled
+             FROM mods WHERE game_code = ?",
         )
         .bind(game.as_str())
         .fetch_all(&self.pool)
@@ -3147,10 +3163,10 @@ impl Core {
             let library_path: String = row.try_get("library_path")?;
             let enabled: i64 = row.try_get("enabled")?;
 
-            if let Some(token) = row.try_get::<Option<String>, _>("reinstall_token")? {
+            if let Some(token) = quarantined.get(&id) {
                 let link = game_mods_dir.join(&junction_dir_name);
                 if self
-                    .withdraw_quarantined_reinstall_junction(&token, Some(&link))
+                    .withdraw_quarantined_reinstall_junction(token, Some(&link))
                     .await?
                     .is_some()
                 {
@@ -3266,13 +3282,16 @@ impl Core {
         game: GameCode,
         game_mods_dir: &Path,
     ) -> Result<reconcile::ReconcileResult> {
+        let quarantined: std::collections::HashMap<_, _> = self
+            .reinstall_swap_witnesses()
+            .await?
+            .into_iter()
+            .filter(|witness| witness.is_quarantined())
+            .map(|witness| (witness.mod_id().to_string(), witness.token().to_string()))
+            .collect();
         let rows = sqlx::query(
-            "SELECT m.id, m.junction_dir_name, m.library_path, m.enabled,
-                    rs.token AS reinstall_token, rs.recovery_error
-             FROM mods m
-             LEFT JOIN reinstall_swaps rs
-               ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
-             WHERE m.game_code = ?",
+            "SELECT id, junction_dir_name, library_path, enabled
+             FROM mods WHERE game_code = ?",
         )
         .bind(game.as_str())
         .fetch_all(&self.pool)
@@ -3292,10 +3311,10 @@ impl Core {
             let id: String = row.try_get("id")?;
             let junction_dir_name: String = row.try_get("junction_dir_name")?;
             let library_path: String = row.try_get("library_path")?;
-            if let Some(token) = row.try_get::<Option<String>, _>("reinstall_token")? {
+            if let Some(token) = quarantined.get(&id) {
                 let link = game_mods_dir.join(&junction_dir_name);
                 if self
-                    .withdraw_quarantined_reinstall_junction(&token, Some(&link))
+                    .withdraw_quarantined_reinstall_junction(token, Some(&link))
                     .await?
                     .is_some()
                 {
@@ -3764,15 +3783,19 @@ impl Core {
 
     /// List every Mod for a given game, ordered by creation time ascending.
     pub async fn list_mods(&self, game: GameCode) -> Result<Vec<Mod>> {
+        let mut recoveries: std::collections::HashMap<_, _> = self
+            .reinstall_swap_witnesses()
+            .await?
+            .into_iter()
+            .filter_map(|witness| {
+                let mod_id = witness.mod_id().to_string();
+                witness.recovery().map(|recovery| (mod_id, recovery))
+            })
+            .collect();
         let rows = sqlx::query(
             "SELECT m.id, m.game_code, m.name, m.source, m.library_path, m.enabled,
-                    m.gamebanana_id, m.source_url, m.author, m.version, m.screenshot_url,
-                    rs.recovery_error, rs.recovery_attempted_at, rs.recovery_attempts,
-                    rs.staged_path, rs.quarantine_path, rs.junction_withdrawn,
-                    rs.junction_withdrawal_error
+                    m.gamebanana_id, m.source_url, m.author, m.version, m.screenshot_url
              FROM mods m
-             LEFT JOIN reinstall_swaps rs
-               ON rs.mod_id = m.id AND rs.recovery_error IS NOT NULL
              WHERE m.game_code = ?
              ORDER BY m.created_at ASC",
         )
@@ -3788,23 +3811,7 @@ impl Core {
                 let source: String = row.try_get("source")?;
                 let library_path: String = row.try_get("library_path")?;
                 let enabled: i64 = row.try_get("enabled")?;
-                let recovery_error: Option<String> = row.try_get("recovery_error")?;
-                let reinstall_recovery = recovery_error
-                    .map(|reason| {
-                        Ok::<ReinstallRecovery, Error>(ReinstallRecovery {
-                            reason,
-                            attempted_at: row.try_get("recovery_attempted_at")?,
-                            attempts: row.try_get::<i64, _>("recovery_attempts")? as u32,
-                            library_path: PathBuf::from(library_path.clone()),
-                            staged_path: PathBuf::from(row.try_get::<String, _>("staged_path")?),
-                            quarantine_path: PathBuf::from(
-                                row.try_get::<String, _>("quarantine_path")?,
-                            ),
-                            junction_withdrawn: row.try_get::<i64, _>("junction_withdrawn")? != 0,
-                            junction_withdrawal_error: row.try_get("junction_withdrawal_error")?,
-                        })
-                    })
-                    .transpose()?;
+                let reinstall_recovery = recoveries.remove(&id);
 
                 Ok(Mod {
                     id,

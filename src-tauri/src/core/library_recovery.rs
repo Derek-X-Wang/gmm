@@ -198,7 +198,7 @@ impl Core {
             );
         }
         let ownership =
-            super::library_ownership::LibraryOwnershipSnapshot::load(&mut *fence.transaction)
+            super::library_ownership::LibraryOwnershipSnapshot::load(&mut fence.transaction)
                 .await?;
         let removed =
             tokio::task::spawn_blocking(move || purge_delete_quarantines(&roots, &ownership))
@@ -224,8 +224,9 @@ impl Core {
         game: GameCode,
         path: &Path,
     ) -> Result<PathBuf> {
+        let mut connection = self.pool.acquire().await?;
         Ok(self
-            .validate_unreferenced_library_dir(game, path, &self.pool)
+            .validate_unreferenced_library_dir(game, path, &mut connection)
             .await?
             .path()
             .to_path_buf())
@@ -603,21 +604,18 @@ impl Core {
     ) -> Result<GuardedLibraryMutation> {
         let mut fence = self.begin_library_mutation(mutation).await?;
         let directory = self
-            .validate_unreferenced_library_dir(game, path, &mut *fence.transaction)
+            .validate_unreferenced_library_dir(game, path, &mut fence.transaction)
             .await?;
         Ok(GuardedLibraryMutation { fence, directory })
     }
 
     /// The shared precondition for every action in this module.
-    async fn validate_unreferenced_library_dir<'e, E>(
+    async fn validate_unreferenced_library_dir(
         &self,
         game: GameCode,
         path: &Path,
-        executor: E,
-    ) -> Result<IdentifiedDirectory>
-    where
-        E: Executor<'e, Database = Sqlite>,
-    {
+        connection: &mut sqlx::SqliteConnection,
+    ) -> Result<IdentifiedDirectory> {
         let root = self.resolved_library_root_for(game).await?;
         let path =
             lexically_normalized(path).ok_or_else(|| Error::NotAnUnreferencedLibraryDir {
@@ -676,7 +674,8 @@ impl Core {
             source,
         })?;
 
-        let ownership = super::library_ownership::LibraryOwnershipSnapshot::load(executor).await?;
+        let ownership =
+            super::library_ownership::LibraryOwnershipSnapshot::load(connection).await?;
         match ownership.disposition_of(&directory) {
             super::library_ownership::LibraryDirectoryDisposition::Owned(owner) => {
                 let reason = match owner {

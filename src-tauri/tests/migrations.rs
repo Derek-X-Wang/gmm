@@ -48,7 +48,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use gmm_lib::core::settings::keys;
-use gmm_lib::core::{Core, GameCode, Source, REINSTALL_SWAP_COLUMNS};
+use gmm_lib::core::{
+    Core, GameCode, Source, REINSTALL_SWAP_COLUMNS, STAGED_LIBRARY_OPERATION_COLUMNS,
+};
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Row, SqlitePool};
@@ -455,18 +457,7 @@ async fn reinstall_witness_migrations_enforce_the_recovery_contract() {
         .map(|row| row.try_get("name").expect("column name"))
         .collect();
     assert_eq!(
-        column_names,
-        [
-            "id",
-            "game_code",
-            "operation",
-            "staged_path",
-            "staged_identity",
-            "created_at",
-            "recovery_error",
-            "recovery_attempted_at",
-            "recovery_attempts",
-        ],
+        column_names, STAGED_LIBRARY_OPERATION_COLUMNS,
         "the staging migration must create the complete durable witness",
     );
     let foreign_keys = sqlx::query("PRAGMA foreign_key_list(staged_library_operations)")

@@ -21,8 +21,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::Utc;
-use sqlx::{Column, Executor, Row, Sqlite};
+use chrono::{DateTime, FixedOffset, Utc};
+use sqlx::{Column, Row, Sqlite, SqliteConnection};
 use ulid::Ulid;
 
 use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
@@ -118,62 +118,133 @@ pub(super) struct ReinstallSwapWitness {
     quarantine_path: PathBuf,
     old_identity: DirectoryIdentity,
     staged_identity: DirectoryIdentity,
+    created_at: DateTime<FixedOffset>,
+    recovery_error: Option<String>,
+    recovery_attempted_at: Option<String>,
+    recovery_attempts: u32,
+    junction_withdrawn: bool,
+    junction_withdrawal_error: Option<String>,
 }
 
-/// Define the raw witness once, deriving both its row decoder and the ordered
-/// SQLite column registry from the field identifiers.
+pub(super) struct NewReinstallSwapWitness<'a> {
+    pub(super) token: Ulid,
+    pub(super) mod_id: &'a str,
+    pub(super) game: GameCode,
+    pub(super) library_path: &'a Path,
+    pub(super) staged_path: &'a Path,
+    pub(super) quarantine_path: &'a Path,
+    pub(super) old_identity: &'a DirectoryIdentity,
+    pub(super) staged_identity: &'a DirectoryIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagedLibraryOperation {
+    AdoptFolder,
+    ImportZip,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct StagedLibraryOperationWitness {
+    id: Ulid,
+    staged_path: PathBuf,
+    staged_identity: DirectoryIdentity,
+    created_at: DateTime<FixedOffset>,
+    recovery_error: Option<String>,
+}
+
+/// Declare every durable witness table once, deriving each raw row decoder,
+/// its ordered column registry, and the table registry used by the structural
+/// ownership test.
 ///
 /// The exhaustive destructure in `validate` is deliberately outside the macro:
-/// adding a field here therefore changes the accepted schema and the raw type
-/// together, but still cannot compile until that field receives a validation
-/// rule.
-macro_rules! define_unvalidated_reinstall_swap_witness {
-    ($($field:ident: $field_type:ty),+ $(,)?) => {
-        /// Ordered `reinstall_swaps` columns accepted at the trust boundary.
+/// adding a field changes the accepted schema and raw type together, but still
+/// cannot compile until the owning module gives that field a validation rule.
+macro_rules! define_unvalidated_witness_tables {
+    ($(
+        table $table_const:ident = $table_name:literal;
+        columns $columns:ident;
+        raw $raw:ident;
+        schema_error |$raw_value:ident, $actual_columns:ident| $schema_error:expr;
+        fields { $($field:ident: $field_type:ty),+ $(,)? }
+    )+) => {
+        /// Durable witness tables whose SQL access belongs to this module.
         #[doc(hidden)]
-        pub const REINSTALL_SWAP_COLUMNS: &[&str] = &[$(stringify!($field)),+];
+        pub const DURABLE_WITNESS_TABLES: &[&str] = &[$($table_name),+];
 
-        /// The database representation is deliberately separate from the
-        /// witness recovery is allowed to trust.
-        struct UnvalidatedReinstallSwapWitness {
-            $($field: $field_type),+
-        }
+        $(
+            const $table_const: &str = $table_name;
 
-        impl UnvalidatedReinstallSwapWitness {
-            fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
-                let mod_id: String = row.try_get(stringify!(mod_id))?;
-                let columns: Vec<_> = row.columns().iter().map(Column::name).collect();
-                if columns.as_slice() != REINSTALL_SWAP_COLUMNS {
-                    return Err(Error::ReinstallWitnessCorrupt {
-                        mod_id,
-                        reason: format!(
-                            "the reinstall_swaps schema columns changed from the ruled set: {columns:?}"
-                        ),
-                    });
-                }
-                Ok(Self {
-                    $($field: row.try_get(stringify!($field))?),+
-                })
+            #[doc(hidden)]
+            pub const $columns: &[&str] = &[$(stringify!($field)),+];
+
+            struct $raw {
+                $($field: $field_type),+
             }
-        }
+
+            impl $raw {
+                fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self> {
+                    let $raw_value = Self {
+                        $($field: row.try_get(stringify!($field))?),+
+                    };
+                    let $actual_columns: Vec<_> =
+                        row.columns().iter().map(Column::name).collect();
+                    if $actual_columns.as_slice() != $columns {
+                        return Err($schema_error);
+                    }
+                    Ok($raw_value)
+                }
+            }
+        )+
     };
 }
 
-define_unvalidated_reinstall_swap_witness! {
-    token: String,
-    mod_id: String,
-    game_code: String,
-    library_path: String,
-    staged_path: String,
-    quarantine_path: String,
-    old_identity: String,
-    staged_identity: String,
-    created_at: String,
-    recovery_error: Option<String>,
-    recovery_attempted_at: Option<String>,
-    recovery_attempts: i64,
-    junction_withdrawn: i64,
-    junction_withdrawal_error: Option<String>,
+define_unvalidated_witness_tables! {
+    table REINSTALL_SWAPS_TABLE = "reinstall_swaps";
+    columns REINSTALL_SWAP_COLUMNS;
+    raw UnvalidatedReinstallSwapWitness;
+    schema_error |raw, columns| Error::ReinstallWitnessCorrupt {
+        mod_id: raw.mod_id.clone(),
+        reason: format!(
+            "the reinstall_swaps schema columns changed from the ruled set: {columns:?}"
+        ),
+    };
+    fields {
+        token: String,
+        mod_id: String,
+        game_code: String,
+        library_path: String,
+        staged_path: String,
+        quarantine_path: String,
+        old_identity: String,
+        staged_identity: String,
+        created_at: String,
+        recovery_error: Option<String>,
+        recovery_attempted_at: Option<String>,
+        recovery_attempts: i64,
+        junction_withdrawn: i64,
+        junction_withdrawal_error: Option<String>,
+    }
+
+    table STAGED_LIBRARY_OPERATIONS_TABLE = "staged_library_operations";
+    columns STAGED_LIBRARY_OPERATION_COLUMNS;
+    raw UnvalidatedStagedLibraryOperationWitness;
+    schema_error |raw, columns| Error::StagingWitnessCorrupt {
+        id: raw.id.clone(),
+        reason: format!(
+            "the staged_library_operations schema columns changed from the ruled set: {columns:?}"
+        ),
+    };
+    fields {
+        id: String,
+        game_code: String,
+        operation: String,
+        staged_path: String,
+        staged_identity: String,
+        created_at: String,
+        recovery_error: Option<String>,
+        recovery_attempted_at: Option<String>,
+        recovery_attempts: i64,
+    }
 }
 
 impl UnvalidatedReinstallSwapWitness {
@@ -187,12 +258,12 @@ impl UnvalidatedReinstallSwapWitness {
             quarantine_path,
             old_identity,
             staged_identity,
-            created_at: _created_at,
-            recovery_error: _recovery_error,
-            recovery_attempted_at: _recovery_attempted_at,
-            recovery_attempts: _recovery_attempts,
-            junction_withdrawn: _junction_withdrawn,
-            junction_withdrawal_error: _junction_withdrawal_error,
+            created_at,
+            recovery_error,
+            recovery_attempted_at,
+            recovery_attempts,
+            junction_withdrawn,
+            junction_withdrawal_error,
         } = self;
         let corrupt = |reason| Error::ReinstallWitnessCorrupt {
             mod_id: mod_id.clone(),
@@ -207,11 +278,10 @@ impl UnvalidatedReinstallSwapWitness {
                 "the recorded value {game_code:?} is an invalid game code"
             ))
         })?;
-        // These six fields order recovery and describe prior recovery attempts;
-        // they are not filesystem identity evidence. Their rule at this trust
-        // boundary is deliberate type decoding above, followed by exclusion
-        // from the trusted witness. Dedicated recovery-state loaders consume
-        // them where they affect user-visible retry and withdrawal status.
+        // Every durable field is decoded here before this row becomes trusted.
+        // Recovery metadata is retained because it affects user-visible retry
+        // and withdrawal status even though it is not filesystem identity
+        // evidence.
         let old_identity = DirectoryIdentity::from_durable_key(&old_identity).ok_or_else(|| {
             corrupt(format!(
                 "the old directory identity {old_identity:?} is not a canonical durable identity"
@@ -222,6 +292,30 @@ impl UnvalidatedReinstallSwapWitness {
                 "the staged directory identity {staged_identity:?} is not a canonical durable identity"
             ))
         })?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at).map_err(|_| {
+            corrupt(format!(
+                "the created-at value {created_at:?} is not an RFC 3339 timestamp"
+            ))
+        })?;
+        let recovery_attempts = u32::try_from(recovery_attempts).map_err(|_| {
+            corrupt(format!(
+                "the recovery-attempt count {recovery_attempts} is outside the supported range"
+            ))
+        })?;
+        let junction_withdrawn = match junction_withdrawn {
+            0 => false,
+            1 => true,
+            value => {
+                return Err(corrupt(format!(
+                    "the junction-withdrawn flag {value} is not zero or one"
+                )))
+            }
+        };
+        if recovery_error.is_some() && recovery_attempted_at.is_none() {
+            return Err(corrupt(
+                "a recorded recovery error has no recovery-attempt timestamp".to_string(),
+            ));
+        }
         let witness = ReinstallSwapWitness {
             token,
             mod_id,
@@ -231,6 +325,12 @@ impl UnvalidatedReinstallSwapWitness {
             quarantine_path: PathBuf::from(quarantine_path),
             old_identity,
             staged_identity,
+            created_at,
+            recovery_error,
+            recovery_attempted_at,
+            recovery_attempts,
+            junction_withdrawn,
+            junction_withdrawal_error,
         };
         witness.validate_paths()?;
         Ok(witness)
@@ -260,6 +360,44 @@ impl ReinstallSwapWitness {
 
     pub(super) fn staged_identity(&self) -> &DirectoryIdentity {
         &self.staged_identity
+    }
+
+    pub(super) fn quarantine_path(&self) -> &Path {
+        &self.quarantine_path
+    }
+
+    pub(super) fn token(&self) -> Ulid {
+        self.token
+    }
+
+    fn created_at(&self) -> DateTime<FixedOffset> {
+        self.created_at
+    }
+
+    pub(super) fn is_quarantined(&self) -> bool {
+        self.recovery_error.is_some()
+    }
+
+    fn junction_withdrawn(&self) -> bool {
+        self.junction_withdrawn
+    }
+
+    pub(super) fn recovery(&self) -> Option<ReinstallRecovery> {
+        self.recovery_error
+            .as_ref()
+            .map(|reason| ReinstallRecovery {
+                reason: reason.clone(),
+                attempted_at: self
+                    .recovery_attempted_at
+                    .clone()
+                    .expect("validated recovery errors have an attempt timestamp"),
+                attempts: self.recovery_attempts,
+                library_path: self.library_path.clone(),
+                staged_path: self.staged_path.clone(),
+                quarantine_path: self.quarantine_path.clone(),
+                junction_withdrawn: self.junction_withdrawn,
+                junction_withdrawal_error: self.junction_withdrawal_error.clone(),
+            })
     }
 
     fn validate_paths(&self) -> Result<()> {
@@ -309,6 +447,184 @@ impl ReinstallSwapWitness {
     }
 }
 
+impl UnvalidatedStagedLibraryOperationWitness {
+    fn validate(self) -> Result<StagedLibraryOperationWitness> {
+        let Self {
+            id,
+            game_code,
+            operation,
+            staged_path,
+            staged_identity,
+            created_at,
+            recovery_error,
+            recovery_attempted_at,
+            recovery_attempts,
+        } = self;
+        let corrupt = |reason| Error::StagingWitnessCorrupt {
+            id: id.clone(),
+            reason,
+        };
+        let parsed_id = Ulid::from_string(&id)
+            .map_err(|_| corrupt(format!("the operation ID {id:?} is not a ULID")))?;
+        let _game = GameCode::from_str(&game_code).map_err(|_| {
+            corrupt(format!(
+                "the recorded value {game_code:?} is an invalid game code"
+            ))
+        })?;
+        let _operation = match operation.as_str() {
+            "adopt" => StagedLibraryOperation::AdoptFolder,
+            "import_zip" => StagedLibraryOperation::ImportZip,
+            _ => {
+                return Err(corrupt(format!(
+                    "the operation value {operation:?} is not supported"
+                )))
+            }
+        };
+        let staged_path = PathBuf::from(staged_path);
+        if staged_path.file_name().and_then(|name| name.to_str()) != Some(id.as_str()) {
+            return Err(corrupt(
+                "the staged path is not named by the operation ID".to_string(),
+            ));
+        }
+        let staged_identity =
+            DirectoryIdentity::from_durable_key(&staged_identity).ok_or_else(|| {
+                corrupt(format!(
+                    "the staged directory identity {staged_identity:?} is not a canonical durable identity"
+                ))
+            })?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at).map_err(|_| {
+            corrupt(format!(
+                "the created-at value {created_at:?} is not an RFC 3339 timestamp"
+            ))
+        })?;
+        let _recovery_attempts = u32::try_from(recovery_attempts).map_err(|_| {
+            corrupt(format!(
+                "the recovery-attempt count {recovery_attempts} is outside the supported range"
+            ))
+        })?;
+        if recovery_error.is_some() && recovery_attempted_at.is_none() {
+            return Err(corrupt(
+                "a recorded recovery error has no recovery-attempt timestamp".to_string(),
+            ));
+        }
+        Ok(StagedLibraryOperationWitness {
+            id: parsed_id,
+            staged_path,
+            staged_identity,
+            created_at,
+            recovery_error,
+        })
+    }
+}
+
+impl StagedLibraryOperationWitness {
+    pub(super) fn id(&self) -> String {
+        self.id.to_string()
+    }
+
+    pub(super) fn staged_path(&self) -> &Path {
+        &self.staged_path
+    }
+
+    pub(super) fn staged_identity(&self) -> &DirectoryIdentity {
+        &self.staged_identity
+    }
+
+    pub(super) fn is_active(&self) -> bool {
+        self.recovery_error.is_none()
+    }
+
+    fn created_at(&self) -> DateTime<FixedOffset> {
+        self.created_at
+    }
+}
+
+pub(super) async fn load_reinstall_swap_witnesses(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<ReinstallSwapWitness>> {
+    let query = format!("SELECT * FROM {REINSTALL_SWAPS_TABLE}");
+    let witnesses: Vec<_> = sqlx::query(&query)
+        .persistent(false)
+        .fetch_all(connection)
+        .await?
+        .iter()
+        .map(ReinstallSwapWitness::from_row)
+        .collect::<Result<_>>()?;
+    let mut tokens = HashMap::new();
+    let mut mod_ids = HashMap::new();
+    for witness in &witnesses {
+        if let Some(first_mod_id) = tokens.insert(witness.token(), witness.mod_id().to_string()) {
+            return Err(Error::ReinstallWitnessCorrupt {
+                mod_id: witness.mod_id().to_string(),
+                reason: format!(
+                    "the swap token {} appears more than once, for Mods {first_mod_id} and {}",
+                    witness.token(),
+                    witness.mod_id(),
+                ),
+            });
+        }
+        if let Some(first_token) = mod_ids.insert(witness.mod_id().to_string(), witness.token()) {
+            return Err(Error::ReinstallWitnessCorrupt {
+                mod_id: witness.mod_id().to_string(),
+                reason: format!(
+                    "the Mod ID {} has more than one reinstall witness, with tokens {first_token} and {}",
+                    witness.mod_id(),
+                    witness.token(),
+                ),
+            });
+        }
+    }
+    Ok(witnesses)
+}
+
+pub(super) async fn load_staged_library_operation_witnesses(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<StagedLibraryOperationWitness>> {
+    let query = format!("SELECT * FROM {STAGED_LIBRARY_OPERATIONS_TABLE}");
+    sqlx::query(&query)
+        .persistent(false)
+        .fetch_all(connection)
+        .await?
+        .iter()
+        .map(|row| UnvalidatedStagedLibraryOperationWitness::from_row(row)?.validate())
+        .collect()
+}
+
+pub(super) async fn insert_reinstall_swap_witness(
+    connection: &mut SqliteConnection,
+    witness: NewReinstallSwapWitness<'_>,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(witness.token.to_string())
+    .bind(witness.mod_id)
+    .bind(witness.game.as_str())
+    .bind(witness.library_path.to_string_lossy().as_ref())
+    .bind(witness.staged_path.to_string_lossy().as_ref())
+    .bind(witness.quarantine_path.to_string_lossy().as_ref())
+    .bind(witness.old_identity.durable_key())
+    .bind(witness.staged_identity.durable_key())
+    .bind(Utc::now().to_rfc3339())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn delete_reinstall_swap_witness(
+    connection: &mut SqliteConnection,
+    token: Ulid,
+) -> Result<()> {
+    sqlx::query("DELETE FROM reinstall_swaps WHERE token = ?")
+        .bind(token.to_string())
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
 impl StagedLibraryDirectory {
     pub(super) fn path(&self) -> &Path {
         self.directory.path()
@@ -320,6 +636,11 @@ impl StagedLibraryDirectory {
 }
 
 impl Core {
+    pub(super) async fn reinstall_swap_witnesses(&self) -> Result<Vec<ReinstallSwapWitness>> {
+        let mut connection = self.pool.acquire().await?;
+        load_reinstall_swap_witnesses(&mut connection).await
+    }
+
     pub(super) async fn begin_library_mutation(
         &self,
         mutation: LibraryMutation,
@@ -371,7 +692,7 @@ impl Core {
         let mut fence = self
             .begin_library_mutation(LibraryMutation::ResolveDuplicateMods)
             .await?;
-        let ownership = LibraryOwnershipSnapshot::load(&mut *fence.transaction).await?;
+        let ownership = LibraryOwnershipSnapshot::load(&mut fence.transaction).await?;
         let keeper_path: Option<String> =
             sqlx::query_scalar("SELECT library_path FROM mods WHERE id = ?")
                 .bind(keeper_id)
@@ -399,18 +720,15 @@ impl Core {
             });
         }
 
-        let witness_rows = sqlx::query("SELECT mod_id FROM reinstall_swaps")
-            .fetch_all(&mut *fence.transaction)
-            .await?;
-        for row in witness_rows {
-            let mod_id: String = row.try_get("mod_id")?;
-            if reviewed.contains(&mod_id) {
-                return Err(Error::DuplicateModResolutionBlockedByReinstall { mod_id });
+        for witness in load_reinstall_swap_witnesses(&mut fence.transaction).await? {
+            if reviewed.contains(witness.mod_id()) {
+                return Err(Error::DuplicateModResolutionBlockedByReinstall {
+                    mod_id: witness.mod_id().to_string(),
+                });
             }
         }
 
-        let current_records =
-            load_duplicate_mod_records(&mut *fence.transaction, &reviewed).await?;
+        let current_records = load_duplicate_mod_records(&mut fence.transaction, &reviewed).await?;
         if current_records.len() != reviewed.len()
             || current_records
                 .iter()
@@ -658,12 +976,17 @@ impl Core {
         let mut fence = self
             .begin_library_mutation(LibraryMutation::ResolveInterruptedStaging)
             .await?;
-        let witnesses: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, staged_path
-             FROM staged_library_operations ORDER BY created_at, id",
-        )
-        .fetch_all(&mut *fence.transaction)
-        .await?;
+        let mut validated = load_staged_library_operation_witnesses(&mut fence.transaction).await?;
+        validated.sort_by_key(|witness| (witness.created_at(), witness.id));
+        let witnesses: Vec<_> = validated
+            .into_iter()
+            .map(|witness| {
+                (
+                    witness.id(),
+                    witness.staged_path().to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
         let removed = match sqlx::query("DELETE FROM staged_library_operations")
             .execute(&mut *fence.transaction)
             .await
@@ -741,7 +1064,7 @@ impl Core {
             .await?;
         self.ensure_mod_reinstall_is_usable(
             id,
-            &mut *fence.transaction,
+            &mut fence.transaction,
             crash_points::SET_ENABLED_AFTER_REINSTALL_GUARD,
         )
         .await?;
@@ -794,7 +1117,7 @@ impl Core {
             .await?;
         self.ensure_mod_reinstall_is_usable(
             mod_id,
-            &mut *fence.transaction,
+            &mut fence.transaction,
             crash_points::SET_ACTIVE_VARIANT_AFTER_REINSTALL_GUARD,
         )
         .await?;
@@ -843,11 +1166,11 @@ impl Core {
         token: Ulid,
         fence: &mut LibraryMutationFence,
     ) -> Result<ReinstallSwapWitness> {
-        let row = sqlx::query("SELECT * FROM reinstall_swaps WHERE token = ?")
-            .bind(token.to_string())
-            .fetch_one(&mut *fence.transaction)
-            .await?;
-        let witness = ReinstallSwapWitness::from_row(&row)?;
+        let witness = load_reinstall_swap_witnesses(&mut fence.transaction)
+            .await?
+            .into_iter()
+            .find(|witness| witness.token() == token)
+            .ok_or(sqlx::Error::RowNotFound)?;
         self.rebase_reinstall_swap_witness(witness, fence).await
     }
 
@@ -857,12 +1180,13 @@ impl Core {
     /// abort Core construction because they are not evidence about one Mod's
     /// bytes.
     pub(super) async fn recover_interrupted_reinstalls_at_startup(&self) -> Result<usize> {
-        let rows = sqlx::query("SELECT token FROM reinstall_swaps ORDER BY created_at, token")
-            .fetch_all(&self.pool)
-            .await?;
+        let mut connection = self.pool.acquire().await?;
+        let mut witnesses = load_reinstall_swap_witnesses(&mut connection).await?;
+        witnesses.sort_by_key(|witness| (witness.created_at(), witness.token()));
+        drop(connection);
         let mut rolled_back = 0;
-        for row in rows {
-            let token: String = row.try_get("token")?;
+        for witness in witnesses {
+            let token = witness.token().to_string();
             match self
                 .attempt_reinstall_recovery(&token, LibraryMutation::FinishInterruptedDeletes)
                 .await?
@@ -886,11 +1210,13 @@ impl Core {
     /// the token are serialized, but the later call can report that the row
     /// vanished rather than claiming in-flight retries are idempotent.
     pub async fn retry_reinstall_recovery(&self, mod_id: &str) -> Result<ReinstallRecoveryOutcome> {
-        let token: Option<String> =
-            sqlx::query_scalar("SELECT token FROM reinstall_swaps WHERE mod_id = ?")
-                .bind(mod_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let mut connection = self.pool.acquire().await?;
+        let token = load_reinstall_swap_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .find(|witness| witness.mod_id() == mod_id)
+            .map(|witness| witness.token().to_string());
+        drop(connection);
         self.crash_point(super::crash_points::RETRY_REINSTALL_AFTER_WITNESS_LOOKUP);
         let Some(token) = token else {
             return Ok(ReinstallRecoveryOutcome::AlreadyRecovered);
@@ -961,14 +1287,13 @@ impl Core {
         token: Ulid,
         fence: &mut LibraryMutationFence,
     ) -> Result<Option<ReinstallSwapWitness>> {
-        let row = sqlx::query("SELECT * FROM reinstall_swaps WHERE token = ?")
-            .bind(token.to_string())
-            .fetch_optional(&mut *fence.transaction)
-            .await?;
-        let Some(row) = row else {
+        let Some(witness) = load_reinstall_swap_witnesses(&mut fence.transaction)
+            .await?
+            .into_iter()
+            .find(|witness| witness.token() == token)
+        else {
             return Ok(None);
         };
-        let witness = ReinstallSwapWitness::from_row(&row)?;
         self.rebase_reinstall_swap_witness(witness, fence)
             .await
             .map(Some)
@@ -997,14 +1322,19 @@ impl Core {
             return Ok(None);
         }
 
+        let witness = load_reinstall_swap_witnesses(&mut transaction)
+            .await?
+            .into_iter()
+            .find(|witness| witness.token().to_string() == token)
+            .ok_or(sqlx::Error::RowNotFound)?;
         let junction = sqlx::query(
             "SELECT m.junction_dir_name, g.install_path
-             FROM reinstall_swaps rs
-             JOIN mods m ON m.id = rs.mod_id
+             FROM mods m
              JOIN games g ON g.code = m.game_code
-             WHERE rs.token = ?",
+             WHERE m.id = ? AND m.game_code = ?",
         )
-        .bind(token)
+        .bind(witness.mod_id())
+        .bind(witness.game.as_str())
         .fetch_one(&mut *transaction)
         .await?;
         let link = junction
@@ -1033,17 +1363,17 @@ impl Core {
         token: &str,
         link: Option<&Path>,
     ) -> Result<Option<bool>> {
-        let state: Option<i64> = sqlx::query_scalar(
-            "SELECT junction_withdrawn FROM reinstall_swaps
-             WHERE token = ? AND recovery_error IS NOT NULL",
-        )
-        .bind(token)
-        .fetch_optional(&self.pool)
-        .await?;
+        let mut connection = self.pool.acquire().await?;
+        let state = load_reinstall_swap_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .find(|witness| witness.token().to_string() == token && witness.is_quarantined())
+            .map(|witness| witness.junction_withdrawn());
+        drop(connection);
         let Some(state) = state else {
             return Ok(None);
         };
-        if state != 0 {
+        if state {
             let absent = match link {
                 Some(path) => !super::link_exists(path)?,
                 None => true,
@@ -1083,16 +1413,12 @@ impl Core {
     }
 
     async fn reinstall_recovery_for_token(&self, token: &str) -> Result<Option<ReinstallRecovery>> {
-        let row = sqlx::query(
-            "SELECT recovery_error, recovery_attempted_at, recovery_attempts,
-                    library_path, staged_path, quarantine_path,
-                    junction_withdrawn, junction_withdrawal_error
-             FROM reinstall_swaps WHERE token = ? AND recovery_error IS NOT NULL",
-        )
-        .bind(token)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.as_ref().map(reinstall_recovery_from_row).transpose()
+        let mut connection = self.pool.acquire().await?;
+        Ok(load_reinstall_swap_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .find(|witness| witness.token().to_string() == token)
+            .and_then(|witness| witness.recovery()))
     }
 
     /// Current relocation refuses to move a subtree with an active witness,
@@ -1447,8 +1773,7 @@ impl Core {
         let mut quarantined = None;
         if retired {
             if let Some((path, current)) = deletion_candidate {
-                let ownership = match LibraryOwnershipSnapshot::load(&mut *fence.transaction).await
-                {
+                let ownership = match LibraryOwnershipSnapshot::load(&mut fence.transaction).await {
                     Ok(ownership) => Some(ownership),
                     Err(error) => {
                         tracing::warn!(
@@ -1583,43 +1908,24 @@ impl Core {
         Ok(())
     }
 
-    async fn ensure_mod_reinstall_is_usable<'e, E>(
+    async fn ensure_mod_reinstall_is_usable(
         &self,
         mod_id: &str,
-        executor: E,
+        connection: &mut SqliteConnection,
         checked_at: &'static str,
-    ) -> Result<()>
-    where
-        E: Executor<'e, Database = Sqlite>,
-    {
-        let quarantined = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM reinstall_swaps
-             WHERE mod_id = ? AND recovery_error IS NOT NULL",
-        )
-        .bind(mod_id)
-        .fetch_one(executor)
-        .await?;
+    ) -> Result<()> {
+        let quarantined = load_reinstall_swap_witnesses(connection)
+            .await?
+            .into_iter()
+            .any(|witness| witness.mod_id() == mod_id && witness.is_quarantined());
         self.crash_point(checked_at);
-        if quarantined != 0 {
+        if quarantined {
             return Err(Error::ReinstallRecoveryQuarantined {
                 mod_id: mod_id.to_string(),
             });
         }
         Ok(())
     }
-}
-
-fn reinstall_recovery_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ReinstallRecovery> {
-    Ok(ReinstallRecovery {
-        reason: row.try_get("recovery_error")?,
-        attempted_at: row.try_get("recovery_attempted_at")?,
-        attempts: row.try_get::<i64, _>("recovery_attempts")? as u32,
-        library_path: PathBuf::from(row.try_get::<String, _>("library_path")?),
-        staged_path: PathBuf::from(row.try_get::<String, _>("staged_path")?),
-        quarantine_path: PathBuf::from(row.try_get::<String, _>("quarantine_path")?),
-        junction_withdrawn: row.try_get::<i64, _>("junction_withdrawn")? != 0,
-        junction_withdrawal_error: row.try_get("junction_withdrawal_error")?,
-    })
 }
 
 fn quarantinable_reinstall_failure(error: &Error) -> bool {
@@ -1829,6 +2135,12 @@ mod tests {
             quarantine_path,
             old_identity: old.identity().clone(),
             staged_identity: current_live.identity().clone(),
+            created_at: Utc::now().fixed_offset(),
+            recovery_error: None,
+            recovery_attempted_at: None,
+            recovery_attempts: 0,
+            junction_withdrawn: false,
+            junction_withdrawal_error: None,
         };
 
         let original_permissions = std::fs::metadata(tmp.path())

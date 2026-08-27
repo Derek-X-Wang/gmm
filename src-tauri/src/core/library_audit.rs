@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{Executor, Row, Sqlite};
+use sqlx::{Row, SqliteConnection};
 
 use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
 use super::library_mutation::LibraryMutation;
@@ -121,7 +121,7 @@ impl Core {
         let root = self
             .resolved_library_root_for_in_mutation(game, &mut fence)
             .await?;
-        let ownership = LibraryOwnershipSnapshot::load(&mut *fence.transaction).await?;
+        let ownership = LibraryOwnershipSnapshot::load(&mut fence.transaction).await?;
         fence.commit().await?;
         self.crash_point(super::crash_points::AUDIT_AFTER_OWNERSHIP_SNAPSHOT);
 
@@ -142,10 +142,10 @@ impl Core {
             .resolved_library_root_for_in_mutation(game, &mut recheck_fence)
             .await?;
         let current_ownership =
-            LibraryOwnershipSnapshot::load(&mut *recheck_fence.transaction).await?;
+            LibraryOwnershipSnapshot::load(&mut recheck_fence.transaction).await?;
         let duplicate_ids = current_ownership.duplicate_mod_ids();
         let duplicate_records =
-            load_duplicate_mod_records(&mut *recheck_fence.transaction, &duplicate_ids).await?;
+            load_duplicate_mod_records(&mut recheck_fence.transaction, &duplicate_ids).await?;
         recheck_fence.commit().await?;
 
         let mut duplicates: Vec<_> = current_ownership
@@ -321,30 +321,31 @@ fn recheck_unreferenced_candidates(
     Ok(unreferenced)
 }
 
-pub(super) async fn load_duplicate_mod_records<'e, E>(
-    executor: E,
+pub(super) async fn load_duplicate_mod_records(
+    connection: &mut SqliteConnection,
     duplicate_ids: &HashSet<String>,
-) -> Result<HashMap<String, DuplicateModRecord>>
-where
-    E: Executor<'e, Database = Sqlite>,
-{
+) -> Result<HashMap<String, DuplicateModRecord>> {
     if duplicate_ids.is_empty() {
         return Ok(HashMap::new());
     }
+    let reinstalling: HashSet<_> =
+        super::library_mutation::load_reinstall_swap_witnesses(&mut *connection)
+            .await?
+            .into_iter()
+            .map(|witness| witness.mod_id().to_string())
+            .collect();
     let rows = sqlx::query(
         "SELECT m.id, m.game_code, m.name, m.source, m.library_path,
                 m.junction_dir_name, m.enabled, m.created_at, m.gamebanana_id,
                 m.source_url, m.author, m.version, m.upstream_version,
                 m.update_check_enabled, m.screenshot_url,
                 m.active_variant_id,
-                EXISTS(SELECT 1 FROM reinstall_swaps rs WHERE rs.mod_id = m.id)
-                    AS reinstall_in_progress,
                 v.id AS variant_id, v.name AS variant_name, v.subpath AS variant_subpath
          FROM mods m
          LEFT JOIN mod_variants v ON v.mod_id = m.id
          ORDER BY m.created_at, m.id, v.name",
     )
-    .fetch_all(executor)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut records = HashMap::new();
@@ -375,7 +376,7 @@ where
                     update_check_enabled: row.try_get::<i64, _>("update_check_enabled")? != 0,
                     screenshot_url: row.try_get("screenshot_url")?,
                     variants: Vec::new(),
-                    reinstall_in_progress: row.try_get::<i64, _>("reinstall_in_progress")? != 0,
+                    reinstall_in_progress: reinstalling.contains(&id),
                     fingerprint: String::new(),
                 },
             );
