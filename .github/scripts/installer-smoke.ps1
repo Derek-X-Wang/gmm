@@ -46,7 +46,7 @@ $AppProc = $null
 $ManifestListener = $null
 $HeldManifestConnection = $null
 $FailureClass = "PRODUCT"
-$FixtureMode = "unavailable-after-launch"
+$FixtureMode = $env:GMM_INSTALLER_SMOKE_FIXTURE_MODE
 
 function Write-Section($msg) {
     Write-Host ""
