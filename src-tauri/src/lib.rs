@@ -131,8 +131,7 @@ pub fn run() {
         let core_for_manifest = core.clone();
         let manifest_url_override =
             crate::core::recommended_importers::loopback_manifest_url_override();
-        let wait_for_manifest_refresh = manifest_url_override.is_some();
-        let manifest_refresh = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -167,11 +166,6 @@ pub fn run() {
                 }
             });
         });
-        if wait_for_manifest_refresh {
-            manifest_refresh
-                .join()
-                .expect("join manifest refresh thread during smoke mutation");
-        }
     }
 
     tauri::Builder::default()
