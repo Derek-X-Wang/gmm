@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { CommandErrorNotice } from "./CommandErrorNotice";
 
 import {
   avGuidance,
@@ -95,9 +96,7 @@ export function OnboardingWizard({ onDone }: { onDone: (skipped: boolean) => voi
           )}
         </div>
       </footer>
-      {close.isError ? (
-        <p className="error">{String(close.error)}</p>
-      ) : null}
+      <CommandErrorNotice error={close.error} />
     </main>
   );
 }
@@ -301,9 +300,7 @@ function LibraryStep() {
       <p className="muted small">
         Per-game overrides are available in Settings later.
       </p>
-      {setRoot.isError ? (
-        <p className="error">{String(setRoot.error)}</p>
-      ) : null}
+      <CommandErrorNotice error={setRoot.error} />
     </div>
   );
 }

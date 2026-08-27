@@ -708,7 +708,7 @@ fn list_supported_games_returns_gimi_and_srmi_in_order() {
     // be stable so the UI's "first tab is default" behaviour matches
     // the registry — GIMI stays first so existing users land on the
     // familiar screen.
-    let games = list_supported_games();
+    let games = list_supported_games().expect("list supported games command");
     let codes: Vec<&str> = games.iter().map(|g| g.code.as_str()).collect();
     assert!(
         codes.first() == Some(&"gimi"),

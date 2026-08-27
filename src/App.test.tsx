@@ -43,7 +43,10 @@ let startupFailures: Array<{
   kind: "invalidActiveVariant";
   error: string;
 }> = [];
-let conflictError: string | null = null;
+let conflictError: {
+  kind: "invalidActiveVariant";
+  message: string;
+} | null = null;
 let relocationFailures: Array<{
   mod_id: string;
   game: "gimi";
@@ -89,7 +92,7 @@ function ipcResult(command: string) {
     case "list_mods":
       return [];
     case "detect_conflicts":
-      if (conflictError) throw new Error(conflictError);
+      if (conflictError) throw conflictError;
       return { conflicts: [], per_mod_count: {} };
     case "set_library_root":
       return {
@@ -112,7 +115,7 @@ beforeEach(() => {
 });
 
 it("shows a conflict-detection failure instead of presenting unavailable data as no conflicts", async () => {
-  conflictError = variantError;
+  conflictError = { kind: "invalidActiveVariant", message: variantError };
   renderWithQuery(<App />);
 
   await waitFor(() =>
@@ -124,6 +127,7 @@ it("shows a conflict-detection failure instead of presenting unavailable data as
   const heading = screen.getByText(/could not check this game's mod conflicts/i);
   const alert = heading.closest('[role="alert"]');
   expect(alert).not.toBeNull();
+  expect(alert).toHaveAttribute("data-command-failure-kind", "invalidActiveVariant");
   expect(alert).toHaveTextContent(/not a “no conflicts” result/i);
   expect(alert).toHaveTextContent("Broken Outfit");
   expect(alert).toHaveTextContent(/Select a valid Variant/i);

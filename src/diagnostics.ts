@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./commandError";
 
 /**
  * Forward a frontend error to the Tauri-side JSON-lines logger. Never

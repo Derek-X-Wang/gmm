@@ -1,4 +1,9 @@
-import { invoke } from "@tauri-apps/api/core";
+import {
+  commandFailureMessage,
+  invoke,
+  type SurfaceFailureKind,
+} from "./commandError";
+export type { SurfaceFailureKind } from "./commandError";
 
 export type GameCode = "gimi" | "srmi" | "zzmi" | "wwmi" | "himi" | "efmi";
 
@@ -141,8 +146,6 @@ export interface ReconcileResult {
   /** Mods whose uncertain reinstall state was deliberately left untouched. */
   quarantined: string[];
 }
-
-export type SurfaceFailureKind = "invalidActiveVariant" | "other";
 
 export interface StartupReconcileFailure {
   game: GameCode;
@@ -689,7 +692,7 @@ export function partitionLaunchError(
   raw: unknown,
   sentinel: string,
 ): { isAvPattern: boolean; message: string } {
-  const message = String(raw);
+  const message = commandFailureMessage(raw);
   if (message.startsWith(sentinel)) {
     return { isAvPattern: true, message: message.slice(sentinel.length) };
   }

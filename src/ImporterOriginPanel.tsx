@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CommandErrorNotice } from "./CommandErrorNotice";
 
 import {
   acceptImporterOriginProposal,
@@ -121,9 +122,7 @@ export function ImporterOriginPanel({
         and you can point it somewhere else.
       </p>
 
-      {status.isError ? (
-        <p className="error">{String(status.error)}</p>
-      ) : null}
+      <CommandErrorNotice error={status.error} />
 
       {data ? (
         <>
@@ -226,9 +225,7 @@ export function ImporterOriginPanel({
                   Not now
                 </button>
               </div>
-              {accept.isError ? (
-                <p className="error">{String(accept.error)}</p>
-              ) : null}
+              <CommandErrorNotice error={accept.error} />
             </div>
           ) : null}
 
@@ -377,8 +374,8 @@ function OverrideEditor({
           </button>
         ) : null}
       </div>
-      {save.isError ? <p className="error">{String(save.error)}</p> : null}
-      {clear.isError ? <p className="error">{String(clear.error)}</p> : null}
+      <CommandErrorNotice error={save.error} />
+      <CommandErrorNotice error={clear.error} />
     </div>
   );
 }

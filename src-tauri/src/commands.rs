@@ -1,7 +1,7 @@
 //! Thin Tauri command shells over the Core API.
 //!
-//! Commands serialise errors to strings — the React side only needs a
-//! flat message for now (slice 1c will introduce structured errors).
+//! Every command returns [`CommandResult`], even when its current body is
+//! infallible. That keeps the structured failure boundary closed by default.
 
 use std::path::PathBuf;
 
@@ -32,6 +32,8 @@ use crate::runtime::SessionRuntime;
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 
+use crate::command_error::{CommandError, CommandResult};
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoptArgs {
@@ -49,29 +51,29 @@ pub struct ImportZipArgs {
 }
 
 #[tauri::command]
-pub async fn list_mods(core: State<'_, Core>, game: GameCode) -> Result<Vec<Mod>, String> {
-    core.list_mods(game).await.map_err(|e| e.to_string())
+pub async fn list_mods(core: State<'_, Core>, game: GameCode) -> CommandResult<Vec<Mod>> {
+    core.list_mods(game).await.map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn retry_reinstall_recovery(
     core: State<'_, Core>,
     mod_id: String,
-) -> Result<ReinstallRecoveryOutcome, String> {
+) -> CommandResult<ReinstallRecoveryOutcome> {
     core.retry_reinstall_recovery(&mod_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn adopt_folder(core: State<'_, Core>, args: AdoptArgs) -> Result<Mod, String> {
+pub async fn adopt_folder(core: State<'_, Core>, args: AdoptArgs) -> CommandResult<Mod> {
     core.adopt_folder(args.game, &args.source_path, &args.name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn import_zip(core: State<'_, Core>, args: ImportZipArgs) -> Result<Mod, String> {
+pub async fn import_zip(core: State<'_, Core>, args: ImportZipArgs) -> CommandResult<Mod> {
     core.import_zip(
         args.game,
         &args.zip_path,
@@ -79,7 +81,7 @@ pub async fn import_zip(core: State<'_, Core>, args: ImportZipArgs) -> Result<Mo
         ImportZipOptions::default(),
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(CommandError::from)
 }
 
 /// Error string returned when a user tries to enable a mod before
@@ -94,28 +96,28 @@ pub async fn set_mod_enabled(
     id: String,
     enabled: bool,
     game: GameCode,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     let install = core
         .game_install_path(game)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| NO_INSTALL_PATH_FOR_ENABLE_MSG.to_string())?;
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::other(NO_INSTALL_PATH_FOR_ENABLE_MSG))?;
     let mods_dir = install.join("Mods");
     std::fs::create_dir_all(&mods_dir)
-        .map_err(|e| format!("create {}: {e}", mods_dir.display()))?;
+        .map_err(|error| CommandError::other(format!("create {}: {error}", mods_dir.display())))?;
     core.set_enabled(&id, enabled, &mods_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn get_game_install_path(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<Option<PathBuf>, String> {
+) -> CommandResult<Option<PathBuf>> {
     core.game_install_path(game)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -123,10 +125,10 @@ pub async fn set_game_install_path(
     core: State<'_, Core>,
     game: GameCode,
     path: PathBuf,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     core.set_game_install_path(game, &path)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,12 +144,13 @@ pub struct FrontendError {
 /// Tauri command — frontend error boundary calls this when a render
 /// throws. Goes through the same JSON-lines logger as the backend.
 #[tauri::command]
-pub fn log_frontend_error(error: FrontendError) {
+pub fn log_frontend_error(error: FrontendError) -> CommandResult<()> {
     diagnostics::record_frontend_error(
         &error.message,
         error.stack.as_deref(),
         error.route.as_deref(),
     );
+    Ok(())
 }
 
 /// Tauri command — user-initiated bundle export. Writes a zip to
@@ -158,8 +161,8 @@ pub async fn export_diagnostics_bundle(
     core: State<'_, Core>,
     log_dir: PathBuf,
     dest_path: PathBuf,
-) -> Result<(), String> {
-    let snapshot = core.settings_snapshot().await.map_err(|e| e.to_string())?;
+) -> CommandResult<()> {
+    let snapshot = core.settings_snapshot().await.map_err(CommandError::from)?;
     // The build is sync I/O; offload so we don't block the Tauri event
     // loop while the zip is being written.
     let log_dir_owned = log_dir.clone();
@@ -173,15 +176,15 @@ pub async fn export_diagnostics_bundle(
         )
     })
     .await
-    .map_err(|e| format!("bundle task join error: {e}"))?
-    .map_err(|e| e.to_string())
+    .map_err(|error| CommandError::other(format!("bundle task join error: {error}")))?
+    .map_err(CommandError::from)
 }
 
 /// Tauri command — surfaces the directory we write logs into so the
 /// frontend can show "Open log folder" / save dialog defaults.
 #[tauri::command]
-pub fn diagnostics_log_dir() -> Result<PathBuf, String> {
-    crate::log_dir().map_err(|e| e.to_string())
+pub fn diagnostics_log_dir() -> CommandResult<PathBuf> {
+    crate::log_dir().map_err(|error| CommandError::other(error.to_string()))
 }
 
 /// Effective + default library paths, returned to the Settings UI so
@@ -213,16 +216,16 @@ const ALL_GAMES: &[GameCode] = &[
 ];
 
 #[tauri::command]
-pub async fn get_library_paths(core: State<'_, Core>) -> Result<LibraryPaths, String> {
+pub async fn get_library_paths(core: State<'_, Core>) -> CommandResult<LibraryPaths> {
     let default_root = core.default_library_root().to_path_buf();
     let root_override = core
         .library_root_override()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(CommandError::from)?;
     let effective_root = core
         .resolved_library_root()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(CommandError::from)?;
 
     let mut per_game_overrides = HashMap::new();
     let mut per_game_effective = HashMap::new();
@@ -231,11 +234,11 @@ pub async fn get_library_paths(core: State<'_, Core>) -> Result<LibraryPaths, St
         let over = core
             .library_root_override_for_game(*game)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
         let eff = core
             .resolved_library_root_for(*game)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
         per_game_overrides.insert(key.clone(), over);
         per_game_effective.insert(key, eff);
     }
@@ -254,8 +257,8 @@ pub async fn get_library_paths(core: State<'_, Core>) -> Result<LibraryPaths, St
 pub async fn audit_library(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<LibraryAuditReport, String> {
-    core.audit_library(game).await.map_err(|e| e.to_string())
+) -> CommandResult<LibraryAuditReport> {
+    core.audit_library(game).await.map_err(CommandError::from)
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,10 +273,10 @@ pub struct ResolveDuplicateModsArgs {
 pub async fn resolve_duplicate_mods(
     core: State<'_, Core>,
     args: ResolveDuplicateModsArgs,
-) -> Result<DuplicateResolution, String> {
+) -> CommandResult<DuplicateResolution> {
     core.resolve_duplicate_mods(&args.keeper_id, &args.reviewed_mods)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Arguments for recovering an unreferenced Library directory.
@@ -297,14 +300,14 @@ pub async fn reveal_unreferenced_library_dir(
     app: AppHandle,
     game: GameCode,
     path: PathBuf,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     let path = core
         .unreferenced_library_dir_for_reveal(game, &path)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(CommandError::from)?;
     app.opener()
         .reveal_item_in_dir(&path)
-        .map_err(|e| format!("could not open {}: {e}", path.display()))
+        .map_err(|e| CommandError::other(format!("could not open {}: {e}", path.display())))
 }
 
 /// Adopt an unreferenced Library folder as a Mod without copying it.
@@ -312,10 +315,10 @@ pub async fn reveal_unreferenced_library_dir(
 pub async fn recover_unreferenced_library_dir(
     core: State<'_, Core>,
     args: RecoverLibraryDirArgs,
-) -> Result<Mod, String> {
+) -> CommandResult<Mod> {
     core.recover_unreferenced_library_dir(args.game, &args.path, &args.name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Permanently delete one unreferenced Library folder the user confirmed.
@@ -328,20 +331,20 @@ pub async fn delete_unreferenced_library_dir(
     core: State<'_, Core>,
     game: GameCode,
     path: PathBuf,
-) -> Result<DeletedLibraryDir, String> {
+) -> CommandResult<DeletedLibraryDir> {
     core.delete_unreferenced_library_dir(game, &path)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn set_library_root(
     core: State<'_, Core>,
     path: Option<PathBuf>,
-) -> Result<MoveReport, String> {
+) -> CommandResult<MoveReport> {
     core.set_library_root(path.as_deref())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -349,10 +352,10 @@ pub async fn set_library_path_for_game(
     core: State<'_, Core>,
     game: GameCode,
     path: Option<PathBuf>,
-) -> Result<MoveReport, String> {
+) -> CommandResult<MoveReport> {
     core.set_library_path_for_game(game, path.as_deref())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[derive(Debug, Serialize)]
@@ -363,15 +366,15 @@ pub struct ModVariants {
 }
 
 #[tauri::command]
-pub async fn list_variants(core: State<'_, Core>, mod_id: String) -> Result<ModVariants, String> {
+pub async fn list_variants(core: State<'_, Core>, mod_id: String) -> CommandResult<ModVariants> {
     let variants = core
         .list_variants(&mod_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(CommandError::from)?;
     let active_variant_id = core
         .active_variant_id(&mod_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(CommandError::from)?;
     Ok(ModVariants {
         variants,
         active_variant_id,
@@ -384,26 +387,30 @@ pub async fn set_active_variant(
     mod_id: String,
     variant_id: String,
     game: GameCode,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     let install = core
         .game_install_path(game)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Set the game install path before switching variants.".to_string())?;
+        .map_err(CommandError::from)?
+        .ok_or_else(|| {
+            CommandError::other("Set the game install path before switching variants.")
+        })?;
     let mods_dir = install.join("Mods");
     std::fs::create_dir_all(&mods_dir)
-        .map_err(|e| format!("create {}: {e}", mods_dir.display()))?;
+        .map_err(|error| CommandError::other(format!("create {}: {error}", mods_dir.display())))?;
     core.set_active_variant(&mod_id, &variant_id, &mods_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn detect_conflicts(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<ConflictReport, String> {
-    core.detect_conflicts(game).await.map_err(|e| e.to_string())
+) -> CommandResult<ConflictReport> {
+    core.detect_conflicts(game)
+        .await
+        .map_err(CommandError::from)
 }
 
 #[derive(Debug, Deserialize)]
@@ -417,28 +424,28 @@ pub struct GameBananaImportArgs {
 pub async fn import_gamebanana(
     core: State<'_, Core>,
     args: GameBananaImportArgs,
-) -> Result<Mod, String> {
+) -> CommandResult<Mod> {
     core.import_gamebanana(args.game, &args.url_or_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn check_importer_update(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<UpdateStatus, String> {
+) -> CommandResult<UpdateStatus> {
     core.check_importer_update_for(game)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Informational Loader version report. Returns the version GMM
 /// ships and the latest upstream release; a failed check surfaces in
 /// `checkError` rather than masquerading as "up to date" (#78).
 #[tauri::command]
-pub async fn check_loader_update(core: State<'_, Core>) -> Result<LoaderVersionStatus, String> {
-    core.check_loader_update().await.map_err(|e| e.to_string())
+pub async fn check_loader_update(core: State<'_, Core>) -> CommandResult<LoaderVersionStatus> {
+    core.check_loader_update().await.map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -446,28 +453,30 @@ pub async fn set_importer_pinned(
     core: State<'_, Core>,
     game: GameCode,
     version: Option<String>,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     core.set_importer_pinned(game, version.as_deref())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn list_mod_updates(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<Vec<ModUpdateRow>, String> {
-    core.list_mod_updates(game).await.map_err(|e| e.to_string())
+) -> CommandResult<Vec<ModUpdateRow>> {
+    core.list_mod_updates(game)
+        .await
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn check_mod_updates_now(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<Vec<ModUpdateRow>, String> {
+) -> CommandResult<Vec<ModUpdateRow>> {
     core.check_mod_updates_now(game)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -475,44 +484,44 @@ pub async fn set_mod_update_check_enabled(
     core: State<'_, Core>,
     mod_id: String,
     enabled: bool,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     core.set_mod_update_check_enabled(&mod_id, enabled)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn set_mod_updates_globally_enabled(
     core: State<'_, Core>,
     enabled: bool,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     core.set_mod_updates_globally_enabled(enabled)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn mod_updates_globally_enabled(core: State<'_, Core>) -> Result<bool, String> {
+pub async fn mod_updates_globally_enabled(core: State<'_, Core>) -> CommandResult<bool> {
     core.mod_updates_globally_enabled()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> Result<(), String> {
+pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> CommandResult<()> {
     core.reinstall_gamebanana_mod(&mod_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn fetch_latest_importer_release(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<Option<LatestRelease>, String> {
+) -> CommandResult<Option<LatestRelease>> {
     core.latest_importer_release(game)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Download and install the Game's Model Importer from its resolved
@@ -527,9 +536,11 @@ pub async fn fetch_latest_importer_release(
 pub async fn install_importer(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<InstallReport, String> {
+) -> CommandResult<InstallReport> {
     refuse_during_session(&core).await?;
-    core.install_importer(game).await.map_err(|e| e.to_string())
+    core.install_importer(game)
+        .await
+        .map_err(CommandError::from)
 }
 
 // ---- Importer Origin surface (ADR 0005 / #109) ----
@@ -551,8 +562,9 @@ pub struct ImporterOriginInput {
 }
 
 impl ImporterOriginInput {
-    fn build(&self) -> Result<ImporterOrigin, String> {
+    fn build(&self) -> CommandResult<ImporterOrigin> {
         ImporterOrigin::from_user_input(&self.owner, &self.repo, &self.asset_pattern)
+            .map_err(CommandError::other)
     }
 }
 
@@ -561,10 +573,10 @@ impl ImporterOriginInput {
 pub async fn importer_origin_status(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<OriginStatus, String> {
+) -> CommandResult<OriginStatus> {
     core.importer_origin_status(game)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Set or clear the user's per-game Importer Origin override (layer 1).
@@ -576,11 +588,11 @@ pub async fn set_importer_origin_override(
     core: State<'_, Core>,
     game: GameCode,
     origin: Option<ImporterOriginInput>,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     let origin = origin.map(|o| o.build()).transpose()?;
     core.set_importer_origin_override(game, origin.as_ref())
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Accept the Importer Origin change GMM is offering: install from the
@@ -592,11 +604,11 @@ pub async fn set_importer_origin_override(
 pub async fn accept_importer_origin_proposal(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<InstallReport, String> {
+) -> CommandResult<InstallReport> {
     refuse_during_session(&core).await?;
     core.accept_importer_origin_proposal(game)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Decline an Importer Origin: remember it and stop proposing it.
@@ -609,10 +621,10 @@ pub async fn dismiss_importer_origin(
     core: State<'_, Core>,
     game: GameCode,
     origin: ImporterOriginInput,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     core.dismiss_importer_origin(game, &origin.build()?)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Undo a dismissal from the affected game's own surface.
@@ -621,19 +633,19 @@ pub async fn restore_importer_origin(
     core: State<'_, Core>,
     game: GameCode,
     origin: ImporterOriginInput,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     core.restore_importer_origin(game, &origin.build()?)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// The global recommendations switch. On for a user who has never
 /// touched it.
 #[tauri::command]
-pub async fn importer_recommendations_enabled(core: State<'_, Core>) -> Result<bool, String> {
+pub async fn importer_recommendations_enabled(core: State<'_, Core>) -> CommandResult<bool> {
     core.importer_recommendations_enabled()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Switch GMM's curated recommendations on or off.
@@ -649,10 +661,10 @@ pub async fn importer_recommendations_enabled(core: State<'_, Core>) -> Result<b
 pub async fn set_importer_recommendations_enabled(
     core: State<'_, Core>,
     enabled: bool,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     core.set_importer_recommendations_enabled(enabled)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(CommandError::from)?;
     if enabled {
         let core = Core::clone(&core);
         tauri::async_runtime::spawn(async move {
@@ -682,15 +694,15 @@ pub struct ProxyArgs {
 }
 
 #[tauri::command]
-pub async fn get_proxy_config(core: State<'_, Core>) -> Result<ProxyConfigPublic, String> {
-    core.proxy_config_public().await.map_err(|e| e.to_string())
+pub async fn get_proxy_config(core: State<'_, Core>) -> CommandResult<ProxyConfigPublic> {
+    core.proxy_config_public().await.map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn set_proxy_config(
     core: State<'_, Core>,
     args: ProxyArgs,
-) -> Result<ProxyConfigPublic, String> {
+) -> CommandResult<ProxyConfigPublic> {
     let cfg = ProxyConfig {
         url: args.url.filter(|s| !s.is_empty()),
         username: args.username.filter(|s| !s.is_empty()),
@@ -698,15 +710,15 @@ pub async fn set_proxy_config(
     };
     core.set_proxy_config(&cfg)
         .await
-        .map_err(|e| e.to_string())?;
-    core.proxy_config_public().await.map_err(|e| e.to_string())
+        .map_err(CommandError::from)?;
+    core.proxy_config_public().await.map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn test_proxy_connection(core: State<'_, Core>) -> Result<(), String> {
+pub async fn test_proxy_connection(core: State<'_, Core>) -> CommandResult<()> {
     core.test_proxy_connection()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Roll the Game's Model Importer back to its most recent backup.
@@ -718,11 +730,11 @@ pub async fn test_proxy_connection(core: State<'_, Core>) -> Result<(), String> 
 pub async fn rollback_importer(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<Option<PathBuf>, String> {
+) -> CommandResult<Option<PathBuf>> {
     refuse_during_session(&core).await?;
     core.rollback_importer(game)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Tauri command — reconcile junctions for a game in place. Used by
@@ -731,17 +743,17 @@ pub async fn rollback_importer(
 pub async fn reconcile_junctions(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<ReconcileResult, String> {
+) -> CommandResult<ReconcileResult> {
     refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Set the game install path in Settings first.".to_string())?;
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::other("Set the game install path in Settings first."))?;
     let mods_dir = install.join("Mods");
     core.reconcile_junctions(game, &mods_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Snapshot the best-effort startup reconcile pass. React polls until
@@ -749,8 +761,8 @@ pub async fn reconcile_junctions(
 #[tauri::command]
 pub fn get_startup_reconcile_status(
     state: State<'_, StartupReconcileState>,
-) -> StartupReconcileStatus {
-    state.snapshot()
+) -> CommandResult<StartupReconcileStatus> {
+    Ok(state.snapshot())
 }
 
 /// Tauri command — drop and recreate every junction for `game` against
@@ -760,17 +772,17 @@ pub fn get_startup_reconcile_status(
 pub async fn rebuild_junctions(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<ReconcileResult, String> {
+) -> CommandResult<ReconcileResult> {
     refuse_during_session(&core).await?;
     let install = core
         .game_install_path(game)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Set the game install path in Settings first.".to_string())?;
+        .map_err(CommandError::from)?
+        .ok_or_else(|| CommandError::other("Set the game install path in Settings first."))?;
     let mods_dir = install.join("Mods");
     core.rebuild_junctions(game, &mods_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 /// Tauri command — auto-detect a game's install path. On success the
@@ -785,19 +797,19 @@ pub async fn rebuild_junctions(
 pub async fn detect_game_install_path(
     core: State<'_, Core>,
     game: GameCode,
-) -> Result<Option<PathBuf>, String> {
+) -> CommandResult<Option<PathBuf>> {
     // Dispatch via the GameProfile registry so each per-game port
     // adds itself to `core::games::GAME_PROFILES` and nothing else.
     let detected = match game.profile().detect {
         Some(f) => tokio::task::spawn_blocking(f)
             .await
-            .map_err(|e| format!("detect task join error: {e}"))?,
+            .map_err(|error| CommandError::other(format!("detect task join error: {error}")))?,
         None => None,
     };
     if let Some(path) = detected.as_ref() {
         core.set_game_install_path(game, path)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(CommandError::from)?;
     }
     Ok(detected)
 }
@@ -809,44 +821,44 @@ pub async fn detect_game_install_path(
 /// install/rollback, reconcile/rebuild junctions, library moves) so
 /// the caller never gets a partial mutation while the game is
 /// running.
-async fn refuse_during_session(core: &State<'_, Core>) -> Result<(), String> {
-    if let Some(info) = core.session_info().await.map_err(|e| e.to_string())? {
-        return Err(format!(
+async fn refuse_during_session(core: &State<'_, Core>) -> CommandResult<()> {
+    if let Some(info) = core.session_info().await.map_err(CommandError::from)? {
+        return Err(CommandError::other(format!(
             "{} is running (session active since {}). Close the game before changing this.",
             info.game.as_str(),
             info.started_at,
-        ));
+        )));
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn current_session(core: State<'_, Core>) -> Result<Option<SessionInfo>, String> {
-    core.session_info().await.map_err(|e| e.to_string())
+pub async fn current_session(core: State<'_, Core>) -> CommandResult<Option<SessionInfo>> {
+    core.session_info().await.map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn clean_stale_session(core: State<'_, Core>) -> Result<Option<SessionInfo>, String> {
-    core.clean_stale_session().await.map_err(|e| e.to_string())
+pub async fn clean_stale_session(core: State<'_, Core>) -> CommandResult<Option<SessionInfo>> {
+    core.clean_stale_session().await.map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn interrupted_session_launches(
     core: State<'_, Core>,
-) -> Result<Vec<InterruptedSessionLaunch>, String> {
+) -> CommandResult<Vec<InterruptedSessionLaunch>> {
     core.interrupted_session_launches()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
 pub async fn retire_interrupted_session_launch(
     core: State<'_, Core>,
     id: String,
-) -> Result<(), String> {
+) -> CommandResult<()> {
     core.retire_interrupted_session_launch(&id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
@@ -855,7 +867,7 @@ pub async fn launch_game(
     core: State<'_, Core>,
     runtime: State<'_, SessionRuntime>,
     game: GameCode,
-) -> Result<SessionInfo, String> {
+) -> CommandResult<SessionInfo> {
     // Thin shell: everything worth testing lives in
     // `runtime::launch::launch`, which is generic over the Tauri runtime
     // so `tests/launch_command*.rs` can drive it against a MockRuntime
@@ -864,6 +876,7 @@ pub async fn launch_game(
     launch::launch(&app, &core, &runtime, game, &LaunchOptions::default())
         .await
         .map(|outcome| outcome.info)
+        .map_err(CommandError::other)
 }
 
 /// Tauri command — return the structured AV / SmartScreen guidance the
@@ -872,8 +885,8 @@ pub async fn launch_game(
 /// `docs/antivirus-and-smartscreen.md` and the `av` module for the
 /// drift-protection contract.
 #[tauri::command]
-pub fn av_guidance() -> av::AvGuidance {
-    av::guidance()
+pub fn av_guidance() -> CommandResult<av::AvGuidance> {
+    Ok(av::guidance())
 }
 
 /// Light per-game summary the React tab strip uses to render only the
@@ -888,13 +901,13 @@ pub struct GameSummary {
 }
 
 #[tauri::command]
-pub fn list_supported_games() -> Vec<GameSummary> {
-    GameCode::ported()
+pub fn list_supported_games() -> CommandResult<Vec<GameSummary>> {
+    Ok(GameCode::ported()
         .map(|p| GameSummary {
             code: p.code,
             display_name: p.display_name,
         })
-        .collect()
+        .collect())
 }
 
 // ---- slice 16-b (#24) — first-run onboarding wizard ----
@@ -914,7 +927,7 @@ pub struct OnboardingStatus {
 }
 
 #[tauri::command]
-pub async fn is_onboarding_complete(core: State<'_, Core>) -> Result<OnboardingStatus, String> {
+pub async fn is_onboarding_complete(core: State<'_, Core>) -> CommandResult<OnboardingStatus> {
     // Doubles as the IPC readiness marker (#54). This is the App
     // router's own query — first invoke of every session, on both the
     // wizard and main-app branches — and reaching this line means the
@@ -923,19 +936,19 @@ pub async fn is_onboarding_complete(core: State<'_, Core>) -> Result<OnboardingS
     // for the resulting log line; without it, a build where every
     // command is denied still passes the smoke.
     diagnostics::record_ipc_ready();
-    core.onboarding_status().await.map_err(|e| e.to_string())
+    core.onboarding_status().await.map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn mark_onboarding_complete(core: State<'_, Core>, skipped: bool) -> Result<(), String> {
+pub async fn mark_onboarding_complete(core: State<'_, Core>, skipped: bool) -> CommandResult<()> {
     core.mark_onboarding_complete(skipped)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub async fn reset_onboarding(core: State<'_, Core>) -> Result<(), String> {
-    core.reset_onboarding().await.map_err(|e| e.to_string())
+pub async fn reset_onboarding(core: State<'_, Core>) -> CommandResult<()> {
+    core.reset_onboarding().await.map_err(CommandError::from)
 }
 
 /// Per-game install-path detection result returned by
@@ -954,7 +967,7 @@ pub struct GameDetection {
 }
 
 #[tauri::command]
-pub async fn detect_all_games(core: State<'_, Core>) -> Result<Vec<GameDetection>, String> {
+pub async fn detect_all_games(core: State<'_, Core>) -> CommandResult<Vec<GameDetection>> {
     // Fan out one blocking task per ported game. Detection is IO-bound
     // (registry probes + path stats) so blocking pool is the right
     // venue. Order in the output preserves `GAME_PROFILES` order so
@@ -968,15 +981,18 @@ pub async fn detect_all_games(core: State<'_, Core>) -> Result<Vec<GameDetection
 
     let mut out = Vec::with_capacity(profiles.len());
     for (p, t) in profiles.into_iter().zip(tasks) {
-        let detected = t
-            .await
-            .map_err(|e| format!("detect task join error for {}: {e}", p.code.as_str()))?;
+        let detected = t.await.map_err(|error| {
+            CommandError::other(format!(
+                "detect task join error for {}: {error}",
+                p.code.as_str()
+            ))
+        })?;
         if let Some(path) = detected.as_ref() {
             // Persist eagerly so subsequent wizard steps see the
             // path without an extra round-trip.
             core.set_game_install_path(p.code, path)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(CommandError::from)?;
         }
         out.push(GameDetection {
             code: p.code,
