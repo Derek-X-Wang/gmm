@@ -178,10 +178,11 @@ pub const REINSTALL_AFTER_REPLACEMENT_MOVE: &str = "reinstall.after_replacement_
 /// finish purging the old intent-backed quarantine.
 pub const REINSTALL_AFTER_METADATA_COMMIT: &str = "reinstall.after_metadata_commit";
 
-/// `retry_reinstall_recovery`: the caller observed a durable witness but has
-/// not yet entered the serialized recovery mutation. Tests pause two real
-/// processes here to prove the later retry treats a concurrently retired row
-/// as already recovered.
+/// `retry_reinstall_recovery`: the caller observed preliminary witness state
+/// but has not yet entered the serialized recovery mutation. Absence is
+/// revalidated under the fence before it can support any outcome. Tests pause
+/// real processes here to prove a later retry verifies deployment after a
+/// concurrent caller retires the row.
 pub const RETRY_REINSTALL_AFTER_WITNESS_LOOKUP: &str =
     "retry_reinstall.after_witness_lookup";
 

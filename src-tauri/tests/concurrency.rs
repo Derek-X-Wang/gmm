@@ -2748,6 +2748,47 @@ async fn concurrent_reinstall_retries_report_the_later_success_honestly() {
     );
 }
 
+/// An absent reinstall witness does not itself prove recovery. If an enabled
+/// Mod's deployed Junction is missing, retry must repair the deployment before
+/// it can report that recovery had already completed.
+///
+/// Mutation oracle: restoring the unconditional `AlreadyRecovered` return for
+/// an absent witness makes the named outcome assertion fail.
+#[tokio::test]
+async fn retry_without_witness_does_not_report_missing_enabled_deployment_as_already_recovered() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("record game install path");
+    let imported = env.seed_mod(&core, "Missing Recovered Deployment").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy enabled Mod");
+    let deployment = env.game_mods.join("Missing Recovered Deployment");
+    gmm_lib::core::junction::remove(&deployment).expect("remove enabled Mod deployment");
+
+    let outcome = core
+        .retry_reinstall_recovery(&imported.id)
+        .await
+        .expect("retry recovery without a witness");
+
+    assert!(
+        !matches!(
+            outcome,
+            gmm_lib::core::ReinstallRecoveryOutcome::AlreadyRecovered
+        ),
+        "missing enabled deployment was reported as AlreadyRecovered",
+    );
+    assert!(
+        deployment.join("merged.ini").is_file(),
+        "retry did not restore the enabled Mod's deployed Junction",
+    );
+}
+
 /// One retry fails its rollback and pauses after reading the quarantined
 /// witness for Junction withdrawal. A competing retry has already observed
 /// the same witness and can restore it only after the withdrawal releases the
