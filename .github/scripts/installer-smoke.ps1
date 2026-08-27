@@ -45,6 +45,9 @@ $UninstallLog = Join-Path $LogDir "msi-uninstall.log"
 $AppProc = $null
 $ManifestListener = $null
 $HeldManifestConnection = $null
+$FailureClass = "PRODUCT"
+$StartupOrderingFailure = $null
+$FixtureMode = "unavailable"
 
 function Write-Section($msg) {
     Write-Host ""
@@ -76,13 +79,60 @@ function Dump-Diagnostics {
         Format-List | Out-String | Write-Host
 }
 
-trap {
-    Write-Host "SMOKE FAILED: $_" -ForegroundColor Red
-    if ($null -ne $AppProc) {
-        Stop-Process -Id $AppProc.Id -Force -ErrorAction SilentlyContinue
+function Publish-SmokeFailure($failureClass, $message) {
+    $title = "Installer smoke $failureClass failure"
+    $annotationMessage = $message.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+    Write-Host "::error title=${title}::$annotationMessage"
+    Write-Host "$($title.ToUpperInvariant()): $message" -ForegroundColor Red
+
+    if (Test-Path Env:GITHUB_OUTPUT) {
+        "failure_class=$($failureClass.ToLowerInvariant())" |
+            Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
     }
-    if ($null -ne $HeldManifestConnection) { $HeldManifestConnection.Dispose() }
-    if ($null -ne $ManifestListener) { $ManifestListener.Stop() }
+    if (Test-Path Env:GITHUB_STEP_SUMMARY) {
+        @(
+            "### $title",
+            "",
+            $message
+        ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+    }
+}
+
+function Stop-StartupAttempt {
+    if ($null -ne $script:AppProc) {
+        Stop-Process -Id $script:AppProc.Id -Force -ErrorAction SilentlyContinue
+        $script:AppProc = $null
+    }
+    if ($null -ne $script:HeldManifestConnection) {
+        $script:HeldManifestConnection.Dispose()
+        $script:HeldManifestConnection = $null
+    }
+    if ($null -ne $script:ManifestListener) {
+        $script:ManifestListener.Stop()
+        $script:ManifestListener = $null
+    }
+}
+
+function Confirm-ManifestFixtureListening($listener, $port) {
+    $probeAccept = $listener.AcceptTcpClientAsync()
+    $probeClient = [System.Net.Sockets.TcpClient]::new()
+    $probeConnection = $null
+    try {
+        $probeClient.Connect([System.Net.IPAddress]::Loopback, $port)
+        if (-not $probeAccept.Wait(5000)) {
+            throw "manifest fixture did not accept its readiness probe on port $port within 5s"
+        }
+        $probeConnection = $probeAccept.GetAwaiter().GetResult()
+    } finally {
+        if ($null -ne $probeConnection) { $probeConnection.Dispose() }
+        $probeClient.Dispose()
+    }
+    Write-Host "manifest fixture confirmed listening on 127.0.0.1:$port"
+}
+
+trap {
+    Publish-SmokeFailure $FailureClass $_.Exception.Message
+    Stop-StartupAttempt
     Dump-Diagnostics
     exit 1
 }
@@ -178,144 +228,184 @@ function Get-DiagnosticEventTimestamp($needle, $previousCount) {
     }
 }
 
-# Accept the refresh request but never answer it. The startup guard is event
-# ordering, not the ordinary 90-second liveness deadline: a blocking startup
-# logs refresh completion before IPC readiness, while a background refresh
-# lets IPC become ready before the client's own 20-second timeout completes.
-$ManifestListener = [System.Net.Sockets.TcpListener]::new(
-    [System.Net.IPAddress]::Loopback,
-    0
-)
-$ManifestListener.Start()
-$manifestPort = ([System.Net.IPEndPoint]$ManifestListener.LocalEndpoint).Port
-$manifestAccept = $ManifestListener.AcceptTcpClientAsync()
-$manifestUrl = "http://127.0.0.1:$manifestPort/recommended-importers.json"
+function Invoke-StartupAttempt($attempt) {
+    $script:FailureClass = "INFRASTRUCTURE"
+    if (Test-Path $AppData) {
+        Write-Host "removing startup data before attempt $attempt"
+        Remove-Item $AppData -Recurse -Force
+    }
 
-$ipcBefore = Get-DiagnosticMarkerCount $IpcReadyMarker
-$manifestRefreshBefore = Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker
-$manifestRefreshFinishedBefore = Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage
-$previousManifestUrl = [System.Environment]::GetEnvironmentVariable(
-    $ManifestUrlOverrideEnv,
-    [System.EnvironmentVariableTarget]::Process
-)
-[System.Environment]::SetEnvironmentVariable(
-    $ManifestUrlOverrideEnv,
-    $manifestUrl,
-    [System.EnvironmentVariableTarget]::Process
-)
-try {
-    $AppProc = Start-Process $exe -PassThru
-} finally {
-    [System.Environment]::SetEnvironmentVariable(
+    # Port zero delegates collision avoidance to Windows. Start is synchronous,
+    # then a real accept proves the listener before the chosen port is passed to
+    # the installed app. This is the installer-smoke equivalent of #203.
+    $script:ManifestListener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        0
+    )
+    $script:ManifestListener.Start()
+    $manifestPort = ([System.Net.IPEndPoint]$script:ManifestListener.LocalEndpoint).Port
+    Confirm-ManifestFixtureListening $script:ManifestListener $manifestPort
+
+    if ($FixtureMode -and $FixtureMode -ne "unavailable") {
+        throw ("unknown GMM_INSTALLER_SMOKE_FIXTURE_MODE " +
+               "'$FixtureMode'")
+    }
+    if ($FixtureMode -eq "unavailable") {
+        $script:ManifestListener.Stop()
+        $script:ManifestListener = $null
+        throw "manifest fixture deliberately made unavailable after readiness confirmation"
+    }
+
+    # Accept the refresh request but never answer it. The startup guard is event
+    # ordering, not the ordinary 90-second liveness deadline: a blocking startup
+    # logs refresh completion before IPC readiness, while a background refresh
+    # lets IPC become ready before the client's own 20-second timeout completes.
+    $manifestAccept = $script:ManifestListener.AcceptTcpClientAsync()
+    $manifestUrl = "http://127.0.0.1:$manifestPort/recommended-importers.json"
+
+    $ipcBefore = Get-DiagnosticMarkerCount $IpcReadyMarker
+    $manifestRefreshBefore = Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker
+    $manifestRefreshFinishedBefore = Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage
+    $previousManifestUrl = [System.Environment]::GetEnvironmentVariable(
         $ManifestUrlOverrideEnv,
-        $previousManifestUrl,
         [System.EnvironmentVariableTarget]::Process
     )
-}
-Write-Host "launched pid $($AppProc.Id) with a held-open manifest endpoint"
-
-$deadline = (Get-Date).AddSeconds(90)
-$dbSeen = $false
-$logSeen = $false
-$ipcSeen = $false
-$manifestRefreshSeen = $false
-$manifestRefreshFinishedSeen = $false
-$manifestRequestSeen = $false
-$ipcReadyAt = $null
-$manifestRefreshFinishedAt = $null
-
-while ((Get-Date) -lt $deadline) {
-    if (-not $dbSeen -and (Test-Path $dbPath)) {
-        $dbSeen = $true
-        Write-Host "gmm.db created (SQLite migrations ran)"
+    [System.Environment]::SetEnvironmentVariable(
+        $ManifestUrlOverrideEnv,
+        $manifestUrl,
+        [System.EnvironmentVariableTarget]::Process
+    )
+    $script:FailureClass = "PRODUCT"
+    try {
+        $script:AppProc = Start-Process $exe -PassThru
+    } finally {
+        [System.Environment]::SetEnvironmentVariable(
+            $ManifestUrlOverrideEnv,
+            $previousManifestUrl,
+            [System.EnvironmentVariableTarget]::Process
+        )
     }
-    if (-not $logSeen -and (Test-Path $logDir) -and
-        (Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue)) {
-        $logSeen = $true
-        Write-Host "log file created (tracing subscriber up)"
-    }
-    if ($logSeen) {
-        if (-not $ipcSeen -and
-            (Get-DiagnosticMarkerCount $IpcReadyMarker) -gt $ipcBefore) {
-            $ipcSeen = $true
-            $ipcReadyAt = Get-DiagnosticEventTimestamp $IpcReadyMarker $ipcBefore
-            Write-Host "new IPC readiness marker seen (frontend reached the backend)"
+    Write-Host "launched pid $($script:AppProc.Id) with held-open manifest endpoint on attempt $attempt"
+
+    $deadline = (Get-Date).AddSeconds(90)
+    $dbSeen = $false
+    $logSeen = $false
+    $ipcSeen = $false
+    $manifestRefreshSeen = $false
+    $manifestRefreshFinishedSeen = $false
+    $manifestRequestSeen = $false
+    $ipcReadyAt = $null
+    $manifestRefreshFinishedAt = $null
+
+    while ((Get-Date) -lt $deadline) {
+        if (-not $dbSeen -and (Test-Path $dbPath)) {
+            $dbSeen = $true
+            Write-Host "gmm.db created (SQLite migrations ran)"
         }
-        if (-not $manifestRefreshSeen -and
-            (Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker) -gt $manifestRefreshBefore) {
-            $manifestRefreshSeen = $true
-            Write-Host "new manifest-refresh marker seen"
+        if (-not $logSeen -and (Test-Path $logDir) -and
+            (Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue)) {
+            $logSeen = $true
+            Write-Host "log file created (tracing subscriber up)"
         }
-        if (-not $manifestRefreshFinishedSeen -and
-            (Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage) -gt
-                $manifestRefreshFinishedBefore) {
-            $manifestRefreshFinishedSeen = $true
-            $manifestRefreshFinishedAt = Get-DiagnosticEventTimestamp `
-                $ManifestRefreshFinishedMessage `
-                $manifestRefreshFinishedBefore
-            Write-Host "manifest refresh reached its terminal event"
+        if ($logSeen) {
+            if (-not $ipcSeen -and
+                (Get-DiagnosticMarkerCount $IpcReadyMarker) -gt $ipcBefore) {
+                $ipcSeen = $true
+                $ipcReadyAt = Get-DiagnosticEventTimestamp $IpcReadyMarker $ipcBefore
+                Write-Host "new IPC readiness marker seen (frontend reached the backend)"
+            }
+            if (-not $manifestRefreshSeen -and
+                (Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker) -gt
+                    $manifestRefreshBefore) {
+                $manifestRefreshSeen = $true
+                Write-Host "new manifest-refresh marker seen"
+            }
+            if (-not $manifestRefreshFinishedSeen -and
+                (Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage) -gt
+                    $manifestRefreshFinishedBefore) {
+                $manifestRefreshFinishedSeen = $true
+                $manifestRefreshFinishedAt = Get-DiagnosticEventTimestamp `
+                    $ManifestRefreshFinishedMessage `
+                    $manifestRefreshFinishedBefore
+                Write-Host "manifest refresh reached its terminal event"
+            }
         }
-    }
-    if (-not $manifestRequestSeen -and $manifestAccept.IsCompletedSuccessfully) {
-        $HeldManifestConnection = $manifestAccept.Result
-        $manifestRequestSeen = $true
-        Write-Host "manifest request accepted and deliberately left unanswered"
-    }
-    if ($dbSeen -and $logSeen -and $ipcSeen -and
-        $manifestRefreshSeen -and $manifestRefreshFinishedSeen -and
-        $manifestRequestSeen) { break }
+        if (-not $manifestRequestSeen -and $manifestAccept.IsCompletedSuccessfully) {
+            $script:HeldManifestConnection = $manifestAccept.Result
+            $manifestRequestSeen = $true
+            Write-Host "manifest request accepted and deliberately left unanswered"
+        }
+        if ($dbSeen -and $logSeen -and $ipcSeen -and
+            $manifestRefreshSeen -and $manifestRefreshFinishedSeen -and
+            $manifestRequestSeen) { break }
 
-    if ($AppProc.HasExited) {
-        throw "GMM exited early with code $($AppProc.ExitCode) before finishing startup"
+        if ($script:AppProc.HasExited) {
+            throw "GMM exited early with code $($script:AppProc.ExitCode) before finishing startup"
+        }
+        Start-Sleep -Milliseconds 500
     }
-    Start-Sleep -Milliseconds 500
+
+    if (-not $dbSeen) { throw "timed out waiting for $dbPath" }
+    if (-not $logSeen) { throw "timed out waiting for a log file in $logDir" }
+    if (-not $ipcSeen) {
+        throw "timed out waiting for the IPC readiness marker '$IpcReadyMarker' in $logDir — " +
+              "the backend started but the frontend never completed a command round-trip " +
+              "(unregistered command, ACL denial, a WebView that never loaded, or " +
+              "startup work blocked Tauri past the deadline)"
+    }
+    if (-not $manifestRefreshSeen) {
+        throw "timed out waiting for a new manifest-refresh marker " +
+              "'$ManifestRefreshStartedMarker' in $logDir"
+    }
+    if (-not $manifestRequestSeen) {
+        throw "timed out waiting for the manifest refresh to reach $manifestUrl"
+    }
+    if (-not $manifestRefreshFinishedSeen) {
+        throw "timed out waiting for the held-open manifest refresh to reach its terminal event"
+    }
+    if ($ipcReadyAt -ge $manifestRefreshFinishedAt) {
+        $script:StartupOrderingFailure =
+            "IPC readiness at $ipcReadyAt did not precede manifest refresh completion at " +
+            "$manifestRefreshFinishedAt — startup appears to be waiting on the network"
+        Stop-StartupAttempt
+        Start-Sleep -Seconds 3
+        return $false
+    }
+    Write-Host "IPC readiness preceded manifest refresh completion"
+
+    # A crash-on-idle would show up here.
+    Start-Sleep -Seconds 5
+    if ($script:AppProc.HasExited) {
+        throw "GMM exited with code $($script:AppProc.ExitCode) shortly after startup"
+    }
+    Write-Host "process still alive after startup — no crash loop"
+
+    # Must happen before reading gmm.db: the running app holds the SQLite
+    # file open, and a read while it is locked fails with a sharing violation.
+    Stop-StartupAttempt
+    Start-Sleep -Seconds 3
+    return $true
 }
 
-if (-not $dbSeen) { throw "timed out waiting for $dbPath" }
-if (-not $logSeen) { throw "timed out waiting for a log file in $logDir" }
-if (-not $ipcSeen) {
-    throw "timed out waiting for the IPC readiness marker '$IpcReadyMarker' in $logDir — " +
-          "the backend started but the frontend never completed a command round-trip " +
-          "(unregistered command, ACL denial, a WebView that never loaded, or " +
-          "startup work blocked Tauri past the deadline)"
+$startupPassed = $false
+foreach ($attempt in 1..2) {
+    Write-Section "Startup attempt $attempt"
+    if (Invoke-StartupAttempt $attempt) {
+        $startupPassed = $true
+        break
+    }
+    if ($attempt -eq 1) {
+        Write-Host "::warning title=Installer smoke infrastructure retry::$StartupOrderingFailure"
+        Write-Host "startup event order was inverted once; retrying from clean app data"
+    }
 }
-if (-not $manifestRefreshSeen) {
-    throw "timed out waiting for a new manifest-refresh marker " +
-          "'$ManifestRefreshStartedMarker' in $logDir"
+if (-not $startupPassed) {
+    $FailureClass = "PRODUCT"
+    throw "$StartupOrderingFailure (the exact product assertion failed twice)"
 }
-if (-not $manifestRequestSeen) {
-    throw "timed out waiting for the manifest refresh to reach $manifestUrl"
-}
-if (-not $manifestRefreshFinishedSeen) {
-    throw "timed out waiting for the held-open manifest refresh to reach its terminal event"
-}
-if ($ipcReadyAt -ge $manifestRefreshFinishedAt) {
-    throw "IPC readiness at $ipcReadyAt did not precede manifest refresh completion at " +
-          "$manifestRefreshFinishedAt — startup appears to be waiting on the network"
-}
-Write-Host "IPC readiness preceded manifest refresh completion"
-
-# A crash-on-idle would show up here.
-Start-Sleep -Seconds 5
-if ($AppProc.HasExited) {
-    throw "GMM exited with code $($AppProc.ExitCode) shortly after startup"
-}
-Write-Host "process still alive after startup — no crash loop"
 
 # ---------------------------------------------------------------------
 Write-Section "Shut down"
-
-# Must happen before reading gmm.db: the running app holds the SQLite
-# file open, and a read while it's locked fails with a sharing violation.
-Stop-Process -Id $AppProc.Id -Force -ErrorAction SilentlyContinue
-$AppProc = $null
-if ($null -ne $HeldManifestConnection) {
-    $HeldManifestConnection.Dispose()
-    $HeldManifestConnection = $null
-}
-$ManifestListener.Stop()
-$ManifestListener = $null
-Start-Sleep -Seconds 3
 
 # ---------------------------------------------------------------------
 # The six supported games must be seeded by the initial migration.
