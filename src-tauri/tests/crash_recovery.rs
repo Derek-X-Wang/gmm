@@ -240,6 +240,44 @@ async fn seed_mod(env: &TestEnv, core: &Core, name: &str) -> gmm_lib::core::Mod 
         .expect("adopt")
 }
 
+#[cfg(unix)]
+fn durable_directory_key(path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path).expect("directory metadata for recovery witness");
+    format!("{:016x}:{:016x}", metadata.dev(), metadata.ino())
+}
+
+#[cfg(windows)]
+fn durable_directory_key(path: &Path) -> String {
+    use std::fs::OpenOptions;
+    use std::mem::MaybeUninit;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let directory = OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .expect("open directory for recovery witness identity");
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    let ok = unsafe { GetFileInformationByHandle(directory.as_raw_handle(), info.as_mut_ptr()) };
+    assert_ne!(
+        ok,
+        0,
+        "read directory identity for recovery witness: {}",
+        std::io::Error::last_os_error(),
+    );
+    let info = unsafe { info.assume_init() };
+    let file = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    format!("{:016x}:{:016x}", info.dwVolumeSerialNumber, file)
+}
+
 /// At the post-commit seam, the referenced Mod must already have its complete
 /// Variant shape and initial active selection. This is intentionally stronger
 /// than merely observing the Mod row: it catches a refactor that commits the
@@ -1421,6 +1459,47 @@ async fn every_crash_point_is_exercised_by_an_operation() {
     core.retry_reinstall_recovery(&imported.id)
         .await
         .expect("coverage retry after completed reinstall");
+
+    // A quarantined reinstall drives the serialized withdrawal seam through
+    // the same validated witness loader used by startup and retry recovery.
+    let env = TestEnv::new();
+    let core = observe(env.restart().await);
+    let quarantined = seed_mod(&env, &core, "Coverage Quarantined Withdrawal").await;
+    let root = quarantined
+        .library_path
+        .parent()
+        .expect("coverage Mod Library root");
+    let token = ulid::Ulid::new();
+    let stage = root.join(format!(".gmm-reinstall-{token}"));
+    let quarantine = root.join(format!(".gmm-delete-{token}"));
+    std::fs::create_dir(&stage).expect("coverage reinstall stage");
+    let pool = SqlitePool::connect(&env.db_url)
+        .await
+        .expect("coverage quarantined withdrawal DB");
+    sqlx::query(
+        "INSERT INTO reinstall_swaps (
+            token, mod_id, game_code, library_path, staged_path,
+            quarantine_path, old_identity, staged_identity, created_at,
+            recovery_error, recovery_attempted_at, recovery_attempts
+         ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+    )
+    .bind(token.to_string())
+    .bind(&quarantined.id)
+    .bind(quarantined.library_path.to_string_lossy().as_ref())
+    .bind(stage.to_string_lossy().as_ref())
+    .bind(quarantine.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&quarantined.library_path))
+    .bind(durable_directory_key(&stage))
+    .bind("2026-08-27T00:00:00Z")
+    .bind("coverage recovery obstruction")
+    .bind("2026-08-27T00:01:00Z")
+    .execute(&pool)
+    .await
+    .expect("insert coverage quarantined witness");
+    pool.close().await;
+    core.reconcile_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("coverage quarantined withdrawal");
 
     // A missing source creates a staged destination and then forces the
     // identity-checked quarantine cleanup path.

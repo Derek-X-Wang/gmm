@@ -185,6 +185,13 @@ pub const REINSTALL_AFTER_METADATA_COMMIT: &str = "reinstall.after_metadata_comm
 pub const RETRY_REINSTALL_AFTER_WITNESS_LOOKUP: &str =
     "retry_reinstall.after_witness_lookup";
 
+/// Quarantine withdrawal: the validated witness still exists and is
+/// quarantined, while its Junction has not yet been inspected or removed.
+/// The Library writer fence is already held, so a retry cannot restore and
+/// retire the witness before this withdrawal decision commits.
+pub const WITHDRAW_REINSTALL_AFTER_WITNESS_LOOKUP: &str =
+    "withdraw_reinstall.after_witness_lookup";
+
 /// Failed adopt/ZIP cleanup: identity and database ownership have been
 /// re-proved under the writer fence, immediately before the staged directory
 /// is renamed into the durable delete quarantine.

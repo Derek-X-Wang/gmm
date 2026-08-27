@@ -45,6 +45,7 @@ pub(super) enum LibraryMutation {
     FinishInterruptedDeletes,
     ResolveInterruptedStaging,
     RetryReinstallRecovery,
+    WithdrawQuarantinedReinstallJunction,
     SetLibraryRoot,
     SetLibraryPathForGame,
     AdoptFolder,
@@ -64,6 +65,7 @@ impl LibraryMutation {
             Self::FinishInterruptedDeletes => "finish_interrupted_library_deletes",
             Self::ResolveInterruptedStaging => "resolve_interrupted_staging_at_startup",
             Self::RetryReinstallRecovery => "retry_reinstall_recovery",
+            Self::WithdrawQuarantinedReinstallJunction => "withdraw_quarantined_reinstall_junction",
             Self::SetLibraryRoot => "set_library_root",
             Self::SetLibraryPathForGame => "set_library_path_for_game",
             Self::AdoptFolder => "adopt_folder",
@@ -651,6 +653,7 @@ impl Core {
             LibraryMutation::AuditLibrary
                 | LibraryMutation::FinishInterruptedDeletes
                 | LibraryMutation::ResolveInterruptedStaging
+                | LibraryMutation::WithdrawQuarantinedReinstallJunction
         ) {
             self.prune_stale_session_launch_claims(&mut transaction)
                 .await?;
@@ -1363,14 +1366,17 @@ impl Core {
         token: &str,
         link: Option<&Path>,
     ) -> Result<Option<bool>> {
-        let mut connection = self.pool.acquire().await?;
-        let state = load_reinstall_swap_witnesses(&mut connection)
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::WithdrawQuarantinedReinstallJunction)
+            .await?;
+        let state = load_reinstall_swap_witnesses(&mut fence.transaction)
             .await?
             .into_iter()
             .find(|witness| witness.token().to_string() == token && witness.is_quarantined())
             .map(|witness| witness.junction_withdrawn());
-        drop(connection);
+        self.crash_point(crash_points::WITHDRAW_REINSTALL_AFTER_WITNESS_LOOKUP);
         let Some(state) = state else {
+            fence.commit().await?;
             return Ok(None);
         };
         if state {
@@ -1379,6 +1385,7 @@ impl Core {
                 None => true,
             };
             if absent {
+                fence.commit().await?;
                 return Ok(Some(true));
             }
         }
@@ -1396,11 +1403,13 @@ impl Core {
         .bind(withdrawn)
         .bind(&withdrawal_error)
         .bind(token)
-        .execute(&self.pool)
+        .execute(&mut *fence.transaction)
         .await?;
         if updated.rows_affected() == 0 {
+            fence.commit().await?;
             return Ok(None);
         }
+        fence.commit().await?;
         if let Some(error) = withdrawal_error {
             tracing::error!(
                 target: "gmm::library",

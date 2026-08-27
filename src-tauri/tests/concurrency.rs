@@ -2748,6 +2748,96 @@ async fn concurrent_reinstall_retries_report_the_later_success_honestly() {
     );
 }
 
+/// One retry fails its rollback and pauses after reading the quarantined
+/// witness for Junction withdrawal. A competing retry has already observed
+/// the same witness and can restore it only after the withdrawal releases the
+/// shared Library writer fence. The final enabled flag and Junction must agree.
+///
+/// Mutation oracle: removing the writer fence from
+/// `withdraw_quarantined_reinstall_junction` lets the competing retry restore
+/// and retire the witness while withdrawal is paused. The stale withdrawal
+/// then removes that restored Junction, and the named final-deployment
+/// assertion fails.
+#[tokio::test]
+async fn quarantined_withdrawal_racing_retry_leaves_enabled_mod_deployed() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("record game install path");
+    let imported = env.seed_mod(&core, "Withdrawal Retry Race").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy enabled Mod before recovery race");
+
+    // Construct both real processes before the witness exists so startup
+    // recovery cannot consume the fixture before the controlled operations.
+    let mut withdrawing = probe(&env)
+        .ready_before_operation()
+        .pausing_at(gmm_lib::core::crash_points::WITHDRAW_REINSTALL_AFTER_WITNESS_LOOKUP)
+        .op(["retry-reinstall-recovery", "--mod-id", imported.id.as_str()])
+        .spawn();
+    withdrawing.wait_until_ready_before_operation();
+    let mut retrying = probe(&env)
+        .ready_before_operation()
+        .pausing_at(gmm_lib::core::crash_points::RETRY_REINSTALL_AFTER_WITNESS_LOOKUP)
+        .op(["retry-reinstall-recovery", "--mod-id", imported.id.as_str()])
+        .spawn();
+    retrying.wait_until_ready_before_operation();
+
+    let (_token, stage, held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    withdrawing.resume();
+    withdrawing
+        .wait_for_pause(gmm_lib::core::crash_points::WITHDRAW_REINSTALL_AFTER_WITNESS_LOOKUP);
+
+    std::fs::remove_dir_all(&stage).expect("remove unproved stage replacement");
+    std::fs::rename(&held_stage, &stage).expect("restore witnessed stage identity");
+    retrying.resume();
+    retrying.wait_for_pause(gmm_lib::core::crash_points::RETRY_REINSTALL_AFTER_WITNESS_LOOKUP);
+    retrying.resume();
+    let first_retry = retrying.wait_for_outcome();
+
+    withdrawing.resume();
+    withdrawing
+        .wait_for_outcome()
+        .expect_ok("quarantining retry after serialized Junction withdrawal");
+
+    if !first_retry.ok {
+        assert!(
+            first_retry
+                .error
+                .to_lowercase()
+                .contains("database is locked"),
+            "the competing retry must be excluded by the withdrawal writer fence, got: {}",
+            first_retry.error,
+        );
+        core.retry_reinstall_recovery(&imported.id)
+            .await
+            .expect("retry recovery after serialized withdrawal");
+    }
+
+    let listed = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list Mod after recovery race");
+    let recovered = listed
+        .iter()
+        .find(|candidate| candidate.id == imported.id)
+        .expect("recovered Mod remains listed");
+    assert!(recovered.enabled, "the race must preserve enabled intent");
+    assert!(
+        env.game_mods
+            .join("Withdrawal Retry Race")
+            .join("merged.ini")
+            .is_file(),
+        "successful recovery left the enabled Mod without its deployed Junction",
+    );
+}
+
 /// Ordinary delete reclamation runs after reinstall recovery. If the old tree
 /// is already at its intent-backed quarantine name when recovery becomes
 /// uncertain, that second phase must not erase the user's rollback copy.
