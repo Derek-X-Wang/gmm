@@ -46,7 +46,6 @@ $AppProc = $null
 $ManifestListener = $null
 $HeldManifestConnection = $null
 $FailureClass = "PRODUCT"
-$StartupOrderingFailure = $null
 $FixtureMode = $env:GMM_INSTALLER_SMOKE_FIXTURE_MODE
 
 function Write-Section($msg) {
@@ -130,6 +129,35 @@ function Confirm-ManifestFixtureListening($listener, $port) {
     Write-Host "manifest fixture confirmed listening on 127.0.0.1:$port"
 }
 
+function Assert-ManifestFixtureAcceptHealthy($acceptTask) {
+    if ($acceptTask.IsFaulted) {
+        $script:FailureClass = "INFRASTRUCTURE"
+        $reason = $acceptTask.Exception.GetBaseException().Message
+        throw "manifest fixture accept faulted after GMM launch: $reason"
+    }
+    if ($acceptTask.IsCanceled) {
+        $script:FailureClass = "INFRASTRUCTURE"
+        throw "manifest fixture accept was canceled after GMM launch"
+    }
+}
+
+function Complete-ManifestFixtureRequest {
+    $response = [System.Text.Encoding]::ASCII.GetBytes(
+        "HTTP/1.1 503 Service Unavailable`r`n" +
+        "Content-Length: 0`r`n" +
+        "Connection: close`r`n`r`n"
+    )
+    try {
+        $stream = $script:HeldManifestConnection.GetStream()
+        $stream.Write($response, 0, $response.Length)
+        $stream.Flush()
+    } finally {
+        $script:HeldManifestConnection.Dispose()
+        $script:HeldManifestConnection = $null
+    }
+    Write-Host "manifest fixture released the request after IPC readiness"
+}
+
 trap {
     Publish-SmokeFailure $FailureClass $_.Exception.Message
     Stop-StartupAttempt
@@ -199,7 +227,7 @@ $IpcReadyMarker = "gmm-ipc-ready"
 # refresh ran and did not block the usable application behind the network.
 $ManifestRefreshStartedMarker = "gmm-manifest-refresh-started"
 # This is the terminal event emitted by the startup refresh thread after the
-# held-open request reaches the production client's own timeout.
+# fixture releases its response, which happens only after IPC is ready.
 $ManifestRefreshFinishedMessage = "recommended-importers refresh finished"
 # Must match `MANIFEST_URL_OVERRIDE_ENV` in recommended_importers.rs.
 $ManifestUrlOverrideEnv = "GMM_RECOMMENDED_IMPORTERS_URL"
@@ -210,28 +238,10 @@ function Get-DiagnosticMarkerCount($marker) {
         Select-String -SimpleMatch $marker).Count
 }
 
-function Get-DiagnosticEventTimestamp($needle, $previousCount) {
-    $matchingLines = @(Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue |
-        Sort-Object FullName |
-        ForEach-Object { Get-Content $_.FullName } |
-        Where-Object { $_.Contains($needle) })
-    if ($matchingLines.Count -le $previousCount) { return $null }
-
-    try {
-        $diagnosticEvent = $matchingLines[$previousCount] | ConvertFrom-Json
-        if ($null -eq $diagnosticEvent.timestamp) {
-            throw "event has no timestamp"
-        }
-        return [System.DateTimeOffset]::Parse([string]$diagnosticEvent.timestamp)
-    } catch {
-        throw "could not parse timestamp for diagnostic event '$needle': $_"
-    }
-}
-
-function Invoke-StartupAttempt($attempt) {
+function Invoke-StartupSmoke {
     $script:FailureClass = "INFRASTRUCTURE"
     if (Test-Path $AppData) {
-        Write-Host "removing startup data before attempt $attempt"
+        Write-Host "removing startup data before launch"
         Remove-Item $AppData -Recurse -Force
     }
 
@@ -246,7 +256,8 @@ function Invoke-StartupAttempt($attempt) {
     $manifestPort = ([System.Net.IPEndPoint]$script:ManifestListener.LocalEndpoint).Port
     Confirm-ManifestFixtureListening $script:ManifestListener $manifestPort
 
-    if ($FixtureMode -and $FixtureMode -ne "unavailable") {
+    if ($FixtureMode -and
+        $FixtureMode -notin @("unavailable", "unavailable-after-launch")) {
         throw ("unknown GMM_INSTALLER_SMOKE_FIXTURE_MODE " +
                "'$FixtureMode'")
     }
@@ -256,10 +267,11 @@ function Invoke-StartupAttempt($attempt) {
         throw "manifest fixture deliberately made unavailable after readiness confirmation"
     }
 
-    # Accept the refresh request but never answer it. The startup guard is event
-    # ordering, not the ordinary 90-second liveness deadline: a blocking startup
-    # logs refresh completion before IPC readiness, while a background refresh
-    # lets IPC become ready before the client's own 20-second timeout completes.
+    # Accept the refresh request but do not answer until IPC is ready. The
+    # loopback override's 120-second client timeout is deliberately longer than
+    # this smoke's 90-second startup deadline. A blocking startup therefore
+    # cannot escape the assertion through a client timeout, while a slow but
+    # non-blocking startup cannot invert two independently scheduled timestamps.
     $manifestAccept = $script:ManifestListener.AcceptTcpClientAsync()
     $manifestUrl = "http://127.0.0.1:$manifestPort/recommended-importers.json"
 
@@ -285,7 +297,12 @@ function Invoke-StartupAttempt($attempt) {
             [System.EnvironmentVariableTarget]::Process
         )
     }
-    Write-Host "launched pid $($script:AppProc.Id) with held-open manifest endpoint on attempt $attempt"
+    Write-Host "launched pid $($script:AppProc.Id) with held-open manifest endpoint"
+
+    if ($FixtureMode -eq "unavailable-after-launch") {
+        $script:ManifestListener.Stop()
+        Write-Host "manifest fixture deliberately stopped after GMM launch"
+    }
 
     $deadline = (Get-Date).AddSeconds(90)
     $dbSeen = $false
@@ -294,10 +311,10 @@ function Invoke-StartupAttempt($attempt) {
     $manifestRefreshSeen = $false
     $manifestRefreshFinishedSeen = $false
     $manifestRequestSeen = $false
-    $ipcReadyAt = $null
-    $manifestRefreshFinishedAt = $null
 
     while ((Get-Date) -lt $deadline) {
+        Assert-ManifestFixtureAcceptHealthy $manifestAccept
+
         if (-not $dbSeen -and (Test-Path $dbPath)) {
             $dbSeen = $true
             Write-Host "gmm.db created (SQLite migrations ran)"
@@ -311,7 +328,6 @@ function Invoke-StartupAttempt($attempt) {
             if (-not $ipcSeen -and
                 (Get-DiagnosticMarkerCount $IpcReadyMarker) -gt $ipcBefore) {
                 $ipcSeen = $true
-                $ipcReadyAt = Get-DiagnosticEventTimestamp $IpcReadyMarker $ipcBefore
                 Write-Host "new IPC readiness marker seen (frontend reached the backend)"
             }
             if (-not $manifestRefreshSeen -and
@@ -324,9 +340,6 @@ function Invoke-StartupAttempt($attempt) {
                 (Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage) -gt
                     $manifestRefreshFinishedBefore) {
                 $manifestRefreshFinishedSeen = $true
-                $manifestRefreshFinishedAt = Get-DiagnosticEventTimestamp `
-                    $ManifestRefreshFinishedMessage `
-                    $manifestRefreshFinishedBefore
                 Write-Host "manifest refresh reached its terminal event"
             }
         }
@@ -335,9 +348,11 @@ function Invoke-StartupAttempt($attempt) {
             $manifestRequestSeen = $true
             Write-Host "manifest request accepted and deliberately left unanswered"
         }
+        if ($manifestRefreshFinishedSeen) {
+            throw "manifest refresh finished before the fixture released its held response"
+        }
         if ($dbSeen -and $logSeen -and $ipcSeen -and
-            $manifestRefreshSeen -and $manifestRefreshFinishedSeen -and
-            $manifestRequestSeen) { break }
+            $manifestRefreshSeen -and $manifestRequestSeen) { break }
 
         if ($script:AppProc.HasExited) {
             throw "GMM exited early with code $($script:AppProc.ExitCode) before finishing startup"
@@ -347,6 +362,11 @@ function Invoke-StartupAttempt($attempt) {
 
     if (-not $dbSeen) { throw "timed out waiting for $dbPath" }
     if (-not $logSeen) { throw "timed out waiting for a log file in $logDir" }
+    Assert-ManifestFixtureAcceptHealthy $manifestAccept
+    if (-not $ipcSeen -and $manifestRefreshSeen -and $manifestRequestSeen) {
+        throw "IPC readiness did not occur while the manifest request remained held open " +
+              "and unanswered — startup did not prove independence from the network"
+    }
     if (-not $ipcSeen) {
         throw "timed out waiting for the IPC readiness marker '$IpcReadyMarker' in $logDir — " +
               "the backend started but the frontend never completed a command round-trip " +
@@ -360,18 +380,28 @@ function Invoke-StartupAttempt($attempt) {
     if (-not $manifestRequestSeen) {
         throw "timed out waiting for the manifest refresh to reach $manifestUrl"
     }
+    Write-Host "IPC readiness observed while manifest request was held open and unanswered"
+
+    $script:FailureClass = "INFRASTRUCTURE"
+    Complete-ManifestFixtureRequest
+    $script:FailureClass = "PRODUCT"
+
+    $refreshDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $refreshDeadline) {
+        if ((Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage) -gt
+            $manifestRefreshFinishedBefore) {
+            $manifestRefreshFinishedSeen = $true
+            Write-Host "manifest refresh reached its terminal event"
+            break
+        }
+        if ($script:AppProc.HasExited) {
+            throw "GMM exited early with code $($script:AppProc.ExitCode) before refresh completion"
+        }
+        Start-Sleep -Milliseconds 500
+    }
     if (-not $manifestRefreshFinishedSeen) {
-        throw "timed out waiting for the held-open manifest refresh to reach its terminal event"
+        throw "timed out waiting for manifest refresh completion after fixture response"
     }
-    if ($ipcReadyAt -ge $manifestRefreshFinishedAt) {
-        $script:StartupOrderingFailure =
-            "IPC readiness at $ipcReadyAt did not precede manifest refresh completion at " +
-            "$manifestRefreshFinishedAt — startup appears to be waiting on the network"
-        Stop-StartupAttempt
-        Start-Sleep -Seconds 3
-        return $false
-    }
-    Write-Host "IPC readiness preceded manifest refresh completion"
 
     # A crash-on-idle would show up here.
     Start-Sleep -Seconds 5
@@ -384,25 +414,10 @@ function Invoke-StartupAttempt($attempt) {
     # file open, and a read while it is locked fails with a sharing violation.
     Stop-StartupAttempt
     Start-Sleep -Seconds 3
-    return $true
 }
 
-$startupPassed = $false
-foreach ($attempt in 1..2) {
-    Write-Section "Startup attempt $attempt"
-    if (Invoke-StartupAttempt $attempt) {
-        $startupPassed = $true
-        break
-    }
-    if ($attempt -eq 1) {
-        Write-Host "::warning title=Installer smoke infrastructure retry::$StartupOrderingFailure"
-        Write-Host "startup event order was inverted once; retrying from clean app data"
-    }
-}
-if (-not $startupPassed) {
-    $FailureClass = "PRODUCT"
-    throw "$StartupOrderingFailure (the exact product assertion failed twice)"
-}
+Write-Section "Startup"
+Invoke-StartupSmoke
 
 # ---------------------------------------------------------------------
 Write-Section "Shut down"

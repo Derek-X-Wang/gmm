@@ -2148,18 +2148,24 @@ impl Core {
         if !self.importer_recommendations_enabled().await? {
             return Ok(recommended_importers::Refreshed::Disabled);
         }
-        let redirect_policy = match redirects {
+        let (redirect_policy, timeout) = match redirects {
             // Keep redirects for the permanent raw-content URL: its hosting
             // may legitimately redirect, and refusing that would make a
             // provider detail take the recommendation layer offline.
-            ManifestRedirects::FollowShippedUrl => reqwest::redirect::Policy::limited(10),
-            ManifestRedirects::RefuseLoopbackOverride => reqwest::redirect::Policy::none(),
+            ManifestRedirects::FollowShippedUrl => (
+                reqwest::redirect::Policy::limited(10),
+                recommended_importers::FETCH_TIMEOUT,
+            ),
+            ManifestRedirects::RefuseLoopbackOverride => (
+                reqwest::redirect::Policy::none(),
+                recommended_importers::PACKAGED_SMOKE_FETCH_TIMEOUT,
+            ),
         };
         let client = self
             .http_client_builder()
             .await?
             .redirect(redirect_policy)
-            .timeout(recommended_importers::FETCH_TIMEOUT)
+            .timeout(timeout)
             .build()
             .map_err(|e| Error::Network(format!("client build: {e}")))?;
 

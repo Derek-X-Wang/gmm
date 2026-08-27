@@ -725,7 +725,10 @@ mod ipc_readiness_marker {
 mod manifest_refresh_started_marker {
     use super::read;
     use gmm_lib::core::diagnostics::MANIFEST_REFRESH_STARTED_MARKER;
-    use gmm_lib::core::recommended_importers::MANIFEST_URL_OVERRIDE_ENV;
+    use gmm_lib::core::recommended_importers::{
+        MANIFEST_URL_OVERRIDE_ENV, PACKAGED_SMOKE_FETCH_TIMEOUT,
+    };
+    use std::time::Duration;
 
     #[test]
     fn installer_smoke_counts_the_same_marker_for_this_launch() {
@@ -745,15 +748,29 @@ mod manifest_refresh_started_marker {
             "installer-smoke.ps1 must set {MANIFEST_URL_OVERRIDE_ENV} to the \
              endpoint it deliberately holds open",
         );
+        assert!(script.contains("Assert-ManifestFixtureAcceptHealthy"));
+        assert!(script.contains("$acceptTask.IsFaulted"));
+        assert!(script.contains("$script:FailureClass = \"INFRASTRUCTURE\""));
+        assert!(script.contains("unavailable-after-launch"));
+        assert!(script
+            .contains("IPC readiness did not occur while the manifest request remained held open"));
+        let direct_assertion = script
+            .find("IPC readiness observed while manifest request was held open and unanswered")
+            .expect("installer smoke must assert IPC while the fixture response is held");
+        let fixture_release = script
+            .rfind("Complete-ManifestFixtureRequest")
+            .expect("installer smoke must release the fixture response after its assertion");
         assert!(
-            script.contains("Get-DiagnosticEventTimestamp"),
-            "installer-smoke.ps1 must compare structured log timestamps rather \
-             than impose a machine-speed deadline",
+            direct_assertion < fixture_release,
+            "the held response must be released only after IPC readiness is proven",
         );
         assert!(
-            script.contains("$ipcReadyAt -ge $manifestRefreshFinishedAt"),
-            "installer-smoke.ps1 must require IPC readiness before the held-open \
-             refresh reaches its own terminal event",
+            PACKAGED_SMOKE_FETCH_TIMEOUT > Duration::from_secs(90),
+            "the loopback client's timeout must outlast the smoke startup deadline",
+        );
+        assert!(
+            !script.contains("foreach ($attempt in 1..2)"),
+            "a product assertion must not be discarded by retrying the launch",
         );
         assert!(
             !script.contains("$manifestRequestAcceptedAt.AddSeconds("),
