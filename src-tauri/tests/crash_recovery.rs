@@ -1500,6 +1500,12 @@ async fn every_crash_point_is_exercised_by_an_operation() {
     core.reconcile_junctions(GameCode::Gimi, &env.game_mods)
         .await
         .expect("coverage quarantined withdrawal");
+    // Rebuild carries its own barrier, so the coverage sweep must drive it as
+    // well as reconcile - otherwise the rebuild seam is registered but never
+    // proven reachable.
+    core.rebuild_junctions(GameCode::Gimi, &env.game_mods)
+        .await
+        .expect("coverage rebuild pass");
 
     // A missing source creates a staged destination and then forces the
     // identity-checked quarantine cleanup path.

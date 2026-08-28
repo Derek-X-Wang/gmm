@@ -2635,7 +2635,7 @@ async fn rebuild_cannot_redeploy_mod_quarantined_after_snapshot() {
         "the enabled Mod must begin the race deployed",
     );
 
-    let pause = gmm_lib::core::crash_points::RECONCILE_AFTER_QUARANTINE_SNAPSHOT;
+    let pause = gmm_lib::core::crash_points::REBUILD_AFTER_QUARANTINE_SNAPSHOT;
     let mut rebuilding = probe(&env)
         .ready_before_operation()
         .pausing_at(pause)

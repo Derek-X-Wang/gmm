@@ -3309,7 +3309,7 @@ impl Core {
         let quarantined = self
             .snapshot_quarantined_reinstalls_in_library_mutation()
             .await?;
-        self.crash_point(crash_points::RECONCILE_AFTER_QUARANTINE_SNAPSHOT);
+        self.crash_point(crash_points::REBUILD_AFTER_QUARANTINE_SNAPSHOT);
         let rows = sqlx::query(
             "SELECT id, junction_dir_name, library_path, enabled
              FROM mods WHERE game_code = ?",
