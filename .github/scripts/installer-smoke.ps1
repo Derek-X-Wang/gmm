@@ -246,7 +246,9 @@ function Assert-ManifestFixtureCheckpointOrder(
         $script:FailureClass = "INFRASTRUCTURE"
         throw "validated manifest fixture checkpoint carried an invalid response final character"
     }
-    [byte[]]($responseFinalByte[0] * [byte]$priorValidationByte * $validationByte)
+    return ,([byte[]](
+        $responseFinalByte[0] * [byte]$priorValidationByte * $validationByte
+    ))
 }
 
 function Assert-ManifestFixtureGuardCoverage {
