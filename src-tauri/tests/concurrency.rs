@@ -2609,6 +2609,81 @@ async fn reconcile_cannot_redeploy_mod_quarantined_after_snapshot() {
     );
 }
 
+/// Rebuild snapshots no quarantine, then a real recovery retry fails closed,
+/// durably quarantines the enabled Mod, and withdraws its Junction. Resuming the
+/// stale pass must not put that deployment entry back into the game.
+///
+/// Mutation oracle: bypassing the guarded Junction creation in
+/// `rebuild_junctions` makes the named final-entry assertion fail.
+#[tokio::test]
+async fn rebuild_cannot_redeploy_mod_quarantined_after_snapshot() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    core.set_game_install_path(
+        GameCode::Gimi,
+        env.game_mods.parent().expect("game install path"),
+    )
+    .await
+    .expect("record game install path");
+    let imported = env.seed_mod(&core, "Rebuild Quarantine Race").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("deploy enabled Mod before rebuild race");
+    let deployment = env.game_mods.join("Rebuild Quarantine Race");
+    assert!(
+        deployment.join("merged.ini").is_file(),
+        "the enabled Mod must begin the race deployed",
+    );
+
+    let pause = gmm_lib::core::crash_points::RECONCILE_AFTER_QUARANTINE_SNAPSHOT;
+    let mut rebuilding = probe(&env)
+        .ready_before_operation()
+        .pausing_at(pause)
+        .op([
+            "rebuild",
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ])
+        .spawn();
+    rebuilding.wait_until_ready_before_operation();
+    rebuilding.resume();
+    rebuilding.wait_for_pause(pause);
+
+    let (_token, _stage, _held_stage, _quarantine) =
+        obstruct_reinstall_recovery(&env, &imported).await;
+    let recovery = core
+        .retry_reinstall_recovery(&imported.id)
+        .await
+        .expect("retry must quarantine the obstructed reinstall");
+    assert!(
+        matches!(
+            recovery,
+            gmm_lib::core::ReinstallRecoveryOutcome::Quarantined { .. }
+        ),
+        "the controlled retry must durably quarantine the Mod: {recovery:?}",
+    );
+    assert!(
+        matches!(
+            std::fs::symlink_metadata(&deployment),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ),
+        "recovery must withdraw the Mod before the stale rebuild resumes",
+    );
+
+    rebuilding.resume();
+    rebuilding
+        .wait_for_outcome()
+        .expect_ok("rebuild after concurrent quarantine");
+
+    assert!(
+        matches!(
+            std::fs::symlink_metadata(&deployment),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ),
+        "stale rebuild recreated the quarantined Mod Junction",
+    );
+}
+
 /// Reconcile is a recovery path, not only a reporting path: a prior failed or
 /// interrupted withdrawal must be retried before the quarantined Mod is
 /// returned to the caller.
