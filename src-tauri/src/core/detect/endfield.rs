@@ -32,12 +32,23 @@ pub const EXE_NAMES: &[&str] = &["Endfield-Win64-Shipping.exe", "Endfield.exe"];
 /// exists two levels up. Same UE discriminator we use for Wuthering
 /// Waves (slice 8 / #18).
 // Detection is a best-effort optional-install probe; an I/O error means this candidate is unusable.
-#[allow(clippy::disallowed_methods)]
 pub fn validate(path: &Path) -> bool {
-    if !path.is_dir() {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "optional-install detection intentionally treats an unreadable candidate as unusable"
+    )]
+    let candidate_is_directory = path.is_dir();
+    if !candidate_is_directory {
         return false;
     }
-    let exe_present = EXE_NAMES.iter().any(|name| path.join(name).is_file());
+    let exe_present = EXE_NAMES.iter().any(|name| {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "optional-install detection intentionally treats an unreadable candidate as unusable"
+        )]
+        let executable_is_file = path.join(name).is_file();
+        executable_is_file
+    });
     if !exe_present {
         return false;
     }
@@ -45,7 +56,12 @@ pub fn validate(path: &Path) -> bool {
         .parent()
         .and_then(Path::parent)
         .map(|p| p.join("Content"));
-    matches!(content_root, Some(p) if p.is_dir())
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "optional-install detection intentionally treats an unreadable candidate as unusable"
+    )]
+    let content_directory_is_present = matches!(content_root, Some(p) if p.is_dir());
+    content_directory_is_present
 }
 
 /// Try each candidate path in order, returning the first one that

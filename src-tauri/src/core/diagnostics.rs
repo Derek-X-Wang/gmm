@@ -119,6 +119,10 @@ pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
         if !is_gmm_log(&path) {
             continue;
         }
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "log pruning intentionally skips the one entry whose timestamp cannot be read"
+        )]
         let modified = match entry.metadata().and_then(|m| m.modified()) {
             Ok(m) => m,
             Err(_) => continue,
@@ -127,7 +131,12 @@ pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
             // Best-effort removal — we'd rather not crash on a locked file
             // mid-startup.
             // The returned count is successful removals, so a failed removal is intentionally not counted.
-            if fs::remove_file(&path).is_ok() {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "log pruning counts only the one removal that reports success"
+            )]
+            let removed_this_file = fs::remove_file(&path).is_ok();
+            if removed_this_file {
                 removed += 1;
             }
         }

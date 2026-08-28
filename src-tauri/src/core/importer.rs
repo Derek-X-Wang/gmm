@@ -688,6 +688,10 @@ pub fn write_backup_provenance(backup_dir: &Path, provenance: &BackupProvenance)
 /// to record unknown rather than to guess.
 pub fn read_backup_provenance(backup_dir: &Path) -> Option<BackupProvenance> {
     let path = provenance_path(backup_dir);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "backup provenance is optional metadata; this read failure deliberately produces the explicit unknown-origin state"
+    )]
     let raw = fs::read_to_string(&path).ok()?;
     match serde_json::from_str(&raw) {
         Ok(provenance) => Some(provenance),

@@ -40,16 +40,32 @@ pub const DATA_DIR_NAME: &str = "BH3_Data";
 /// `true` iff `path` is a directory containing the executable AND
 /// the Unity data directory.
 // Detection is a best-effort optional-install probe; an I/O error means this candidate is unusable.
-#[allow(clippy::disallowed_methods)]
 pub fn validate(path: &Path) -> bool {
-    if !path.is_dir() {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "optional-install detection intentionally treats an unreadable candidate as unusable"
+    )]
+    let candidate_is_directory = path.is_dir();
+    if !candidate_is_directory {
         return false;
     }
-    let exe_present = EXE_NAMES.iter().any(|name| path.join(name).is_file());
+    let exe_present = EXE_NAMES.iter().any(|name| {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "optional-install detection intentionally treats an unreadable candidate as unusable"
+        )]
+        let executable_is_file = path.join(name).is_file();
+        executable_is_file
+    });
     if !exe_present {
         return false;
     }
-    path.join(DATA_DIR_NAME).is_dir()
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "optional-install detection intentionally treats an unreadable candidate as unusable"
+    )]
+    let data_directory_is_present = path.join(DATA_DIR_NAME).is_dir();
+    data_directory_is_present
 }
 
 /// Try each candidate path in order, returning the first one that
