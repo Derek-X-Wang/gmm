@@ -212,6 +212,19 @@ pub fn build_bundle(
     dest: &Path,
     log_age_days: i64,
 ) -> Result<()> {
+    build_bundle_with_metadata_hook(log_dir, settings, dest, log_age_days, |_| {})
+}
+
+fn build_bundle_with_metadata_hook<F>(
+    log_dir: &Path,
+    settings: &SettingsSnapshot,
+    dest: &Path,
+    log_age_days: i64,
+    mut before_log_metadata: F,
+) -> Result<()>
+where
+    F: FnMut(&Path),
+{
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|source| Error::Io {
@@ -274,10 +287,14 @@ pub fn build_bundle(
             if !file_type.is_file() || !is_gmm_log(&path) {
                 continue;
             }
+            before_log_metadata(&path);
             let modified = entry
                 .metadata()
                 .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
+                .map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
             if modified < cutoff {
                 continue;
             }
@@ -365,4 +382,33 @@ pub fn record_frontend_error(message: &str, stack: Option<&str>, route: Option<&
         route = route.unwrap_or(""),
         message,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_propagates_log_metadata_uncertainty() {
+        let temp = tempfile::tempdir().expect("temporary diagnostics roots");
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).expect("create logs");
+        let log = log_dir.join("gmm.log");
+        fs::write(&log, b"diagnostic evidence").expect("write log");
+        let bundle = temp.path().join("bundle.zip");
+
+        let result = build_bundle_with_metadata_hook(
+            &log_dir,
+            &SettingsSnapshot::default(),
+            &bundle,
+            DEFAULT_BUNDLE_LOG_DAYS,
+            |path| fs::remove_file(path).expect("make log metadata uncertain"),
+        );
+
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &log && source.kind() == io::ErrorKind::NotFound),
+            "a log whose metadata becomes unreadable must not silently vanish from the bundle, got {result:?}",
+        );
+    }
 }

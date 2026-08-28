@@ -990,8 +990,18 @@ mod tests {
             }
         }
 
-        assert!(!quarantine.exists(), "the quarantine must be removed");
-        assert!(!intent.exists(), "the durable intent must be retired");
+        assert!(
+            symlink_metadata_if_exists(&quarantine)
+                .expect("inspect reclaimed quarantine")
+                .is_none(),
+            "the quarantine must be removed"
+        );
+        assert!(
+            symlink_metadata_if_exists(&intent)
+                .expect("inspect retired intent")
+                .is_none(),
+            "the durable intent must be retired"
+        );
     }
 
     #[test]

@@ -56,18 +56,34 @@ pub fn extract_hashes_from_dir(root: &Path) -> Result<Vec<HashBinding>> {
 }
 
 fn visit(dir: &Path, out: &mut Vec<HashBinding>) -> Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for entry in entries.flatten() {
+    visit_with_file_type(dir, out, &mut |entry| entry.file_type())
+}
+
+fn visit_with_file_type<F>(
+    dir: &Path,
+    out: &mut Vec<HashBinding>,
+    classify_file_type: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&fs::DirEntry) -> std::io::Result<fs::FileType>,
+{
+    let entries = fs::read_dir(dir).map_err(|source| Error::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| Error::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
         let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+        let file_type = classify_file_type(&entry).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
         // Safe: `file_type()` above succeeded; this only classifies known metadata.
         if file_type.is_dir() {
-            visit(&path, out)?;
+            visit_with_file_type(&path, out, classify_file_type)?;
         } else if file_type.is_file()
             && path
                 .extension()
@@ -236,5 +252,35 @@ pub fn build_report(per_mod_bindings: &[(String, Vec<HashBinding>)]) -> Conflict
     ConflictReport {
         conflicts,
         per_mod_count,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn dir_scan_propagates_entry_type_uncertainty() {
+        let temp = tempfile::tempdir().expect("temporary mod directory");
+        let root = temp.path().join("mod");
+        fs::create_dir_all(&root).expect("create mod directory");
+        let ini = root.join("unreadable.ini");
+        fs::write(&ini, b"[TextureOverrideA]\nhash = 0x1\n").expect("write ini");
+        let mut out = Vec::new();
+
+        let result = visit_with_file_type(&root, &mut out, &mut |_| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "test entry-type obstruction",
+            ))
+        });
+
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &ini && source.kind() == io::ErrorKind::PermissionDenied),
+            "an unreadable directory entry type must not produce a partial conflict scan, got {result:?}",
+        );
     }
 }

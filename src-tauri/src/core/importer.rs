@@ -445,25 +445,38 @@ pub fn install_from_local_zip(
 /// `game_dir`'s root) into a timestamped backup folder under
 /// `backups_root`. Returns `None` if nothing was there to back up.
 pub fn backup_existing(game_dir: &Path, backups_root: &Path) -> Result<Option<PathBuf>> {
-    let mut found = false;
+    backup_existing_with(game_dir, backups_root, symlink_metadata_if_exists)
+}
+
+fn backup_existing_with<F>(
+    game_dir: &Path,
+    backups_root: &Path,
+    mut probe: F,
+) -> Result<Option<PathBuf>>
+where
+    F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
+{
+    // Resolve the complete move set before creating a backup directory or
+    // moving anything. An uncertain later entry must not leave an earlier
+    // entry evacuated with no usable backup result.
+    let mut present = Vec::new();
     for name in IMPORTER_ROOT_FILES
         .iter()
         .copied()
         .chain(IMPORTER_ROOT_DIRS.iter().copied())
     {
         let path = game_dir.join(name);
-        if symlink_metadata_if_exists(&path)
+        if probe(&path)
             .map_err(|source| Error::Io {
                 path: path.clone(),
                 source,
             })?
             .is_some()
         {
-            found = true;
-            break;
+            present.push((name, path));
         }
     }
-    if !found {
+    if present.is_empty() {
         return Ok(None);
     }
 
@@ -474,21 +487,7 @@ pub fn backup_existing(game_dir: &Path, backups_root: &Path) -> Result<Option<Pa
         source,
     })?;
 
-    for name in IMPORTER_ROOT_FILES
-        .iter()
-        .copied()
-        .chain(IMPORTER_ROOT_DIRS.iter().copied())
-    {
-        let from = game_dir.join(name);
-        if symlink_metadata_if_exists(&from)
-            .map_err(|source| Error::Io {
-                path: from.clone(),
-                source,
-            })?
-            .is_none()
-        {
-            continue;
-        }
+    for (name, from) in present {
         let to = dest.join(name);
         if let Err(_e) = fs::rename(&from, &to) {
             // Cross-volume; fall back to copy + delete.
@@ -1084,4 +1083,67 @@ pub async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> Re
         source,
     })?;
     Ok(bytes.len() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn backup_preflight_uncertainty_leaves_game_directory_intact() {
+        let temp = tempfile::tempdir().expect("temporary importer roots");
+        let game_dir = temp.path().join("game");
+        let backups_root = temp.path().join("backups");
+        fs::create_dir_all(game_dir.join("Core")).expect("create game Core");
+        fs::write(game_dir.join("d3d11.dll"), b"working loader").expect("write loader");
+
+        let result = backup_existing_with(&game_dir, &backups_root, |path| {
+            if path.file_name().is_some_and(|name| name == "Core") {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test obstruction on later importer entry",
+                ));
+            }
+            symlink_metadata_if_exists(path)
+        });
+
+        assert_eq!(
+            fs::read(game_dir.join("d3d11.dll")).expect(
+                "preflight uncertainty must leave earlier importer entries in the game directory",
+            ),
+            b"working loader",
+            "preflight uncertainty must leave earlier importer entries in the game directory",
+        );
+        fs::symlink_metadata(game_dir.join("Core"))
+            .expect("preflight uncertainty must leave the obstructed entry in the game directory");
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &game_dir.join("Core")
+                    && source.kind() == io::ErrorKind::PermissionDenied),
+            "a later uncertain entry must abort before evacuation, got {result:?}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_into_propagates_uncertain_source_metadata_at_occupied_destination() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary merge roots");
+        let from = temp.path().join("from");
+        let to = temp.path().join("to");
+        fs::create_dir_all(&from).expect("create source");
+        fs::create_dir_all(&to).expect("create destination");
+        let source = from.join("loop");
+        symlink(&source, &source).expect("create self-referential source symlink");
+        fs::write(to.join("loop"), b"occupied").expect("occupy destination");
+
+        let result = merge_into(&from, &to);
+        assert!(
+            matches!(result, Err(Error::Io { ref path, .. }) if path == &source),
+            "uncertain source metadata at an occupied destination must not be silently skipped, got {result:?}",
+        );
+    }
 }
