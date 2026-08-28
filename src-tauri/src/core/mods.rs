@@ -28,6 +28,21 @@ pub struct ReinstallRecovery {
     pub junction_withdrawal_error: Option<String>,
 }
 
+/// A durable enable/disable transition that startup could not settle yet.
+/// The requested state remains authoritative; GMM blocks later deployment
+/// mutations and game launch until the recorded Junction operation succeeds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnabledTransitionRecovery {
+    pub intended_enabled: bool,
+    pub reason: String,
+    pub attempted_at: String,
+    pub attempts: u32,
+    pub junction_path: PathBuf,
+    /// True when the numeric PID is live but its start identity is unknown.
+    pub owner_uncertain: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum ReinstallRecoveryOutcome {
@@ -103,4 +118,8 @@ pub struct Mod {
     /// this Mod's durable reinstall witness.
     #[serde(default)]
     pub reinstall_recovery: Option<ReinstallRecovery>,
+    /// Present only when automatic startup recovery could not yet complete a
+    /// durable enable/disable transition.
+    #[serde(default)]
+    pub enabled_transition_recovery: Option<EnabledTransitionRecovery>,
 }
