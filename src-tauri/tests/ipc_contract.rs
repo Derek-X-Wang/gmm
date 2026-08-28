@@ -730,40 +730,277 @@ mod manifest_refresh_started_marker {
     };
     use std::time::Duration;
 
+    // This is intentionally a narrow structural scanner, not a PowerShell
+    // parser. The pinned fixture functions contain no braces in strings or
+    // comments, so balanced braces identify their bodies without pretending
+    // to validate arbitrary PowerShell syntax.
+    fn powershell_function_body<'a>(script: &'a str, name: &str) -> &'a str {
+        let declaration = format!("function {name}");
+        let declaration_start = script
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("PowerShell function {name} is not declared"));
+        let body_start = script[declaration_start..]
+            .find('{')
+            .map(|offset| declaration_start + offset)
+            .unwrap_or_else(|| panic!("PowerShell function {name} has no body"));
+
+        let mut depth = 0usize;
+        for (offset, character) in script[body_start..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &script[body_start + 1..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("PowerShell function {name} has an unterminated body");
+    }
+
+    fn position(body: &str, needle: &str) -> usize {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("expected PowerShell structure not found: {needle}"))
+    }
+
+    fn position_after(body: &str, after: usize, needle: &str) -> usize {
+        body[after..]
+            .find(needle)
+            .map(|offset| after + offset)
+            .unwrap_or_else(|| panic!("expected PowerShell structure not found: {needle}"))
+    }
+
+    fn powershell_block_after<'a>(body: &'a str, needle: &str) -> &'a str {
+        let needle_start = position(body, needle);
+        let body_start = body[needle_start..]
+            .find('{')
+            .map(|offset| needle_start + offset)
+            .unwrap_or_else(|| panic!("PowerShell structure has no body: {needle}"));
+
+        let mut depth = 0usize;
+        for (offset, character) in body[body_start..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &body[body_start + 1..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("PowerShell structure has an unterminated body: {needle}");
+    }
+
     #[test]
     fn installer_smoke_counts_the_same_marker_for_this_launch() {
         let script = read(".github/scripts/installer-smoke.ps1");
+        let startup = powershell_function_body(&script, "Invoke-StartupSmoke");
+
+        // These literal assertions pin cross-language names and diagnostic
+        // wording only. Source locations are advisory shape checks: the native
+        // Windows smoke's observed checkpoint assertion proves execution.
         assert!(
             script.contains(MANIFEST_REFRESH_STARTED_MARKER),
-            "installer-smoke.ps1 must count the marker literal \
-             '{MANIFEST_REFRESH_STARTED_MARKER}'",
+            "installer-smoke.ps1 must retain the marker literal \
+             '{MANIFEST_REFRESH_STARTED_MARKER}' for the cross-language contract",
         );
-        assert!(
-            script.contains("Get-DiagnosticMarkerCount"),
-            "installer-smoke.ps1 must compare marker counts so an old log line \
-             cannot satisfy the current launch",
-        );
-        assert!(
-            script.contains(MANIFEST_URL_OVERRIDE_ENV),
-            "installer-smoke.ps1 must set {MANIFEST_URL_OVERRIDE_ENV} to the \
-             endpoint it deliberately holds open",
-        );
-        assert!(script.contains("Assert-ManifestFixtureAcceptHealthy"));
-        assert!(script.contains("$acceptTask.IsFaulted"));
-        assert!(script.contains("$script:FailureClass = \"INFRASTRUCTURE\""));
-        assert!(script.contains("unavailable-after-launch"));
-        assert!(script.contains("Assert-ManifestFixturePeerConnected"));
         assert!(script.contains(
             "manifest refresh client closed its held request before the fixture released its response"
         ));
-        assert!(script
+        assert!(startup
             .contains("IPC readiness did not occur while the manifest request remained held open"));
-        let direct_assertion = script
-            .find("IPC readiness observed while manifest request was held open and unanswered")
-            .expect("installer smoke must assert IPC while the fixture response is held");
-        let fixture_release = script
-            .rfind("Complete-ManifestFixtureRequest")
-            .expect("installer smoke must release the fixture response after its assertion");
+        assert!(startup.contains("startup work blocked Tauri past the deadline"));
+
+        let count_before = position(
+            startup,
+            "$manifestRefreshBefore = Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker",
+        );
+        let launch = position(startup, "$script:AppProc = Start-Process $exe -PassThru");
+        let count_after = position(
+            startup,
+            "(Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker) -gt",
+        );
+        assert!(
+            count_before < launch && launch < count_after,
+            "installer-smoke.ps1 must capture the manifest marker count before launch \
+             and compare it after launch",
+        );
+
+        let set_override = position(startup, "[System.Environment]::SetEnvironmentVariable(");
+        let restore_override = startup[launch..]
+            .find("[System.Environment]::SetEnvironmentVariable(")
+            .map(|offset| launch + offset)
+            .expect("installer smoke must restore the manifest URL override after launch");
+        assert!(
+            set_override < launch && launch < restore_override,
+            "installer-smoke.ps1 must set {MANIFEST_URL_OVERRIDE_ENV} before launch \
+             and restore it afterward",
+        );
+        assert!(startup[set_override..launch].contains("$ManifestUrlOverrideEnv"));
+        assert!(startup[set_override..launch].contains("$manifestUrl"));
+        assert!(startup[restore_override..].contains("$previousManifestUrl"));
+    }
+
+    #[test]
+    fn installer_smoke_records_accept_health_checks_for_runtime_coverage() {
+        let script = read(".github/scripts/installer-smoke.ps1");
+        let accept_guard = powershell_function_body(&script, "Assert-ManifestFixtureAcceptHealthy");
+        let faulted = position(accept_guard, "if ($acceptTask.IsFaulted)");
+        let fault_class = accept_guard[faulted..]
+            .find("$script:FailureClass = \"INFRASTRUCTURE\"")
+            .map(|offset| faulted + offset)
+            .expect("faulted accept must be classified INFRASTRUCTURE");
+        let fault_throw = accept_guard[fault_class..]
+            .find("throw \"manifest fixture accept faulted")
+            .map(|offset| fault_class + offset)
+            .expect("faulted accept must stop the smoke");
+        let canceled = position(accept_guard, "if ($acceptTask.IsCanceled)");
+        let cancel_class = accept_guard[canceled..]
+            .find("$script:FailureClass = \"INFRASTRUCTURE\"")
+            .map(|offset| canceled + offset)
+            .expect("canceled accept must be classified INFRASTRUCTURE");
+        let cancel_throw = accept_guard[cancel_class..]
+            .find("throw \"manifest fixture accept was canceled")
+            .map(|offset| cancel_class + offset)
+            .expect("canceled accept must stop the smoke");
+        assert!(faulted < fault_class && fault_class < fault_throw);
+        assert!(canceled < cancel_class && cancel_class < cancel_throw);
+
+        let startup = powershell_function_body(&script, "Invoke-StartupSmoke");
+        // These source positions keep the intended stage names near their
+        // owning flow but do not claim to parse or execute PowerShell. The
+        // runtime checkpoint assertion below is the load-bearing pin.
+        let polling_check = position(
+            startup,
+            "Assert-ManifestFixtureAcceptHealthy $manifestAccept \"startup-poll\"",
+        );
+        let post_loop_check = position(
+            startup,
+            "Assert-ManifestFixtureAcceptHealthy $manifestAccept \"startup-post-loop\"",
+        );
+        let polling_loop = position(startup, "while ((Get-Date) -lt $deadline)");
+        let first_observation = position(startup, "if (-not $dbSeen -and");
+        let after_loop = position(startup, "if (-not $dbSeen) { throw");
+        let product_classification = position(
+            startup,
+            "if (-not $ipcSeen -and $manifestRefreshSeen -and $manifestRequestSeen)",
+        );
+        assert!(polling_loop < polling_check && polling_check < first_observation);
+        assert!(after_loop < post_loop_check && post_loop_check < product_classification);
+
+        let coverage = powershell_function_body(&script, "Assert-ManifestFixtureGuardCoverage");
+        assert!(coverage.contains("$script:ManifestAcceptCheckpoints"));
+        assert!(coverage.contains("@(\"startup-poll\", \"startup-post-loop\")"));
+
+        let launch = position(startup, "$script:AppProc = Start-Process $exe -PassThru");
+        let fault_injection = position(
+            startup,
+            "if ($FixtureMode -eq \"unavailable-after-launch\")",
+        );
+        assert!(
+            launch < fault_injection && fault_injection < polling_loop,
+            "the post-launch accept-fault proof seam must run after launch and before polling"
+        );
+    }
+
+    #[test]
+    fn installer_smoke_records_peer_checks_through_fixture_release() {
+        let script = read(".github/scripts/installer-smoke.ps1");
+        let peer_guard = powershell_function_body(&script, "Assert-ManifestFixturePeerConnected");
+        let faulted = position(peer_guard, "if ($script:ManifestPeerReadTask.IsFaulted)");
+        let canceled = position(peer_guard, "if ($script:ManifestPeerReadTask.IsCanceled)");
+        let read_result = position(peer_guard, "$bytesRead =");
+        let eof = position(peer_guard, "if ($bytesRead -eq 0)");
+        let next_read = peer_guard
+            .rfind("$script:ManifestPeerReadTask = $stream.ReadAsync(")
+            .expect("peer monitor must leave another read pending after request bytes");
+        assert!(faulted < canceled && canceled < read_result && read_result < eof);
+        assert!(eof < next_read);
+        let fault_branch = &peer_guard[faulted..canceled];
+        let canceled_branch = &peer_guard[canceled..read_result];
+        let eof_branch = &peer_guard[eof..next_read];
+        for branch in [fault_branch, canceled_branch, eof_branch] {
+            assert!(branch.contains("$script:FailureClass = \"PRODUCT\""));
+            assert!(branch.contains("throw"));
+        }
+
+        let startup = powershell_function_body(&script, "Invoke-StartupSmoke");
+        let polling_check = position(
+            startup,
+            "Assert-ManifestFixturePeerConnected \"startup-poll\"",
+        );
+        let post_loop_check = position(
+            startup,
+            "Assert-ManifestFixturePeerConnected \"startup-post-loop\"",
+        );
+        let monitor_start = position(startup, "Start-ManifestFixturePeerMonitor");
+        let premature_finish = position(startup, "if ($manifestRefreshFinishedSeen)");
+        let request_required = position(startup, "if (-not $manifestRequestSeen)");
+        let direct_assertion = position(
+            startup,
+            "IPC readiness observed while manifest request was held open and unanswered",
+        );
+        assert!(monitor_start < polling_check && polling_check < premature_finish);
+        assert!(request_required < post_loop_check && post_loop_check < direct_assertion);
+
+        let release = powershell_function_body(&script, "Complete-ManifestFixtureRequest");
+        let pre_prefix_check = position(
+            release,
+            "Assert-ManifestFixturePeerConnected \"release-pre-prefix\"",
+        );
+        let pre_final_byte_check = position(
+            release,
+            "Assert-ManifestFixturePeerConnected \"release-pre-final-byte\" ([char]125)",
+        );
+        let get_stream = position(
+            release,
+            "$stream = $script:HeldManifestConnection.GetStream()",
+        );
+        let close_window_proof = position(
+            release,
+            "if ($FixtureMode -eq \"pause-after-prewrite-peer-check\")",
+        );
+        let prefix_write = position(release, "$stream.Write($responsePrefix");
+        let prefix_flush = position_after(release, prefix_write, "$stream.Flush()");
+        let release_capability = position(
+            release,
+            "$responseFinalByte = Assert-ManifestFixtureGuardCoverage",
+        );
+        let final_byte_write = position(release, "$stream.Write($responseFinalByte");
+        let final_byte_flush = position_after(release, final_byte_write, "$stream.Flush()");
+        let dispose = position(release, "$script:HeldManifestConnection.Dispose()");
+        assert!(get_stream < pre_prefix_check && pre_prefix_check < close_window_proof);
+        assert!(close_window_proof < prefix_write && prefix_write < prefix_flush);
+        assert!(prefix_flush < pre_final_byte_check && pre_final_byte_check < release_capability);
+        assert!(release_capability < final_byte_write);
+        assert!(final_byte_write < final_byte_flush && final_byte_flush < dispose);
+
+        let coverage = powershell_function_body(&script, "Assert-ManifestFixtureGuardCoverage");
+        assert!(coverage.contains("$acceptValidationByte = Assert-ManifestFixtureCheckpointOrder"));
+        assert!(coverage.contains("$acceptValidationByte"));
+        for checkpoint in [
+            "startup-poll",
+            "startup-post-loop",
+            "release-pre-prefix",
+            "release-pre-final-byte",
+        ] {
+            assert!(coverage.contains(checkpoint));
+        }
+    }
+
+    #[test]
+    fn installer_smoke_releases_only_after_direct_startup_proof() {
+        let script = read(".github/scripts/installer-smoke.ps1");
+        let startup = powershell_function_body(&script, "Invoke-StartupSmoke");
+        let direct_assertion = position(
+            startup,
+            "IPC readiness observed while manifest request was held open and unanswered",
+        );
+        let fixture_release = position(startup, "Complete-ManifestFixtureRequest");
         assert!(
             direct_assertion < fixture_release,
             "the held response must be released only after IPC readiness is proven",
@@ -772,18 +1009,27 @@ mod manifest_refresh_started_marker {
             PACKAGED_SMOKE_FETCH_TIMEOUT > Duration::from_secs(90),
             "the loopback client's timeout must outlast the smoke startup deadline",
         );
-        assert!(
-            !script.contains("foreach ($attempt in 1..2)"),
-            "a product assertion must not be discarded by retrying the launch",
+        // Advisory source-shape pin only: the native Windows smoke invokes
+        // startup once, so it does not exercise this second-attempt branch.
+        // Block comments can also preserve this scanner's expected text.
+        let attempt_guard = position(startup, "if ($script:StartupAttemptCount -ne 0)");
+        let attempt_guard_body =
+            powershell_block_after(startup, "if ($script:StartupAttemptCount -ne 0)");
+        assert_eq!(
+            attempt_guard_body.trim(),
+            "throw \"installer smoke must not retry a failed product startup assertion\"",
+            "the second-attempt branch must terminate instead of allowing a product assertion retry",
         );
+        let attempt_increment = position(startup, "$script:StartupAttemptCount++");
+        let launch = position(startup, "$script:AppProc = Start-Process $exe -PassThru");
+        assert!(attempt_guard < attempt_increment && attempt_increment < launch);
+
+        // Advisory only: this names the known wall-clock workaround so it
+        // cannot return unnoticed. A source substring cannot prove the absence
+        // of every equivalent margin; the Windows behavior check is the oracle.
         assert!(
             !script.contains("$manifestRequestAcceptedAt.AddSeconds("),
-            "the startup guard must not depend on an arbitrary wall-clock margin",
-        );
-        assert!(
-            script.contains("startup work blocked Tauri past the deadline"),
-            "the ordinary readiness timeout must name blocking startup work as a \
-             possible cause rather than diagnosing only frontend/IPC failures",
+            "advisory source guard: review any restored wall-clock margin against #219",
         );
     }
 

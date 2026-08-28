@@ -47,6 +47,9 @@ $ManifestListener = $null
 $HeldManifestConnection = $null
 $ManifestPeerReadBuffer = $null
 $ManifestPeerReadTask = $null
+$ManifestAcceptCheckpoints = [System.Collections.Generic.List[object]]::new()
+$ManifestPeerCheckpoints = [System.Collections.Generic.List[object]]::new()
+$StartupAttemptCount = 0
 $ManifestPeerClosedMessage =
     "manifest refresh client closed its held request before the fixture released its response"
 $FailureClass = "PRODUCT"
@@ -135,7 +138,7 @@ function Confirm-ManifestFixtureListening($listener, $port) {
     Write-Host "manifest fixture confirmed listening on 127.0.0.1:$port"
 }
 
-function Assert-ManifestFixtureAcceptHealthy($acceptTask) {
+function Assert-ManifestFixtureAcceptHealthy($acceptTask, $checkpoint) {
     if ($acceptTask.IsFaulted) {
         $script:FailureClass = "INFRASTRUCTURE"
         $reason = $acceptTask.Exception.GetBaseException().Message
@@ -145,6 +148,10 @@ function Assert-ManifestFixtureAcceptHealthy($acceptTask) {
         $script:FailureClass = "INFRASTRUCTURE"
         throw "manifest fixture accept was canceled after GMM launch"
     }
+    $script:ManifestAcceptCheckpoints.Add([pscustomobject]@{
+        Name = $checkpoint
+        ResponseFinalCharacter = $null
+    })
 }
 
 function Start-ManifestFixturePeerMonitor {
@@ -157,7 +164,10 @@ function Start-ManifestFixturePeerMonitor {
     )
 }
 
-function Assert-ManifestFixturePeerConnected {
+function Assert-ManifestFixturePeerConnected(
+    $checkpoint,
+    $responseFinalCharacter = $null
+) {
     if ($null -eq $script:ManifestPeerReadTask) { return }
 
     # Drain the request bytes without blocking, then leave another read pending.
@@ -188,28 +198,132 @@ function Assert-ManifestFixturePeerConnected {
             $script:ManifestPeerReadBuffer.Length
         )
     }
+    $script:ManifestPeerCheckpoints.Add([pscustomobject]@{
+        Name = $checkpoint
+        ResponseFinalCharacter = $responseFinalCharacter
+    })
+}
+
+function Assert-ManifestFixtureCheckpointOrder(
+    $guard,
+    $observed,
+    $required,
+    $priorValidationByte = $null
+) {
+    $observedNames = @($observed | ForEach-Object { $_.Name })
+    $previous = -1
+    foreach ($checkpoint in $required) {
+        $current = [array]::IndexOf($observedNames, $checkpoint)
+        if ($current -le $previous) {
+            $script:FailureClass = "INFRASTRUCTURE"
+            throw ("installer smoke did not execute required manifest fixture " +
+                   "$guard check '$checkpoint' in order; observed: " +
+                   "$($observedNames -join ', ')")
+        }
+        $previous = $current
+    }
+
+    # This byte is computed from the final observed checkpoint that satisfied
+    # the ordered comparison. The peer comparison consumes the accept result,
+    # so both validations must execute before a response byte can be returned.
+    $validationByte = [byte][int](
+        $previous -ge 0 -and
+        $observedNames[$previous] -ceq $required[-1]
+    )
+    if ($null -eq $priorValidationByte) {
+        return $validationByte
+    }
+
+    $responseFinalCharacter = $observed[$previous].ResponseFinalCharacter
+    if ($null -eq $responseFinalCharacter) {
+        $script:FailureClass = "INFRASTRUCTURE"
+        throw "validated manifest fixture checkpoint did not carry the response final character"
+    }
+    $responseFinalByte = [System.Text.Encoding]::ASCII.GetBytes(
+        [string]$responseFinalCharacter
+    )
+    if ($responseFinalByte.Length -ne 1) {
+        $script:FailureClass = "INFRASTRUCTURE"
+        throw "validated manifest fixture checkpoint carried an invalid response final character"
+    }
+    return ,([byte[]](
+        $responseFinalByte[0] * [byte]$priorValidationByte * $validationByte
+    ))
+}
+
+function Assert-ManifestFixtureGuardCoverage {
+    # Source scans cannot prove that a PowerShell command executes. This
+    # assertion checks the stages observed by this Windows run instead, while
+    # allowing extra guards and an arbitrary number of polling iterations.
+    $acceptValidationByte = Assert-ManifestFixtureCheckpointOrder `
+        "accept" `
+        $script:ManifestAcceptCheckpoints `
+        @("startup-poll", "startup-post-loop")
+    Assert-ManifestFixtureCheckpointOrder `
+        "peer" `
+        $script:ManifestPeerCheckpoints `
+        @(
+            "startup-poll",
+            "startup-post-loop",
+            "release-pre-prefix",
+            "release-pre-final-byte"
+        ) `
+        $acceptValidationByte
 }
 
 function Complete-ManifestFixtureRequest {
-    Assert-ManifestFixturePeerConnected
-    $response = [System.Text.Encoding]::ASCII.GetBytes(
-        "HTTP/1.1 503 Service Unavailable`r`n" +
-        "Content-Length: 0`r`n" +
-        "Connection: close`r`n`r`n"
+    # Keep the final body byte separate: the HTTP response is not released to
+    # GMM until that byte is written, so a peer close after the prefix cannot be
+    # mistaken for a normal close after receiving a complete response.
+    $responsePrefix = [System.Text.Encoding]::ASCII.GetBytes(
+        "HTTP/1.1 200 OK`r`n" +
+        "Content-Length: 30`r`n" +
+        "Connection: close`r`n`r`n" +
+        ([char]123).ToString() +
+        '"schemaVersion":1,"games":' +
+        ([char]123).ToString() +
+        ([char]125).ToString()
     )
+    $stream = $script:HeldManifestConnection.GetStream()
+    # Keep the last pre-release check immediately beside the write. A FIN can
+    # otherwise arrive after the startup loop's final check while the response
+    # bytes and stream are being prepared.
+    Assert-ManifestFixturePeerConnected "release-pre-prefix"
+    # Deliberate mutation-proof seam: when CI selects this mode with a
+    # temporarily shortened client timeout, GMM closes after the pre-write
+    # check, during the response-work window that issue #219 exposed.
+    if ($FixtureMode -eq "pause-after-prewrite-peer-check") {
+        Write-Host "pausing after pre-write peer check for close-window mutation proof"
+        Start-Sleep -Seconds 105
+    }
     try {
-        $stream = $script:HeldManifestConnection.GetStream()
-        $stream.Write($response, 0, $response.Length)
+        $stream.Write($responsePrefix, 0, $responsePrefix.Length)
         $stream.Flush()
     } catch {
         $script:FailureClass = "PRODUCT"
         throw "$ManifestPeerClosedMessage`: $($_.Exception.Message)"
-    } finally {
-        $script:HeldManifestConnection.Dispose()
-        $script:HeldManifestConnection = $null
-        $script:ManifestPeerReadBuffer = $null
-        $script:ManifestPeerReadTask = $null
     }
+    # A graceful FIN may let the prefix write succeed. Recheck after that flush
+    # and immediately before the final body byte releases the response.
+    # The response character becomes checkpoint data only when this peer guard
+    # actually executes. Ordered validation extracts and encodes it; there is no
+    # fallback release byte elsewhere in the script. Trust still bottoms out at
+    # CI executing this script and requiring its zero exit.
+    Assert-ManifestFixturePeerConnected "release-pre-final-byte" ([char]125)
+    $script:FailureClass = "INFRASTRUCTURE"
+    $responseFinalByte = Assert-ManifestFixtureGuardCoverage
+    $responseFinalByteLength = $responseFinalByte.Length
+    try {
+        $stream.Write($responseFinalByte, 0, $responseFinalByteLength)
+        $stream.Flush()
+    } catch {
+        $script:FailureClass = "PRODUCT"
+        throw "$ManifestPeerClosedMessage`: $($_.Exception.Message)"
+    }
+    $script:HeldManifestConnection.Dispose()
+    $script:HeldManifestConnection = $null
+    $script:ManifestPeerReadBuffer = $null
+    $script:ManifestPeerReadTask = $null
     Write-Host "manifest fixture released the request after IPC readiness"
 }
 
@@ -295,6 +409,12 @@ function Get-DiagnosticMarkerCount($marker) {
 
 function Invoke-StartupSmoke {
     $script:FailureClass = "INFRASTRUCTURE"
+    if ($script:StartupAttemptCount -ne 0) {
+        throw "installer smoke must not retry a failed product startup assertion"
+    }
+    $script:StartupAttemptCount++
+    $script:ManifestAcceptCheckpoints.Clear()
+    $script:ManifestPeerCheckpoints.Clear()
     if (Test-Path $AppData) {
         Write-Host "removing startup data before launch"
         Remove-Item $AppData -Recurse -Force
@@ -312,7 +432,11 @@ function Invoke-StartupSmoke {
     Confirm-ManifestFixtureListening $script:ManifestListener $manifestPort
 
     if ($FixtureMode -and
-        $FixtureMode -notin @("unavailable", "unavailable-after-launch")) {
+        $FixtureMode -notin @(
+            "unavailable",
+            "unavailable-after-launch",
+            "pause-after-prewrite-peer-check"
+        )) {
         throw ("unknown GMM_INSTALLER_SMOKE_FIXTURE_MODE " +
                "'$FixtureMode'")
     }
@@ -368,7 +492,7 @@ function Invoke-StartupSmoke {
     $manifestRequestSeen = $false
 
     while ((Get-Date) -lt $deadline) {
-        Assert-ManifestFixtureAcceptHealthy $manifestAccept
+        Assert-ManifestFixtureAcceptHealthy $manifestAccept "startup-poll"
 
         if (-not $dbSeen -and (Test-Path $dbPath)) {
             $dbSeen = $true
@@ -404,7 +528,7 @@ function Invoke-StartupSmoke {
             $manifestRequestSeen = $true
             Write-Host "manifest request accepted and deliberately left unanswered"
         }
-        Assert-ManifestFixturePeerConnected
+        Assert-ManifestFixturePeerConnected "startup-poll"
         if ($manifestRefreshFinishedSeen) {
             throw "manifest refresh finished before the fixture released its held response"
         }
@@ -419,7 +543,7 @@ function Invoke-StartupSmoke {
 
     if (-not $dbSeen) { throw "timed out waiting for $dbPath" }
     if (-not $logSeen) { throw "timed out waiting for a log file in $logDir" }
-    Assert-ManifestFixtureAcceptHealthy $manifestAccept
+    Assert-ManifestFixtureAcceptHealthy $manifestAccept "startup-post-loop"
     if (-not $ipcSeen -and $manifestRefreshSeen -and $manifestRequestSeen) {
         throw "IPC readiness did not occur while the manifest request remained held open " +
               "and unanswered — startup did not prove independence from the network"
@@ -437,7 +561,7 @@ function Invoke-StartupSmoke {
     if (-not $manifestRequestSeen) {
         throw "timed out waiting for the manifest refresh to reach $manifestUrl"
     }
-    Assert-ManifestFixturePeerConnected
+    Assert-ManifestFixturePeerConnected "startup-post-loop"
     Write-Host "IPC readiness observed while manifest request was held open and unanswered"
 
     Complete-ManifestFixtureRequest

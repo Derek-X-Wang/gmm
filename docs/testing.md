@@ -352,9 +352,36 @@ recent Application event-log errors — so a Windows-less maintainer can
 still diagnose from the CI output. Artifacts are uploaded too.
 
 The manifest fixture also keeps an asynchronous read pending on the accepted
-connection while its response is withheld. If GMM closes that request before
-the fixture releases it, the smoke reports a `PRODUCT` failure: abandoning the
-in-flight refresh is application behavior, not a fixture-server outage.
+connection while its response is withheld. The fixture withholds the final body
+byte, checks the read after flushing the incomplete response prefix, and checks
+again immediately before that byte releases the response. A close observed by
+either check is a `PRODUCT` failure: abandoning the in-flight refresh is
+application behavior, not a fixture-server outage.
+
+The final check and final-byte write are separate socket operations, so they do
+not close the last check-then-act interval. A FIN that arrives between them can
+still escape detection if the write succeeds. Checking after the write would
+turn a legitimate close after a complete response into a race-dependent false
+failure, so the smoke deliberately accepts this narrow residual window. The
+Windows run does verify that every required accept and peer-check stage actually
+executed, rather than treating source text as proof of execution.
+
+That runtime coverage is bound into the response data flow. The final peer guard
+records the response's final character as part of its observed checkpoint. The
+accept-order comparison returns a validation byte derived from its observed final
+checkpoint; the peer-order comparison consumes that byte and encodes the final
+character from its own validated checkpoint. The coverage function returns only
+that computed result, and the release write consumes it directly. Removing the
+comparisons therefore removes the byte instead of exposing a fallback literal.
+The trust chain bottoms out at the CI job executing this script and requiring a
+zero exit; code inside the script cannot prove or protect that outermost
+invocation.
+
+The Rust source pin around `StartupAttemptCount` is advisory. It detects a direct
+edit to the second-attempt branch, but block-commenting the branch can preserve
+the scanner's expected text, and the Windows smoke invokes startup only once so
+it does not take that branch at runtime. The actual no-retry guarantee therefore
+remains a reviewable script-shape convention rather than a runtime-proven pin.
 
 This is the layer that would have caught a broken bundle, a missing
 WebView2 dependency, or a migration that fails on a clean machine.
