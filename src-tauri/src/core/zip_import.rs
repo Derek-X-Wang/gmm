@@ -237,6 +237,7 @@ fn plan_extraction<R: io::Read + io::Seek>(
             });
         }
 
+        // Safe: this is archive metadata already read from the ZIP, not a filesystem probe.
         let is_dir = zfile.is_dir() || raw_name.ends_with('/');
         let kind = if is_dir {
             EntryKind::Dir

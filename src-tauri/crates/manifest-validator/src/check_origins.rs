@@ -228,6 +228,8 @@ fn github_client() -> Result<reqwest::Client, reqwest::Error> {
 /// Locate the committed manifest by walking up from this crate, so the
 /// command works from any directory and does not encode how deep the
 /// crate sits.
+// This CLI probe tries ancestors opportunistically and returns an actionable fallback path on any miss.
+#[allow(clippy::disallowed_methods)]
 fn default_manifest_path() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for ancestor in here.ancestors() {

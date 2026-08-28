@@ -51,6 +51,7 @@ pub fn detect_variants(mod_root: &Path) -> Result<Vec<DetectedVariant>> {
         path: mod_root.to_path_buf(),
         source,
     })?;
+    // Safe: `metadata()` above propagated I/O uncertainty.
     if !metadata.is_dir() {
         return Ok(Vec::new());
     }
@@ -72,6 +73,7 @@ pub fn detect_variants(mod_root: &Path) -> Result<Vec<DetectedVariant>> {
             path: path.clone(),
             source,
         })?;
+        // Safe: `file_type()` above propagated I/O uncertainty.
         if file_type.is_file() {
             if path
                 .extension()
@@ -127,6 +129,7 @@ fn has_ini_anywhere(dir: &Path) -> Result<bool> {
             path: path.clone(),
             source,
         })?;
+        // Safe: `file_type()` above propagated I/O uncertainty.
         if file_type.is_file() {
             if path
                 .extension()

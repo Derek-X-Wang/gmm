@@ -555,6 +555,7 @@ impl Core {
             .expect("a validated orphan has a file name")
             .to_string_lossy()
             .into_owned();
+        // Safe: ULID parsing is a pure format check, not a filesystem observation.
         if Ulid::from_string(&name).is_ok() {
             if self.mod_id_exists(&name, &mut **mutation).await? {
                 return Err(Error::NotAnUnreferencedLibraryDir {
@@ -663,6 +664,7 @@ impl Core {
                 reason: "it is a link, and acting on it would act on its target".to_string(),
             });
         }
+        // Safe: `symlink_metadata()` above propagated I/O uncertainty.
         if !metadata.file_type().is_dir() {
             return Err(Error::NotAnUnreferencedLibraryDir {
                 path,
@@ -906,6 +908,7 @@ fn open_owned_delete_quarantine(path: &Path) -> Result<Option<IdentifiedDirector
             })
         }
     };
+    // Safe: `symlink_metadata()` above propagated I/O uncertainty.
     if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
         return Ok(None);
     }
@@ -943,6 +946,8 @@ fn lexically_normalized(path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+// Test-only postcondition probes may collapse an assertion failure to `false`; no production decision follows.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -989,8 +994,18 @@ mod tests {
             }
         }
 
-        assert!(!quarantine.exists(), "the quarantine must be removed");
-        assert!(!intent.exists(), "the durable intent must be retired");
+        assert!(
+            super::super::filesystem::symlink_metadata_if_exists(&quarantine)
+                .expect("inspect reclaimed quarantine")
+                .is_none(),
+            "the quarantine must be removed"
+        );
+        assert!(
+            super::super::filesystem::symlink_metadata_if_exists(&intent)
+                .expect("inspect retired intent")
+                .is_none(),
+            "the durable intent must be retired"
+        );
     }
 
     #[test]

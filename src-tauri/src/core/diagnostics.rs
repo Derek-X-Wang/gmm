@@ -31,6 +31,7 @@ use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
 use super::error::{Error, Result};
+use super::filesystem::resolve_enumerated_entry;
 
 /// Prefix used for every log file the rolling appender writes.
 pub const LOG_FILE_PREFIX: &str = "gmm";
@@ -94,18 +95,22 @@ pub fn install_subscriber(log_dir: &Path) -> Result<WorkerGuard> {
 /// Remove log files matching `gmm-*.log` whose modified time is older
 /// than `max_age_days`. Returns the number of files removed.
 pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
-    if !log_dir.exists() {
-        return Ok(0);
-    }
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs((max_age_days.max(0) as u64) * 86_400))
         .unwrap_or(SystemTime::UNIX_EPOCH);
 
+    let entries = match fs::read_dir(log_dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => {
+            return Err(Error::Io {
+                path: log_dir.to_path_buf(),
+                source,
+            })
+        }
+    };
     let mut removed = 0_u32;
-    for entry in fs::read_dir(log_dir).map_err(|source| Error::Io {
-        path: log_dir.to_path_buf(),
-        source,
-    })? {
+    for entry in entries {
         let entry = entry.map_err(|source| Error::Io {
             path: log_dir.to_path_buf(),
             source,
@@ -121,6 +126,7 @@ pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
         if modified < cutoff {
             // Best-effort removal — we'd rather not crash on a locked file
             // mid-startup.
+            // The returned count is successful removals, so a failed removal is intentionally not counted.
             if fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
@@ -207,6 +213,53 @@ pub fn build_bundle(
     dest: &Path,
     log_age_days: i64,
 ) -> Result<()> {
+    build_bundle_with_log_lookups(
+        log_dir,
+        settings,
+        dest,
+        log_age_days,
+        |entry| entry.file_type(),
+        |entry| entry.metadata().and_then(|metadata| metadata.modified()),
+        |path| File::open(path),
+    )
+}
+
+#[cfg(test)]
+fn build_bundle_with_log_modified<F>(
+    log_dir: &Path,
+    settings: &SettingsSnapshot,
+    dest: &Path,
+    log_age_days: i64,
+    log_modified: F,
+) -> Result<()>
+where
+    F: FnMut(&fs::DirEntry) -> io::Result<SystemTime>,
+{
+    build_bundle_with_log_lookups(
+        log_dir,
+        settings,
+        dest,
+        log_age_days,
+        |entry| entry.file_type(),
+        log_modified,
+        |path| File::open(path),
+    )
+}
+
+fn build_bundle_with_log_lookups<C, M, O>(
+    log_dir: &Path,
+    settings: &SettingsSnapshot,
+    dest: &Path,
+    log_age_days: i64,
+    mut classify_file_type: C,
+    mut log_modified: M,
+    mut open_log: O,
+) -> Result<()>
+where
+    C: FnMut(&fs::DirEntry) -> io::Result<fs::FileType>,
+    M: FnMut(&fs::DirEntry) -> io::Result<SystemTime>,
+    O: FnMut(&Path) -> io::Result<File>,
+{
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|source| Error::Io {
@@ -240,28 +293,46 @@ pub fn build_bundle(
         })?;
 
     // Logs younger than the cutoff.
-    if log_dir.exists() {
+    let entries = match fs::read_dir(log_dir) {
+        Ok(entries) => Some(entries),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(Error::Io {
+                path: log_dir.to_path_buf(),
+                source,
+            })
+        }
+    };
+    if let Some(entries) = entries {
         let cutoff = SystemTime::now()
             .checked_sub(Duration::from_secs((log_age_days.max(0) as u64) * 86_400))
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        let entries = fs::read_dir(log_dir).map_err(|source| Error::Io {
-            path: log_dir.to_path_buf(),
-            source,
-        })?;
         for entry in entries {
             let entry = entry.map_err(|source| Error::Io {
                 path: log_dir.to_path_buf(),
                 source,
             })?;
             let path = entry.path();
-            if !path.is_file() || !is_gmm_log(&path) {
+            let Some(file_type) =
+                resolve_enumerated_entry(classify_file_type(&entry).map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                }))?
+            else {
+                continue;
+            };
+            if !file_type.is_file() || !is_gmm_log(&path) {
                 continue;
             }
-            let modified = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let Some(modified) =
+                resolve_enumerated_entry(log_modified(&entry).map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                }))?
+            else {
+                continue;
+            };
             if modified < cutoff {
                 continue;
             }
@@ -270,13 +341,17 @@ pub fn build_bundle(
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| Error::Diagnostics("log filename not utf-8".to_string()))?;
             let zip_name = format!("logs/{name}");
+            let Some(mut log_file) =
+                resolve_enumerated_entry(open_log(&path).map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                }))?
+            else {
+                continue;
+            };
             writer
                 .start_file(&zip_name, opts)
                 .map_err(|e| Error::Diagnostics(format!("zip start {zip_name}: {e}")))?;
-            let mut log_file = File::open(&path).map_err(|source| Error::Io {
-                path: path.clone(),
-                source,
-            })?;
             io::copy(&mut log_file, &mut writer).map_err(|source| Error::Io {
                 path: path.clone(),
                 source,
@@ -349,4 +424,227 @@ pub fn record_frontend_error(message: &str, stack: Option<&str>, route: Option<&
         route = route.unwrap_or(""),
         message,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read as _;
+
+    use super::*;
+
+    fn assert_bundle_has_only_remaining_log(bundle: &Path) {
+        let mut archive = zip::ZipArchive::new(File::open(bundle).expect("open bundle"))
+            .expect("bundle must remain a valid, complete ZIP");
+        assert_eq!(
+            archive.len(),
+            2,
+            "a vanished log must not commit an empty ZIP entry",
+        );
+        let mut remaining = String::new();
+        archive
+            .by_name("logs/gmm-remaining.log")
+            .expect("remaining log stays in bundle")
+            .read_to_string(&mut remaining)
+            .expect("read remaining log");
+        assert_eq!(remaining, "remaining evidence");
+        assert!(
+            archive.by_name("logs/gmm.log").is_err(),
+            "the vanished log must be absent from the complete archive",
+        );
+    }
+
+    #[test]
+    fn bundle_skips_log_that_vanishes_before_metadata() {
+        let temp = tempfile::tempdir().expect("temporary diagnostics roots");
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).expect("create logs");
+        let log = log_dir.join("gmm.log");
+        fs::write(&log, b"diagnostic evidence").expect("write log");
+        let bundle = temp.path().join("bundle.zip");
+
+        let result = build_bundle_with_log_modified(
+            &log_dir,
+            &SettingsSnapshot::default(),
+            &bundle,
+            DEFAULT_BUNDLE_LOG_DAYS,
+            |entry| {
+                fs::remove_file(entry.path()).expect("make log vanish");
+                Err(io::Error::new(io::ErrorKind::NotFound, "test log vanished"))
+            },
+        );
+
+        assert!(result.is_ok(), "a vanished log must be skipped");
+        let mut archive = zip::ZipArchive::new(File::open(&bundle).expect("open bundle"))
+            .expect("complete bundle");
+        let mut settings = String::new();
+        archive
+            .by_name("settings.json")
+            .expect("settings remain in bundle")
+            .read_to_string(&mut settings)
+            .expect("read settings");
+        assert_eq!(
+            archive.len(),
+            1,
+            "the vanished log must not leave a ZIP entry"
+        );
+    }
+
+    #[test]
+    fn bundle_propagates_unreadable_log_metadata() {
+        let temp = tempfile::tempdir().expect("temporary diagnostics roots");
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).expect("create logs");
+        let log = log_dir.join("gmm.log");
+        fs::write(&log, b"diagnostic evidence").expect("write log");
+        let bundle = temp.path().join("bundle.zip");
+
+        let result = build_bundle_with_log_modified(
+            &log_dir,
+            &SettingsSnapshot::default(),
+            &bundle,
+            DEFAULT_BUNDLE_LOG_DAYS,
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test log metadata obstruction",
+                ))
+            },
+        );
+
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &log && source.kind() == io::ErrorKind::PermissionDenied),
+            "unreadable log metadata must still fail the bundle, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn bundle_skips_log_that_vanishes_before_file_type() {
+        let temp = tempfile::tempdir().expect("temporary diagnostics roots");
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).expect("create logs");
+        let vanished = log_dir.join("gmm.log");
+        fs::write(&vanished, b"vanishing evidence").expect("write vanishing log");
+        fs::write(log_dir.join("gmm-remaining.log"), b"remaining evidence")
+            .expect("write remaining log");
+        let bundle = temp.path().join("bundle.zip");
+
+        let result = build_bundle_with_log_lookups(
+            &log_dir,
+            &SettingsSnapshot::default(),
+            &bundle,
+            DEFAULT_BUNDLE_LOG_DAYS,
+            |entry| {
+                if entry.path() == vanished {
+                    fs::remove_file(&vanished).expect("make log vanish");
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "test log vanished"));
+                }
+                entry.file_type()
+            },
+            |entry| entry.metadata().and_then(|metadata| metadata.modified()),
+            |path| File::open(path),
+        );
+
+        assert!(
+            result.is_ok(),
+            "a log that vanishes before file-type lookup must be skipped"
+        );
+        assert_bundle_has_only_remaining_log(&bundle);
+    }
+
+    #[test]
+    fn bundle_propagates_unreadable_log_file_type() {
+        let temp = tempfile::tempdir().expect("temporary diagnostics roots");
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).expect("create logs");
+        let log = log_dir.join("gmm.log");
+        fs::write(&log, b"diagnostic evidence").expect("write log");
+        let bundle = temp.path().join("bundle.zip");
+
+        let result = build_bundle_with_log_lookups(
+            &log_dir,
+            &SettingsSnapshot::default(),
+            &bundle,
+            DEFAULT_BUNDLE_LOG_DAYS,
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test file-type obstruction",
+                ))
+            },
+            |entry| entry.metadata().and_then(|metadata| metadata.modified()),
+            |path| File::open(path),
+        );
+
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &log && source.kind() == io::ErrorKind::PermissionDenied),
+            "an unreadable enumerated log type must still fail the bundle, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn bundle_skips_log_that_vanishes_before_open_and_keeps_archive_complete() {
+        let temp = tempfile::tempdir().expect("temporary diagnostics roots");
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).expect("create logs");
+        let vanished = log_dir.join("gmm.log");
+        fs::write(&vanished, b"vanishing evidence").expect("write vanishing log");
+        fs::write(log_dir.join("gmm-remaining.log"), b"remaining evidence")
+            .expect("write remaining log");
+        let bundle = temp.path().join("bundle.zip");
+
+        let result = build_bundle_with_log_lookups(
+            &log_dir,
+            &SettingsSnapshot::default(),
+            &bundle,
+            DEFAULT_BUNDLE_LOG_DAYS,
+            |entry| entry.file_type(),
+            |entry| entry.metadata().and_then(|metadata| metadata.modified()),
+            |path| {
+                if path == vanished {
+                    fs::remove_file(&vanished).expect("make log vanish");
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "test log vanished"));
+                }
+                File::open(path)
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "a log that vanishes before open must be skipped"
+        );
+        assert_bundle_has_only_remaining_log(&bundle);
+    }
+
+    #[test]
+    fn bundle_propagates_unreadable_log_open() {
+        let temp = tempfile::tempdir().expect("temporary diagnostics roots");
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).expect("create logs");
+        let log = log_dir.join("gmm.log");
+        fs::write(&log, b"diagnostic evidence").expect("write log");
+        let bundle = temp.path().join("bundle.zip");
+
+        let result = build_bundle_with_log_lookups(
+            &log_dir,
+            &SettingsSnapshot::default(),
+            &bundle,
+            DEFAULT_BUNDLE_LOG_DAYS,
+            |entry| entry.file_type(),
+            |entry| entry.metadata().and_then(|metadata| metadata.modified()),
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test log-open obstruction",
+                ))
+            },
+        );
+
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &log && source.kind() == io::ErrorKind::PermissionDenied),
+            "an unreadable enumerated log must still fail before ZIP insertion, got {result:?}",
+        );
+    }
 }

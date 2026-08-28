@@ -30,6 +30,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use sqlx::{Column, Row, Sqlite, SqliteConnection};
 use ulid::Ulid;
 
+use super::filesystem::metadata_if_exists;
 use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
 use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
@@ -1097,7 +1098,12 @@ impl Core {
                 let target = self
                     .junction_target_for(&mod_id, &library_path, &mut *fence.transaction)
                     .await?;
-                if !target.is_dir() {
+                let target_metadata = metadata_if_exists(&target).map_err(|source| Error::Io {
+                    path: target.clone(),
+                    source,
+                })?;
+                // Safe: the fallible lookup above preserved I/O uncertainty.
+                if !target_metadata.is_some_and(|metadata| metadata.is_dir()) {
                     return Err(Error::DuplicateModResolutionChanged {
                         reason: format!(
                             "duplicate Mod {mod_id}'s selected Library target is no longer a directory"
@@ -2156,6 +2162,7 @@ impl Core {
                 }
             }
         })?;
+        // Safe: `metadata()` above propagated I/O uncertainty.
         if !target_metadata.is_dir() {
             return Err(Error::ReinstallRecoveryDeploymentUnverified {
                 mod_id: mod_id.to_string(),
