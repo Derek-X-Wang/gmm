@@ -68,7 +68,7 @@ import {
 } from "./ReinstallRecoveryWarning";
 import { LoaderVersionNote } from "./LoaderVersionNote";
 import { CommandErrorNotice } from "./CommandErrorNotice";
-import { commandFailureMessage } from "./commandError";
+import { commandFailureMessage, type CommandFailure } from "./commandError";
 import { checkInteractively, type UpdateState } from "./updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
@@ -446,7 +446,7 @@ function LaunchGameButton({
       {partitioned && partitioned.isAvPattern && guidance.data ? (
         <AvGuidanceCallout
           guidance={guidance.data}
-          underlyingError={partitioned.failure.message}
+          failure={partitioned.failure}
         />
       ) : partitioned ? (
         <CommandErrorNotice error={partitioned.failure} />
@@ -464,13 +464,17 @@ function LaunchGameButton({
  */
 function AvGuidanceCallout({
   guidance,
-  underlyingError,
+  failure,
 }: {
   guidance: AvGuidance;
-  underlyingError: string;
+  failure: CommandFailure;
 }) {
   return (
-    <div className="av-guidance error" role="alert">
+    <div
+      className="av-guidance error"
+      role="alert"
+      data-command-failure-kind={failure.kind}
+    >
       <strong>{guidance.headline}</strong>
       <p>{guidance.body}</p>
       <ul>
@@ -487,7 +491,7 @@ function AvGuidanceCallout({
       </p>
       <details>
         <summary className="muted small">Underlying error</summary>
-        <pre className="muted small">{underlyingError}</pre>
+        <pre className="muted small">{failure.message}</pre>
       </details>
     </div>
   );
