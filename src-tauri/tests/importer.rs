@@ -9,10 +9,12 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
+#[cfg(unix)]
+use gmm_lib::core::importer::{backup_existing, find_d3dx_ini, latest_backup};
 use gmm_lib::core::importer::{
-    backup_existing, find_d3dx_ini, install_from_local_zip, latest_backup, rewrite_d3dx_loader,
-    rollback_to, DEFAULT_LOADER_EXE,
+    install_from_local_zip, rewrite_d3dx_loader, rollback_to, DEFAULT_LOADER_EXE,
 };
+#[cfg(unix)]
 use gmm_lib::core::Error;
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
