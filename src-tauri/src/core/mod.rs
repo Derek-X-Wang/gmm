@@ -3138,13 +3138,10 @@ impl Core {
         game: GameCode,
         game_mods_dir: &Path,
     ) -> Result<reconcile::ReconcileResult> {
-        let quarantined: std::collections::HashMap<_, _> = self
-            .reinstall_swap_witnesses()
-            .await?
-            .into_iter()
-            .filter(|witness| witness.is_quarantined())
-            .map(|witness| (witness.mod_id().to_string(), witness.token().to_string()))
-            .collect();
+        let quarantined = self
+            .snapshot_quarantined_reinstalls_in_library_mutation()
+            .await?;
+        self.crash_point(crash_points::RECONCILE_AFTER_QUARANTINE_SNAPSHOT);
         let rows = sqlx::query(
             "SELECT id, junction_dir_name, library_path, enabled
              FROM mods WHERE game_code = ?",
@@ -3217,9 +3214,20 @@ impl Core {
             }
 
             if !link_exists(&link)? {
-                volume::require_ntfs_pair(game_mods_dir, &expected_target)?;
-                junction::create(&link, &expected_target)?;
-                result.recreated.push(id);
+                if self
+                    .create_reconciled_junction_in_library_mutation(
+                        &id,
+                        game_mods_dir,
+                        &link,
+                        &expected_target,
+                        false,
+                    )
+                    .await?
+                {
+                    result.recreated.push(id);
+                } else {
+                    result.quarantined.push(id);
+                }
                 continue;
             }
 
@@ -3260,10 +3268,20 @@ impl Core {
                 // conflicting (see
                 // `a_junction_whose_target_was_deleted_is_not_healthy`).
                 Some(actual) if path_within(&actual, &library_path) && expected_target.is_dir() => {
-                    junction::remove(&link)?;
-                    volume::require_ntfs_pair(game_mods_dir, &expected_target)?;
-                    junction::create(&link, &expected_target)?;
-                    result.recreated.push(id);
+                    if self
+                        .create_reconciled_junction_in_library_mutation(
+                            &id,
+                            game_mods_dir,
+                            &link,
+                            &expected_target,
+                            true,
+                        )
+                        .await?
+                    {
+                        result.recreated.push(id);
+                    } else {
+                        result.quarantined.push(id);
+                    }
                 }
                 // Outside the Mod's Library entirely — the user aimed it
                 // somewhere of their own. Surface, never clobber.
@@ -3288,13 +3306,10 @@ impl Core {
         game: GameCode,
         game_mods_dir: &Path,
     ) -> Result<reconcile::ReconcileResult> {
-        let quarantined: std::collections::HashMap<_, _> = self
-            .reinstall_swap_witnesses()
-            .await?
-            .into_iter()
-            .filter(|witness| witness.is_quarantined())
-            .map(|witness| (witness.mod_id().to_string(), witness.token().to_string()))
-            .collect();
+        let quarantined = self
+            .snapshot_quarantined_reinstalls_in_library_mutation()
+            .await?;
+        self.crash_point(crash_points::REBUILD_AFTER_QUARANTINE_SNAPSHOT);
         let rows = sqlx::query(
             "SELECT id, junction_dir_name, library_path, enabled
              FROM mods WHERE game_code = ?",
@@ -3347,11 +3362,11 @@ impl Core {
             // Always drop the existing link first; if the user relocated
             // the Library, the old link would resolve to thin air.
             let had_link = link_exists(&link)?;
-            if had_link {
-                junction::remove(&link)?;
-            }
 
             if !enabled {
+                if had_link {
+                    junction::remove(&link)?;
+                }
                 // Rebuild already deletes stranded junctions as a side
                 // effect of dropping every link. Report it the same way
                 // reconcile does, so `removed` means one thing across
@@ -3364,8 +3379,20 @@ impl Core {
                 continue;
             }
             let target = target.expect("enabled Mods have a preflighted Junction target");
-            junction::create(&link, &target)?;
-            result.recreated.push(id);
+            if self
+                .create_reconciled_junction_in_library_mutation(
+                    &id,
+                    game_mods_dir,
+                    &link,
+                    &target,
+                    had_link,
+                )
+                .await?
+            {
+                result.recreated.push(id);
+            } else {
+                result.quarantined.push(id);
+            }
         }
         Ok(result)
     }

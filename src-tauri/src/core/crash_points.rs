@@ -75,6 +75,19 @@ pub const SESSION_LAUNCH_AFTER_CHILD_RECORD: &str = "session_launch.after_child_
 /// while the immediate Library-root directory scan has not started yet.
 pub const AUDIT_AFTER_OWNERSHIP_SNAPSHOT: &str = "audit.after_ownership_snapshot";
 
+/// `reconcile_junctions`: the pass has snapshotted reinstall quarantine
+/// state, while no Mod row has been inspected and no Junction has been
+/// created yet. Tests pause here so recovery can quarantine and withdraw a
+/// Mod before the pass reaches its deployment decision.
+pub const RECONCILE_AFTER_QUARANTINE_SNAPSHOT: &str =
+    "reconcile.after_quarantine_snapshot";
+
+/// `rebuild_junctions`: the same barrier for the rebuild pass. It carries its
+/// own name so a paused barrier identifies which operation reached it; the two
+/// passes share a guard but must remain independently provable.
+pub const REBUILD_AFTER_QUARANTINE_SNAPSHOT: &str =
+    "rebuild.after_quarantine_snapshot";
+
 /// Startup has committed every recoverable reinstall rollback, while ordinary
 /// intent-backed delete-quarantine cleanup has not started yet.
 pub const STARTUP_AFTER_REINSTALL_RECOVERY: &str = "startup.after_reinstall_recovery";
