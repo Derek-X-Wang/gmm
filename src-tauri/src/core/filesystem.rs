@@ -8,6 +8,21 @@ use std::fs::{self, Metadata};
 use std::io;
 use std::path::Path;
 
+use super::error::{Error, Result};
+
+/// Resolve a lookup on an entry already yielded by `read_dir`.
+///
+/// `NotFound` means the enumerated entry vanished before the follow-up lookup,
+/// so its caller should skip that entry. Every other failure remains
+/// uncertainty and must abort the operation.
+pub(super) fn resolve_enumerated_entry<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::Io { ref source, .. }) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Read target-following metadata, returning `None` only for `NotFound`.
 pub(super) fn metadata_if_exists(path: &Path) -> io::Result<Option<Metadata>> {
     optional_metadata(fs::metadata(path))

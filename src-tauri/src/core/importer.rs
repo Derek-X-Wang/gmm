@@ -1298,6 +1298,16 @@ mod tests {
         let result = rollback_to_with_destination_probe(&backup, &game, &mut probe);
 
         assert_eq!(
+            fs::read(game.join("Mods/user.ini")).expect("read live mod"),
+            b"user bytes",
+            "Mods destination uncertainty must preserve the live file bytes",
+        );
+        assert_eq!(
+            fs::read(backup.join("Mods/shipped.ini")).expect("read backup mod"),
+            b"backup bytes",
+            "Mods destination uncertainty must preserve the backup file bytes",
+        );
+        assert_eq!(
             names(&game.join("Mods")),
             vec!["user.ini"],
             "Mods destination uncertainty must not merge backup bytes into the live tree",

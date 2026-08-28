@@ -26,6 +26,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::error::{Error, Result};
+use super::filesystem::resolve_enumerated_entry;
 
 /// One binding produced by the parser: a hash literal seen inside a
 /// `[TextureOverride*]` or `[ResourceOverride*]` section, with the
@@ -56,9 +57,16 @@ pub fn extract_hashes_from_dir(root: &Path) -> Result<Vec<HashBinding>> {
 }
 
 fn visit(dir: &Path, out: &mut Vec<HashBinding>) -> Result<()> {
-    visit_with_file_type(dir, out, &mut |entry| entry.file_type())
+    visit_with_entry_lookups(
+        dir,
+        out,
+        &mut |entry| entry.file_type(),
+        &mut |_| Ok(()),
+        &mut |_| Ok(()),
+    )
 }
 
+#[cfg(test)]
 fn visit_with_file_type<F>(
     dir: &Path,
     out: &mut Vec<HashBinding>,
@@ -66,6 +74,23 @@ fn visit_with_file_type<F>(
 ) -> Result<()>
 where
     F: FnMut(&fs::DirEntry) -> std::io::Result<fs::FileType>,
+{
+    visit_with_entry_lookups(dir, out, classify_file_type, &mut |_| Ok(()), &mut |_| {
+        Ok(())
+    })
+}
+
+fn visit_with_entry_lookups<F, D, R>(
+    dir: &Path,
+    out: &mut Vec<HashBinding>,
+    classify_file_type: &mut F,
+    before_descend: &mut D,
+    before_read_ini: &mut R,
+) -> Result<()>
+where
+    F: FnMut(&fs::DirEntry) -> std::io::Result<fs::FileType>,
+    D: FnMut(&Path) -> Result<()>,
+    R: FnMut(&Path) -> Result<()>,
 {
     let entries = fs::read_dir(dir).map_err(|source| Error::Io {
         path: dir.to_path_buf(),
@@ -77,26 +102,37 @@ where
             source,
         })?;
         let path = entry.path();
-        let file_type = match classify_file_type(&entry) {
-            Ok(file_type) => file_type,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(Error::Io {
-                    path: path.clone(),
-                    source,
-                })
-            }
+        let Some(file_type) =
+            resolve_enumerated_entry(classify_file_type(&entry).map_err(|source| Error::Io {
+                path: path.clone(),
+                source,
+            }))?
+        else {
+            continue;
         };
-        // Safe: `file_type()` above succeeded; this only classifies known metadata.
         if file_type.is_dir() {
-            visit_with_file_type(&path, out, classify_file_type)?;
+            let descend = before_descend(&path).and_then(|()| {
+                visit_with_entry_lookups(
+                    &path,
+                    out,
+                    classify_file_type,
+                    before_descend,
+                    before_read_ini,
+                )
+            });
+            if resolve_enumerated_entry(descend)?.is_none() {
+                continue;
+            }
         } else if file_type.is_file()
             && path
                 .extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("ini"))
         {
-            let bindings = extract_hashes_from_file(&path)?;
+            let read_ini = before_read_ini(&path).and_then(|()| extract_hashes_from_file(&path));
+            let Some(bindings) = resolve_enumerated_entry(read_ini)? else {
+                continue;
+            };
             out.extend(bindings);
         }
     }
@@ -320,6 +356,160 @@ mod tests {
                 section: "TextureOverrideHere".to_string(),
             }],
             "a vanished entry must not hide readable conflict evidence",
+        );
+    }
+
+    #[test]
+    fn dir_scan_skips_directory_that_vanishes_before_descending() {
+        let temp = tempfile::tempdir().expect("temporary mod directory");
+        let root = temp.path().join("mod");
+        let vanished = root.join("vanished");
+        fs::create_dir_all(&vanished).expect("create vanishing directory");
+        fs::write(
+            vanished.join("gone.ini"),
+            b"[TextureOverrideGone]\nhash = 0x1\n",
+        )
+        .expect("write vanishing ini");
+        fs::write(
+            root.join("remaining.ini"),
+            b"[TextureOverrideHere]\nhash = 0x2\n",
+        )
+        .expect("write remaining ini");
+        let mut out = Vec::new();
+
+        let result = visit_with_entry_lookups(
+            &root,
+            &mut out,
+            &mut |entry| entry.file_type(),
+            &mut |path| {
+                if path == vanished {
+                    fs::remove_dir_all(&vanished).expect("make directory vanish");
+                    return Err(Error::Io {
+                        path: vanished.clone(),
+                        source: io::Error::new(io::ErrorKind::NotFound, "test directory vanished"),
+                    });
+                }
+                Ok(())
+            },
+            &mut |_| Ok(()),
+        );
+
+        assert!(
+            result.is_ok(),
+            "a directory that vanishes after enumeration must be skipped"
+        );
+        assert_eq!(
+            out,
+            vec![HashBinding {
+                hash: "2".to_string(),
+                section: "TextureOverrideHere".to_string(),
+            }],
+            "a vanished directory must not hide readable conflict evidence",
+        );
+    }
+
+    #[test]
+    fn dir_scan_propagates_unreadable_directory_before_descending() {
+        let temp = tempfile::tempdir().expect("temporary mod directory");
+        let root = temp.path().join("mod");
+        let unreadable = root.join("unreadable");
+        fs::create_dir_all(&unreadable).expect("create unreadable directory");
+        let mut out = Vec::new();
+
+        let result = visit_with_entry_lookups(
+            &root,
+            &mut out,
+            &mut |entry| entry.file_type(),
+            &mut |path| {
+                Err(Error::Io {
+                    path: path.to_path_buf(),
+                    source: io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "test directory obstruction",
+                    ),
+                })
+            },
+            &mut |_| Ok(()),
+        );
+
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &unreadable && source.kind() == io::ErrorKind::PermissionDenied),
+            "an unreadable enumerated directory must still fail the conflict scan, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn dir_scan_skips_ini_that_vanishes_before_read() {
+        let temp = tempfile::tempdir().expect("temporary mod directory");
+        let root = temp.path().join("mod");
+        fs::create_dir_all(&root).expect("create mod directory");
+        let vanished = root.join("vanished.ini");
+        fs::write(&vanished, b"[TextureOverrideGone]\nhash = 0x1\n").expect("write vanishing ini");
+        fs::write(
+            root.join("remaining.ini"),
+            b"[TextureOverrideHere]\nhash = 0x2\n",
+        )
+        .expect("write remaining ini");
+        let mut out = Vec::new();
+
+        let result = visit_with_entry_lookups(
+            &root,
+            &mut out,
+            &mut |entry| entry.file_type(),
+            &mut |_| Ok(()),
+            &mut |path| {
+                if path == vanished {
+                    fs::remove_file(&vanished).expect("make ini vanish");
+                    return Err(Error::Io {
+                        path: vanished.clone(),
+                        source: io::Error::new(io::ErrorKind::NotFound, "test ini vanished"),
+                    });
+                }
+                Ok(())
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "an ini that vanishes after enumeration must be skipped"
+        );
+        assert_eq!(
+            out,
+            vec![HashBinding {
+                hash: "2".to_string(),
+                section: "TextureOverrideHere".to_string(),
+            }],
+            "a vanished ini must not hide readable conflict evidence",
+        );
+    }
+
+    #[test]
+    fn dir_scan_propagates_unreadable_ini_before_read() {
+        let temp = tempfile::tempdir().expect("temporary mod directory");
+        let root = temp.path().join("mod");
+        fs::create_dir_all(&root).expect("create mod directory");
+        let unreadable = root.join("unreadable.ini");
+        fs::write(&unreadable, b"[TextureOverrideA]\nhash = 0x1\n").expect("write ini");
+        let mut out = Vec::new();
+
+        let result = visit_with_entry_lookups(
+            &root,
+            &mut out,
+            &mut |entry| entry.file_type(),
+            &mut |_| Ok(()),
+            &mut |path| {
+                Err(Error::Io {
+                    path: path.to_path_buf(),
+                    source: io::Error::new(io::ErrorKind::PermissionDenied, "test ini obstruction"),
+                })
+            },
+        );
+
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &unreadable && source.kind() == io::ErrorKind::PermissionDenied),
+            "an unreadable enumerated ini must still fail the conflict scan, got {result:?}",
         );
     }
 }
