@@ -107,7 +107,7 @@ async fn refuses_a_second_launch_while_a_game_session_is_active() {
     .expect_err("a second launch must be refused while a session is active");
 
     assert!(
-        err.contains("already running"),
+        err.message.contains("already running"),
         "error should name the active session, got: {err}",
     );
     assert_eq!(
@@ -145,7 +145,7 @@ async fn refuses_to_launch_before_the_game_install_path_is_set() {
     .expect_err("no install path means nothing to launch");
 
     assert!(
-        err.contains("install path"),
+        err.message.contains("install path"),
         "error should point the user at Settings, got: {err}",
     );
     assert_nothing_started(&core, &runtime, &events).await;
@@ -179,7 +179,7 @@ async fn refuses_to_launch_when_no_game_executable_is_present() {
 
     for candidate in GameCode::Gimi.profile().executable_candidates {
         assert!(
-            err.contains(candidate),
+            err.message.contains(candidate),
             "error should list the candidates it looked for ({candidate}), got: {err}",
         );
     }
@@ -215,7 +215,7 @@ async fn refuses_to_launch_before_the_model_importer_is_installed() {
     .expect_err("no Model Importer means no modded launch");
 
     assert!(
-        err.contains("d3d11.dll") && err.contains("importer"),
+        err.message.contains("d3d11.dll") && err.message.contains("importer"),
         "error should name the missing Model Importer DLL, got: {err}",
     );
     assert_nothing_started(&core, &runtime, &events).await;

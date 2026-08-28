@@ -1,4 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import {
+  CommandFailure,
+  commandFailureFrom,
+  invoke,
+  type SurfaceFailureKind,
+} from "./commandError";
+export type { SurfaceFailureKind } from "./commandError";
 
 export type GameCode = "gimi" | "srmi" | "zzmi" | "wwmi" | "himi" | "efmi";
 
@@ -141,8 +147,6 @@ export interface ReconcileResult {
   /** Mods whose uncertain reinstall state was deliberately left untouched. */
   quarantined: string[];
 }
-
-export type SurfaceFailureKind = "invalidActiveVariant" | "other";
 
 export interface StartupReconcileFailure {
   game: GameCode;
@@ -679,21 +683,27 @@ export async function avGuidance(): Promise<AvGuidance> {
 }
 
 /**
- * Inspect a thrown error string from `launch_game`. If the backend
+ * Inspect a structured failure from `launch_game`. If the backend
  * classifier matched a known AV / SmartScreen pattern, the message is
- * prefixed with the sentinel from `AvGuidance`; we return the
- * original (sentinel-stripped) message alongside an `isAvPattern`
- * flag. Non-AV errors round-trip with the flag set to false.
+ * prefixed with the sentinel from `AvGuidance`; we return a new failure
+ * carrying the original kind and sentinel-stripped message alongside an
+ * `isAvPattern` flag. Non-AV errors round-trip unchanged.
  */
 export function partitionLaunchError(
   raw: unknown,
   sentinel: string,
-): { isAvPattern: boolean; message: string } {
-  const message = String(raw);
-  if (message.startsWith(sentinel)) {
-    return { isAvPattern: true, message: message.slice(sentinel.length) };
+): { isAvPattern: boolean; failure: CommandFailure } {
+  const failure = commandFailureFrom(raw);
+  if (failure.message.startsWith(sentinel)) {
+    return {
+      isAvPattern: true,
+      failure: new CommandFailure({
+        kind: failure.kind,
+        message: failure.message.slice(sentinel.length),
+      }),
+    };
   }
-  return { isAvPattern: false, message };
+  return { isAvPattern: false, failure };
 }
 
 // ---- Importer Origin surface (ADR 0005 / #109) ----

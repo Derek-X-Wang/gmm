@@ -22,6 +22,7 @@ use tauri::{AppHandle, Emitter, Runtime};
 
 use gmm_loader::Loader;
 
+use crate::command_error::{CommandError, CommandResult};
 use crate::core::av;
 use crate::core::games::InjectMode;
 use crate::core::{Core, GameCode, SessionInfo};
@@ -166,8 +167,8 @@ pub async fn launch<R: Runtime>(
     runtime: &SessionRuntime,
     game: GameCode,
     opts: &LaunchOptions,
-) -> Result<LaunchOutcome, String> {
-    let result: Result<LaunchOutcome, String> = async {
+) -> CommandResult<LaunchOutcome> {
+    let result: CommandResult<LaunchOutcome> = async {
         // Deal with whatever the last session left in the live slot
         // before consulting the DB — a dead watcher can leave a stale
         // LiveSession behind, and the row it should have cleared with
@@ -176,12 +177,12 @@ pub async fn launch<R: Runtime>(
 
         // Cheap pre-check; the atomic INSERT in start_session is the
         // real gate against double-launch races.
-        if let Some(existing) = core.session_info().await.map_err(|e| e.to_string())? {
-            return Err(format!(
+        if let Some(existing) = core.session_info().await.map_err(CommandError::from)? {
+            return Err(CommandError::other(format!(
                 "{} is already running (since {}).",
                 existing.game.as_str(),
                 existing.started_at
-            ));
+            )));
         }
 
         // Commit the durable Library blocker before any loader setup or
@@ -192,32 +193,38 @@ pub async fn launch<R: Runtime>(
         let claim = core
             .begin_session_launch(game)
             .await
-            .map_err(|e| format!("begin_session_launch: {e}"))?;
+            .map_err(CommandError::from)
+            .map_err(|error| {
+                error.map_message(|message| format!("begin_session_launch: {message}"))
+            })?;
 
-        let launch_result: Result<LaunchOutcome, String> = async {
+        let launch_result: CommandResult<LaunchOutcome> = async {
             let install = core
                 .game_install_path(game)
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(CommandError::from)?
                 .ok_or_else(|| {
-                    "Set the game install path in Settings before launching.".to_string()
+                    CommandError::other(
+                        "Set the game install path in Settings before launching.",
+                    )
                 })?;
 
-            let game_exe = resolve_game_exe(game, &install)?;
+            let game_exe = resolve_game_exe(game, &install).map_err(CommandError::other)?;
             let dll_to_inject = install.join("d3d11.dll");
             if !dll_to_inject.exists() {
-                return Err(format!(
+                return Err(CommandError::other(format!(
                     "Model Importer DLL not found at {}. Install the importer for this game first.",
                     dll_to_inject.display()
-                ));
+                )));
             }
-            let loader_dll = locate_loader_dll()?;
+            let loader_dll = locate_loader_dll().map_err(CommandError::other)?;
 
             // Loading the 3dmloader DLL is the most common AV-quarantine
             // target (Defender frequently flags the vendored DLL on first
             // run); errors from this step land in the AV classifier via
             // the outer `wrap_launch_error`.
-            let loader = Loader::load(&loader_dll).map_err(|e| format!("load loader: {e}"))?;
+            let loader = Loader::load(&loader_dll)
+                .map_err(|e| CommandError::other(format!("load loader: {e}")))?;
 
             let inject_mode = game.profile().inject_mode;
             let child_guard = match inject_mode {
@@ -227,16 +234,23 @@ pub async fn launch<R: Runtime>(
                     // startup.
                     let hook = loader
                         .hook(&dll_to_inject)
-                        .map_err(|e| format!("install hook: {e}"))?;
+                        .map_err(|e| CommandError::other(format!("install hook: {e}")))?;
 
                     let child = std::process::Command::new(&game_exe)
                         .current_dir(&install)
                         .spawn()
-                        .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+                        .map_err(|e| {
+                            CommandError::other(format!("spawn {}: {e}", game_exe.display()))
+                        })?;
                     let child_guard = ChildGuard::new(child);
                     core.record_session_launch_child(&claim, child_guard.pid())
                         .await
-                        .map_err(|e| format!("record_session_launch_child: {e}"))?;
+                        .map_err(CommandError::from)
+                        .map_err(|error| {
+                            error.map_message(|message| {
+                                format!("record_session_launch_child: {message}")
+                            })
+                        })?;
 
                     // Block until the importer DLL lands in a process
                     // whose image name matches the game exe, then DROP
@@ -248,7 +262,9 @@ pub async fn launch<R: Runtime>(
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "GenshinImpact.exe".to_string());
                     hook.wait_for_injection(&target_process, opts.injection_timeout_secs)
-                        .map_err(|e| format!("wait_for_injection: {e}"))?;
+                        .map_err(|e| {
+                            CommandError::other(format!("wait_for_injection: {e}"))
+                        })?;
                     // Explicitly drop so the unhook runs immediately
                     // rather than at end-of-scope. clippy::drop_non_drop
                     // fires on the non-Windows stub HookSession (no Drop
@@ -269,11 +285,18 @@ pub async fn launch<R: Runtime>(
                     let child = std::process::Command::new(&game_exe)
                         .current_dir(&install)
                         .spawn()
-                        .map_err(|e| format!("spawn {}: {e}", game_exe.display()))?;
+                        .map_err(|e| {
+                            CommandError::other(format!("spawn {}: {e}", game_exe.display()))
+                        })?;
                     let child_guard = ChildGuard::new(child);
                     core.record_session_launch_child(&claim, child_guard.pid())
                         .await
-                        .map_err(|e| format!("record_session_launch_child: {e}"))?;
+                        .map_err(CommandError::from)
+                        .map_err(|error| {
+                            error.map_message(|message| {
+                                format!("record_session_launch_child: {message}")
+                            })
+                        })?;
 
                     // Give the process a beat to start its main module
                     // before injecting; injecting into a process that has
@@ -283,7 +306,9 @@ pub async fn launch<R: Runtime>(
                     let pid = child_guard.pid();
                     loader
                         .inject(pid, &dll_to_inject)
-                        .map_err(|e| format!("inject into pid {pid}: {e}"))?;
+                        .map_err(|e| {
+                            CommandError::other(format!("inject into pid {pid}: {e}"))
+                        })?;
 
                     child_guard
                 }
@@ -301,7 +326,10 @@ pub async fn launch<R: Runtime>(
             // drop kills every losing launch's spawned game.
             core.complete_session_launch(&claim, &info)
                 .await
-                .map_err(|e| format!("complete_session_launch: {e}"))?;
+                .map_err(CommandError::from)
+                .map_err(|error| {
+                    error.map_message(|message| format!("complete_session_launch: {message}"))
+                })?;
 
             let child = child_guard.into_inner();
 
@@ -319,11 +347,10 @@ pub async fn launch<R: Runtime>(
                 if let Err(e) = core.end_session().await {
                     tracing::warn!(error = %e, "end_session failed after a rejected session install");
                 }
-                return Err(
-                "Another game session was installed while this one was starting. \
-                 The game was closed again; try launching once it has settled."
-                    .to_string(),
-                );
+                return Err(CommandError::other(
+                    "Another game session was installed while this one was starting. \
+                     The game was closed again; try launching once it has settled.",
+                ));
             }
 
             // Emit to the frontend so the banner appears immediately.
@@ -354,7 +381,7 @@ pub async fn launch<R: Runtime>(
     }
     .await;
 
-    result.map_err(av::wrap_launch_error)
+    result.map_err(|error| error.map_message(av::wrap_launch_error))
 }
 
 /// Make the live-session slot safe to install into.
@@ -369,7 +396,7 @@ pub async fn launch<R: Runtime>(
 ///   the stale session and clear the row it should have cleared;
 /// - slot occupied and the game is still running → refuse. Installing
 ///   over it would drop the running game's handle on the floor.
-async fn reconcile_live_slot(core: &Core, runtime: &SessionRuntime) -> Result<(), String> {
+async fn reconcile_live_slot(core: &Core, runtime: &SessionRuntime) -> CommandResult<()> {
     if !runtime.has_session() {
         return Ok(());
     }
@@ -380,12 +407,12 @@ async fn reconcile_live_slot(core: &Core, runtime: &SessionRuntime) -> Result<()
             .info()
             .map(|info| info.game.as_str().to_string())
             .unwrap_or_else(|| "a game".to_string());
-        return Err(format!(
+        return Err(CommandError::other(format!(
             "{running} is still running. Close the game before launching again.",
-        ));
+        )));
     }
     drop(runtime.take());
-    core.end_session().await.map_err(|e| e.to_string())?;
+    core.end_session().await.map_err(CommandError::from)?;
     Ok(())
 }
 

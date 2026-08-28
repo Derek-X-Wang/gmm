@@ -162,6 +162,27 @@ it("declines the origin the user was actually shown", async () => {
   expect(acceptImporterOriginProposal).not.toHaveBeenCalled();
 });
 
+it("renders a structured failure when declining a recommendation fails", async () => {
+  dismissImporterOrigin.mockRejectedValue({
+    kind: "invalidActiveVariant",
+    message: "Could not save the dismissal.",
+  });
+  importerOriginStatus.mockResolvedValue(
+    status({
+      proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } },
+    }),
+  );
+  render();
+
+  await userEvent.click(await screen.findByRole("button", { name: /not now/i }));
+
+  const failure = await screen.findByText("Could not save the dismissal.");
+  expect(failure).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
+  );
+});
+
 it("shows dismissed origins on the game's own surface and can undo one", async () => {
   importerOriginStatus.mockResolvedValue(status({ dismissed: [theFork] }));
   render();
@@ -176,6 +197,23 @@ it("shows dismissed origins on the game's own surface and can undo one", async (
       repo: "GIMI-Fork",
       assetPattern: "GIMI-PACKAGE-v\\d+\\.zip",
     }),
+  );
+});
+
+it("renders a structured failure when undoing a dismissal fails", async () => {
+  restoreImporterOrigin.mockRejectedValue({
+    kind: "invalidActiveVariant",
+    message: "Could not restore the recommendation.",
+  });
+  importerOriginStatus.mockResolvedValue(status({ dismissed: [theFork] }));
+  render();
+
+  await userEvent.click(await screen.findByRole("button", { name: /undo/i }));
+
+  const failure = await screen.findByText("Could not restore the recommendation.");
+  expect(failure).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
   );
 });
 
@@ -277,6 +315,27 @@ it("switches recommendations off for every game from one control", async () => {
 
   await waitFor(() =>
     expect(setImporterRecommendationsEnabled).toHaveBeenCalledWith(false),
+  );
+});
+
+it("renders a structured failure when the recommendations switch fails", async () => {
+  setImporterRecommendationsEnabled.mockRejectedValue({
+    kind: "invalidActiveVariant",
+    message: "Could not change recommendation settings.",
+  });
+  importerOriginStatus.mockResolvedValue(status());
+  render();
+
+  await userEvent.click(
+    await screen.findByRole("checkbox", { name: /recommend/i }),
+  );
+
+  const failure = await screen.findByText(
+    "Could not change recommendation settings.",
+  );
+  expect(failure).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
   );
 });
 

@@ -67,6 +67,8 @@ import {
   type ReinstallRecoveryFeedback,
 } from "./ReinstallRecoveryWarning";
 import { LoaderVersionNote } from "./LoaderVersionNote";
+import { CommandErrorNotice } from "./CommandErrorNotice";
+import { commandFailureMessage } from "./commandError";
 import { checkInteractively, type UpdateState } from "./updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import "./App.css";
@@ -352,7 +354,7 @@ function SessionBanner() {
           pending={retireLaunch.isPending && retireLaunch.variables === launch.id}
           error={
             retireLaunch.isError && retireLaunch.variables === launch.id
-              ? String(retireLaunch.error)
+              ? commandFailureMessage(retireLaunch.error)
               : undefined
           }
           onRetire={() => retireLaunch.mutate(launch.id)}
@@ -444,10 +446,10 @@ function LaunchGameButton({
       {partitioned && partitioned.isAvPattern && guidance.data ? (
         <AvGuidanceCallout
           guidance={guidance.data}
-          underlyingError={partitioned.message}
+          underlyingError={partitioned.failure.message}
         />
       ) : partitioned ? (
-        <p className="error">{partitioned.message}</p>
+        <CommandErrorNotice error={partitioned.failure} />
       ) : null}
     </section>
   );
@@ -540,7 +542,7 @@ function ModUpdatesPanel({ game }: { game: ApiGameCode }) {
           <span>Weekly check enabled</span>
         </label>
       </div>
-      {check.isError ? <p className="error">{String(check.error)}</p> : null}
+      <CommandErrorNotice error={check.error} />
     </section>
   );
 }
@@ -675,8 +677,8 @@ function NetworkPanel() {
         </button>
         {test.isSuccess ? <span className="muted small">Proxy reachable.</span> : null}
       </div>
-      {save.isError ? <p className="error">{String(save.error)}</p> : null}
-      {test.isError ? <p className="error">{String(test.error)}</p> : null}
+      <CommandErrorNotice error={save.error} />
+      <CommandErrorNotice error={test.error} />
     </section>
   );
 }
@@ -740,7 +742,7 @@ function ImporterPanel({
       </p>
       <div className="row">
         <span className="muted small">
-          Latest release: {release.data ? <code>{release.data.tag_name}</code> : release.isLoading ? "checking…" : release.isError ? "unavailable" : "—"}
+          Latest release: {release.data ? <code>{release.data.tag_name}</code> : release.isLoading ? "checking…" : "—"}
         </span>
         {update.data?.installedVersion ? (
           <span className="muted small">
@@ -749,6 +751,14 @@ function ImporterPanel({
         ) : null}
         {update.data?.pinned ? <span className="muted small"> · pinned</span> : null}
       </div>
+      <CommandErrorNotice
+        error={release.error}
+        heading="GMM could not check the latest Model Importer release."
+      />
+      <CommandErrorNotice
+        error={update.error}
+        heading="GMM could not check for a Model Importer update."
+      />
       <div className="row">
         <button onClick={() => install.mutate()} disabled={install.isPending}>
           {install.isPending ? "Installing…" : update.data?.available ? "Apply update" : "Reinstall importer"}
@@ -781,8 +791,9 @@ function ImporterPanel({
           Couldn't check for an importer update: {update.data.checkError}
         </p>
       ) : null}
-      {install.isError ? <p className="error">{String(install.error)}</p> : null}
-      {rollback.isError ? <p className="error">{String(rollback.error)}</p> : null}
+      <CommandErrorNotice error={install.error} />
+      <CommandErrorNotice error={rollback.error} />
+      <CommandErrorNotice error={pin.error} />
     </section>
   );
 }
@@ -858,7 +869,7 @@ function LibraryPathsPanel() {
           Reset to default
         </button>
       </div>
-      {setRoot.isError ? <p className="error">{String(setRoot.error)}</p> : null}
+      <CommandErrorNotice error={setRoot.error} />
       <JunctionRestoreFailures failures={setRoot.data?.failed_junction_restores} />
 
       <h3 className="muted small">Per-game overrides</h3>
@@ -886,7 +897,7 @@ function LibraryPathsPanel() {
           </div>
         );
       })}
-      {setPerGame.isError ? <p className="error">{String(setPerGame.error)}</p> : null}
+      <CommandErrorNotice error={setPerGame.error} />
       <JunctionRestoreFailures failures={setPerGame.data?.failed_junction_restores} />
     </section>
   );
@@ -988,9 +999,7 @@ function Diagnostics() {
       {exportBundle.data ? (
         <p className="muted small">Saved bundle to <code>{exportBundle.data}</code>.</p>
       ) : null}
-      {exportBundle.isError ? (
-        <p className="error">{String(exportBundle.error)}</p>
-      ) : null}
+      <CommandErrorNotice error={exportBundle.error} />
     </section>
   );
 }
@@ -1086,8 +1095,8 @@ function Settings({
           manually.
         </p>
       ) : null}
-      {setPath.isError ? <p className="error">{String(setPath.error)}</p> : null}
-      {detect.isError ? <p className="error">{String(detect.error)}</p> : null}
+      <CommandErrorNotice error={setPath.error} />
+      <CommandErrorNotice error={detect.error} />
       <LibraryAuditWarning game={game} />
       <RebuildJunctions game={game} />
     </section>
@@ -1115,7 +1124,7 @@ function RebuildJunctions({ game }: { game: ApiGameCode }) {
           quarantined untouched.
         </span>
       ) : null}
-      {rebuild.isError ? <p className="error">{String(rebuild.error)}</p> : null}
+      <CommandErrorNotice error={rebuild.error} />
     </div>
   );
 }
@@ -1171,7 +1180,7 @@ function ModList({ game }: { game: ApiGameCode }) {
       setRecoveryFeedback({
         kind: "stillQuarantined",
         modName: mod.name,
-        reason: String(error),
+        reason: commandFailureMessage(error),
       });
     },
   });
@@ -1197,14 +1206,12 @@ function ModList({ game }: { game: ApiGameCode }) {
       <ZipDropZone game={game} onImported={invalidate} />
 
       {mods.isLoading ? <p>Loading…</p> : null}
-      {mods.isError ? <p className="error">{String(mods.error)}</p> : null}
-      {conflicts.isError ? (
-        <OperationFailureNotice
-          heading="GMM could not check this game's Mod conflicts."
-          detail="Conflict information is unavailable; this is not a “no conflicts” result."
-          errors={[String(conflicts.error)]}
-        />
-      ) : null}
+      <CommandErrorNotice error={mods.error} />
+      <CommandErrorNotice
+        error={conflicts.error}
+        heading="GMM could not check this game's Mod conflicts."
+        detail="Conflict information is unavailable; this is not a “no conflicts” result."
+      />
 
       {mods.data && mods.data.length === 0 ? (
         <p className="muted">No mods yet — adopt a folder to get started.</p>
@@ -1277,7 +1284,7 @@ function ModList({ game }: { game: ApiGameCode }) {
           </li>
         ))}
       </ul>
-      {toggle.isError ? <p className="error">{String(toggle.error)}</p> : null}
+      <CommandErrorNotice error={toggle.error} />
     </section>
   );
 }
@@ -1332,7 +1339,7 @@ function AdoptButton({
           Cancel
         </button>
       </div>
-      {adopt.isError ? <p className="error">{String(adopt.error)}</p> : null}
+      <CommandErrorNotice error={adopt.error} />
     </div>
   );
 }
@@ -1382,7 +1389,7 @@ function GameBananaImport({
           Cancel
         </button>
       </div>
-      {ingest.isError ? <p className="error">{String(ingest.error)}</p> : null}
+      <CommandErrorNotice error={ingest.error} />
     </div>
   );
 }
@@ -1476,9 +1483,7 @@ function VariantSelector({
           </label>
         );
       })}
-      {switchVariant.isError ? (
-        <p className="error">{String(switchVariant.error)}</p>
-      ) : null}
+      <CommandErrorNotice error={switchVariant.error} />
     </div>
   );
 }
@@ -1544,7 +1549,7 @@ function ImportZipButton({
           Cancel
         </button>
       </div>
-      {importMutation.isError ? <p className="error">{String(importMutation.error)}</p> : null}
+      <CommandErrorNotice error={importMutation.error} />
     </div>
   );
 }
@@ -1638,7 +1643,7 @@ function ZipDropZone({
               Cancel
             </button>
           </div>
-          {importMutation.isError ? <p className="error">{String(importMutation.error)}</p> : null}
+          <CommandErrorNotice error={importMutation.error} />
         </div>
       ) : (
         <p className="muted small">Drop a <code>.zip</code> here, or use the Import button above.</p>

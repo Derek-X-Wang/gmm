@@ -6,13 +6,16 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 const {
   adoptFolder,
+  detectConflicts,
   importGamebanana,
   importZip,
+  partitionLaunchError,
   recoverUnreferencedLibraryDir,
   resolveDuplicateMods,
   retryReinstallRecovery,
   setProxyConfig,
 } = await import("./api");
+const { CommandFailure } = await import("./commandError");
 
 const RAW_MOD = {
   id: "01MOD",
@@ -26,6 +29,38 @@ const RAW_MOD = {
 beforeEach(() => {
   vi.clearAllMocks();
   invoke.mockResolvedValue(RAW_MOD);
+});
+
+it("preserves a command failure's classification and user-facing message", async () => {
+  invoke.mockRejectedValueOnce({
+    kind: "invalidActiveVariant",
+    message: "Select a valid Variant for this Mod, or reinstall it.",
+  });
+
+  const failure = await detectConflicts("gimi").catch((error) => error);
+
+  expect(failure).toBeInstanceOf(CommandFailure);
+  expect(failure).toMatchObject({
+    kind: "invalidActiveVariant",
+    message: "Select a valid Variant for this Mod, or reinstall it.",
+  });
+});
+
+it("partitions launch presentation without discarding failure classification", () => {
+  const partitioned = partitionLaunchError(
+    {
+      kind: "invalidActiveVariant",
+      message: "AV-PATTERN: Select a valid Variant.",
+    },
+    "AV-PATTERN: ",
+  );
+
+  expect(partitioned.isAvPattern).toBe(true);
+  expect(partitioned.failure).toBeInstanceOf(CommandFailure);
+  expect(partitioned.failure).toMatchObject({
+    kind: "invalidActiveVariant",
+    message: "Select a valid Variant.",
+  });
 });
 
 it.each([
