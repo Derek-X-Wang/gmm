@@ -253,7 +253,6 @@ function Assert-ManifestFixtureGuardCoverage {
     # Source scans cannot prove that a PowerShell command executes. This
     # assertion checks the stages observed by this Windows run instead, while
     # allowing extra guards and an arbitrary number of polling iterations.
-    <#
     $acceptValidationByte = Assert-ManifestFixtureCheckpointOrder `
         "accept" `
         $script:ManifestAcceptCheckpoints `
@@ -268,7 +267,6 @@ function Assert-ManifestFixtureGuardCoverage {
             "release-pre-final-byte"
         ) `
         $acceptValidationByte
-    #>
 }
 
 function Complete-ManifestFixtureRequest {
