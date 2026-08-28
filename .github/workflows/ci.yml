@@ -69,6 +69,16 @@ jobs:
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.event.pull_request.head.sha }}"
 
+      - name: Test personal-data guard
+        run: .github/scripts/test-no-personal-data.sh
+
+      - name: Reject session links and personal paths
+        if: github.event_name == 'pull_request'
+        run: |
+          .github/scripts/check-no-personal-data.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}"
+
       - name: Test dead-origin alerting
         run: .github/scripts/test-dead-origin-issues.sh
 
