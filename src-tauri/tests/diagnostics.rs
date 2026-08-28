@@ -97,6 +97,44 @@ fn prune_old_logs_removes_files_past_retention() {
     assert!(new_file.exists(), "fresh file stays");
 }
 
+#[cfg(unix)]
+#[test]
+fn pruning_propagates_log_directory_uncertainty() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+    symlink(&log_dir, &log_dir).expect("self-referential log directory");
+
+    let prune = prune_old_logs(&log_dir, DEFAULT_LOG_RETENTION_DAYS);
+    assert!(
+        matches!(prune, Err(gmm_lib::core::Error::Io { ref path, .. }) if path == &log_dir),
+        "an unreadable log directory must not be reported as empty, got {prune:?}",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_propagates_log_directory_uncertainty() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+    symlink(&log_dir, &log_dir).expect("self-referential log directory");
+
+    let bundle = tmp.path().join("bundle.zip");
+    let result = build_bundle(
+        &log_dir,
+        &SettingsSnapshot::default(),
+        &bundle,
+        DEFAULT_BUNDLE_LOG_DAYS,
+    );
+    assert!(
+        matches!(result, Err(gmm_lib::core::Error::Io { ref path, .. }) if path == &log_dir),
+        "an unreadable log directory must not produce a confidently complete bundle, got {result:?}",
+    );
+}
+
 #[test]
 fn bundle_includes_recent_logs_and_redacts_settings() {
     let tmp = TempDir::new().expect("tmp");

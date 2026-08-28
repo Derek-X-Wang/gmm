@@ -65,6 +65,7 @@ fn visit(dir: &Path, out: &mut Vec<HashBinding>) -> Result<()> {
             Ok(t) => t,
             Err(_) => continue,
         };
+        // Safe: `file_type()` above succeeded; this only classifies known metadata.
         if file_type.is_dir() {
             visit(&path, out)?;
         } else if file_type.is_file()

@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "std::path::Path::exists", reason = "Path::exists collapses every metadata error into false; use core::filesystem so only NotFound means absent" },
+    { path = "std::path::Path::is_dir", reason = "Path::is_dir collapses every metadata error into false; inspect fallible metadata or explicitly annotate a best-effort probe" },
+    { path = "std::path::Path::is_file", reason = "Path::is_file collapses every metadata error into false; inspect fallible metadata or explicitly annotate a best-effort probe" },
+]

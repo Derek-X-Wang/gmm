@@ -543,6 +543,8 @@ mod tests {
     /// The 8.3 short form of a path must expand back to the long form.
     /// This is the case that silently broke WaitForInjection: Windows
     /// reports module paths in long form, so a short path never matches.
+    // Test-only fixture assertion; a collapsed failure still fails the test and drives no production decision.
+    #[allow(clippy::disallowed_methods)]
     #[test]
     fn short_paths_expand_to_long_form() {
         let tmp = tempfile::TempDir::new().expect("tmp");

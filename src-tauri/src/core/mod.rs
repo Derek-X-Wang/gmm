@@ -10,6 +10,7 @@ pub mod crash_points;
 pub mod detect;
 pub mod diagnostics;
 pub mod error;
+mod filesystem;
 pub mod gamebanana;
 pub mod games;
 pub mod importer;
@@ -232,10 +233,12 @@ impl Core {
     /// App router uses this on every cold start to decide between
     /// showing the wizard vs. the main app.
     pub async fn onboarding_status(&self) -> Result<crate::commands::OnboardingStatus> {
+        // Safe: these are optional database booleans, not filesystem observations.
         let complete = get_setting(&self.pool, keys::onboarding_complete())
             .await?
             .map(|v| v == "true")
             .unwrap_or(false);
+        // Safe: these are optional database booleans, not filesystem observations.
         let skipped = get_setting(&self.pool, keys::onboarding_skipped())
             .await?
             .map(|v| v == "true")
@@ -581,9 +584,7 @@ impl Core {
                 ] {
                     let from = previous.join(game.as_str());
                     let to = next.join(game.as_str());
-                    if from.exists() {
-                        move_subtree(&from, &to, &mut report)?;
-                    }
+                    move_subtree(&from, &to, &mut report)?;
                 }
             }
         }
@@ -3231,6 +3232,20 @@ impl Core {
                 continue;
             }
 
+            let expected_target_is_dir = match filesystem::metadata_if_exists(&expected_target) {
+                Ok(Some(metadata)) => {
+                    // Safe: the fallible lookup above preserved I/O uncertainty.
+                    metadata.is_dir()
+                }
+                Ok(None) => false,
+                Err(source) => {
+                    return Err(Error::Io {
+                        path: expected_target.clone(),
+                        source,
+                    })
+                }
+            };
+
             match resolve_link(&link) {
                 // A junction whose target directory has been deleted
                 // still resolves to the expected path string, so
@@ -3238,18 +3253,10 @@ impl Core {
                 // showing an enabled mod the game cannot load.
                 // Pointing at the right place is necessary but not
                 // sufficient — the target directory has to actually be
-                // there. `try_exists` rather than `exists` so a
-                // permission error or disconnected drive doesn't
-                // masquerade as "deleted": on an inconclusive answer we
-                // leave the mod healthy rather than nagging the user
-                // about a Library that is merely temporarily
-                // unreachable. `is_dir` because a plain file at the
-                // target path is not a usable junction target.
-                Some(actual)
-                    if same_path(&actual, &expected_target)
-                        && matches!(expected_target.try_exists(), Ok(true) | Err(_))
-                        && !expected_target.is_file() =>
-                {
+                // there. Only a successful metadata read can classify it
+                // as a usable directory; an I/O error is returned rather
+                // than reported as either healthy or deleted.
+                Some(actual) if same_path(&actual, &expected_target) && expected_target_is_dir => {
                     result.healthy.push(id);
                 }
                 // The Junction points somewhere other than the row
@@ -3267,7 +3274,7 @@ impl Core {
                 // and there is nothing to relink it to. That case stays
                 // conflicting (see
                 // `a_junction_whose_target_was_deleted_is_not_healthy`).
-                Some(actual) if path_within(&actual, &library_path) && expected_target.is_dir() => {
+                Some(actual) if path_within(&actual, &library_path) && expected_target_is_dir => {
                     if self
                         .create_reconciled_junction_in_library_mutation(
                             &id,
@@ -3938,7 +3945,13 @@ pub struct JunctionRestoreFailure {
 /// Move `from` to `to`. Prefer atomic rename; fall back to recursive
 /// copy + delete when rename fails (typically EXDEV, cross-volume).
 fn move_subtree(from: &Path, to: &Path, report: &mut MoveReport) -> Result<()> {
-    if !from.exists() {
+    if filesystem::symlink_metadata_if_exists(from)
+        .map_err(|source| Error::Io {
+            path: from.to_path_buf(),
+            source,
+        })?
+        .is_none()
+    {
         return Ok(());
     }
     if let Some(parent) = to.parent() {
@@ -4064,6 +4077,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path, after_file: Option<&dyn Fn()>) -> 
             source,
         })?;
 
+        // Safe: `metadata()` above propagated I/O uncertainty.
         if metadata.is_dir() {
             copy_dir_recursive(&entry_path, &dst_path, after_file)?;
         } else {

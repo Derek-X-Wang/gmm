@@ -10,8 +10,10 @@ use std::io::Write;
 use std::path::Path;
 
 use gmm_lib::core::importer::{
-    install_from_local_zip, rewrite_d3dx_loader, rollback_to, DEFAULT_LOADER_EXE,
+    backup_existing, find_d3dx_ini, install_from_local_zip, latest_backup, rewrite_d3dx_loader,
+    rollback_to, DEFAULT_LOADER_EXE,
 };
+use gmm_lib::core::Error;
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
@@ -396,5 +398,61 @@ fn merging_a_shipped_mods_dir_recurses_into_existing_subdirectories() {
         mods.join("Examples/shipped.ini").exists(),
         "a shipped file nested under an existing directory must still be merged in — \
          a non-recursive merge would skip the whole subtree",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn d3dx_lookup_propagates_metadata_uncertainty() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let d3dx = tmp.path().join("d3dx.ini");
+    symlink(&d3dx, &d3dx).expect("self-referential d3dx.ini");
+
+    let result = find_d3dx_ini(tmp.path());
+
+    assert!(
+        matches!(result, Err(Error::Io { ref path, .. }) if path == &d3dx),
+        "an unreadable matching d3dx.ini must remain an I/O error, got {result:?}",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn latest_backup_propagates_metadata_uncertainty() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let backups = tmp.path().join("backups");
+    fs::create_dir_all(&backups).expect("backups root");
+    let uncertain = backups.join("20260828T000000");
+    symlink(&uncertain, &uncertain).expect("self-referential backup entry");
+
+    let result = latest_backup(&backups);
+    assert!(
+        matches!(result, Err(Error::Io { ref path, .. }) if path == &uncertain),
+        "an unreadable backup entry must not be reported as no backup, got {result:?}",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_existing_propagates_directory_search_uncertainty() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().expect("tmp");
+    let backups = tmp.path().join("backups");
+    let game = tmp.path().join("game");
+    fs::create_dir_all(&game).expect("game directory");
+    let original = fs::metadata(&game).expect("game metadata").permissions();
+    fs::set_permissions(&game, fs::Permissions::from_mode(0o000))
+        .expect("deny game directory search");
+    let backup_result = backup_existing(&game, &backups);
+    fs::set_permissions(&game, original).expect("restore game directory search");
+
+    assert!(
+        matches!(backup_result, Err(Error::Io { .. })),
+        "an unsearchable game directory must not be reported as having nothing to back up, got {backup_result:?}",
     );
 }

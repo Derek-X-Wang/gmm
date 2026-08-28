@@ -94,18 +94,22 @@ pub fn install_subscriber(log_dir: &Path) -> Result<WorkerGuard> {
 /// Remove log files matching `gmm-*.log` whose modified time is older
 /// than `max_age_days`. Returns the number of files removed.
 pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
-    if !log_dir.exists() {
-        return Ok(0);
-    }
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs((max_age_days.max(0) as u64) * 86_400))
         .unwrap_or(SystemTime::UNIX_EPOCH);
 
+    let entries = match fs::read_dir(log_dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => {
+            return Err(Error::Io {
+                path: log_dir.to_path_buf(),
+                source,
+            })
+        }
+    };
     let mut removed = 0_u32;
-    for entry in fs::read_dir(log_dir).map_err(|source| Error::Io {
-        path: log_dir.to_path_buf(),
-        source,
-    })? {
+    for entry in entries {
         let entry = entry.map_err(|source| Error::Io {
             path: log_dir.to_path_buf(),
             source,
@@ -121,6 +125,7 @@ pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
         if modified < cutoff {
             // Best-effort removal — we'd rather not crash on a locked file
             // mid-startup.
+            // The returned count is successful removals, so a failed removal is intentionally not counted.
             if fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
@@ -240,22 +245,33 @@ pub fn build_bundle(
         })?;
 
     // Logs younger than the cutoff.
-    if log_dir.exists() {
+    let entries = match fs::read_dir(log_dir) {
+        Ok(entries) => Some(entries),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(Error::Io {
+                path: log_dir.to_path_buf(),
+                source,
+            })
+        }
+    };
+    if let Some(entries) = entries {
         let cutoff = SystemTime::now()
             .checked_sub(Duration::from_secs((log_age_days.max(0) as u64) * 86_400))
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        let entries = fs::read_dir(log_dir).map_err(|source| Error::Io {
-            path: log_dir.to_path_buf(),
-            source,
-        })?;
         for entry in entries {
             let entry = entry.map_err(|source| Error::Io {
                 path: log_dir.to_path_buf(),
                 source,
             })?;
             let path = entry.path();
-            if !path.is_file() || !is_gmm_log(&path) {
+            let file_type = entry.file_type().map_err(|source| Error::Io {
+                path: path.clone(),
+                source,
+            })?;
+            // Safe: `file_type()` above propagated I/O uncertainty.
+            if !file_type.is_file() || !is_gmm_log(&path) {
                 continue;
             }
             let modified = entry

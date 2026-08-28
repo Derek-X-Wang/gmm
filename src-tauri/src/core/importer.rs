@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::error::{Error, Result};
+use super::filesystem::{metadata_if_exists, symlink_metadata_if_exists};
 use super::zip_import;
 
 /// Root-level filenames the backup-and-restore path must move out of
@@ -327,13 +328,21 @@ pub fn find_d3dx_ini(game_dir: &Path) -> Result<PathBuf> {
             path: game_dir.to_path_buf(),
             source,
         })?;
-        if entry
+        if !entry
             .file_name()
             .to_string_lossy()
             .eq_ignore_ascii_case(IMPORTER_REQUIRED_FILE)
-            && entry.path().is_file()
         {
-            return Ok(entry.path());
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::metadata(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        // Safe: `metadata()` above propagated I/O uncertainty; this only classifies known metadata.
+        if metadata.is_file() {
+            return Ok(path);
         }
     }
     Err(Error::Importer(format!(
@@ -374,7 +383,13 @@ pub fn install_from_local_zip(
         source,
     })?;
     let staging = game_dir.join(".gmm-staging");
-    if staging.exists() {
+    if symlink_metadata_if_exists(&staging)
+        .map_err(|source| Error::Io {
+            path: staging.clone(),
+            source,
+        })?
+        .is_some()
+    {
         fs::remove_dir_all(&staging).map_err(|source| Error::Io {
             path: staging.clone(),
             source,
@@ -436,7 +451,14 @@ pub fn backup_existing(game_dir: &Path, backups_root: &Path) -> Result<Option<Pa
         .copied()
         .chain(IMPORTER_ROOT_DIRS.iter().copied())
     {
-        if game_dir.join(name).exists() {
+        let path = game_dir.join(name);
+        if symlink_metadata_if_exists(&path)
+            .map_err(|source| Error::Io {
+                path: path.clone(),
+                source,
+            })?
+            .is_some()
+        {
             found = true;
             break;
         }
@@ -458,7 +480,13 @@ pub fn backup_existing(game_dir: &Path, backups_root: &Path) -> Result<Option<Pa
         .chain(IMPORTER_ROOT_DIRS.iter().copied())
     {
         let from = game_dir.join(name);
-        if !from.exists() {
+        if symlink_metadata_if_exists(&from)
+            .map_err(|source| Error::Io {
+                path: from.clone(),
+                source,
+            })?
+            .is_none()
+        {
             continue;
         }
         let to = dest.join(name);
@@ -494,13 +522,17 @@ fn swap_in(staging: &Path, game_dir: &Path) -> Result<()> {
         // onto an occupied directory entry. Ask whether an entry exists
         // at all instead.
         let is_user_owned = USER_OWNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d));
-        if is_user_owned && fs::symlink_metadata(&to).is_ok() {
+        let destination_present = symlink_metadata_if_exists(&to).map_err(|source| Error::Io {
+            path: to.clone(),
+            source,
+        })?;
+        if is_user_owned && destination_present.is_some() {
             merge_into(&from, &to)?;
             remove_any(&from)?;
             continue;
         }
 
-        if to.exists() {
+        if destination_present.is_some() {
             remove_any(&to)?;
         }
         if let Err(_rename_err) = fs::rename(&from, &to) {
@@ -537,16 +569,23 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
         // would try to copy straight onto the existing directory entry.
         // `symlink_metadata` answers "is there an entry here" without
         // following, which is the question we actually have.
-        let occupied = fs::symlink_metadata(&dest).is_ok();
+        let destination = symlink_metadata_if_exists(&dest).map_err(|source| Error::Io {
+            path: dest.clone(),
+            source,
+        })?;
 
-        if occupied {
+        if let Some(destination) = destination {
             // Recurse only when both sides are ordinary directories.
             // A junction/reparse point on the destination side belongs
             // to the user (it is an enabled mod) and is left alone.
-            let dest_is_plain_dir = fs::symlink_metadata(&dest)
-                .map(|m| m.is_dir() && !m.file_type().is_symlink())
-                .unwrap_or(false);
-            if src.is_dir() && dest_is_plain_dir {
+            // Safe: the fallible lookup above succeeded; these calls only classify known metadata.
+            let dest_is_plain_dir = destination.is_dir() && !destination.file_type().is_symlink();
+            let source_metadata = fs::metadata(&src).map_err(|source| Error::Io {
+                path: src.clone(),
+                source,
+            })?;
+            // Safe: `metadata()` above propagated I/O uncertainty.
+            if source_metadata.is_dir() && dest_is_plain_dir {
                 merge_into(&src, &dest)?;
             }
             // Otherwise keep whatever is already there — never clobber
@@ -631,17 +670,35 @@ pub fn read_backup_provenance(backup_dir: &Path) -> Option<BackupProvenance> {
 /// Backups are named with an ISO-8601 timestamp, so lexicographic order
 /// is chronological order.
 pub fn latest_backup(backups_root: &Path) -> Result<Option<PathBuf>> {
-    if !backups_root.exists() {
-        return Ok(None);
-    }
-    let mut entries: Vec<PathBuf> = fs::read_dir(backups_root)
-        .map_err(|source| Error::Io {
+    let listed = match fs::read_dir(backups_root) {
+        Ok(listed) => listed,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::Io {
+                path: backups_root.to_path_buf(),
+                source,
+            })
+        }
+    };
+    let mut entries = Vec::new();
+    for entry in listed {
+        let entry = entry.map_err(|source| Error::Io {
             path: backups_root.to_path_buf(),
             source,
+        })?;
+        let path = entry.path();
+        let Some(metadata) = metadata_if_exists(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
         })?
-        .filter_map(|r| r.ok().map(|e| e.path()))
-        .filter(|p| p.is_dir())
-        .collect();
+        else {
+            continue;
+        };
+        // Safe: `metadata_if_exists` propagated I/O uncertainty.
+        if metadata.is_dir() {
+            entries.push(path);
+        }
+    }
     entries.sort();
     Ok(entries.pop())
 }
@@ -668,7 +725,13 @@ pub fn rollback_to(backup_dir: &Path, game_dir: &Path) -> Result<()> {
         // backup forever; replacing wholesale would delete whatever
         // the user has enabled since. So merge, preferring live.
         if USER_OWNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d)) {
-            if fs::symlink_metadata(&to).is_ok() {
+            if symlink_metadata_if_exists(&to)
+                .map_err(|source| Error::Io {
+                    path: to.clone(),
+                    source,
+                })?
+                .is_some()
+            {
                 merge_into(&from, &to)?;
                 remove_any(&from)?;
             } else {
@@ -681,7 +744,13 @@ pub fn rollback_to(backup_dir: &Path, game_dir: &Path) -> Result<()> {
             continue;
         }
 
-        if fs::symlink_metadata(&to).is_ok() {
+        if symlink_metadata_if_exists(&to)
+            .map_err(|source| Error::Io {
+                path: to.clone(),
+                source,
+            })?
+            .is_some()
+        {
             remove_any(&to)?;
         }
         if let Err(_rename_err) = fs::rename(&from, &to) {
@@ -743,6 +812,7 @@ fn copy_any(from: &Path, to: &Path) -> Result<()> {
         path: from.to_path_buf(),
         source,
     })?;
+    // Safe: `symlink_metadata()` above propagated I/O uncertainty.
     if meta.is_dir() {
         copy_dir_recursive(from, to)
     } else {
@@ -765,6 +835,7 @@ fn remove_any(path: &Path) -> Result<()> {
         path: path.to_path_buf(),
         source,
     })?;
+    // Safe: `symlink_metadata()` above propagated I/O uncertainty.
     if meta.is_dir() {
         fs::remove_dir_all(path).map_err(|source| Error::Io {
             path: path.to_path_buf(),
@@ -793,7 +864,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         })?;
         let entry_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        let file_type = entry.file_type().map_err(|source| Error::Io {
+            path: entry_path.clone(),
+            source,
+        })?;
+        // Safe: `file_type()` above propagated I/O uncertainty.
+        if file_type.is_dir() {
             copy_dir_recursive(&entry_path, &dst_path)?;
         } else {
             fs::copy(&entry_path, &dst_path).map_err(|source| Error::Io {

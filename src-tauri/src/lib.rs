@@ -1,5 +1,6 @@
 pub mod command_error;
 pub mod commands;
+#[deny(clippy::disallowed_methods)]
 pub mod core;
 pub mod runtime;
 

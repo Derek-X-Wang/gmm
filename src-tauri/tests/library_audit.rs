@@ -1698,6 +1698,33 @@ async fn duplicate_resolution_refuses_a_missing_selected_variant_target() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn duplicate_resolution_propagates_selected_target_metadata_uncertainty() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let target = fixture.library_path.join("Amber");
+    fs::remove_dir_all(&target).expect("remove readable selected Variant target");
+    symlink(&target, &target).expect("self-referential selected Variant target");
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::Io { ref path, .. }) if path == &target),
+        "an unreadable selected Variant target must remain an I/O error, got {result:?}",
+    );
+    assert!(
+        fs::symlink_metadata(&fixture.duplicate_junction).is_ok(),
+        "target uncertainty must stop before Junction withdrawal",
+    );
+}
+
 #[tokio::test]
 async fn duplicate_resolution_preflights_every_junction_before_withdrawing_any() {
     let tmp = TempDir::new().expect("tmp");

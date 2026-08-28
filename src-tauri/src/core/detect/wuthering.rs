@@ -39,6 +39,8 @@ pub const EXE_NAMES: &[&str] = &["Client-Win64-Shipping.exe"];
 /// `true` iff the candidate looks like Wuthering Waves's playable
 /// directory: contains the shipping exe AND the Unreal `Content/`
 /// directory two levels up.
+// Detection is a best-effort optional-install probe; an I/O error means this candidate is unusable.
+#[allow(clippy::disallowed_methods)]
 pub fn validate(path: &Path) -> bool {
     if !path.is_dir() {
         return false;
