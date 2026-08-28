@@ -80,9 +80,22 @@ while IFS= read -r sha; do
     "$(git log -1 --format='%B' "$sha")"
 done < <(git rev-list "${BASE_COMMIT}..${HEAD_COMMIT}")
 
+# This guard and its self-test necessarily contain specimens of the thing they
+# forbid: the pattern names the trailer, and the self-test has to feed real
+# leaks to a real checker. Scanning them would make the gate reject itself.
+# The exemption is by exact path and covers nothing else, so a leak anywhere in
+# the repository is still caught even in the same pull request that edits these
+# two files. It does leave one blind spot -- a leak hidden inside them -- which
+# is narrow, deliberate, and stated here rather than discovered later.
+SELF="\
+:(exclude).github/scripts/check-no-personal-data.sh
+:(exclude).github/scripts/test-no-personal-data.sh"
+
 # Only added lines. A pull request that deletes an existing leak must pass.
+mapfile -t exclusions <<<"$SELF"
 scan_text "an added line in this pull request" \
   "$(git diff --no-color --unified=0 "$BASE_COMMIT" "$HEAD_COMMIT" \
+     -- . "${exclusions[@]}" \
      | grep '^+' | grep -v '^+++' || true)"
 
 if [ "$failures" -gt 0 ]; then

@@ -96,6 +96,27 @@ run_case "a CI runner path passes" 0 \
 run_case "a placeholder account passes" 0 \
   "Fix the thing" "example: /Users/username/Games"
 
+# The guard exempts its own two files because they must carry specimens. That
+# exemption has to be exactly two paths wide: a leak in any other file, in the
+# same pull request that edits them, must still fail.
+scoped_dir="$(mktemp -d)"
+trap 'rm -rf "$scoped_dir"' EXIT
+setup_repo "$scoped_dir"
+scoped_base="$(git -C "$scoped_dir" rev-parse HEAD)"
+mkdir -p "$scoped_dir/.github/scripts"
+printf '%s\n' "Claude-Session: https://claude.ai/code/session_SPECIMEN" \
+  >"$scoped_dir/.github/scripts/test-no-personal-data.sh"
+git -C "$scoped_dir" add .github/scripts/test-no-personal-data.sh
+git -C "$scoped_dir" commit --quiet -m "edit the guard self-test"
+expect "a specimen inside the guard self-test passes" 0 \
+  "$scoped_base" "$(git -C "$scoped_dir" rev-parse HEAD)" "$scoped_dir"
+
+printf '%s\n' "leak: /home/${PERSONAL_ACCOUNT}/notes" >>"$scoped_dir/file.txt"
+git -C "$scoped_dir" add file.txt
+git -C "$scoped_dir" commit --quiet -m "and a leak elsewhere"
+expect "a leak outside the guard is still caught" 1 \
+  "$scoped_base" "$(git -C "$scoped_dir" rev-parse HEAD)" "$scoped_dir"
+
 # Removing an existing leak must not be blocked by the leak it removes.
 removal_dir="$(mktemp -d)"
 trap 'rm -rf "$removal_dir"' EXIT
