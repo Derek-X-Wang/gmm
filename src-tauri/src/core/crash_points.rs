@@ -178,12 +178,20 @@ pub const REINSTALL_AFTER_REPLACEMENT_MOVE: &str = "reinstall.after_replacement_
 /// finish purging the old intent-backed quarantine.
 pub const REINSTALL_AFTER_METADATA_COMMIT: &str = "reinstall.after_metadata_commit";
 
-/// `retry_reinstall_recovery`: the caller observed a durable witness but has
-/// not yet entered the serialized recovery mutation. Tests pause two real
-/// processes here to prove the later retry treats a concurrently retired row
-/// as already recovered.
+/// `retry_reinstall_recovery`: the caller observed preliminary witness state
+/// but has not yet entered the serialized recovery mutation. Absence is
+/// revalidated under the fence before it can support any outcome. Tests pause
+/// real processes here to prove a later retry verifies deployment after a
+/// concurrent caller retires the row.
 pub const RETRY_REINSTALL_AFTER_WITNESS_LOOKUP: &str =
     "retry_reinstall.after_witness_lookup";
+
+/// Quarantine withdrawal: the validated witness still exists and is
+/// quarantined, while its Junction has not yet been inspected or removed.
+/// The Library writer fence is already held, so a retry cannot restore and
+/// retire the witness before this withdrawal decision commits.
+pub const WITHDRAW_REINSTALL_AFTER_WITNESS_LOOKUP: &str =
+    "withdraw_reinstall.after_witness_lookup";
 
 /// Failed adopt/ZIP cleanup: identity and database ownership have been
 /// re-proved under the writer fence, immediately before the staged directory

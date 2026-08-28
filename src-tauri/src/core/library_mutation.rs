@@ -45,6 +45,7 @@ pub(super) enum LibraryMutation {
     FinishInterruptedDeletes,
     ResolveInterruptedStaging,
     RetryReinstallRecovery,
+    WithdrawQuarantinedReinstallJunction,
     SetLibraryRoot,
     SetLibraryPathForGame,
     AdoptFolder,
@@ -64,6 +65,7 @@ impl LibraryMutation {
             Self::FinishInterruptedDeletes => "finish_interrupted_library_deletes",
             Self::ResolveInterruptedStaging => "resolve_interrupted_staging_at_startup",
             Self::RetryReinstallRecovery => "retry_reinstall_recovery",
+            Self::WithdrawQuarantinedReinstallJunction => "withdraw_quarantined_reinstall_junction",
             Self::SetLibraryRoot => "set_library_root",
             Self::SetLibraryPathForGame => "set_library_path_for_game",
             Self::AdoptFolder => "adopt_folder",
@@ -651,6 +653,7 @@ impl Core {
             LibraryMutation::AuditLibrary
                 | LibraryMutation::FinishInterruptedDeletes
                 | LibraryMutation::ResolveInterruptedStaging
+                | LibraryMutation::WithdrawQuarantinedReinstallJunction
         ) {
             self.prune_stale_session_launch_claims(&mut transaction)
                 .await?;
@@ -1187,8 +1190,13 @@ impl Core {
         let mut rolled_back = 0;
         for witness in witnesses {
             let token = witness.token().to_string();
+            let mod_id = witness.mod_id().to_string();
             match self
-                .attempt_reinstall_recovery(&token, LibraryMutation::FinishInterruptedDeletes)
+                .attempt_reinstall_recovery(
+                    &token,
+                    &mod_id,
+                    LibraryMutation::FinishInterruptedDeletes,
+                )
                 .await?
             {
                 ReinstallRecoveryOutcome::Recovered => rolled_back += 1,
@@ -1205,10 +1213,11 @@ impl Core {
     }
 
     /// Retry the exact verified rollback that startup attempted for one Mod.
-    /// A witness absent at the initial lookup means startup or an earlier
-    /// completed retry already settled it. Concurrent calls that both observe
-    /// the token are serialized, but the later call can report that the row
-    /// vanished rather than claiming in-flight retries are idempotent.
+    /// An absent witness is not evidence that the Mod is usable. Preliminary
+    /// absence is revalidated under the same Library writer fence as the
+    /// enabled/Junction proof; a missing deployment is repaired and reported
+    /// as `Recovered`, while `AlreadyRecovered` is reserved for a deployment
+    /// that already agrees with the persisted enabled state.
     pub async fn retry_reinstall_recovery(&self, mod_id: &str) -> Result<ReinstallRecoveryOutcome> {
         let mut connection = self.pool.acquire().await?;
         let token = load_reinstall_swap_witnesses(&mut connection)
@@ -1218,11 +1227,26 @@ impl Core {
             .map(|witness| witness.token().to_string());
         drop(connection);
         self.crash_point(super::crash_points::RETRY_REINSTALL_AFTER_WITNESS_LOOKUP);
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::RetryReinstallRecovery)
+            .await?;
+        let token = match token {
+            Some(token) => Some(token),
+            None => load_reinstall_swap_witnesses(&mut fence.transaction)
+                .await?
+                .into_iter()
+                .find(|witness| witness.mod_id() == mod_id)
+                .map(|witness| witness.token().to_string()),
+        };
         let Some(token) = token else {
-            return Ok(ReinstallRecoveryOutcome::AlreadyRecovered);
+            let outcome = self
+                .finish_absent_reinstall_recovery_in_mutation(mod_id, &mut fence)
+                .await?;
+            fence.commit().await?;
+            return Ok(outcome);
         };
         let outcome = self
-            .attempt_reinstall_recovery(&token, LibraryMutation::RetryReinstallRecovery)
+            .attempt_reinstall_recovery_in_mutation(&token, mod_id, fence)
             .await?;
         if matches!(outcome, ReinstallRecoveryOutcome::Recovered) {
             if let Err(error) = self.finish_interrupted_library_deletes().await {
@@ -1240,13 +1264,24 @@ impl Core {
     async fn attempt_reinstall_recovery(
         &self,
         token_raw: &str,
+        mod_id: &str,
         mutation: LibraryMutation,
+    ) -> Result<ReinstallRecoveryOutcome> {
+        let fence = self.begin_library_mutation(mutation).await?;
+        self.attempt_reinstall_recovery_in_mutation(token_raw, mod_id, fence)
+            .await
+    }
+
+    async fn attempt_reinstall_recovery_in_mutation(
+        &self,
+        token_raw: &str,
+        mod_id: &str,
+        mut fence: LibraryMutationFence,
     ) -> Result<ReinstallRecoveryOutcome> {
         let token = Ulid::from_string(token_raw).map_err(|_| Error::ReinstallWitnessCorrupt {
             mod_id: "<unknown>".to_string(),
             reason: format!("the swap token {token_raw:?} is not a ULID"),
         })?;
-        let mut fence = self.begin_library_mutation(mutation).await?;
         let recovery = async {
             let Some(witness) = self
                 .reinstall_swap_witness_if_present(token, &mut fence)
@@ -1265,8 +1300,11 @@ impl Core {
                 Ok(ReinstallRecoveryOutcome::Recovered)
             }
             Ok(None) => {
+                let outcome = self
+                    .finish_absent_reinstall_recovery_in_mutation(mod_id, &mut fence)
+                    .await?;
                 fence.commit().await?;
-                Ok(ReinstallRecoveryOutcome::AlreadyRecovered)
+                Ok(outcome)
             }
             Err(error) if quarantinable_reinstall_failure(&error) => {
                 fence.transaction.rollback().await?;
@@ -1275,11 +1313,158 @@ impl Core {
                     .await?;
                 match recovery {
                     Some(recovery) => Ok(ReinstallRecoveryOutcome::Quarantined { recovery }),
-                    None => Ok(ReinstallRecoveryOutcome::AlreadyRecovered),
+                    None => self.finish_absent_reinstall_recovery(mod_id).await,
                 }
             }
             Err(error) => Err(error),
         }
+    }
+
+    async fn finish_absent_reinstall_recovery(
+        &self,
+        mod_id: &str,
+    ) -> Result<ReinstallRecoveryOutcome> {
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::RetryReinstallRecovery)
+            .await?;
+        let outcome = self
+            .finish_absent_reinstall_recovery_in_mutation(mod_id, &mut fence)
+            .await?;
+        fence.commit().await?;
+        Ok(outcome)
+    }
+
+    async fn finish_absent_reinstall_recovery_in_mutation(
+        &self,
+        mod_id: &str,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<ReinstallRecoveryOutcome> {
+        if load_reinstall_swap_witnesses(&mut fence.transaction)
+            .await?
+            .into_iter()
+            .any(|witness| witness.mod_id() == mod_id)
+        {
+            return Err(Error::ReinstallRecoveryDeploymentUnverified {
+                mod_id: mod_id.to_string(),
+                reason: "new interrupted reinstall state appeared during recovery verification"
+                    .to_string(),
+            });
+        }
+        let row = sqlx::query(
+            "SELECT m.enabled, m.junction_dir_name, m.library_path, g.install_path
+             FROM mods m JOIN games g ON g.code = m.game_code
+             WHERE m.id = ?",
+        )
+        .bind(mod_id)
+        .fetch_optional(&mut *fence.transaction)
+        .await?
+        .ok_or_else(|| Error::ReinstallRecoveryDeploymentUnverified {
+            mod_id: mod_id.to_string(),
+            reason: "the Mod row no longer exists".to_string(),
+        })?;
+        let enabled = row.try_get::<i64, _>("enabled")? != 0;
+        let Some(install_path) = row
+            .try_get::<Option<String>, _>("install_path")?
+            .map(PathBuf::from)
+        else {
+            if enabled {
+                return Err(Error::ReinstallRecoveryDeploymentUnverified {
+                    mod_id: mod_id.to_string(),
+                    reason: "the enabled Mod has no configured game install path".to_string(),
+                });
+            }
+            // A disabled Mod with no configured install path has no persisted
+            // deployment namespace to inspect: `install_path` is GMM's only
+            // durable route to this Mod's Junction. With no witness and no
+            // expected deployment location, the disabled intent leaves no
+            // recovery work to prove or perform.
+            return Ok(ReinstallRecoveryOutcome::AlreadyRecovered);
+        };
+        let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+        let target = self
+            .junction_target_for(mod_id, &library_path, &mut *fence.transaction)
+            .await?;
+        let link = install_path
+            .join("Mods")
+            .join(row.try_get::<String, _>("junction_dir_name")?);
+
+        if !enabled {
+            if !super::link_exists(&link)? {
+                return Ok(ReinstallRecoveryOutcome::AlreadyRecovered);
+            }
+            let Some(actual) = super::resolve_link(&link) else {
+                return Err(Error::ReinstallRecoveryDeploymentUnverified {
+                    mod_id: mod_id.to_string(),
+                    reason:
+                        "the disabled Mod's deployment path is not a Junction GMM can safely remove"
+                            .to_string(),
+                });
+            };
+            if !super::same_path(&actual, &target) && !super::path_within(&actual, &library_path) {
+                return Err(Error::ReinstallRecoveryDeploymentUnverified {
+                    mod_id: mod_id.to_string(),
+                    reason: "the disabled Mod's deployment Junction points outside its Library"
+                        .to_string(),
+                });
+            }
+            junction::remove(&link)?;
+            return Ok(ReinstallRecoveryOutcome::Recovered);
+        }
+
+        let target_metadata = fs::metadata(&target).map_err(|source| {
+            if source.kind() == io::ErrorKind::NotFound {
+                Error::ReinstallRecoveryDeploymentUnverified {
+                    mod_id: mod_id.to_string(),
+                    reason: "the enabled Mod's Library target is missing".to_string(),
+                }
+            } else {
+                Error::Io {
+                    path: target.clone(),
+                    source,
+                }
+            }
+        })?;
+        if !target_metadata.is_dir() {
+            return Err(Error::ReinstallRecoveryDeploymentUnverified {
+                mod_id: mod_id.to_string(),
+                reason: "the enabled Mod's Library target is not a directory".to_string(),
+            });
+        }
+
+        if !super::link_exists(&link)? {
+            let mods_dir = link.parent().expect("a deployment name has a Mods parent");
+            fs::create_dir_all(mods_dir).map_err(|source| Error::Io {
+                path: mods_dir.to_path_buf(),
+                source,
+            })?;
+            volume::require_ntfs_pair(mods_dir, &target)?;
+            junction::create(&link, &target)?;
+            return Ok(ReinstallRecoveryOutcome::Recovered);
+        }
+
+        let Some(actual) = super::resolve_link(&link) else {
+            return Err(Error::ReinstallRecoveryDeploymentUnverified {
+                mod_id: mod_id.to_string(),
+                reason: "the enabled Mod's deployment path is not a Junction".to_string(),
+            });
+        };
+        if super::same_path(&actual, &target) {
+            return Ok(ReinstallRecoveryOutcome::AlreadyRecovered);
+        }
+        if !super::path_within(&actual, &library_path) {
+            return Err(Error::ReinstallRecoveryDeploymentUnverified {
+                mod_id: mod_id.to_string(),
+                reason: "the enabled Mod's deployment Junction points outside its Library"
+                    .to_string(),
+            });
+        }
+        junction::remove(&link)?;
+        volume::require_ntfs_pair(
+            link.parent().expect("a deployment name has a Mods parent"),
+            &target,
+        )?;
+        junction::create(&link, &target)?;
+        Ok(ReinstallRecoveryOutcome::Recovered)
     }
 
     async fn reinstall_swap_witness_if_present(
@@ -1358,19 +1543,25 @@ impl Core {
         self.reinstall_recovery_for_token(token).await
     }
 
-    pub(super) async fn withdraw_quarantined_reinstall_junction(
+    /// Public only for the test-only concurrency probe, which must exercise
+    /// this fence without passing through caller-level recovery repair.
+    #[doc(hidden)]
+    pub async fn withdraw_quarantined_reinstall_junction(
         &self,
         token: &str,
         link: Option<&Path>,
     ) -> Result<Option<bool>> {
-        let mut connection = self.pool.acquire().await?;
-        let state = load_reinstall_swap_witnesses(&mut connection)
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::WithdrawQuarantinedReinstallJunction)
+            .await?;
+        let state = load_reinstall_swap_witnesses(&mut fence.transaction)
             .await?
             .into_iter()
             .find(|witness| witness.token().to_string() == token && witness.is_quarantined())
             .map(|witness| witness.junction_withdrawn());
-        drop(connection);
+        self.crash_point(crash_points::WITHDRAW_REINSTALL_AFTER_WITNESS_LOOKUP);
         let Some(state) = state else {
+            fence.commit().await?;
             return Ok(None);
         };
         if state {
@@ -1379,6 +1570,7 @@ impl Core {
                 None => true,
             };
             if absent {
+                fence.commit().await?;
                 return Ok(Some(true));
             }
         }
@@ -1396,11 +1588,13 @@ impl Core {
         .bind(withdrawn)
         .bind(&withdrawal_error)
         .bind(token)
-        .execute(&self.pool)
+        .execute(&mut *fence.transaction)
         .await?;
         if updated.rows_affected() == 0 {
+            fence.commit().await?;
             return Ok(None);
         }
+        fence.commit().await?;
         if let Some(error) = withdrawal_error {
             tracing::error!(
                 target: "gmm::library",

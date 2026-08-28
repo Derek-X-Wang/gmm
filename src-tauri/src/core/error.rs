@@ -394,6 +394,13 @@ pub enum Error {
     ReinstallRecoveryQuarantined { mod_id: String },
 
     #[error(
+        "GMM could not confirm that Mod {mod_id}'s deployed Junction matches its enabled state: \
+         {reason}. GMM did not report recovery as complete. Set the game install path if needed, \
+         or use Rebuild junctions, then retry recovery."
+    )]
+    ReinstallRecoveryDeploymentUnverified { mod_id: String, reason: String },
+
+    #[error(
         "the reinstall failed ({reinstall}), and GMM could not complete its verified rollback \
          ({rollback}). The Mod's final on-disk and Junction state could not be fully established."
     )]
