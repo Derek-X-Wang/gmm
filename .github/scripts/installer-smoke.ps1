@@ -45,6 +45,10 @@ $UninstallLog = Join-Path $LogDir "msi-uninstall.log"
 $AppProc = $null
 $ManifestListener = $null
 $HeldManifestConnection = $null
+$ManifestPeerReadBuffer = $null
+$ManifestPeerReadTask = $null
+$ManifestPeerClosedMessage =
+    "manifest refresh client closed its held request before the fixture released its response"
 $FailureClass = "PRODUCT"
 $FixtureMode = $env:GMM_INSTALLER_SMOKE_FIXTURE_MODE
 
@@ -106,6 +110,8 @@ function Stop-StartupAttempt {
         $script:HeldManifestConnection.Dispose()
         $script:HeldManifestConnection = $null
     }
+    $script:ManifestPeerReadBuffer = $null
+    $script:ManifestPeerReadTask = $null
     if ($null -ne $script:ManifestListener) {
         $script:ManifestListener.Stop()
         $script:ManifestListener = $null
@@ -141,7 +147,51 @@ function Assert-ManifestFixtureAcceptHealthy($acceptTask) {
     }
 }
 
+function Start-ManifestFixturePeerMonitor {
+    $script:ManifestPeerReadBuffer = [byte[]]::new(8192)
+    $stream = $script:HeldManifestConnection.GetStream()
+    $script:ManifestPeerReadTask = $stream.ReadAsync(
+        $script:ManifestPeerReadBuffer,
+        0,
+        $script:ManifestPeerReadBuffer.Length
+    )
+}
+
+function Assert-ManifestFixturePeerConnected {
+    if ($null -eq $script:ManifestPeerReadTask) { return }
+
+    # Drain the request bytes without blocking, then leave another read pending.
+    # A completed zero-byte read or a read fault means the client abandoned its
+    # own in-flight refresh. That is PRODUCT behavior even though the fixture is
+    # the side that observes it.
+    while ($script:ManifestPeerReadTask.IsCompleted) {
+        if ($script:ManifestPeerReadTask.IsFaulted) {
+            $script:FailureClass = "PRODUCT"
+            $reason = $script:ManifestPeerReadTask.Exception.GetBaseException().Message
+            throw "$ManifestPeerClosedMessage`: $reason"
+        }
+        if ($script:ManifestPeerReadTask.IsCanceled) {
+            $script:FailureClass = "PRODUCT"
+            throw $ManifestPeerClosedMessage
+        }
+
+        $bytesRead = $script:ManifestPeerReadTask.GetAwaiter().GetResult()
+        if ($bytesRead -eq 0) {
+            $script:FailureClass = "PRODUCT"
+            throw $ManifestPeerClosedMessage
+        }
+
+        $stream = $script:HeldManifestConnection.GetStream()
+        $script:ManifestPeerReadTask = $stream.ReadAsync(
+            $script:ManifestPeerReadBuffer,
+            0,
+            $script:ManifestPeerReadBuffer.Length
+        )
+    }
+}
+
 function Complete-ManifestFixtureRequest {
+    Assert-ManifestFixturePeerConnected
     $response = [System.Text.Encoding]::ASCII.GetBytes(
         "HTTP/1.1 503 Service Unavailable`r`n" +
         "Content-Length: 0`r`n" +
@@ -151,9 +201,14 @@ function Complete-ManifestFixtureRequest {
         $stream = $script:HeldManifestConnection.GetStream()
         $stream.Write($response, 0, $response.Length)
         $stream.Flush()
+    } catch {
+        $script:FailureClass = "PRODUCT"
+        throw "$ManifestPeerClosedMessage`: $($_.Exception.Message)"
     } finally {
         $script:HeldManifestConnection.Dispose()
         $script:HeldManifestConnection = $null
+        $script:ManifestPeerReadBuffer = $null
+        $script:ManifestPeerReadTask = $null
     }
     Write-Host "manifest fixture released the request after IPC readiness"
 }
@@ -345,9 +400,11 @@ function Invoke-StartupSmoke {
         }
         if (-not $manifestRequestSeen -and $manifestAccept.IsCompletedSuccessfully) {
             $script:HeldManifestConnection = $manifestAccept.Result
+            Start-ManifestFixturePeerMonitor
             $manifestRequestSeen = $true
             Write-Host "manifest request accepted and deliberately left unanswered"
         }
+        Assert-ManifestFixturePeerConnected
         if ($manifestRefreshFinishedSeen) {
             throw "manifest refresh finished before the fixture released its held response"
         }
@@ -380,9 +437,9 @@ function Invoke-StartupSmoke {
     if (-not $manifestRequestSeen) {
         throw "timed out waiting for the manifest refresh to reach $manifestUrl"
     }
+    Assert-ManifestFixturePeerConnected
     Write-Host "IPC readiness observed while manifest request was held open and unanswered"
 
-    $script:FailureClass = "INFRASTRUCTURE"
     Complete-ManifestFixtureRequest
     $script:FailureClass = "PRODUCT"
 

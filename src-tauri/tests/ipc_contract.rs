@@ -752,6 +752,10 @@ mod manifest_refresh_started_marker {
         assert!(script.contains("$acceptTask.IsFaulted"));
         assert!(script.contains("$script:FailureClass = \"INFRASTRUCTURE\""));
         assert!(script.contains("unavailable-after-launch"));
+        assert!(script.contains("Assert-ManifestFixturePeerConnected"));
+        assert!(script.contains(
+            "manifest refresh client closed its held request before the fixture released its response"
+        ));
         assert!(script
             .contains("IPC readiness did not occur while the manifest request remained held open"));
         let direct_assertion = script
