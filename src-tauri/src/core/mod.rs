@@ -4018,23 +4018,28 @@ fn link_exists(path: &Path) -> Result<bool> {
 
 /// Resolve the target of a junction/symlink. Returns `None` if `path`
 /// is not a link or the OS refuses to read it.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "every read_link failure means the entry is not a proven GMM Junction; all callers refuse link mutation unless this returns Some"
-)]
 fn resolve_link(path: &Path) -> Option<PathBuf> {
-    std::fs::read_link(path).ok()
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this read_link failure means the entry is not a proven GMM Junction; callers then refuse link mutation"
+    )]
+    let target = std::fs::read_link(path).ok();
+    target
 }
 
 /// Path equality that is tolerant of trailing separators and
 /// case-insensitivity quirks on Windows. We canonicalise both sides;
 /// on failure we fall back to a literal compare.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "canonicalization only recognizes aliases; literal equality remains positive path evidence, while a mismatch makes every caller refuse or preserve bytes"
-)]
 fn same_path(a: &Path, b: &Path) -> bool {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this canonicalization only recognizes aliases; literal equality remains positive path evidence"
+    )]
     let canon_a = std::fs::canonicalize(a).ok();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this canonicalization only recognizes aliases; literal equality remains positive path evidence"
+    )]
     let canon_b = std::fs::canonicalize(b).ok();
     match (canon_a, canon_b) {
         (Some(x), Some(y)) => x == y,
@@ -4054,11 +4059,11 @@ fn same_path(a: &Path, b: &Path) -> bool {
 ///
 /// Falls back to a literal comparison when either side cannot be
 /// canonicalised (typically because it no longer exists).
-#[allow(
-    clippy::disallowed_methods,
-    reason = "remaining callers only mutate after canonical or component-wise lexical containment is positively proved; a false result refuses or preserves bytes"
-)]
 fn path_within(path: &Path, ancestor: &Path) -> bool {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "this canonicalization collapse feeds only positive containment evidence; false refuses or preserves bytes"
+    )]
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(path).starts_with(canon(ancestor))
 }

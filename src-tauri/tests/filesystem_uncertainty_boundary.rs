@@ -3,25 +3,32 @@
 //! Rust's lint configuration can deny named methods, but the unsafe behavior
 //! is a shape: a fallible filesystem observation becomes a boolean or `Option`
 //! without classifying its error. This test parses every production module in
-//! `core` and rejects that shape across direct calls, local aliases, method
-//! chains, UFCS calls, `match`/`if let`, and `matches!`. It also rejects direct
-//! follow-up filesystem lookups on entries yielded by `read_dir` unless the
-//! lookup is inside `resolve_enumerated_entry`.
+//! `core` and rejects known collapse methods on direct calls and local bindings,
+//! including nested `use` aliases, ordinary `Result` chains, UFCS, awaited async
+//! blocks, boolean/`Option` `match` and `if let` branches, and `matches!`. A
+//! `NotFound` exception is accepted only when the AST proves an equality check
+//! against the matched error's `kind()`. It also rejects direct follow-up
+//! filesystem lookups on entries yielded by `read_dir` unless the lookup is
+//! inside `resolve_enumerated_entry`.
 //!
 //! This is deliberately not a Rust type checker. It recognizes standard-library
 //! filesystem calls and values that remain syntactically connected through a
 //! local binding or ordinary `Result` combinator. A helper that hides I/O behind
-//! an unrelated function name, runtime-generated source, procedural macro
-//! output, or a value passed across a function boundary still requires review.
-//! Core cannot make `std::fs` unconstructible: any module in the crate can name
-//! it directly. The structural gate is therefore the enforceable boundary; the
-//! safe helpers in `core::filesystem` remain the preferred production route.
+//! an unrelated function name, a value passed across a function boundary, or
+//! filesystem access emitted by a declarative or procedural macro still requires
+//! review. Because receiver types are unavailable, ordinary methods named
+//! `metadata`, `file_type`, `read_dir`, or `try_exists` are conservatively treated
+//! as filesystem observations and can produce a false positive. Intentional
+//! collapses require a reasoned allow on the one `let` statement containing the
+//! probe; function-level allows are rejected. Core cannot make `std::fs`
+//! unconstructible, so the safe helpers in `core::filesystem` remain preferred.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use proc_macro2::TokenStream;
+use syn::parse::{Parse, ParseStream};
 use syn::visit::{self, Visit};
 
 const CORE: &str = "src/core";
@@ -85,13 +92,21 @@ struct FilesystemAliases {
 
 impl FilesystemAliases {
     fn from_file(file: &syn::File) -> Self {
-        let mut aliases = Self::default();
-        for item in &file.items {
-            if let syn::Item::Use(item) = item {
-                collect_use_tree(Vec::new(), &item.tree, &mut aliases);
+        struct AliasCollector {
+            aliases: FilesystemAliases,
+        }
+
+        impl<'ast> Visit<'ast> for AliasCollector {
+            fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+                collect_use_tree(Vec::new(), &item.tree, &mut self.aliases);
             }
         }
-        aliases
+
+        let mut collector = AliasCollector {
+            aliases: Self::default(),
+        };
+        collector.visit_file(file);
+        collector.aliases
     }
 }
 
@@ -155,8 +170,14 @@ struct BoundaryVisitor<'a> {
 
 impl BoundaryVisitor<'_> {
     fn analyze_function(&mut self, attrs: &[syn::Attribute], block: &syn::Block) {
-        if is_test_only(attrs) || has_deliberate_collapse_allow(attrs) {
+        if is_test_only(attrs) {
             return;
+        }
+        if has_deliberate_collapse_allow(attrs) {
+            self.violations.push(format!(
+                "{}: #[allow(clippy::disallowed_methods)] must annotate one let statement, not a whole function",
+                self.relative.display()
+            ));
         }
         let mut analyzer = FunctionAnalyzer {
             aliases: self.aliases,
@@ -181,10 +202,27 @@ impl<'ast> Visit<'ast> for BoundaryVisitor<'_> {
         self.analyze_function(&function.attrs, &function.block);
     }
 
-    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-        if !is_test_only(&module.attrs) {
-            visit::visit_item_mod(self, module);
+    fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+        if has_deliberate_collapse_allow(&implementation.attrs) {
+            self.violations.push(format!(
+                "{}: #[allow(clippy::disallowed_methods)] must annotate one let statement, not a whole impl",
+                self.relative.display()
+            ));
         }
+        visit::visit_item_impl(self, implementation);
+    }
+
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        if is_test_only(&module.attrs) {
+            return;
+        }
+        if has_deliberate_collapse_allow(&module.attrs) {
+            self.violations.push(format!(
+                "{}: #[allow(clippy::disallowed_methods)] must annotate one let statement, not a whole module",
+                self.relative.display()
+            ));
+        }
+        visit::visit_item_mod(self, module);
     }
 }
 
@@ -218,6 +256,12 @@ impl FunctionAnalyzer<'_> {
                     || (preserves_result(&method) && self.is_filesystem_result(&call.receiver))
             }
             syn::Expr::Await(awaited) => self.is_filesystem_result(&awaited.base),
+            syn::Expr::Async(asynchronous) => asynchronous
+                .block
+                .stmts
+                .last()
+                .and_then(statement_expression)
+                .is_some_and(|expression| self.is_filesystem_result(expression)),
             syn::Expr::Block(block) => block
                 .block
                 .stmts
@@ -264,6 +308,9 @@ impl FunctionAnalyzer<'_> {
 
 impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
     fn visit_local(&mut self, local: &'ast syn::Local) {
+        if has_deliberate_collapse_allow(&local.attrs) {
+            return;
+        }
         if let Some(init) = &local.init {
             visit::visit_expr(self, &init.expr);
             let mut bindings = Vec::new();
@@ -316,7 +363,7 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let method = call.method.to_string();
         let explicitly_classifies_not_found =
-            method == "is_err_and" && call.args.iter().any(expression_mentions_not_found);
+            method == "is_err_and" && call.args.first().is_some_and(closure_proves_not_found);
         if collapses_result(&method)
             && !explicitly_classifies_not_found
             && self.is_filesystem_result(&call.receiver)
@@ -343,7 +390,11 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
             return;
         }
         let explicitly_classifies_not_found = function_name.as_deref() == Some("is_err_and")
-            && call.args.iter().skip(1).any(expression_mentions_not_found);
+            && call
+                .args
+                .iter()
+                .nth(1)
+                .is_some_and(closure_proves_not_found);
         if function_name.as_deref().is_some_and(collapses_result)
             && !explicitly_classifies_not_found
             && call
@@ -365,16 +416,21 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
     }
 
     fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
-        if self.is_filesystem_result(&expression.expr)
-            && expression.arms.iter().any(|arm| {
-                pattern_contains_err(&arm.pat)
-                    && !arm
-                        .guard
-                        .as_ref()
-                        .is_some_and(|(_, guard)| expression_mentions_not_found(guard))
-                    && collapses_to_bool_or_option(&arm.body)
-            })
-        {
+        let filesystem_result = self.is_filesystem_result(&expression.expr);
+        let unclassified_error_collapse = expression.arms.iter().any(|arm| {
+            pattern_contains_err(&arm.pat)
+                && !arm
+                    .guard
+                    .as_ref()
+                    .is_some_and(|(_, guard)| guard_proves_not_found(&arm.pat, guard))
+                && collapses_to_bool_or_option(&arm.body)
+        });
+        let result_reduced_to_bool_or_option = !expression.arms.is_empty()
+            && expression
+                .arms
+                .iter()
+                .all(|arm| collapses_to_bool_or_option(&arm.body));
+        if filesystem_result && (unclassified_error_collapse || result_reduced_to_bool_or_option) {
             self.report("match arm collapses a filesystem error to bool or Option");
         }
         visit::visit_expr_match(self, expression);
@@ -382,13 +438,16 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
 
     fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
         if let syn::Expr::Let(condition) = peel_expression(&expression.cond) {
-            if pattern_contains_err(&condition.pat)
-                && self.is_filesystem_result(&condition.expr)
-                && (block_collapses(&expression.then_branch)
-                    || expression
-                        .else_branch
-                        .as_ref()
-                        .is_some_and(|(_, branch)| collapses_to_bool_or_option(branch)))
+            let then_collapses = block_collapses(&expression.then_branch);
+            let else_collapses = expression
+                .else_branch
+                .as_ref()
+                .is_some_and(|(_, branch)| collapses_to_bool_or_option(branch));
+            let unclassified_error_collapse =
+                pattern_contains_err(&condition.pat) && (then_collapses || else_collapses);
+            let result_reduced_to_bool_or_option = then_collapses && else_collapses;
+            if self.is_filesystem_result(&condition.expr)
+                && (unclassified_error_collapse || result_reduced_to_bool_or_option)
             {
                 self.report("if-let collapses a filesystem error to bool or Option");
             }
@@ -397,11 +456,22 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
     }
 
     fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
-        if invocation.path.is_ident("matches")
-            && macro_mentions_filesystem(&invocation.tokens, self.aliases)
-            && !invocation.tokens.to_string().contains("NotFound")
-        {
-            self.report("matches! collapses a filesystem Result to bool");
+        if invocation.path.is_ident("matches") {
+            match syn::parse2::<MatchesInput>(invocation.tokens.clone()) {
+                Ok(input) if self.is_filesystem_result(&input.expression) => {
+                    let classifies_not_found = input
+                        .guard
+                        .as_ref()
+                        .is_some_and(|guard| guard_proves_not_found(&input.pattern, guard));
+                    if !classifies_not_found {
+                        self.report("matches! collapses a filesystem Result to bool");
+                    }
+                }
+                Err(_) if macro_mentions_filesystem(&invocation.tokens, self.aliases) => {
+                    self.report("unclassified matches! filesystem Result shape");
+                }
+                _ => {}
+            }
         }
         visit::visit_macro(self, invocation);
     }
@@ -625,26 +695,103 @@ fn collapses_to_bool_or_option(expression: &syn::Expr) -> bool {
     }
 }
 
-fn expression_mentions_not_found(expression: &syn::Expr) -> bool {
-    struct Finder {
-        found: bool,
+fn closure_proves_not_found(expression: &syn::Expr) -> bool {
+    let syn::Expr::Closure(closure) = peel_expression(expression) else {
+        return false;
+    };
+    let Some(binding) = closure.inputs.first().and_then(single_binding) else {
+        return false;
+    };
+    expression_proves_not_found(&closure.body, &binding)
+}
+
+fn guard_proves_not_found(pattern: &syn::Pat, expression: &syn::Expr) -> bool {
+    error_binding(pattern).is_some_and(|binding| expression_proves_not_found(expression, &binding))
+}
+
+fn expression_proves_not_found(expression: &syn::Expr, error_binding: &str) -> bool {
+    let syn::Expr::Binary(binary) = peel_expression(expression) else {
+        return false;
+    };
+    if !matches!(binary.op, syn::BinOp::Eq(_)) {
+        return false;
     }
-    impl<'ast> Visit<'ast> for Finder {
-        fn visit_path(&mut self, path: &'ast syn::Path) {
-            if path
+    (is_error_kind_call(&binary.left, error_binding) && is_not_found_path(&binary.right))
+        || (is_not_found_path(&binary.left) && is_error_kind_call(&binary.right, error_binding))
+}
+
+fn is_error_kind_call(expression: &syn::Expr, error_binding: &str) -> bool {
+    let syn::Expr::MethodCall(call) = peel_expression(expression) else {
+        return false;
+    };
+    call.method == "kind"
+        && call.args.is_empty()
+        && path_ident(&call.receiver).as_deref() == Some(error_binding)
+}
+
+fn is_not_found_path(expression: &syn::Expr) -> bool {
+    let syn::Expr::Path(path) = peel_expression(expression) else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "NotFound")
+}
+
+fn error_binding(pattern: &syn::Pat) -> Option<String> {
+    match pattern {
+        syn::Pat::TupleStruct(tuple)
+            if tuple
+                .path
                 .segments
                 .last()
-                .is_some_and(|segment| segment.ident == "NotFound")
-            {
-                self.found = true;
-                return;
-            }
-            visit::visit_path(self, path);
+                .is_some_and(|segment| segment.ident == "Err") =>
+        {
+            tuple.elems.first().and_then(single_binding)
         }
+        syn::Pat::Paren(paren) => error_binding(&paren.pat),
+        syn::Pat::Reference(reference) => error_binding(&reference.pat),
+        _ => None,
     }
-    let mut finder = Finder { found: false };
-    finder.visit_expr(expression);
-    finder.found
+}
+
+fn single_binding(pattern: &syn::Pat) -> Option<String> {
+    match pattern {
+        syn::Pat::Ident(ident) => Some(ident.ident.to_string()),
+        syn::Pat::Paren(paren) => single_binding(&paren.pat),
+        syn::Pat::Reference(reference) => single_binding(&reference.pat),
+        syn::Pat::Type(typed) => single_binding(&typed.pat),
+        _ => None,
+    }
+}
+
+struct MatchesInput {
+    expression: syn::Expr,
+    pattern: syn::Pat,
+    guard: Option<syn::Expr>,
+}
+
+impl Parse for MatchesInput {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let expression = input.parse()?;
+        input.parse::<syn::Token![,]>()?;
+        let pattern = syn::Pat::parse_multi_with_leading_vert(input)?;
+        let guard = if input.peek(syn::Token![if]) {
+            input.parse::<syn::Token![if]>()?;
+            Some(input.parse()?)
+        } else {
+            None
+        };
+        if input.peek(syn::Token![,]) {
+            input.parse::<syn::Token![,]>()?;
+        }
+        Ok(Self {
+            expression,
+            pattern,
+            guard,
+        })
+    }
 }
 
 fn block_collapses(block: &syn::Block) -> bool {

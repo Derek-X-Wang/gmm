@@ -94,10 +94,6 @@ pub fn install_subscriber(log_dir: &Path) -> Result<WorkerGuard> {
 
 /// Remove log files matching `gmm-*.log` whose modified time is older
 /// than `max_age_days`. Returns the number of files removed.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "log pruning is an intentional best-effort maintenance probe; failures skip an entry and the count includes only confirmed removals"
-)]
 pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs((max_age_days.max(0) as u64) * 86_400))
@@ -123,6 +119,10 @@ pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
         if !is_gmm_log(&path) {
             continue;
         }
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "log pruning intentionally skips the one entry whose timestamp cannot be read"
+        )]
         let modified = match entry.metadata().and_then(|m| m.modified()) {
             Ok(m) => m,
             Err(_) => continue,
@@ -131,7 +131,12 @@ pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
             // Best-effort removal — we'd rather not crash on a locked file
             // mid-startup.
             // The returned count is successful removals, so a failed removal is intentionally not counted.
-            if fs::remove_file(&path).is_ok() {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "log pruning counts only the one removal that reports success"
+            )]
+            let removed_this_file = fs::remove_file(&path).is_ok();
+            if removed_this_file {
                 removed += 1;
             }
         }
