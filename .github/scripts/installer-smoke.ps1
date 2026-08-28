@@ -274,7 +274,7 @@ function Complete-ManifestFixtureRequest {
     # and immediately before the final body byte releases the response.
     Assert-ManifestFixturePeerConnected "release-pre-final-byte"
     $script:FailureClass = "INFRASTRUCTURE"
-    <# $validatedRelease = Assert-ManifestFixtureGuardCoverage #>
+    $validatedRelease = Assert-ManifestFixtureGuardCoverage
     $responseFinalByte = $validatedRelease.ResponseFinalByte
     try {
         $stream.Write($responseFinalByte, 0, $responseFinalByte.Length)
