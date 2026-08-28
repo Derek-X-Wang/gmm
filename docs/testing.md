@@ -354,11 +354,17 @@ still diagnose from the CI output. Artifacts are uploaded too.
 The manifest fixture also keeps an asynchronous read pending on the accepted
 connection while its response is withheld. The fixture withholds the final body
 byte, checks the read after flushing the incomplete response prefix, and checks
-again immediately before that byte releases the response. If GMM closes the
-request before release, including in the final response-preparation window, the
-smoke reports a `PRODUCT` failure: abandoning the in-flight refresh is
-application behavior, not a fixture-server outage. The fixture does not check
-after the complete response because a correct client may close normally then.
+again immediately before that byte releases the response. A close observed by
+either check is a `PRODUCT` failure: abandoning the in-flight refresh is
+application behavior, not a fixture-server outage.
+
+The final check and final-byte write are separate socket operations, so they do
+not close the last check-then-act interval. A FIN that arrives between them can
+still escape detection if the write succeeds. Checking after the write would
+turn a legitimate close after a complete response into a race-dependent false
+failure, so the smoke deliberately accepts this narrow residual window. The
+Windows run does verify that every required accept and peer-check stage actually
+executed, rather than treating source text as proof of execution.
 
 This is the layer that would have caught a broken bundle, a missing
 WebView2 dependency, or a migration that fails on a clean machine.
