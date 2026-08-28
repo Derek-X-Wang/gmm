@@ -70,6 +70,12 @@ report() {
 # grep exits 1 for "no match" and 2 or more for a real failure. Collapsing
 # those together is the same mistake this whole gate exists to prevent, so an
 # operational failure aborts rather than reading as "nothing found".
+#
+# The result is published through a global rather than returned. A function
+# called inside $(...) runs in a subshell, where `exit 2` ends only the
+# subshell and the caller carries on with an empty string -- the failure this
+# very handler exists to prevent.
+MATCHES=""
 match_all() {
   local pattern="$1" text="$2" out status
 
@@ -82,13 +88,29 @@ match_all() {
     echo "grep failed while scanning (status ${status})" >&2
     exit 2
   fi
-  printf '%s' "$out"
+  MATCHES="$out"
+}
+
+# Fail closed on a grep that broke rather than found nothing, as above.
+filter_lines() {
+  local text="$1" out status
+  shift
+  set +e
+  out="$(printf '%s\n' "$text" | "$@")"
+  status=$?
+  set -e
+  if [ "$status" -gt 1 ]; then
+    echo "grep failed while selecting added lines (status ${status})" >&2
+    exit 2
+  fi
+  FILTERED="$out"
 }
 
 scan_text() {
   local where="$1" text="$2" hits account path_hits=""
 
-  hits="$(match_all 'Claude-Session:[^ ]*|claude\.ai/code/session_[A-Za-z0-9]+' "$text")"
+  match_all 'Claude-Session:[^ ]*|claude\.ai/code/session_[A-Za-z0-9]+' "$text"
+  hits="$MATCHES"
   if [ -n "$hits" ]; then
     report "$where" "a Claude session link" "$hits"
   fi
@@ -98,21 +120,33 @@ scan_text() {
   #
   # Separators are matched in every spelling a real file uses: a raw slash, a
   # backslash, the doubled backslash of a source string literal, and the
-  # backslash-escaped slash of serialized JSON. A pattern written only for the
-  # raw spelling misses the forms that actually appear in code.
+  # backslash-escaped slash of serialized JSON.
+  #
+  # The leading boundary keeps a URL or a package import from reading as a home
+  # directory: in https://example.com/users/alice the segment is preceded by a
+  # word character, so it is part of a longer token rather than a path.
+  #
+  # A known false positive survives: prose such as "/home/directories" is
+  # indistinguishable from a real path, and IMPERSONAL_ACCOUNTS is the intended
+  # escape hatch for it.
+  match_all '(^|[^A-Za-z0-9._-])((\\?/)(users|home)(\\?/)|[A-Za-z]:\\{1,2}users\\{1,2})[A-Za-z0-9._-]+' "$text"
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
     account="${hit##*[/\\]}"
     if ! printf '%s' "$account" | grep -qiE "$IMPERSONAL_ACCOUNTS"; then
       path_hits="${path_hits}${hit}"$'\n'
     fi
-  done <<<"$(match_all '(\\?/|[A-Za-z]:\\{1,2})(users|home)(\\?/|\\{1,2})[A-Za-z0-9._-]+' "$text")"
+  done <<<"$MATCHES"
 
   if [ -n "$path_hits" ]; then
     report "$where" "a home-directory path naming an account" "${path_hits%$'\n'}"
   fi
 }
 
+# Every commit message in the range, not just the tip. This repository squash
+# merges, and GitHub folds the individual messages into the squashed commit
+# body, so a trailer written on any commit reaches main -- which is how the
+# session trailers already in published history got there.
 commits="$(git rev-list "${BASE_COMMIT}..${HEAD_COMMIT}")" || {
   echo "could not enumerate commits in ${BASE_COMMIT}..${HEAD_COMMIT}" >&2
   exit 2
@@ -127,7 +161,11 @@ while IFS= read -r sha; do
   scan_text "commit $(git rev-parse --short "$sha") message" "$message"
 done <<<"$commits"
 
-# Only added lines, so a pull request that deletes an existing leak passes.
+# Added lines only, so a pull request that deletes an existing leak passes.
+#
+# This is the net range diff rather than a walk of each commit's diff, which is
+# correct under squash merge: a line added and then removed within the pull
+# request never reaches main, so it is not a leak to report.
 diff_output="$(git diff --no-color --unified=0 \
   "$BASE_COMMIT" "$HEAD_COMMIT" -- . "${EXCLUSIONS[@]}")" || {
   echo "could not diff ${BASE_COMMIT}..${HEAD_COMMIT}" >&2
@@ -136,7 +174,10 @@ diff_output="$(git diff --no-color --unified=0 \
 
 # The file header is '+++ ' with a trailing space. Matching '+++' alone would
 # also discard a genuine added line whose own text begins with '++'.
-added="$(printf '%s\n' "$diff_output" | { grep '^+' || true; } | { grep -v '^+++ ' || true; })"
+FILTERED=""
+filter_lines "$diff_output" grep '^+'
+filter_lines "$FILTERED" grep -v '^+++ '
+added="$FILTERED"
 scan_text "an added line in this pull request" "$added"
 
 if [ "$failures" -gt 0 ]; then

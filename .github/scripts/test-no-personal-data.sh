@@ -124,6 +124,105 @@ run_case "a Windows CI runner path passes" 0 \
 run_case "a placeholder account passes" 0 \
   "Fix the thing" "docs/example.md" "example: /Users/username/Games"
 
+# A mutation keeping only the first sorted match would report the allowlisted
+# path and drop the real one, since /home/example sorts before /home/<account>.
+run_case "a personal path after an allowlisted one fails" 1 \
+  "Fix the thing" "vendor/thirdparty/notes.md" \
+  "cp /home/example/a /home/${PERSONAL_ACCOUNT}/b"
+
+# Fixtures above cluster in src/, docs/ and src-tauri/. These live where a
+# pathspec narrowed to those trees would stop looking.
+run_case "a leak at the repository root fails" 1 \
+  "Fix the thing" "README.md" "built from /home/${PERSONAL_ACCOUNT}/gmm"
+
+run_case "a leak under .github fails" 1 \
+  "Fix the thing" ".github/workflows/local.yml" \
+  "working-directory: /home/${PERSONAL_ACCOUNT}/gmm"
+
+run_case "a leak under public fails" 1 \
+  "Fix the thing" "public/config.json" \
+  "{\"root\": \"/home/${PERSONAL_ACCOUNT}\"}"
+
+# A gate that flags ordinary URLs and package imports gets switched off.
+run_case "a URL path segment passes" 0 \
+  "Fix the thing" "docs/links.md" "see https://example.com/users/alice"
+
+run_case "a package import path passes" 0 \
+  "Fix the thing" "src/deps.go" 'import "example.com/home/alice/pkg"'
+
+# Every case above puts its leak in the single commit at the tip, so a checker
+# reading only the newest message would still pass them all. Here the leak is
+# in an earlier commit and a clean commit follows it.
+buried_dir="$(mktemp -d)"
+setup_repo "$buried_dir"
+buried_base="$(git -C "$buried_dir" rev-parse HEAD)"
+printf '%s\n' "first change" >>"$buried_dir/src/main.rs"
+git -C "$buried_dir" add src/main.rs
+git -C "$buried_dir" commit --quiet -m "Fix the first thing
+
+Claude-Session: https://claude.ai/code/session_BURIED0123456789"
+printf '%s\n' "second change" >>"$buried_dir/docs/notes.md"
+git -C "$buried_dir" add docs/notes.md
+git -C "$buried_dir" commit --quiet -m "Fix the second thing"
+expect "a leak in an earlier commit message is caught" 1 \
+  "$buried_base" "$(git -C "$buried_dir" rev-parse HEAD)" "$buried_dir"
+rm -rf "$buried_dir"
+
+# The same, for a home-directory path rather than a session link.
+buried_path_dir="$(mktemp -d)"
+setup_repo "$buried_path_dir"
+buried_path_base="$(git -C "$buried_path_dir" rev-parse HEAD)"
+printf '%s\n' "first change" >>"$buried_path_dir/src/main.rs"
+git -C "$buried_path_dir" add src/main.rs
+git -C "$buried_path_dir" commit --quiet -m "Fix the first thing
+
+Reproduced from /home/${PERSONAL_ACCOUNT}/gmm."
+printf '%s\n' "second change" >>"$buried_path_dir/docs/notes.md"
+git -C "$buried_path_dir" add docs/notes.md
+git -C "$buried_path_dir" commit --quiet -m "Fix the second thing"
+expect "a path in an earlier commit message is caught" 1 \
+  "$buried_path_base" "$(git -C "$buried_path_dir" rev-parse HEAD)" "$buried_path_dir"
+rm -rf "$buried_path_dir"
+
+# Message coverage above does not prove the diff spans the whole range: those
+# fixtures leak only through commit messages, and the multi-file fixture is a
+# single commit. Between them a checker diffing only the tip commit stays
+# green. Here the added-line leak is in an earlier commit behind a clean one.
+buried_added_dir="$(mktemp -d)"
+setup_repo "$buried_added_dir"
+buried_added_base="$(git -C "$buried_added_dir" rev-parse HEAD)"
+printf '%s\n' "leak: /home/${PERSONAL_ACCOUNT}/gmm" \
+  >>"$buried_added_dir/src/main.rs"
+git -C "$buried_added_dir" add src/main.rs
+git -C "$buried_added_dir" commit --quiet -m "Change the implementation"
+printf '%s\n' "a harmless line" >>"$buried_added_dir/docs/notes.md"
+git -C "$buried_added_dir" add docs/notes.md
+git -C "$buried_added_dir" commit --quiet -m "Update the notes"
+expect "an added-line leak in an earlier commit is caught" 1 \
+  "$buried_added_base" "$(git -C "$buried_added_dir" rev-parse HEAD)" \
+  "$buried_added_dir"
+rm -rf "$buried_added_dir"
+
+# Every case above puts its leak among the first added lines of a single
+# changed file, so a checker examining only the head of the diff would pass
+# them all. Here the commit touches several files and the leak is in the last
+# one, well past the first added lines.
+buried_diff_dir="$(mktemp -d)"
+setup_repo "$buried_diff_dir"
+buried_diff_base="$(git -C "$buried_diff_dir" rev-parse HEAD)"
+for filler in src/a.rs src/b.rs docs/c.md docs/d.md; do
+  mkdir -p "$buried_diff_dir/$(dirname "$filler")"
+  printf 'harmless one\nharmless two\nharmless three\nharmless four\n' \
+    >"$buried_diff_dir/$filler"
+done
+printf 'harmless\nharmless\nharmless\nleak: /home/%s/gmm\n' "$PERSONAL_ACCOUNT" \
+  >"$buried_diff_dir/src-tauri/src/core/last.rs"
+git -C "$buried_diff_dir" add -A
+git -C "$buried_diff_dir" commit --quiet -m "Touch several files"
+expect "a leak in a later file of a multi-file commit is caught" 1 \
+  "$buried_diff_base" "$(git -C "$buried_diff_dir" rev-parse HEAD)" "$buried_diff_dir"
+rm -rf "$buried_diff_dir"
+
 # The guard exempts its own two files because they must carry specimens. That
 # exemption has to be exactly two paths wide: a leak in any other file, in the
 # same pull request that edits them, must still fail.
@@ -139,11 +238,13 @@ git -C "$scoped_dir" commit --quiet -m "edit the guard self-test"
 expect "a specimen inside the guard self-test passes" 0 \
   "$scoped_base" "$(git -C "$scoped_dir" rev-parse HEAD)" "$scoped_dir"
 
+# Deliberately a sibling of the two exempt files: widening the exemption to
+# .github/scripts/** must fail here, not merely a leak far away in the tree.
 printf '%s\n' "leak: /home/${PERSONAL_ACCOUNT}/notes" \
-  >>"$scoped_dir/src-tauri/src/core/variants.rs"
-git -C "$scoped_dir" add src-tauri/src/core/variants.rs
+  >"$scoped_dir/.github/scripts/unrelated-helper.sh"
+git -C "$scoped_dir" add .github/scripts/unrelated-helper.sh
 git -C "$scoped_dir" commit --quiet -m "and a leak elsewhere"
-expect "a leak outside the guard is still caught" 1 \
+expect "a leak in a sibling guard-directory file is caught" 1 \
   "$scoped_base" "$(git -C "$scoped_dir" rev-parse HEAD)" "$scoped_dir"
 
 # Removing an existing leak must not be blocked by the leak it removes.
@@ -170,31 +271,53 @@ rm -rf "$endpoint_dir"
 
 # grep exits 1 for "no match" and 2 or more for a real failure. Collapsing
 # those is the same mistake the gate exists to prevent, so a broken grep must
-# abort rather than report a clean tree. A shim earlier on PATH forces it.
-broken_dir="$(mktemp -d)"
-setup_repo "$broken_dir"
-broken_base="$(git -C "$broken_dir" rev-parse HEAD)"
-printf '%s\n' "a harmless line" >>"$broken_dir/src/main.rs"
-git -C "$broken_dir" add src/main.rs
-git -C "$broken_dir" commit --quiet -m "Fix the thing"
-mkdir -p "$broken_dir/bin"
-printf '%s\n' '#!/bin/sh' 'exit 2' >"$broken_dir/bin/grep"
-chmod +x "$broken_dir/bin/grep"
-broken_output=""
-broken_status=0
-set +e
-broken_output="$(cd "$broken_dir" && PATH="$broken_dir/bin:$PATH" \
-  "$CHECKER" "$broken_base" "$(git -C "$broken_dir" rev-parse HEAD)" 2>&1)"
-broken_status=$?
-set -e
-if [ "$broken_status" -ne 2 ]; then
-  echo "FAIL: a failing grep aborts: expected exit 2, got ${broken_status}"
-  printf '%s\n' "$broken_output" | sed 's/^/    /'
-  failures=$((failures + 1))
-else
-  echo "ok: a failing grep aborts"
-fi
-rm -rf "$broken_dir"
+# abort rather than report a clean tree.
+#
+# The checker has two independent handlers -- one in match_all, one in
+# filter_lines. A shim that breaks every grep proves only that *some* handler
+# fired, so each would cover for the other and neither would be proven. These
+# shims break exactly one call site each.
+REAL_GREP="$(command -v grep)"
+
+probe_broken_grep() {
+  local name="$1" shim_body="$2"
+  local dir output status
+  dir="$(mktemp -d)"
+  setup_repo "$dir"
+  local base
+  base="$(git -C "$dir" rev-parse HEAD)"
+  printf '%s\n' "a harmless line" >>"$dir/src/main.rs"
+  git -C "$dir" add src/main.rs
+  git -C "$dir" commit --quiet -m "Fix the thing"
+  mkdir -p "$dir/bin"
+  {
+    printf '%s\n' '#!/bin/sh'
+    printf '%s\n' "$shim_body"
+    printf 'exec %s "$@"\n' "$REAL_GREP"
+  } >"$dir/bin/grep"
+  chmod +x "$dir/bin/grep"
+  set +e
+  output="$(cd "$dir" && PATH="$dir/bin:$PATH" "$CHECKER" "$base" \
+    "$(git -C "$dir" rev-parse HEAD)" 2>&1)"
+  status=$?
+  set -e
+  if [ "$status" -ne 2 ]; then
+    echo "FAIL: ${name}: expected exit 2, got ${status}"
+    printf '%s\n' "$output" | sed 's/^/    /'
+    failures=$((failures + 1))
+  else
+    echo "ok: ${name}"
+  fi
+  rm -rf "$dir"
+}
+
+# Only the scanning call uses -oEi.
+probe_broken_grep "a broken scanning grep aborts" \
+  'case "$*" in *-oEi*) exit 2 ;; esac'
+
+# Only the added-line filters match on a leading plus.
+probe_broken_grep "a broken added-line grep aborts" \
+  'case "$*" in *"^+"*) exit 2 ;; esac'
 
 if [ "$failures" -gt 0 ]; then
   echo "${failures} self-test case(s) failed"
