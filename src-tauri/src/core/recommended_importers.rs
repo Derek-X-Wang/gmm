@@ -407,6 +407,13 @@ use std::time::Duration;
 /// session.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The packaged startup smoke holds its numeric-loopback response open while
+/// waiting for IPC readiness. Keep this longer than the smoke's 90-second
+/// startup deadline so a client timeout cannot release a network-blocked
+/// startup and make the guard pass. This affects only the validated loopback
+/// override; shipped manifest refreshes retain [`FETCH_TIMEOUT`].
+pub const PACKAGED_SMOKE_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Settings keys holding the cached manifest.
 ///
 /// The cache lives in the existing key/value `settings` table, so it

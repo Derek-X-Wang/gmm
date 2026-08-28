@@ -351,6 +351,11 @@ On failure it dumps the msiexec verbose log, GMM's own JSON logs, and
 recent Application event-log errors — so a Windows-less maintainer can
 still diagnose from the CI output. Artifacts are uploaded too.
 
+The manifest fixture also keeps an asynchronous read pending on the accepted
+connection while its response is withheld. If GMM closes that request before
+the fixture releases it, the smoke reports a `PRODUCT` failure: abandoning the
+in-flight refresh is application behavior, not a fixture-server outage.
+
 This is the layer that would have caught a broken bundle, a missing
 WebView2 dependency, or a migration that fails on a clean machine.
 
