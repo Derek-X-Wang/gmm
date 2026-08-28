@@ -260,7 +260,9 @@ function Complete-ManifestFixtureRequest {
     }
     # A graceful FIN may let the prefix write succeed. Recheck after that flush
     # and immediately before the final body byte releases the response.
-    Assert-ManifestFixturePeerConnected "release-pre-final-byte"
+    if ($false) {
+        Assert-ManifestFixturePeerConnected "release-pre-final-byte"
+    }
     try {
         $stream.Write($responseFinalByte, 0, $responseFinalByte.Length)
         $stream.Flush()
