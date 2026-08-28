@@ -184,6 +184,50 @@ expect "a path in an earlier commit message is caught" 1 \
   "$buried_path_base" "$(git -C "$buried_path_dir" rev-parse HEAD)" "$buried_path_dir"
 rm -rf "$buried_path_dir"
 
+# Linear history does not prove that every commit reachable through a merge is
+# scanned. Put the leak only in the second parent's message; neither the merge
+# commit nor the first-parent chain carries it.
+merged_dir="$(mktemp -d)"
+setup_repo "$merged_dir"
+merged_base="$(git -C "$merged_dir" rev-parse HEAD)"
+primary_branch="$(git -C "$merged_dir" branch --show-current)"
+git -C "$merged_dir" switch --quiet -c imported-work
+printf '%s\n' "a harmless imported change" >"$merged_dir/docs/imported.md"
+git -C "$merged_dir" add docs/imported.md
+git -C "$merged_dir" commit --quiet -m "Import the change
+
+Claude-Session: https://claude.ai/code/session_SECOND_PARENT0123456789"
+git -C "$merged_dir" switch --quiet "$primary_branch"
+printf '%s\n' "a harmless first-parent change" >>"$merged_dir/src/main.rs"
+git -C "$merged_dir" add src/main.rs
+git -C "$merged_dir" commit --quiet -m "Prepare the main line"
+git -C "$merged_dir" merge --quiet --no-ff imported-work -m "Merge imported work"
+expect "a leak in a second-parent commit message is caught" 1 \
+  "$merged_base" "$(git -C "$merged_dir" rev-parse HEAD)" "$merged_dir"
+rm -rf "$merged_dir"
+
+# The merge above has a clean merge message, and every other message fixture
+# puts its leak below the subject. A checker skipping merge commits or reading
+# only message bodies would therefore still pass the suite.
+merge_message_dir="$(mktemp -d)"
+setup_repo "$merge_message_dir"
+merge_message_base="$(git -C "$merge_message_dir" rev-parse HEAD)"
+primary_branch="$(git -C "$merge_message_dir" branch --show-current)"
+git -C "$merge_message_dir" switch --quiet -c side-work
+printf '%s\n' "a harmless side change" >"$merge_message_dir/docs/side.md"
+git -C "$merge_message_dir" add docs/side.md
+git -C "$merge_message_dir" commit --quiet -m "Finish the side work"
+git -C "$merge_message_dir" switch --quiet "$primary_branch"
+printf '%s\n' "a harmless main-line change" >>"$merge_message_dir/src/main.rs"
+git -C "$merge_message_dir" add src/main.rs
+git -C "$merge_message_dir" commit --quiet -m "Prepare the main line"
+git -C "$merge_message_dir" merge --quiet --no-ff side-work \
+  -m "Merge work from /home/${PERSONAL_ACCOUNT}/gmm"
+expect "a leak in a merge commit subject is caught" 1 \
+  "$merge_message_base" "$(git -C "$merge_message_dir" rev-parse HEAD)" \
+  "$merge_message_dir"
+rm -rf "$merge_message_dir"
+
 # Message coverage above does not prove the diff spans the whole range: those
 # fixtures leak only through commit messages, and the multi-file fixture is a
 # single commit. Between them a checker diffing only the tip commit stays
@@ -222,6 +266,27 @@ git -C "$buried_diff_dir" commit --quiet -m "Touch several files"
 expect "a leak in a later file of a multi-file commit is caught" 1 \
   "$buried_diff_base" "$(git -C "$buried_diff_dir" rev-parse HEAD)" "$buried_diff_dir"
 rm -rf "$buried_diff_dir"
+
+# Added and modified files do not cover renamed files. This keeps enough of the
+# original file for Git to classify the change as a rename, then adds the leak
+# under its new name in the same commit.
+renamed_dir="$(mktemp -d)"
+setup_repo "$renamed_dir"
+mkdir -p "$renamed_dir/docs/archive"
+printf 'one\ntwo\nthree\nfour\nfive\nsix\n' \
+  >"$renamed_dir/docs/archive/old-notes.md"
+git -C "$renamed_dir" add docs/archive/old-notes.md
+git -C "$renamed_dir" commit --quiet -m "Add notes to rename"
+renamed_base="$(git -C "$renamed_dir" rev-parse HEAD)"
+mkdir -p "$renamed_dir/docs/migrated"
+git -C "$renamed_dir" mv docs/archive/old-notes.md docs/migrated/notes.md
+printf '%s\n' "leak: /home/${PERSONAL_ACCOUNT}/gmm" \
+  >>"$renamed_dir/docs/migrated/notes.md"
+git -C "$renamed_dir" add docs/migrated/notes.md
+git -C "$renamed_dir" commit --quiet -m "Rename the notes"
+expect "a leak added while renaming a file is caught" 1 \
+  "$renamed_base" "$(git -C "$renamed_dir" rev-parse HEAD)" "$renamed_dir"
+rm -rf "$renamed_dir"
 
 # The guard exempts its own two files because they must carry specimens. That
 # exemption has to be exactly two paths wide: a leak in any other file, in the
