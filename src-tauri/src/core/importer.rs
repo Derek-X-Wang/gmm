@@ -367,6 +367,25 @@ pub fn install_from_local_zip(
     backups_root: &Path,
     loader_exe: &str,
 ) -> Result<InstallReport> {
+    install_from_local_zip_with_staging_probe(
+        zip_path,
+        game_dir,
+        backups_root,
+        loader_exe,
+        symlink_metadata_if_exists,
+    )
+}
+
+fn install_from_local_zip_with_staging_probe<F>(
+    zip_path: &Path,
+    game_dir: &Path,
+    backups_root: &Path,
+    loader_exe: &str,
+    mut staging_probe: F,
+) -> Result<InstallReport>
+where
+    F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
+{
     // 0. Refuse an archive that is not a Model Importer, before anything
     //    in the game directory is touched — not before the swap, and not
     //    before the backup, but before the first `create_dir_all`. A
@@ -383,7 +402,7 @@ pub fn install_from_local_zip(
         source,
     })?;
     let staging = game_dir.join(".gmm-staging");
-    if symlink_metadata_if_exists(&staging)
+    if staging_probe(&staging)
         .map_err(|source| Error::Io {
             path: staging.clone(),
             source,
@@ -502,6 +521,17 @@ where
 /// already in the backup folder at this point; we just `rename` from
 /// staging into the game directory.
 fn swap_in(staging: &Path, game_dir: &Path) -> Result<()> {
+    swap_in_with_destination_probe(staging, game_dir, symlink_metadata_if_exists)
+}
+
+fn swap_in_with_destination_probe<F>(
+    staging: &Path,
+    game_dir: &Path,
+    mut destination_probe: F,
+) -> Result<()>
+where
+    F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
+{
     for entry in fs::read_dir(staging).map_err(|source| Error::Io {
         path: staging.to_path_buf(),
         source,
@@ -521,7 +551,7 @@ fn swap_in(staging: &Path, game_dir: &Path) -> Result<()> {
         // onto an occupied directory entry. Ask whether an entry exists
         // at all instead.
         let is_user_owned = USER_OWNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d));
-        let destination_present = symlink_metadata_if_exists(&to).map_err(|source| Error::Io {
+        let destination_present = destination_probe(&to).map_err(|source| Error::Io {
             path: to.clone(),
             source,
         })?;
@@ -547,6 +577,17 @@ fn swap_in(staging: &Path, game_dir: &Path) -> Result<()> {
 /// [`USER_OWNED_DIRS`] so importer-shipped example mods can land
 /// without disturbing the user's Junctions.
 fn merge_into(from: &Path, to: &Path) -> Result<()> {
+    merge_into_with_destination_probe(from, to, &mut symlink_metadata_if_exists)
+}
+
+fn merge_into_with_destination_probe<F>(
+    from: &Path,
+    to: &Path,
+    destination_probe: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
+{
     fs::create_dir_all(to).map_err(|source| Error::Io {
         path: to.to_path_buf(),
         source,
@@ -568,7 +609,7 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
         // would try to copy straight onto the existing directory entry.
         // `symlink_metadata` answers "is there an entry here" without
         // following, which is the question we actually have.
-        let destination = symlink_metadata_if_exists(&dest).map_err(|source| Error::Io {
+        let destination = destination_probe(&dest).map_err(|source| Error::Io {
             path: dest.clone(),
             source,
         })?;
@@ -585,7 +626,7 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
             })?;
             // Safe: `metadata()` above propagated I/O uncertainty.
             if source_metadata.is_dir() && dest_is_plain_dir {
-                merge_into(&src, &dest)?;
+                merge_into_with_destination_probe(&src, &dest, destination_probe)?;
             }
             // Otherwise keep whatever is already there — never clobber
             // something the user (or GMM) put in place.
@@ -705,6 +746,17 @@ pub fn latest_backup(backups_root: &Path) -> Result<Option<PathBuf>> {
 /// Restore `game_dir` to the state captured in `backup_dir`. Files
 /// currently in `game_dir` with the same name are removed first.
 pub fn rollback_to(backup_dir: &Path, game_dir: &Path) -> Result<()> {
+    rollback_to_with_destination_probe(backup_dir, game_dir, &mut symlink_metadata_if_exists)
+}
+
+fn rollback_to_with_destination_probe<F>(
+    backup_dir: &Path,
+    game_dir: &Path,
+    destination_probe: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
+{
     for entry in fs::read_dir(backup_dir).map_err(|source| Error::Io {
         path: backup_dir.to_path_buf(),
         source,
@@ -724,7 +776,7 @@ pub fn rollback_to(backup_dir: &Path, game_dir: &Path) -> Result<()> {
         // backup forever; replacing wholesale would delete whatever
         // the user has enabled since. So merge, preferring live.
         if USER_OWNED_DIRS.iter().any(|d| name.eq_ignore_ascii_case(d)) {
-            if symlink_metadata_if_exists(&to)
+            if destination_probe(&to)
                 .map_err(|source| Error::Io {
                     path: to.clone(),
                     source,
@@ -743,7 +795,7 @@ pub fn rollback_to(backup_dir: &Path, game_dir: &Path) -> Result<()> {
             continue;
         }
 
-        if symlink_metadata_if_exists(&to)
+        if destination_probe(&to)
             .map_err(|source| Error::Io {
                 path: to.clone(),
                 source,
@@ -849,6 +901,17 @@ fn remove_any(path: &Path) -> Result<()> {
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    copy_dir_recursive_with_file_type(src, dst, &mut |entry| entry.file_type())
+}
+
+fn copy_dir_recursive_with_file_type<F>(
+    src: &Path,
+    dst: &Path,
+    classify_file_type: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&fs::DirEntry) -> std::io::Result<fs::FileType>,
+{
     fs::create_dir_all(dst).map_err(|source| Error::Io {
         path: dst.to_path_buf(),
         source,
@@ -863,13 +926,13 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         })?;
         let entry_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        let file_type = entry.file_type().map_err(|source| Error::Io {
+        let file_type = classify_file_type(&entry).map_err(|source| Error::Io {
             path: entry_path.clone(),
             source,
         })?;
         // Safe: `file_type()` above propagated I/O uncertainty.
         if file_type.is_dir() {
-            copy_dir_recursive(&entry_path, &dst_path)?;
+            copy_dir_recursive_with_file_type(&entry_path, &dst_path, classify_file_type)?;
         } else {
             fs::copy(&entry_path, &dst_path).map_err(|source| Error::Io {
                 path: entry_path.clone(),
@@ -1087,9 +1150,228 @@ pub async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> Re
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::io::{self, Write as _};
 
     use super::*;
+
+    fn importer_zip(path: &Path) {
+        let mut zip = zip::ZipWriter::new(fs::File::create(path).expect("create importer zip"));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("d3dx.ini", options).expect("start d3dx.ini");
+        zip.write_all(b"[Loader]\nloader = old.exe\n")
+            .expect("write d3dx.ini");
+        zip.add_directory("Core/", options).expect("add Core");
+        zip.start_file("Core/library.ini", options)
+            .expect("start Core file");
+        zip.write_all(b"core").expect("write Core file");
+        zip.add_directory("ShaderFixes/", options)
+            .expect("add ShaderFixes");
+        zip.finish().expect("finish importer zip");
+    }
+
+    fn names(path: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(path)
+            .expect("read test directory")
+            .map(|entry| {
+                entry
+                    .expect("read test entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn denied(message: &'static str) -> io::Error {
+        io::Error::new(io::ErrorKind::PermissionDenied, message)
+    }
+
+    #[test]
+    fn staging_lookup_uncertainty_leaves_game_directory_unchanged() {
+        let temp = tempfile::tempdir().expect("temporary importer roots");
+        let zip = temp.path().join("importer.zip");
+        importer_zip(&zip);
+        let game = temp.path().join("game");
+        fs::create_dir_all(&game).expect("create game");
+        fs::write(game.join("sentinel.txt"), b"user bytes").expect("write sentinel");
+        let backups = temp.path().join("backups");
+        let staging = game.join(".gmm-staging");
+
+        let result = install_from_local_zip_with_staging_probe(
+            &zip,
+            &game,
+            &backups,
+            DEFAULT_LOADER_EXE,
+            |_| Err(denied("test staging obstruction")),
+        );
+
+        assert_eq!(
+            names(&game),
+            vec!["sentinel.txt"],
+            "staging lookup uncertainty must not mutate the game directory",
+        );
+        assert_eq!(
+            fs::read(game.join("sentinel.txt")).expect("read sentinel"),
+            b"user bytes",
+        );
+        assert!(
+            matches!(result, Err(Error::Io { ref path, ref source })
+                if path == &staging && source.kind() == io::ErrorKind::PermissionDenied),
+            "staging lookup uncertainty must stop installation, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn swap_destination_uncertainty_leaves_both_trees_unchanged() {
+        let temp = tempfile::tempdir().expect("temporary swap roots");
+        let staging = temp.path().join("staging");
+        let game = temp.path().join("game");
+        fs::create_dir_all(&staging).expect("create staging");
+        fs::create_dir_all(&game).expect("create game");
+        fs::write(staging.join("d3dx.ini"), b"staged bytes").expect("write staged file");
+        fs::write(game.join("d3dx.ini"), b"live bytes").expect("write live file");
+
+        let result = swap_in_with_destination_probe(&staging, &game, |_| {
+            Err(denied("test swap destination obstruction"))
+        });
+
+        assert_eq!(
+            fs::read(game.join("d3dx.ini")).expect("read live file"),
+            b"live bytes",
+            "destination uncertainty must not overwrite the live game file",
+        );
+        assert_eq!(
+            fs::read(staging.join("d3dx.ini")).expect("read staged file"),
+            b"staged bytes",
+            "destination uncertainty must not evacuate staging",
+        );
+        assert!(
+            matches!(result, Err(Error::Io { ref source, .. })
+                if source.kind() == io::ErrorKind::PermissionDenied),
+            "swap destination uncertainty must stop before mutation, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn merge_destination_uncertainty_leaves_both_trees_unchanged() {
+        let temp = tempfile::tempdir().expect("temporary merge roots");
+        let from = temp.path().join("from");
+        let to = temp.path().join("to");
+        fs::create_dir_all(&from).expect("create source");
+        fs::create_dir_all(&to).expect("create destination");
+        fs::write(from.join("example.ini"), b"shipped bytes").expect("write source");
+        fs::write(to.join("example.ini"), b"user bytes").expect("write destination");
+        let mut probe = |_: &Path| Err(denied("test merge destination obstruction"));
+
+        let result = merge_into_with_destination_probe(&from, &to, &mut probe);
+
+        assert_eq!(
+            fs::read(to.join("example.ini")).expect("read destination"),
+            b"user bytes",
+            "destination uncertainty must not overwrite the user's file",
+        );
+        assert_eq!(
+            fs::read(from.join("example.ini")).expect("read source"),
+            b"shipped bytes",
+            "destination uncertainty must not remove the source file",
+        );
+        assert!(
+            matches!(result, Err(Error::Io { ref source, .. })
+                if source.kind() == io::ErrorKind::PermissionDenied),
+            "merge destination uncertainty must stop before mutation, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn rollback_mods_destination_uncertainty_leaves_both_trees_unchanged() {
+        let temp = tempfile::tempdir().expect("temporary rollback roots");
+        let backup = temp.path().join("backup");
+        let game = temp.path().join("game");
+        fs::create_dir_all(backup.join("Mods")).expect("create backup Mods");
+        fs::create_dir_all(game.join("Mods")).expect("create live Mods");
+        fs::write(backup.join("Mods/shipped.ini"), b"backup bytes").expect("write backup");
+        fs::write(game.join("Mods/user.ini"), b"user bytes").expect("write live mod");
+        let mut probe = |_: &Path| Err(denied("test rollback Mods obstruction"));
+
+        let result = rollback_to_with_destination_probe(&backup, &game, &mut probe);
+
+        assert_eq!(
+            names(&game.join("Mods")),
+            vec!["user.ini"],
+            "Mods destination uncertainty must not merge backup bytes into the live tree",
+        );
+        assert_eq!(
+            names(&backup.join("Mods")),
+            vec!["shipped.ini"],
+            "Mods destination uncertainty must not evacuate the backup",
+        );
+        assert!(
+            matches!(result, Err(Error::Io { ref source, .. })
+                if source.kind() == io::ErrorKind::PermissionDenied),
+            "rollback Mods destination uncertainty must stop before mutation, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn rollback_file_destination_uncertainty_leaves_both_trees_unchanged() {
+        let temp = tempfile::tempdir().expect("temporary rollback roots");
+        let backup = temp.path().join("backup");
+        let game = temp.path().join("game");
+        fs::create_dir_all(&backup).expect("create backup");
+        fs::create_dir_all(&game).expect("create game");
+        fs::write(backup.join("d3dx.ini"), b"backup bytes").expect("write backup");
+        fs::write(game.join("d3dx.ini"), b"live bytes").expect("write live file");
+        let mut probe = |_: &Path| Err(denied("test rollback file obstruction"));
+
+        let result = rollback_to_with_destination_probe(&backup, &game, &mut probe);
+
+        assert_eq!(
+            fs::read(game.join("d3dx.ini")).expect("read live file"),
+            b"live bytes",
+            "file destination uncertainty must not overwrite the live file",
+        );
+        assert_eq!(
+            fs::read(backup.join("d3dx.ini")).expect("read backup file"),
+            b"backup bytes",
+            "file destination uncertainty must not evacuate the backup",
+        );
+        assert!(
+            matches!(result, Err(Error::Io { ref source, .. })
+                if source.kind() == io::ErrorKind::PermissionDenied),
+            "rollback file destination uncertainty must stop before mutation, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn recursive_copy_entry_type_uncertainty_leaves_destination_unchanged() {
+        let temp = tempfile::tempdir().expect("temporary copy roots");
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(&source).expect("create source");
+        fs::create_dir_all(&destination).expect("create destination");
+        fs::write(source.join("file.ini"), b"source bytes").expect("write source file");
+        let mut classify = |_: &fs::DirEntry| Err(denied("test entry type obstruction"));
+
+        let result = copy_dir_recursive_with_file_type(&source, &destination, &mut classify);
+
+        assert_eq!(
+            names(&destination),
+            Vec::<String>::new(),
+            "entry type uncertainty must not copy anything into the destination",
+        );
+        assert_eq!(
+            fs::read(source.join("file.ini")).expect("read source file"),
+            b"source bytes",
+            "entry type uncertainty must not remove source bytes",
+        );
+        assert!(
+            matches!(result, Err(Error::Io { ref source, .. })
+                if source.kind() == io::ErrorKind::PermissionDenied),
+            "entry type uncertainty must stop recursive copy, got {result:?}",
+        );
+    }
 
     #[test]
     fn backup_preflight_uncertainty_leaves_game_directory_intact() {

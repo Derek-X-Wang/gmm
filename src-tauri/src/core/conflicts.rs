@@ -77,10 +77,16 @@ where
             source,
         })?;
         let path = entry.path();
-        let file_type = classify_file_type(&entry).map_err(|source| Error::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let file_type = match classify_file_type(&entry) {
+            Ok(file_type) => file_type,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(Error::Io {
+                    path: path.clone(),
+                    source,
+                })
+            }
+        };
         // Safe: `file_type()` above succeeded; this only classifies known metadata.
         if file_type.is_dir() {
             visit_with_file_type(&path, out, classify_file_type)?;
@@ -281,6 +287,39 @@ mod tests {
             matches!(result, Err(Error::Io { ref path, ref source })
                 if path == &ini && source.kind() == io::ErrorKind::PermissionDenied),
             "an unreadable directory entry type must not produce a partial conflict scan, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn dir_scan_skips_entry_that_vanishes_before_type_lookup() {
+        let temp = tempfile::tempdir().expect("temporary mod directory");
+        let root = temp.path().join("mod");
+        fs::create_dir_all(&root).expect("create mod directory");
+        let vanished = root.join("vanished.ini");
+        let remaining = root.join("remaining.ini");
+        fs::write(&vanished, b"[TextureOverrideGone]\nhash = 0x1\n").expect("write vanishing ini");
+        fs::write(&remaining, b"[TextureOverrideHere]\nhash = 0x2\n").expect("write remaining ini");
+        let mut out = Vec::new();
+
+        let result = visit_with_file_type(&root, &mut out, &mut |entry| {
+            if entry.path() == vanished {
+                fs::remove_file(&vanished).expect("make directory entry vanish");
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "test entry vanished",
+                ));
+            }
+            entry.file_type()
+        });
+
+        assert!(result.is_ok(), "a vanished directory entry must be skipped");
+        assert_eq!(
+            out,
+            vec![HashBinding {
+                hash: "2".to_string(),
+                section: "TextureOverrideHere".to_string(),
+            }],
+            "a vanished entry must not hide readable conflict evidence",
         );
     }
 }

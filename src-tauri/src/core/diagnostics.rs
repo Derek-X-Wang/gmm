@@ -212,18 +212,20 @@ pub fn build_bundle(
     dest: &Path,
     log_age_days: i64,
 ) -> Result<()> {
-    build_bundle_with_metadata_hook(log_dir, settings, dest, log_age_days, |_| {})
+    build_bundle_with_log_modified(log_dir, settings, dest, log_age_days, |entry| {
+        entry.metadata().and_then(|metadata| metadata.modified())
+    })
 }
 
-fn build_bundle_with_metadata_hook<F>(
+fn build_bundle_with_log_modified<F>(
     log_dir: &Path,
     settings: &SettingsSnapshot,
     dest: &Path,
     log_age_days: i64,
-    mut before_log_metadata: F,
+    mut log_modified: F,
 ) -> Result<()>
 where
-    F: FnMut(&Path),
+    F: FnMut(&fs::DirEntry) -> io::Result<SystemTime>,
 {
     if let Some(parent) = dest.parent() {
         if !parent.as_os_str().is_empty() {
@@ -287,14 +289,16 @@ where
             if !file_type.is_file() || !is_gmm_log(&path) {
                 continue;
             }
-            before_log_metadata(&path);
-            let modified = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map_err(|source| Error::Io {
-                    path: path.clone(),
-                    source,
-                })?;
+            let modified = match log_modified(&entry) {
+                Ok(modified) => modified,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(Error::Io {
+                        path: path.clone(),
+                        source,
+                    })
+                }
+            };
             if modified < cutoff {
                 continue;
             }
@@ -386,10 +390,12 @@ pub fn record_frontend_error(message: &str, stack: Option<&str>, route: Option<&
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
+
     use super::*;
 
     #[test]
-    fn bundle_propagates_log_metadata_uncertainty() {
+    fn bundle_skips_log_that_vanishes_before_metadata() {
         let temp = tempfile::tempdir().expect("temporary diagnostics roots");
         let log_dir = temp.path().join("logs");
         fs::create_dir_all(&log_dir).expect("create logs");
@@ -397,18 +403,59 @@ mod tests {
         fs::write(&log, b"diagnostic evidence").expect("write log");
         let bundle = temp.path().join("bundle.zip");
 
-        let result = build_bundle_with_metadata_hook(
+        let result = build_bundle_with_log_modified(
             &log_dir,
             &SettingsSnapshot::default(),
             &bundle,
             DEFAULT_BUNDLE_LOG_DAYS,
-            |path| fs::remove_file(path).expect("make log metadata uncertain"),
+            |entry| {
+                fs::remove_file(entry.path()).expect("make log vanish");
+                entry.metadata().and_then(|metadata| metadata.modified())
+            },
+        );
+
+        assert!(result.is_ok(), "a vanished log must be skipped");
+        let mut archive = zip::ZipArchive::new(File::open(&bundle).expect("open bundle"))
+            .expect("complete bundle");
+        let mut settings = String::new();
+        archive
+            .by_name("settings.json")
+            .expect("settings remain in bundle")
+            .read_to_string(&mut settings)
+            .expect("read settings");
+        assert_eq!(
+            archive.len(),
+            1,
+            "the vanished log must not leave a ZIP entry"
+        );
+    }
+
+    #[test]
+    fn bundle_propagates_unreadable_log_metadata() {
+        let temp = tempfile::tempdir().expect("temporary diagnostics roots");
+        let log_dir = temp.path().join("logs");
+        fs::create_dir_all(&log_dir).expect("create logs");
+        let log = log_dir.join("gmm.log");
+        fs::write(&log, b"diagnostic evidence").expect("write log");
+        let bundle = temp.path().join("bundle.zip");
+
+        let result = build_bundle_with_log_modified(
+            &log_dir,
+            &SettingsSnapshot::default(),
+            &bundle,
+            DEFAULT_BUNDLE_LOG_DAYS,
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test log metadata obstruction",
+                ))
+            },
         );
 
         assert!(
             matches!(result, Err(Error::Io { ref path, ref source })
-                if path == &log && source.kind() == io::ErrorKind::NotFound),
-            "a log whose metadata becomes unreadable must not silently vanish from the bundle, got {result:?}",
+                if path == &log && source.kind() == io::ErrorKind::PermissionDenied),
+            "unreadable log metadata must still fail the bundle, got {result:?}",
         );
     }
 }
