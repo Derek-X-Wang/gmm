@@ -94,6 +94,14 @@ function ipcResult(command: string) {
     case "launch_game":
       if (launchError) throw launchError;
       return null;
+    case "av_guidance":
+      return {
+        headline: "Antivirus software may be blocking the launch",
+        body: "Check your antivirus quarantine before trying again.",
+        exclusionSteps: ["Restore the blocked file."],
+        docPath: "docs/antivirus-and-smartscreen.md",
+        sentinel: "AV-PATTERN: ",
+      };
     case "set_importer_pinned":
       if (importerPinError) throw importerPinError;
       return null;
@@ -176,6 +184,30 @@ it("preserves a non-AV launch failure's kind through the shared renderer", async
     "data-command-failure-kind",
     "invalidActiveVariant",
   );
+});
+
+it("preserves an AV-pattern launch failure's kind through the guidance renderer", async () => {
+  launchError = {
+    kind: "invalidActiveVariant",
+    message: "AV-PATTERN: The selected Mod variant is unavailable.",
+  };
+  renderWithQuery(<App />);
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /Launch Genshin Impact/i }),
+  );
+
+  const headline = await screen.findByText(
+    "Antivirus software may be blocking the launch",
+  );
+  const alert = headline.closest('[role="alert"]');
+  expect(alert).not.toBeNull();
+  expect(
+    alert,
+    "the AV guidance renderer must preserve the launch failure classification",
+  ).toHaveAttribute("data-command-failure-kind", "invalidActiveVariant");
+  expect(alert).toHaveTextContent("The selected Mod variant is unavailable.");
+  expect(alert).not.toHaveTextContent("AV-PATTERN:");
 });
 
 it("renders a structured failure when changing an Importer Pin fails", async () => {
