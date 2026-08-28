@@ -366,6 +366,14 @@ failure, so the smoke deliberately accepts this narrow residual window. The
 Windows run does verify that every required accept and peer-check stage actually
 executed, rather than treating source text as proof of execution.
 
+That runtime coverage is bound into the response data flow: its validator is the
+only code that constructs the final response byte, and the release write consumes
+the returned capability directly. If the validator invocation does not execute,
+PowerShell StrictMode stops the script before the response can be completed, so
+"coverage not validated" and "smoke passed" are mutually exclusive. The trust
+chain bottoms out at the CI job executing this script and requiring a zero exit;
+code inside the script cannot prove or protect that outermost invocation.
+
 This is the layer that would have caught a broken bundle, a missing
 WebView2 dependency, or a migration that fails on a clean machine.
 

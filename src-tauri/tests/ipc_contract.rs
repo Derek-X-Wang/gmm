@@ -772,6 +772,29 @@ mod manifest_refresh_started_marker {
             .unwrap_or_else(|| panic!("expected PowerShell structure not found: {needle}"))
     }
 
+    fn powershell_block_after<'a>(body: &'a str, needle: &str) -> &'a str {
+        let needle_start = position(body, needle);
+        let body_start = body[needle_start..]
+            .find('{')
+            .map(|offset| needle_start + offset)
+            .unwrap_or_else(|| panic!("PowerShell structure has no body: {needle}"));
+
+        let mut depth = 0usize;
+        for (offset, character) in body[body_start..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &body[body_start + 1..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("PowerShell structure has an unterminated body: {needle}");
+    }
+
     #[test]
     fn installer_smoke_counts_the_same_marker_for_this_launch() {
         let script = read(".github/scripts/installer-smoke.ps1");
@@ -943,15 +966,22 @@ mod manifest_refresh_started_marker {
         );
         let prefix_write = position(release, "$stream.Write($responsePrefix");
         let prefix_flush = position_after(release, prefix_write, "$stream.Flush()");
+        let validated_release = position(
+            release,
+            "$validatedRelease = Assert-ManifestFixtureGuardCoverage",
+        );
+        let release_capability = position(
+            release,
+            "$responseFinalByte = $validatedRelease.ResponseFinalByte",
+        );
         let final_byte_write = position(release, "$stream.Write($responseFinalByte");
         let final_byte_flush = position_after(release, final_byte_write, "$stream.Flush()");
-        let runtime_coverage = position(release, "Assert-ManifestFixtureGuardCoverage");
         let dispose = position(release, "$script:HeldManifestConnection.Dispose()");
         assert!(get_stream < pre_prefix_check && pre_prefix_check < close_window_proof);
         assert!(close_window_proof < prefix_write && prefix_write < prefix_flush);
-        assert!(prefix_flush < pre_final_byte_check && pre_final_byte_check < final_byte_write);
-        assert!(final_byte_write < final_byte_flush && final_byte_flush < runtime_coverage);
-        assert!(runtime_coverage < dispose);
+        assert!(prefix_flush < pre_final_byte_check && pre_final_byte_check < validated_release);
+        assert!(validated_release < release_capability && release_capability < final_byte_write);
+        assert!(final_byte_write < final_byte_flush && final_byte_flush < dispose);
 
         let coverage = powershell_function_body(&script, "Assert-ManifestFixtureGuardCoverage");
         for checkpoint in [
@@ -982,6 +1012,13 @@ mod manifest_refresh_started_marker {
             "the loopback client's timeout must outlast the smoke startup deadline",
         );
         let attempt_guard = position(startup, "if ($script:StartupAttemptCount -ne 0)");
+        let attempt_guard_body =
+            powershell_block_after(startup, "if ($script:StartupAttemptCount -ne 0)");
+        assert_eq!(
+            attempt_guard_body.trim(),
+            "throw \"installer smoke must not retry a failed product startup assertion\"",
+            "the second-attempt branch must terminate instead of allowing a product assertion retry",
+        );
         let attempt_increment = position(startup, "$script:StartupAttemptCount++");
         let launch = position(startup, "$script:AppProc = Start-Process $exe -PassThru");
         assert!(attempt_guard < attempt_increment && attempt_increment < launch);

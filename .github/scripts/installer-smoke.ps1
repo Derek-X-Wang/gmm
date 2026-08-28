@@ -226,6 +226,16 @@ function Assert-ManifestFixtureGuardCoverage {
             "release-pre-prefix",
             "release-pre-final-byte"
         )
+
+    # Validation owns the capability that releases the held response: the final
+    # body byte is constructed nowhere else, and the write below directly
+    # consumes this return value. Disabling this invocation therefore leaves the
+    # release capability unbound under StrictMode and the smoke cannot succeed.
+    # Trust bottoms out at CI actually executing this script and requiring its
+    # zero exit; a script cannot protect that outermost invocation from itself.
+    [pscustomobject]@{
+        ResponseFinalByte = [byte[]](125)
+    }
 }
 
 function Complete-ManifestFixtureRequest {
@@ -236,9 +246,11 @@ function Complete-ManifestFixtureRequest {
         "HTTP/1.1 200 OK`r`n" +
         "Content-Length: 30`r`n" +
         "Connection: close`r`n`r`n" +
-        '{"schemaVersion":1,"games":{}'
+        ([char]123).ToString() +
+        '"schemaVersion":1,"games":' +
+        ([char]123).ToString() +
+        ([char]125).ToString()
     )
-    $responseFinalByte = [System.Text.Encoding]::ASCII.GetBytes("}")
     $stream = $script:HeldManifestConnection.GetStream()
     # Keep the last pre-release check immediately beside the write. A FIN can
     # otherwise arrive after the startup loop's final check while the response
@@ -261,6 +273,9 @@ function Complete-ManifestFixtureRequest {
     # A graceful FIN may let the prefix write succeed. Recheck after that flush
     # and immediately before the final body byte releases the response.
     Assert-ManifestFixturePeerConnected "release-pre-final-byte"
+    $script:FailureClass = "INFRASTRUCTURE"
+    $validatedRelease = Assert-ManifestFixtureGuardCoverage
+    $responseFinalByte = $validatedRelease.ResponseFinalByte
     try {
         $stream.Write($responseFinalByte, 0, $responseFinalByte.Length)
         $stream.Flush()
@@ -268,7 +283,6 @@ function Complete-ManifestFixtureRequest {
         $script:FailureClass = "PRODUCT"
         throw "$ManifestPeerClosedMessage`: $($_.Exception.Message)"
     }
-    Assert-ManifestFixtureGuardCoverage
     $script:HeldManifestConnection.Dispose()
     $script:HeldManifestConnection = $null
     $script:ManifestPeerReadBuffer = $null
