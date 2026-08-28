@@ -47,8 +47,8 @@ $ManifestListener = $null
 $HeldManifestConnection = $null
 $ManifestPeerReadBuffer = $null
 $ManifestPeerReadTask = $null
-$ManifestAcceptCheckpoints = [System.Collections.Generic.List[string]]::new()
-$ManifestPeerCheckpoints = [System.Collections.Generic.List[string]]::new()
+$ManifestAcceptCheckpoints = [System.Collections.Generic.List[object]]::new()
+$ManifestPeerCheckpoints = [System.Collections.Generic.List[object]]::new()
 $StartupAttemptCount = 0
 $ManifestPeerClosedMessage =
     "manifest refresh client closed its held request before the fixture released its response"
@@ -148,7 +148,10 @@ function Assert-ManifestFixtureAcceptHealthy($acceptTask, $checkpoint) {
         $script:FailureClass = "INFRASTRUCTURE"
         throw "manifest fixture accept was canceled after GMM launch"
     }
-    $script:ManifestAcceptCheckpoints.Add($checkpoint)
+    $script:ManifestAcceptCheckpoints.Add([pscustomobject]@{
+        Name = $checkpoint
+        ResponseFinalCharacter = $null
+    })
 }
 
 function Start-ManifestFixturePeerMonitor {
@@ -161,7 +164,10 @@ function Start-ManifestFixturePeerMonitor {
     )
 }
 
-function Assert-ManifestFixturePeerConnected($checkpoint) {
+function Assert-ManifestFixturePeerConnected(
+    $checkpoint,
+    $responseFinalCharacter = $null
+) {
     if ($null -eq $script:ManifestPeerReadTask) { return }
 
     # Drain the request bytes without blocking, then leave another read pending.
@@ -192,28 +198,62 @@ function Assert-ManifestFixturePeerConnected($checkpoint) {
             $script:ManifestPeerReadBuffer.Length
         )
     }
-    $script:ManifestPeerCheckpoints.Add($checkpoint)
+    $script:ManifestPeerCheckpoints.Add([pscustomobject]@{
+        Name = $checkpoint
+        ResponseFinalCharacter = $responseFinalCharacter
+    })
 }
 
-function Assert-ManifestFixtureCheckpointOrder($guard, $observed, $required) {
+function Assert-ManifestFixtureCheckpointOrder(
+    $guard,
+    $observed,
+    $required,
+    $priorValidationByte = $null
+) {
+    $observedNames = @($observed | ForEach-Object { $_.Name })
     $previous = -1
     foreach ($checkpoint in $required) {
-        $current = $observed.IndexOf($checkpoint)
+        $current = [array]::IndexOf($observedNames, $checkpoint)
         if ($current -le $previous) {
             $script:FailureClass = "INFRASTRUCTURE"
             throw ("installer smoke did not execute required manifest fixture " +
                    "$guard check '$checkpoint' in order; observed: " +
-                   "$($observed -join ', ')")
+                   "$($observedNames -join ', ')")
         }
         $previous = $current
     }
+
+    # This byte is computed from the final observed checkpoint that satisfied
+    # the ordered comparison. The peer comparison consumes the accept result,
+    # so both validations must execute before a response byte can be returned.
+    $validationByte = [byte][int](
+        $previous -ge 0 -and
+        $observedNames[$previous] -ceq $required[-1]
+    )
+    if ($null -eq $priorValidationByte) {
+        return $validationByte
+    }
+
+    $responseFinalCharacter = $observed[$previous].ResponseFinalCharacter
+    if ($null -eq $responseFinalCharacter) {
+        $script:FailureClass = "INFRASTRUCTURE"
+        throw "validated manifest fixture checkpoint did not carry the response final character"
+    }
+    $responseFinalByte = [System.Text.Encoding]::ASCII.GetBytes(
+        [string]$responseFinalCharacter
+    )
+    if ($responseFinalByte.Length -ne 1) {
+        $script:FailureClass = "INFRASTRUCTURE"
+        throw "validated manifest fixture checkpoint carried an invalid response final character"
+    }
+    [byte[]]($responseFinalByte[0] * [byte]$priorValidationByte * $validationByte)
 }
 
 function Assert-ManifestFixtureGuardCoverage {
     # Source scans cannot prove that a PowerShell command executes. This
     # assertion checks the stages observed by this Windows run instead, while
     # allowing extra guards and an arbitrary number of polling iterations.
-    Assert-ManifestFixtureCheckpointOrder `
+    $acceptValidationByte = Assert-ManifestFixtureCheckpointOrder `
         "accept" `
         $script:ManifestAcceptCheckpoints `
         @("startup-poll", "startup-post-loop")
@@ -225,17 +265,8 @@ function Assert-ManifestFixtureGuardCoverage {
             "startup-post-loop",
             "release-pre-prefix",
             "release-pre-final-byte"
-        )
-
-    # Validation owns the capability that releases the held response: the final
-    # body byte is constructed nowhere else, and the write below directly
-    # consumes this return value. Disabling this invocation therefore leaves the
-    # release capability unbound under StrictMode and the smoke cannot succeed.
-    # Trust bottoms out at CI actually executing this script and requiring its
-    # zero exit; a script cannot protect that outermost invocation from itself.
-    [pscustomobject]@{
-        ResponseFinalByte = [byte[]](125)
-    }
+        ) `
+        $acceptValidationByte
 }
 
 function Complete-ManifestFixtureRequest {
@@ -272,10 +303,13 @@ function Complete-ManifestFixtureRequest {
     }
     # A graceful FIN may let the prefix write succeed. Recheck after that flush
     # and immediately before the final body byte releases the response.
-    Assert-ManifestFixturePeerConnected "release-pre-final-byte"
+    # The response character becomes checkpoint data only when this peer guard
+    # actually executes. Ordered validation extracts and encodes it; there is no
+    # fallback release byte elsewhere in the script. Trust still bottoms out at
+    # CI executing this script and requiring its zero exit.
+    Assert-ManifestFixturePeerConnected "release-pre-final-byte" ([char]125)
     $script:FailureClass = "INFRASTRUCTURE"
-    $validatedRelease = Assert-ManifestFixtureGuardCoverage
-    $responseFinalByte = $validatedRelease.ResponseFinalByte
+    $responseFinalByte = Assert-ManifestFixtureGuardCoverage
     try {
         $stream.Write($responseFinalByte, 0, $responseFinalByte.Length)
         $stream.Flush()

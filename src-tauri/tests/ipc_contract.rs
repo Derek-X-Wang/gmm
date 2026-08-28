@@ -954,7 +954,7 @@ mod manifest_refresh_started_marker {
         );
         let pre_final_byte_check = position(
             release,
-            "Assert-ManifestFixturePeerConnected \"release-pre-final-byte\"",
+            "Assert-ManifestFixturePeerConnected \"release-pre-final-byte\" ([char]125)",
         );
         let get_stream = position(
             release,
@@ -966,24 +966,22 @@ mod manifest_refresh_started_marker {
         );
         let prefix_write = position(release, "$stream.Write($responsePrefix");
         let prefix_flush = position_after(release, prefix_write, "$stream.Flush()");
-        let validated_release = position(
-            release,
-            "$validatedRelease = Assert-ManifestFixtureGuardCoverage",
-        );
         let release_capability = position(
             release,
-            "$responseFinalByte = $validatedRelease.ResponseFinalByte",
+            "$responseFinalByte = Assert-ManifestFixtureGuardCoverage",
         );
         let final_byte_write = position(release, "$stream.Write($responseFinalByte");
         let final_byte_flush = position_after(release, final_byte_write, "$stream.Flush()");
         let dispose = position(release, "$script:HeldManifestConnection.Dispose()");
         assert!(get_stream < pre_prefix_check && pre_prefix_check < close_window_proof);
         assert!(close_window_proof < prefix_write && prefix_write < prefix_flush);
-        assert!(prefix_flush < pre_final_byte_check && pre_final_byte_check < validated_release);
-        assert!(validated_release < release_capability && release_capability < final_byte_write);
+        assert!(prefix_flush < pre_final_byte_check && pre_final_byte_check < release_capability);
+        assert!(release_capability < final_byte_write);
         assert!(final_byte_write < final_byte_flush && final_byte_flush < dispose);
 
         let coverage = powershell_function_body(&script, "Assert-ManifestFixtureGuardCoverage");
+        assert!(coverage.contains("$acceptValidationByte = Assert-ManifestFixtureCheckpointOrder"));
+        assert!(coverage.contains("$acceptValidationByte"));
         for checkpoint in [
             "startup-poll",
             "startup-post-loop",
@@ -1011,6 +1009,9 @@ mod manifest_refresh_started_marker {
             PACKAGED_SMOKE_FETCH_TIMEOUT > Duration::from_secs(90),
             "the loopback client's timeout must outlast the smoke startup deadline",
         );
+        // Advisory source-shape pin only: the native Windows smoke invokes
+        // startup once, so it does not exercise this second-attempt branch.
+        // Block comments can also preserve this scanner's expected text.
         let attempt_guard = position(startup, "if ($script:StartupAttemptCount -ne 0)");
         let attempt_guard_body =
             powershell_block_after(startup, "if ($script:StartupAttemptCount -ne 0)");
