@@ -49,7 +49,8 @@ use std::path::{Path, PathBuf};
 
 use gmm_lib::core::settings::keys;
 use gmm_lib::core::{
-    Core, GameCode, Source, REINSTALL_SWAP_COLUMNS, STAGED_LIBRARY_OPERATION_COLUMNS,
+    Core, GameCode, Source, ENABLED_TRANSITION_COLUMNS, REINSTALL_SWAP_COLUMNS,
+    STAGED_LIBRARY_OPERATION_COLUMNS,
 };
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteConnectOptions;
@@ -578,6 +579,92 @@ async fn session_launch_claim_migration_preserves_parallel_launch_ownership() {
     assert!(
         invalid_game.is_err(),
         "a launch claim must reference a real Game",
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn enabled_transition_migration_enforces_the_durable_recovery_contract() {
+    let (_, fixture) = corpus()
+        .into_iter()
+        .find(|(version, _)| *version == 12)
+        .expect("schema-12 fixture");
+    let tmp = TempDir::new().expect("tmp");
+    let db = stage(&fixture, &tmp);
+    let core = open_core(&db, &tmp).await;
+    drop(core);
+    let pool = raw_pool(&db).await;
+
+    let columns = sqlx::query("PRAGMA table_info(enabled_transitions)")
+        .fetch_all(&pool)
+        .await
+        .expect("inspect enabled_transitions columns");
+    let column_names: Vec<String> = columns
+        .iter()
+        .map(|row| row.try_get("name").expect("column name"))
+        .collect();
+    assert_eq!(
+        column_names, ENABLED_TRANSITION_COLUMNS,
+        "the transition migration must create the complete validated witness",
+    );
+
+    sqlx::query(
+        "INSERT INTO enabled_transitions (
+            mod_id, game_code, intended_enabled, junction_path,
+            junction_target, junction_parent_identity, junction_identity, owner_pid,
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
+         ) VALUES (?, 'gimi', 1, 'C:\\Games\\Genshin\\Mods\\Raiden',
+                   'D:\\gmm-library\\gimi\\01JCORPUS0000000000000002',
+                   '0000000000000001:0000000000000002', NULL,
+                   42, 1, 1, '2026-08-28T00:00:00Z',
+                   '0000000000000001:0000000000000004',
+                   '0000000000000001:0000000000000005')",
+    )
+    .bind(SEED_MODS[1].id)
+    .execute(&pool)
+    .await
+    .expect("insert valid enabled-transition witness");
+    let duplicate = sqlx::query(
+        "INSERT INTO enabled_transitions (
+            mod_id, game_code, intended_enabled, junction_path,
+            junction_target, junction_parent_identity, junction_identity, owner_pid,
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
+         ) VALUES (?, 'gimi', 0, 'C:\\Games\\Genshin\\Mods\\Other',
+                   'D:\\gmm-library\\gimi\\01JCORPUS0000000000000002',
+                   '0000000000000001:0000000000000002',
+                   '0000000000000001:0000000000000003',
+                   42, 1, 1, '2026-08-28T00:00:01Z',
+                   '0000000000000001:0000000000000004',
+                   '0000000000000001:0000000000000005')",
+    )
+    .bind(SEED_MODS[1].id)
+    .execute(&pool)
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "one Mod must not carry two enable/disable transition witnesses",
+    );
+    let invalid_intent = sqlx::query(
+        "INSERT INTO enabled_transitions (
+            mod_id, game_code, intended_enabled, junction_path,
+            junction_target, junction_parent_identity, junction_identity, owner_pid,
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
+         ) VALUES (?, 'gimi', 2, 'C:\\Games\\Genshin\\Mods\\Invalid',
+                   'D:\\gmm-library\\gimi\\01JCORPUS0000000000000001',
+                   '0000000000000001:0000000000000002', NULL,
+                   42, 1, 1, '2026-08-28T00:00:02Z',
+                   '0000000000000001:0000000000000004',
+                   '0000000000000001:0000000000000005')",
+    )
+    .bind(SEED_MODS[0].id)
+    .execute(&pool)
+    .await;
+    assert!(
+        invalid_intent.is_err(),
+        "the durable transition must reject an ambiguous requested state",
     );
     pool.close().await;
 }

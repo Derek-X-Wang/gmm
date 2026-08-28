@@ -13,6 +13,7 @@ use super::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryDirectoryOwner {
     Mod,
+    ModWithPendingEnabledTransition,
     ActiveReinstall,
     ActiveStaging,
 }
@@ -42,6 +43,8 @@ pub(super) struct LibraryOwnershipSnapshot {
     mods: HashMap<DirectoryIdentity, Vec<String>>,
     active_reinstall_directories: HashSet<DirectoryIdentity>,
     active_staging_directories: HashSet<DirectoryIdentity>,
+    enabled_transition_mod_ids: HashSet<String>,
+    enabled_transition_directories: HashSet<DirectoryIdentity>,
 }
 
 impl LibraryOwnershipSnapshot {
@@ -51,19 +54,35 @@ impl LibraryOwnershipSnapshot {
             mods: HashMap::new(),
             active_reinstall_directories: HashSet::new(),
             active_staging_directories: HashSet::new(),
+            enabled_transition_mod_ids: HashSet::new(),
+            enabled_transition_directories: HashSet::new(),
         }
     }
 
     pub(super) async fn load(connection: &mut SqliteConnection) -> Result<Self> {
+        let enabled_transition_witnesses =
+            super::library_mutation::load_enabled_transition_witnesses(&mut *connection).await?;
+        let enabled_transition_mod_ids: HashSet<_> = enabled_transition_witnesses
+            .iter()
+            .map(|witness| witness.mod_id().to_string())
+            .collect();
+        let enabled_transition_directories = enabled_transition_witnesses
+            .iter()
+            .map(|witness| witness.library_identity().clone())
+            .collect();
+
         let rows = sqlx::query("SELECT id AS mod_id, library_path FROM mods")
             .fetch_all(&mut *connection)
             .await?;
         let mut mods: HashMap<DirectoryIdentity, Vec<String>> = HashMap::new();
         for row in rows {
+            let mod_id: String = row.try_get("mod_id")?;
+            if enabled_transition_mod_ids.contains(&mod_id) {
+                continue;
+            }
             let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
             match IdentifiedDirectory::open(&path) {
                 Ok(directory) => {
-                    let mod_id: String = row.try_get("mod_id")?;
                     mods.entry(directory.identity().clone())
                         .or_default()
                         .push(mod_id);
@@ -112,19 +131,44 @@ impl LibraryOwnershipSnapshot {
             mods,
             active_reinstall_directories,
             active_staging_directories,
+            enabled_transition_mod_ids,
+            enabled_transition_directories,
         })
     }
 
+    pub(super) async fn enabled_transition_mod_ids(
+        connection: &mut SqliteConnection,
+    ) -> Result<HashSet<String>> {
+        super::library_mutation::load_enabled_transition_witnesses(connection)
+            .await
+            .map(|witnesses| {
+                witnesses
+                    .into_iter()
+                    .map(|witness| witness.mod_id().to_string())
+                    .collect()
+            })
+    }
+
     pub(super) fn owner_of(&self, identity: &DirectoryIdentity) -> Option<LibraryDirectoryOwner> {
+        if self.enabled_transition_directories.contains(identity) {
+            return Some(LibraryDirectoryOwner::ModWithPendingEnabledTransition);
+        }
         if self.active_reinstall_directories.contains(identity) {
             return Some(LibraryDirectoryOwner::ActiveReinstall);
         }
         if self.active_staging_directories.contains(identity) {
             return Some(LibraryDirectoryOwner::ActiveStaging);
         }
-        self.mods
-            .contains_key(identity)
-            .then_some(LibraryDirectoryOwner::Mod)
+        self.mods.get(identity).map(|mod_ids| {
+            if mod_ids
+                .iter()
+                .any(|mod_id| self.enabled_transition_mod_ids.contains(mod_id))
+            {
+                LibraryDirectoryOwner::ModWithPendingEnabledTransition
+            } else {
+                LibraryDirectoryOwner::Mod
+            }
+        })
     }
 
     /// The one report/action rule for an immediate Library-root directory.

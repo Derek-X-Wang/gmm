@@ -52,10 +52,13 @@ pub use library_audit::{
 };
 #[doc(hidden)]
 pub use library_mutation::{
-    DURABLE_WITNESS_TABLES, REINSTALL_SWAP_COLUMNS, STAGED_LIBRARY_OPERATION_COLUMNS,
+    DURABLE_WITNESS_TABLES, ENABLED_TRANSITION_COLUMNS, REINSTALL_SWAP_COLUMNS,
+    STAGED_LIBRARY_OPERATION_COLUMNS,
 };
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
-pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
+pub use mods::{
+    EnabledTransitionRecovery, Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source,
+};
 pub use session::{InterruptedSessionLaunch, SessionInfo, SessionLaunchClaim};
 pub use zip_import::ImportZipOptions;
 
@@ -165,6 +168,16 @@ impl Core {
             // durable witness for the next startup instead of moving Library
             // bytes while the process may still be loading them.
             return Ok(core);
+        }
+        if let Err(recovery) = core
+            .resolve_interrupted_enabled_transitions_at_startup()
+            .await
+        {
+            tracing::warn!(
+                target: "gmm::library",
+                error = %recovery,
+                "could not resolve interrupted enable/disable transitions at startup",
+            );
         }
         if let Err(recovery) = core.resolve_interrupted_staging_at_startup().await {
             tracing::warn!(
@@ -752,6 +765,7 @@ impl Core {
             version: None,
             screenshot_url: None,
             reinstall_recovery: None,
+            enabled_transition_recovery: None,
         })
     }
 
@@ -2805,6 +2819,7 @@ impl Core {
             version: None,
             screenshot_url: None,
             reinstall_recovery: None,
+            enabled_transition_recovery: None,
         })
     }
 
@@ -3149,6 +3164,7 @@ impl Core {
         .bind(game.as_str())
         .fetch_all(&self.pool)
         .await?;
+        self.crash_point(crash_points::RECONCILE_AFTER_MOD_SNAPSHOT);
 
         // Non-fatal: if the game mods dir does not exist yet we'll just
         // recreate links into it; we ensure it exists first so the
@@ -3197,10 +3213,22 @@ impl Core {
                 match resolve_link(&link) {
                     // Ours: we put it there, the row says it should be
                     // gone, and deleting it cannot touch the Library.
-                    Some(actual) if same_path(&actual, &expected_target) => {
-                        junction::remove(&link)?;
-                        result.removed.push(id);
-                    }
+                    Some(actual) if same_path(&actual, &expected_target) => match self
+                        .remove_disabled_reconciled_junction_in_library_mutation(
+                            &id,
+                            &link,
+                            Some(&expected_target),
+                        )
+                        .await?
+                    {
+                        library_mutation::ReconciledJunctionMutation::Applied => {
+                            result.removed.push(id)
+                        }
+                        library_mutation::ReconciledJunctionMutation::Quarantined => {
+                            result.quarantined.push(id)
+                        }
+                        library_mutation::ReconciledJunctionMutation::Stale => {}
+                    },
                     // Points somewhere we never pointed it. Same rule as
                     // the enabled-but-drifted case: surface, don't
                     // clobber whatever the user intended.
@@ -3214,7 +3242,7 @@ impl Core {
             }
 
             if !link_exists(&link)? {
-                if self
+                match self
                     .create_reconciled_junction_in_library_mutation(
                         &id,
                         game_mods_dir,
@@ -3224,9 +3252,13 @@ impl Core {
                     )
                     .await?
                 {
-                    result.recreated.push(id);
-                } else {
-                    result.quarantined.push(id);
+                    library_mutation::ReconciledJunctionMutation::Applied => {
+                        result.recreated.push(id)
+                    }
+                    library_mutation::ReconciledJunctionMutation::Quarantined => {
+                        result.quarantined.push(id)
+                    }
+                    library_mutation::ReconciledJunctionMutation::Stale => {}
                 }
                 continue;
             }
@@ -3274,7 +3306,7 @@ impl Core {
                 // conflicting (see
                 // `a_junction_whose_target_was_deleted_is_not_healthy`).
                 Some(actual) if path_within(&actual, &library_path) && expected_target_is_dir => {
-                    if self
+                    match self
                         .create_reconciled_junction_in_library_mutation(
                             &id,
                             game_mods_dir,
@@ -3284,9 +3316,13 @@ impl Core {
                         )
                         .await?
                     {
-                        result.recreated.push(id);
-                    } else {
-                        result.quarantined.push(id);
+                        library_mutation::ReconciledJunctionMutation::Applied => {
+                            result.recreated.push(id)
+                        }
+                        library_mutation::ReconciledJunctionMutation::Quarantined => {
+                            result.quarantined.push(id)
+                        }
+                        library_mutation::ReconciledJunctionMutation::Stale => {}
                     }
                 }
                 // Outside the Mod's Library entirely — the user aimed it
@@ -3323,6 +3359,7 @@ impl Core {
         .bind(game.as_str())
         .fetch_all(&self.pool)
         .await?;
+        self.crash_point(crash_points::REBUILD_AFTER_MOD_SNAPSHOT);
 
         std::fs::create_dir_all(game_mods_dir).map_err(|source| Error::Io {
             path: game_mods_dir.to_path_buf(),
@@ -3371,21 +3408,29 @@ impl Core {
 
             if !enabled {
                 if had_link {
-                    junction::remove(&link)?;
-                }
-                // Rebuild already deletes stranded junctions as a side
-                // effect of dropping every link. Report it the same way
-                // reconcile does, so `removed` means one thing across
-                // both passes rather than depending on which the user ran.
-                if had_link {
-                    result.removed.push(id);
+                    match self
+                        .remove_disabled_reconciled_junction_in_library_mutation(&id, &link, None)
+                        .await?
+                    {
+                        library_mutation::ReconciledJunctionMutation::Applied => {
+                            result.removed.push(id);
+                        }
+                        library_mutation::ReconciledJunctionMutation::Quarantined => {
+                            result.quarantined.push(id);
+                        }
+                        library_mutation::ReconciledJunctionMutation::Stale => {}
+                    }
                 } else {
+                    // Rebuild already deletes stranded junctions as a side
+                    // effect of dropping every link. Report it the same way
+                    // reconcile does, so `removed` means one thing across
+                    // both passes rather than depending on which the user ran.
                     result.skipped.push(id);
                 }
                 continue;
             }
             let target = target.expect("enabled Mods have a preflighted Junction target");
-            if self
+            match self
                 .create_reconciled_junction_in_library_mutation(
                     &id,
                     game_mods_dir,
@@ -3395,9 +3440,11 @@ impl Core {
                 )
                 .await?
             {
-                result.recreated.push(id);
-            } else {
-                result.quarantined.push(id);
+                library_mutation::ReconciledJunctionMutation::Applied => result.recreated.push(id),
+                library_mutation::ReconciledJunctionMutation::Quarantined => {
+                    result.quarantined.push(id)
+                }
+                library_mutation::ReconciledJunctionMutation::Stale => {}
             }
         }
         Ok(result)
@@ -3480,6 +3527,16 @@ impl Core {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         self.prune_stale_session_launch_claims(&mut transaction)
             .await?;
+        if let Some(mod_id) =
+            library_ownership::LibraryOwnershipSnapshot::enabled_transition_mod_ids(
+                &mut transaction,
+            )
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Err(Error::EnabledTransitionPending { mod_id });
+        }
         sqlx::query(
             "INSERT INTO session_launch_claims (
                 token, game_code, owner_pid, owner_started_at,
@@ -3811,6 +3868,13 @@ impl Core {
         Ok(())
     }
 
+    /// Retire an interrupted enable/disable producer only after the user has
+    /// confirmed no original GMM operation is still changing the Mod.
+    pub async fn retire_interrupted_enabled_transition(&self, mod_id: &str) -> Result<()> {
+        self.retire_interrupted_enabled_transition_in_library_mutation(mod_id)
+            .await
+    }
+
     /// Enable or disable a Mod. On enable, a Junction is created at
     /// `<game_mods_dir>/<mod-name>/` pointing at the Mod's Library path
     /// (joined with the active Variant's subpath when one is set).
@@ -3831,6 +3895,17 @@ impl Core {
                 witness.recovery().map(|recovery| (mod_id, recovery))
             })
             .collect();
+        let mut enabled_transition_recoveries: std::collections::HashMap<_, _> = {
+            let mut connection = self.pool.acquire().await?;
+            library_mutation::load_enabled_transition_witnesses(&mut connection)
+                .await?
+                .into_iter()
+                .filter_map(|witness| {
+                    let mod_id = witness.mod_id().to_string();
+                    witness.recovery().map(|recovery| (mod_id, recovery))
+                })
+                .collect()
+        };
         let rows = sqlx::query(
             "SELECT m.id, m.game_code, m.name, m.source, m.library_path, m.enabled,
                     m.gamebanana_id, m.source_url, m.author, m.version, m.screenshot_url
@@ -3851,6 +3926,7 @@ impl Core {
                 let library_path: String = row.try_get("library_path")?;
                 let enabled: i64 = row.try_get("enabled")?;
                 let reinstall_recovery = recoveries.remove(&id);
+                let enabled_transition_recovery = enabled_transition_recoveries.remove(&id);
 
                 Ok(Mod {
                     id,
@@ -3867,6 +3943,7 @@ impl Core {
                     version: row.try_get("version")?,
                     screenshot_url: row.try_get("screenshot_url")?,
                     reinstall_recovery,
+                    enabled_transition_recovery,
                 })
             })
             .collect()

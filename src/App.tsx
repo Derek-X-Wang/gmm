@@ -17,6 +17,7 @@ import {
   partitionLaunchError,
   resetOnboarding,
   retryReinstallRecovery,
+  retireInterruptedEnabledTransition,
   retireInterruptedSessionLaunch,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
@@ -58,6 +59,7 @@ import {
   type GameCode as ApiGameCode,
 } from "./api";
 import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarning";
+import { EnabledTransitionRecoveryWarning } from "./EnabledTransitionRecoveryWarning";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { LibraryAuditWarning } from "./LibraryAuditWarning";
@@ -1189,6 +1191,15 @@ function ModList({ game }: { game: ApiGameCode }) {
     },
   });
 
+  const retireEnabledTransition = useMutation({
+    mutationFn: ({ id }: { id: string; name: string }) =>
+      retireInterruptedEnabledTransition(id),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["mods", game] });
+      queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
+    },
+  });
+
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["mods", game] });
 
   return (
@@ -1225,7 +1236,7 @@ function ModList({ game }: { game: ApiGameCode }) {
         {mods.data?.map((m) => (
           <li
             key={m.id}
-            className={`mods__row${m.reinstallRecovery ? " mods__row--quarantined" : ""}`}
+            className={`mods__row${m.reinstallRecovery || m.enabledTransitionRecovery ? " mods__row--quarantined" : ""}`}
           >
             <div className="mods__main">
               <strong>{m.name}</strong>
@@ -1240,7 +1251,9 @@ function ModList({ game }: { game: ApiGameCode }) {
                   <ModUpdateBadge
                     modId={m.id}
                     game={game}
-                    disabled={m.reinstallRecovery !== null}
+                    disabled={
+                      m.reinstallRecovery !== null || m.enabledTransitionRecovery !== null
+                    }
                   />
                 </>
               ) : null}
@@ -1252,7 +1265,9 @@ function ModList({ game }: { game: ApiGameCode }) {
               <VariantSelector
                 modId={m.id}
                 game={game}
-                disabled={m.reinstallRecovery !== null}
+                disabled={
+                  m.reinstallRecovery !== null || m.enabledTransitionRecovery !== null
+                }
               />
               {m.reinstallRecovery ? (
                 <ReinstallRecoveryWarning
@@ -1263,20 +1278,44 @@ function ModList({ game }: { game: ApiGameCode }) {
                   onRetry={() => retryRecovery.mutate({ id: m.id, name: m.name })}
                 />
               ) : null}
+              {m.enabledTransitionRecovery ? (
+                <EnabledTransitionRecoveryWarning
+                  modName={m.name}
+                  recovery={m.enabledTransitionRecovery}
+                  pending={
+                    retireEnabledTransition.isPending &&
+                    retireEnabledTransition.variables?.id === m.id
+                  }
+                  error={
+                    retireEnabledTransition.isError &&
+                    retireEnabledTransition.variables?.id === m.id
+                      ? commandFailureMessage(retireEnabledTransition.error)
+                      : undefined
+                  }
+                  onRetire={() =>
+                    retireEnabledTransition.mutate({ id: m.id, name: m.name })
+                  }
+                />
+              ) : null}
             </div>
             <label className="toggle">
               <input
                 type="checkbox"
                 checked={m.enabled}
                 disabled={
-                  toggle.isPending || sessionActive || m.reinstallRecovery !== null
+                  toggle.isPending ||
+                  sessionActive ||
+                  m.reinstallRecovery !== null ||
+                  m.enabledTransitionRecovery !== null
                 }
                 onChange={(e) =>
                   toggle.mutate({ id: m.id, enabled: e.currentTarget.checked })
                 }
               />
               <span>
-                {m.reinstallRecovery
+                {m.enabledTransitionRecovery
+                  ? "Unavailable · deployment recovery pending"
+                  : m.reinstallRecovery
                   ? m.reinstallRecovery.junctionWithdrawn
                     ? "Unavailable"
                     : "Unavailable · may still be loading"

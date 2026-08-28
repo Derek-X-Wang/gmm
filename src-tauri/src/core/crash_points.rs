@@ -12,8 +12,9 @@
 //!
 //! `tests/session.rs` covers crash recovery for a Game Session because a
 //! Game Session has an obvious external witness: a PID that is or is not
-//! alive. Ordinary mutations have no such witness, so testing them needs
-//! a way to stop the process at a chosen instant.
+//! alive. Durable mutations either carry their own witness or rely on
+//! startup reconciliation, and testing both shapes needs a way to stop the
+//! process at a chosen instant.
 //!
 //! # The shape of the seam
 //!
@@ -82,11 +83,22 @@ pub const AUDIT_AFTER_OWNERSHIP_SNAPSHOT: &str = "audit.after_ownership_snapshot
 pub const RECONCILE_AFTER_QUARANTINE_SNAPSHOT: &str =
     "reconcile.after_quarantine_snapshot";
 
+/// `reconcile_junctions`: the pass has cached every Mod row, including each
+/// enabled flag, but has not inspected or mutated a Junction yet. Tests pause
+/// here so an enable transition can complete its filesystem half after the
+/// stale disabled decision was captured.
+pub const RECONCILE_AFTER_MOD_SNAPSHOT: &str = "reconcile.after_mod_snapshot";
+
 /// `rebuild_junctions`: the same barrier for the rebuild pass. It carries its
 /// own name so a paused barrier identifies which operation reached it; the two
 /// passes share a guard but must remain independently provable.
 pub const REBUILD_AFTER_QUARANTINE_SNAPSHOT: &str =
     "rebuild.after_quarantine_snapshot";
+
+/// `rebuild_junctions`: the pass has cached every Mod row but has not begun
+/// target preflight or Junction withdrawal. This is the rebuild-specific
+/// stale-enabled-state barrier.
+pub const REBUILD_AFTER_MOD_SNAPSHOT: &str = "rebuild.after_mod_snapshot";
 
 /// Startup has committed every recoverable reinstall rollback, while ordinary
 /// intent-backed delete-quarantine cleanup has not started yet.
@@ -101,6 +113,11 @@ pub const STAGING_AFTER_WITNESS_COMMIT: &str = "staging.after_witness_commit";
 /// writer fence is already held, so recovery cannot quarantine this Mod before
 /// the deployment-state transition commits.
 pub const SET_ENABLED_AFTER_REINSTALL_GUARD: &str = "set_enabled.after_reinstall_guard";
+
+/// `set_enabled`: the durable requested transition committed before the first
+/// Junction mutation. A process death from here onward leaves startup a
+/// durable instruction for completing the flag/Junction pair.
+pub const SET_ENABLED_AFTER_WITNESS_COMMIT: &str = "set_enabled.after_witness_commit";
 
 /// `set_enabled(true)`: the Junction now exists, the row still says
 /// disabled. Recoverable — see the Junction, believe the row, remove it.
