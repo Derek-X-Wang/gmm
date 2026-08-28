@@ -686,6 +686,10 @@ pub fn write_backup_provenance(backup_dir: &Path, provenance: &BackupProvenance)
 /// unreadable one alike. All of them mean the same thing to the caller —
 /// GMM cannot say what these files were — and the caller's response is
 /// to record unknown rather than to guess.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "backup provenance is optional metadata; every read failure deliberately produces the explicit unknown-origin state"
+)]
 pub fn read_backup_provenance(backup_dir: &Path) -> Option<BackupProvenance> {
     let path = provenance_path(backup_dir);
     let raw = fs::read_to_string(&path).ok()?;

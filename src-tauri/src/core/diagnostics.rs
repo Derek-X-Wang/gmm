@@ -94,6 +94,10 @@ pub fn install_subscriber(log_dir: &Path) -> Result<WorkerGuard> {
 
 /// Remove log files matching `gmm-*.log` whose modified time is older
 /// than `max_age_days`. Returns the number of files removed.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "log pruning is an intentional best-effort maintenance probe; failures skip an entry and the count includes only confirmed removals"
+)]
 pub fn prune_old_logs(log_dir: &Path, max_age_days: i64) -> Result<u32> {
     let cutoff = SystemTime::now()
         .checked_sub(Duration::from_secs((max_age_days.max(0) as u64) * 86_400))

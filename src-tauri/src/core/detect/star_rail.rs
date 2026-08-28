@@ -37,7 +37,10 @@ pub const DATA_DIR_NAME: &str = "StarRail_Data";
 /// `true` iff `path` is a directory containing the executable AND the
 /// matching Unity data directory.
 // Detection is a best-effort optional-install probe; an I/O error means this candidate is unusable.
-#[allow(clippy::disallowed_methods)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "optional-install detection intentionally treats an unreadable candidate as unusable"
+)]
 pub fn validate(path: &Path) -> bool {
     if !path.is_dir() {
         return false;

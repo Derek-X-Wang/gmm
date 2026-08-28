@@ -134,6 +134,10 @@ impl LibraryOwnershipSnapshot {
     /// a non-empty or uninspectable directory remains user-visible. Keeping
     /// that distinction here prevents audit, Reveal, Recover, and Delete from
     /// independently redefining what “unreferenced” means.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a failed emptiness probe takes the conservative unreferenced path; only a successful empty read_dir becomes ignorable"
+    )]
     pub(super) fn disposition_of(
         &self,
         directory: &IdentifiedDirectory,

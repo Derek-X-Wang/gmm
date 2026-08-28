@@ -486,7 +486,7 @@ impl Core {
             library_mutation::load_reinstall_swap_witnesses(&mut fence.transaction).await?;
         for witness in active_reinstalls {
             let witness = self.rebase_reinstall_swap_witness(witness, fence).await?;
-            if path_within(witness.library_path(), previous) {
+            if filesystem::path_within(witness.library_path(), previous)? {
                 return Err(Error::LibraryRelocationBlockedByReinstall {
                     mod_id: witness.mod_id().to_string(),
                 });
@@ -495,11 +495,10 @@ impl Core {
         let active_staging =
             library_mutation::load_staged_library_operation_witnesses(&mut fence.transaction)
                 .await?;
-        if active_staging
-            .iter()
-            .any(|witness| witness.is_active() && path_within(witness.staged_path(), previous))
-        {
-            return Err(Error::LibraryRelocationBlockedByStaging);
+        for witness in active_staging.iter().filter(|witness| witness.is_active()) {
+            if filesystem::path_within(witness.staged_path(), previous)? {
+                return Err(Error::LibraryRelocationBlockedByStaging);
+            }
         }
 
         // Snapshot mods that need their library_path rewritten. For the
@@ -4019,6 +4018,10 @@ fn link_exists(path: &Path) -> Result<bool> {
 
 /// Resolve the target of a junction/symlink. Returns `None` if `path`
 /// is not a link or the OS refuses to read it.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "every read_link failure means the entry is not a proven GMM Junction; all callers refuse link mutation unless this returns Some"
+)]
 fn resolve_link(path: &Path) -> Option<PathBuf> {
     std::fs::read_link(path).ok()
 }
@@ -4026,6 +4029,10 @@ fn resolve_link(path: &Path) -> Option<PathBuf> {
 /// Path equality that is tolerant of trailing separators and
 /// case-insensitivity quirks on Windows. We canonicalise both sides;
 /// on failure we fall back to a literal compare.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "canonicalization only recognizes aliases; literal equality remains positive path evidence, while a mismatch makes every caller refuse or preserve bytes"
+)]
 fn same_path(a: &Path, b: &Path) -> bool {
     let canon_a = std::fs::canonicalize(a).ok();
     let canon_b = std::fs::canonicalize(b).ok();
@@ -4047,6 +4054,10 @@ fn same_path(a: &Path, b: &Path) -> bool {
 ///
 /// Falls back to a literal comparison when either side cannot be
 /// canonicalised (typically because it no longer exists).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "remaining callers only mutate after canonical or component-wise lexical containment is positively proved; a false result refuses or preserves bytes"
+)]
 fn path_within(path: &Path, ancestor: &Path) -> bool {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(path).starts_with(canon(ancestor))
