@@ -384,6 +384,256 @@ async fn enable_crashing_after_the_junction_is_created_recovers() {
     assert_rows_match_disk(&core, &env, "enable crashed after junction create").await;
 }
 
+/// The durable transition names the exact Library object that was selected,
+/// not merely the pathname it occupied when the witness committed. Replacing
+/// that directory at the same spelling before startup must leave the witness
+/// unresolved and the impostor undeployed. The displaced original remains
+/// owned by the witness so the Library audit cannot offer it for deletion.
+///
+/// Mutation oracle: comparing only the recorded/current target path makes
+/// startup create the Junction and fires the named impostor-deployment
+/// assertion.
+#[tokio::test]
+async fn enabled_transition_recovery_refuses_replaced_target_identity() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+    let m = seed_mod(&env, &core, "Replaced Enable Target").await;
+    drop(core);
+
+    env.crash_during(
+        crash_points::SET_ENABLED_AFTER_WITNESS_COMMIT,
+        &[
+            "set-enabled",
+            "--mod-id",
+            &m.id,
+            "--enabled",
+            "1",
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ],
+    );
+
+    let original = m.library_path.with_file_name("held-original-enable-target");
+    std::fs::rename(&m.library_path, &original).expect("move witnessed target aside");
+    std::fs::create_dir(&m.library_path).expect("create replacement at recorded pathname");
+    std::fs::write(
+        m.library_path.join("impostor.ini"),
+        b"not the witnessed Mod",
+    )
+    .expect("write replacement marker");
+
+    let recovered = env.restart().await;
+    assert!(
+        !env.link("Replaced Enable Target").join("impostor.ini").is_file(),
+        "startup deployed a replacement directory whose pathname matched but filesystem identity did not",
+    );
+    let listed = recovered
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list Mod with refused recovery");
+    let recovery = listed[0]
+        .enabled_transition_recovery
+        .as_ref()
+        .expect("the refused target replacement must remain a visible transition");
+    assert!(
+        recovery.reason.contains("filesystem identity"),
+        "the refusal must explain the target identity mismatch: {recovery:?}",
+    );
+
+    let audit = recovered
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit while the identity-bound witness remains pending");
+    assert!(
+        audit.unreferenced.iter().all(|entry| entry.path != original),
+        "the displaced witnessed directory must remain owned and unavailable for deletion: {audit:?}",
+    );
+    assert!(
+        audit
+            .unreferenced
+            .iter()
+            .any(|entry| entry.path == m.library_path),
+        "the replacement at the Mod pathname must not inherit the witness's ownership: {audit:?}",
+    );
+}
+
+/// A Variant target can be replaced while the Mod root itself keeps the same
+/// identity. Recovery must therefore validate the selected effective target,
+/// not rely on the broader Mod-root identity check.
+///
+/// Mutation oracle: removing only the Junction-target identity comparison
+/// deploys the replacement Variant and fires the named assertion.
+#[tokio::test]
+async fn enabled_transition_recovery_refuses_replaced_variant_target_identity() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+    let source = env.tmp.path().join("variant-target-fixture");
+    for variant in ["Red", "Blue"] {
+        let directory = source.join(variant);
+        std::fs::create_dir_all(&directory).expect("create Variant fixture");
+        std::fs::write(directory.join("merged.ini"), format!("; {variant}\n"))
+            .expect("write Variant fixture");
+    }
+    let m = core
+        .adopt_folder(GameCode::Gimi, &source, "Replaced Variant Target")
+        .await
+        .expect("adopt Variant Mod");
+    let active_id = core
+        .active_variant_id(&m.id)
+        .await
+        .expect("read active Variant")
+        .expect("Variant Mod has an active selection");
+    let active = core
+        .list_variants(&m.id)
+        .await
+        .expect("list Variants")
+        .into_iter()
+        .find(|variant| variant.id == active_id)
+        .expect("find active Variant");
+    let target = m.library_path.join(&active.subpath);
+    drop(core);
+
+    env.crash_during(
+        crash_points::SET_ENABLED_AFTER_WITNESS_COMMIT,
+        &[
+            "set-enabled",
+            "--mod-id",
+            &m.id,
+            "--enabled",
+            "1",
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ],
+    );
+
+    let held = m.library_path.join("held-original-variant-target");
+    std::fs::rename(&target, &held).expect("move witnessed Variant target aside");
+    std::fs::create_dir(&target).expect("create replacement Variant at recorded pathname");
+    std::fs::write(target.join("impostor.ini"), b"not the witnessed Variant")
+        .expect("write replacement Variant marker");
+
+    let recovered = env.restart().await;
+    assert!(
+        !env.link("Replaced Variant Target").join("impostor.ini").is_file(),
+        "startup deployed a replacement Variant whose pathname matched but filesystem identity did not",
+    );
+    let listed = recovered
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list Mod with refused Variant recovery");
+    let recovery = listed[0]
+        .enabled_transition_recovery
+        .as_ref()
+        .expect("the refused Variant replacement must remain a visible transition");
+    assert!(
+        recovery
+            .reason
+            .contains("Junction target changed filesystem identity"),
+        "the refusal must name the effective target identity mismatch: {recovery:?}",
+    );
+}
+
+/// The effective Variant directory can keep its identity even when the Mod
+/// root around it is replaced. Recovery must still refuse the replacement
+/// root, and the shared ownership snapshot must keep the displaced original
+/// root out of the unreferenced/deletion surface.
+///
+/// Mutation oracle: removing the Mod-root identity comparison makes startup
+/// commit the replacement root and fires the named visible-transition
+/// assertion. Removing the witness identity from `LibraryOwnershipSnapshot`
+/// fires the displaced-root ownership assertion instead.
+#[tokio::test]
+async fn enabled_transition_recovery_binds_and_owns_the_original_mod_root() {
+    let env = TestEnv::new();
+    let core = env.restart().await;
+    let source = env.tmp.path().join("mod-root-identity-fixture");
+    for variant in ["Red", "Blue"] {
+        let directory = source.join(variant);
+        std::fs::create_dir_all(&directory).expect("create Mod-root fixture Variant");
+        std::fs::write(directory.join("merged.ini"), format!("; {variant}\n"))
+            .expect("write Mod-root fixture Variant");
+    }
+    let m = core
+        .adopt_folder(GameCode::Gimi, &source, "Replaced Mod Root")
+        .await
+        .expect("adopt Mod-root fixture");
+    let active_id = core
+        .active_variant_id(&m.id)
+        .await
+        .expect("read active Variant")
+        .expect("Variant Mod has an active selection");
+    let active = core
+        .list_variants(&m.id)
+        .await
+        .expect("list Mod-root fixture Variants")
+        .into_iter()
+        .find(|variant| variant.id == active_id)
+        .expect("find Mod-root fixture active Variant");
+    drop(core);
+
+    env.crash_during(
+        crash_points::SET_ENABLED_AFTER_WITNESS_COMMIT,
+        &[
+            "set-enabled",
+            "--mod-id",
+            &m.id,
+            "--enabled",
+            "1",
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ],
+    );
+
+    let original_root = m.library_path.with_file_name("held-original-mod-root");
+    std::fs::rename(&m.library_path, &original_root).expect("move witnessed Mod root aside");
+    std::fs::create_dir(&m.library_path).expect("create replacement Mod root");
+    std::fs::rename(
+        original_root.join(&active.subpath),
+        m.library_path.join(&active.subpath),
+    )
+    .expect("preserve the witnessed effective target inside the replacement root");
+    std::fs::write(
+        m.library_path.join("replacement-root-marker"),
+        b"replacement root",
+    )
+    .expect("write replacement-root marker");
+
+    let recovered = env.restart().await;
+    let listed = recovered
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list Mod with replaced root");
+    let recovery = listed[0]
+        .enabled_transition_recovery
+        .as_ref()
+        .expect("a replacement Mod root must leave the transition unresolved");
+    assert!(
+        recovery
+            .reason
+            .contains("Mod Library changed filesystem identity"),
+        "the refusal must name the Mod-root identity mismatch: {recovery:?}",
+    );
+
+    let audit = recovered
+        .audit_library(GameCode::Gimi)
+        .await
+        .expect("audit while the original Mod root is witness-owned");
+    assert!(
+        audit
+            .unreferenced
+            .iter()
+            .all(|entry| entry.path != original_root),
+        "the displaced original Mod root must remain owned by the transition witness: {audit:?}",
+    );
+    assert!(
+        audit
+            .unreferenced
+            .iter()
+            .any(|entry| entry.path == m.library_path),
+        "the replacement Mod root must not inherit ownership from the pending Mod row: {audit:?}",
+    );
+}
+
 /// Crash after the Junction is removed, before the row is written.
 ///
 /// On restart the row says enabled and there is no Junction — the

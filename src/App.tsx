@@ -17,6 +17,7 @@ import {
   partitionLaunchError,
   resetOnboarding,
   retryReinstallRecovery,
+  retireInterruptedEnabledTransition,
   retireInterruptedSessionLaunch,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
@@ -1190,6 +1191,15 @@ function ModList({ game }: { game: ApiGameCode }) {
     },
   });
 
+  const retireEnabledTransition = useMutation({
+    mutationFn: ({ id }: { id: string; name: string }) =>
+      retireInterruptedEnabledTransition(id),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["mods", game] });
+      queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
+    },
+  });
+
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["mods", game] });
 
   return (
@@ -1272,6 +1282,19 @@ function ModList({ game }: { game: ApiGameCode }) {
                 <EnabledTransitionRecoveryWarning
                   modName={m.name}
                   recovery={m.enabledTransitionRecovery}
+                  pending={
+                    retireEnabledTransition.isPending &&
+                    retireEnabledTransition.variables?.id === m.id
+                  }
+                  error={
+                    retireEnabledTransition.isError &&
+                    retireEnabledTransition.variables?.id === m.id
+                      ? commandFailureMessage(retireEnabledTransition.error)
+                      : undefined
+                  }
+                  onRetire={() =>
+                    retireEnabledTransition.mutate({ id: m.id, name: m.name })
+                  }
                 />
               ) : null}
             </div>

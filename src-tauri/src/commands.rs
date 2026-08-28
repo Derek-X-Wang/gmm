@@ -66,6 +66,16 @@ pub async fn retry_reinstall_recovery(
 }
 
 #[tauri::command]
+pub async fn retire_interrupted_enabled_transition(
+    core: State<'_, Core>,
+    mod_id: String,
+) -> CommandResult<()> {
+    core.retire_interrupted_enabled_transition(&mod_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub async fn adopt_folder(core: State<'_, Core>, args: AdoptArgs) -> CommandResult<Mod> {
     core.adopt_folder(args.game, &args.source_path, &args.name)
         .await

@@ -27,6 +27,7 @@ export interface EnabledTransitionRecovery {
   attemptedAt: string;
   attempts: number;
   junctionPath: string;
+  ownerUncertain: boolean;
 }
 
 export type ReinstallRecoveryOutcome =
@@ -91,6 +92,10 @@ export async function retryReinstallRecovery(
   modId: string,
 ): Promise<ReinstallRecoveryOutcome> {
   return invoke<ReinstallRecoveryOutcome>("retry_reinstall_recovery", { modId });
+}
+
+export async function retireInterruptedEnabledTransition(modId: string): Promise<void> {
+  return invoke<void>("retire_interrupted_enabled_transition", { modId });
 }
 
 export async function adoptFolder(

@@ -612,11 +612,14 @@ async fn enabled_transition_migration_enforces_the_durable_recovery_contract() {
         "INSERT INTO enabled_transitions (
             mod_id, game_code, intended_enabled, junction_path,
             junction_target, junction_parent_identity, junction_identity, owner_pid,
-            owner_started_at, owner_active, created_at
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
          ) VALUES (?, 'gimi', 1, 'C:\\Games\\Genshin\\Mods\\Raiden',
                    'D:\\gmm-library\\gimi\\01JCORPUS0000000000000002',
                    '0000000000000001:0000000000000002', NULL,
-                   42, 1, 1, '2026-08-28T00:00:00Z')",
+                   42, 1, 1, '2026-08-28T00:00:00Z',
+                   '0000000000000001:0000000000000004',
+                   '0000000000000001:0000000000000005')",
     )
     .bind(SEED_MODS[1].id)
     .execute(&pool)
@@ -626,12 +629,15 @@ async fn enabled_transition_migration_enforces_the_durable_recovery_contract() {
         "INSERT INTO enabled_transitions (
             mod_id, game_code, intended_enabled, junction_path,
             junction_target, junction_parent_identity, junction_identity, owner_pid,
-            owner_started_at, owner_active, created_at
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
          ) VALUES (?, 'gimi', 0, 'C:\\Games\\Genshin\\Mods\\Other',
                    'D:\\gmm-library\\gimi\\01JCORPUS0000000000000002',
                    '0000000000000001:0000000000000002',
                    '0000000000000001:0000000000000003',
-                   42, 1, 1, '2026-08-28T00:00:01Z')",
+                   42, 1, 1, '2026-08-28T00:00:01Z',
+                   '0000000000000001:0000000000000004',
+                   '0000000000000001:0000000000000005')",
     )
     .bind(SEED_MODS[1].id)
     .execute(&pool)
@@ -644,11 +650,14 @@ async fn enabled_transition_migration_enforces_the_durable_recovery_contract() {
         "INSERT INTO enabled_transitions (
             mod_id, game_code, intended_enabled, junction_path,
             junction_target, junction_parent_identity, junction_identity, owner_pid,
-            owner_started_at, owner_active, created_at
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
          ) VALUES (?, 'gimi', 2, 'C:\\Games\\Genshin\\Mods\\Invalid',
                    'D:\\gmm-library\\gimi\\01JCORPUS0000000000000001',
                    '0000000000000001:0000000000000002', NULL,
-                   42, 1, 1, '2026-08-28T00:00:02Z')",
+                   42, 1, 1, '2026-08-28T00:00:02Z',
+                   '0000000000000001:0000000000000004',
+                   '0000000000000001:0000000000000005')",
     )
     .bind(SEED_MODS[0].id)
     .execute(&pool)

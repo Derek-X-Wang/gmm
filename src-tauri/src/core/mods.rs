@@ -39,6 +39,8 @@ pub struct EnabledTransitionRecovery {
     pub attempted_at: String,
     pub attempts: u32,
     pub junction_path: PathBuf,
+    /// True when the numeric PID is live but its start identity is unknown.
+    pub owner_uncertain: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

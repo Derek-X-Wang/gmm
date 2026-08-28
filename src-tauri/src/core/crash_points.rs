@@ -83,11 +83,22 @@ pub const AUDIT_AFTER_OWNERSHIP_SNAPSHOT: &str = "audit.after_ownership_snapshot
 pub const RECONCILE_AFTER_QUARANTINE_SNAPSHOT: &str =
     "reconcile.after_quarantine_snapshot";
 
+/// `reconcile_junctions`: the pass has cached every Mod row, including each
+/// enabled flag, but has not inspected or mutated a Junction yet. Tests pause
+/// here so an enable transition can complete its filesystem half after the
+/// stale disabled decision was captured.
+pub const RECONCILE_AFTER_MOD_SNAPSHOT: &str = "reconcile.after_mod_snapshot";
+
 /// `rebuild_junctions`: the same barrier for the rebuild pass. It carries its
 /// own name so a paused barrier identifies which operation reached it; the two
 /// passes share a guard but must remain independently provable.
 pub const REBUILD_AFTER_QUARANTINE_SNAPSHOT: &str =
     "rebuild.after_quarantine_snapshot";
+
+/// `rebuild_junctions`: the pass has cached every Mod row but has not begun
+/// target preflight or Junction withdrawal. This is the rebuild-specific
+/// stale-enabled-state barrier.
+pub const REBUILD_AFTER_MOD_SNAPSHOT: &str = "rebuild.after_mod_snapshot";
 
 /// Startup has committed every recoverable reinstall rollback, while ordinary
 /// intent-backed delete-quarantine cleanup has not started yet.

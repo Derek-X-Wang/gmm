@@ -2684,6 +2684,103 @@ async fn rebuild_cannot_redeploy_mod_quarantined_after_snapshot() {
     );
 }
 
+async fn assert_enable_survives_stale_disabled_pass(
+    operation: &str,
+    snapshot_pause: &'static str,
+    display_name: &str,
+) {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, display_name).await;
+    let deployment = env.game_mods.join(display_name);
+
+    let mut stale_pass = probe(&env)
+        .ready_before_operation()
+        .pausing_at(snapshot_pause)
+        .op([
+            operation,
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ])
+        .spawn();
+    stale_pass.wait_until_ready_before_operation();
+    stale_pass.resume();
+    stale_pass.wait_for_pause(snapshot_pause);
+
+    let junction_pause = gmm_lib::core::crash_points::SET_ENABLED_AFTER_JUNCTION_CREATE;
+    let mut enabling = probe(&env)
+        .pausing_at(junction_pause)
+        .op([
+            "set-enabled",
+            "--mod-id",
+            &imported.id,
+            "--enabled",
+            "1",
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ])
+        .spawn();
+    enabling.wait_for_pause(junction_pause);
+    assert!(
+        deployment.join("merged.ini").is_file(),
+        "set_enabled must create the Junction before the stale pass resumes",
+    );
+
+    enabling.resume();
+    enabling
+        .wait_for_outcome()
+        .expect_ok("enable after the stale row snapshot");
+    stale_pass.resume();
+    stale_pass
+        .wait_for_outcome()
+        .expect_ok(&format!("stale {operation} pass"));
+
+    let enabled = core
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list Mods after race")
+        .into_iter()
+        .find(|candidate| candidate.id == imported.id)
+        .expect("raced Mod")
+        .enabled;
+    assert!(enabled, "the raced Mod must commit enabled");
+    assert!(
+        deployment.join("merged.ini").is_file(),
+        "the enabled Mod must remain actually deployed after stale {operation}",
+    );
+}
+
+/// Reconcile caches `enabled = 0`, then `set_enabled(true)` creates the
+/// Junction under its second writer fence. The stale pass must reacquire the
+/// fence and revalidate before removing that newly-created deployment entry.
+///
+/// Mutation oracle: replacing the guarded disabled-Junction removal with a
+/// direct `junction::remove` fires the named final-deployment assertion.
+#[tokio::test]
+async fn enabled_mod_remains_deployed_after_stale_reconcile() {
+    assert_enable_survives_stale_disabled_pass(
+        "reconcile",
+        gmm_lib::core::crash_points::RECONCILE_AFTER_MOD_SNAPSHOT,
+        "Reconcile Enable Transition Race",
+    )
+    .await;
+}
+
+/// Rebuild has the same stale disabled-row window as reconcile and must use
+/// the same bounded post-traversal fence discipline.
+///
+/// Mutation oracle: replacing rebuild's guarded disabled-Junction removal
+/// with a direct `junction::remove` fires the named final-deployment assertion.
+#[tokio::test]
+async fn enabled_mod_remains_deployed_after_stale_rebuild() {
+    assert_enable_survives_stale_disabled_pass(
+        "rebuild",
+        gmm_lib::core::crash_points::REBUILD_AFTER_MOD_SNAPSHOT,
+        "Rebuild Enable Transition Race",
+    )
+    .await;
+}
+
 /// Reconcile is a recovery path, not only a reporting path: a prior failed or
 /// interrupted withdrawal must be retried before the quarantined Mod is
 /// returned to the caller.
@@ -5374,6 +5471,44 @@ async fn enable_excludes_relocation_until_junction_and_flag_agree() {
         "Fenced Enable",
     )
     .await;
+}
+
+/// The manual escape hatch is only for an owner whose identity GMM cannot
+/// establish. It must not cancel a transition still owned by the exact live
+/// producer process.
+///
+/// Mutation oracle: removing the live-owner refusal makes the retirement call
+/// succeed and fires the named safety assertion.
+#[tokio::test]
+async fn retire_refuses_transition_still_owned_by_original_process() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let m = env.seed_mod(&core, "Live Transition Owner").await;
+    let pause = gmm_lib::core::crash_points::SET_ENABLED_AFTER_WITNESS_COMMIT;
+    let mut enabling = probe(&env)
+        .pausing_at(pause)
+        .op([
+            "set-enabled",
+            "--mod-id",
+            &m.id,
+            "--enabled",
+            "1",
+            "--mods-dir",
+            &env.game_mods.display().to_string(),
+        ])
+        .spawn();
+    enabling.wait_for_pause(pause);
+
+    let retirement = core.retire_interrupted_enabled_transition(&m.id).await;
+    assert!(
+        matches!(retirement, Err(Error::EnabledTransitionStillOwned)),
+        "the recovery action must not cancel a transition still owned by its original process: {retirement:?}",
+    );
+
+    enabling.resume();
+    enabling
+        .wait_for_outcome()
+        .expect_ok("live owner after refused retirement");
 }
 
 /// Two processes enable the same Mod at the same instant.

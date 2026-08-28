@@ -435,6 +435,9 @@ pub enum Error {
     #[error("the launch reservation is still owned by the GMM process that created it")]
     SessionLaunchStillOwned,
 
+    #[error("the enable/disable transition is still owned by the GMM process that created it")]
+    EnabledTransitionStillOwned,
+
     #[error("the durable game-launch claim was lost before the session became active")]
     SessionLaunchClaimLost,
 }

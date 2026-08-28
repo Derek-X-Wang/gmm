@@ -272,14 +272,18 @@ async fn partial_junction_remove_is_completed_before_the_flag_changes() {
         "INSERT INTO enabled_transitions (
             mod_id, game_code, intended_enabled, junction_path,
             junction_target, junction_parent_identity, junction_identity, owner_pid,
-            owner_started_at, owner_active, created_at
-         ) VALUES (?, 'gimi', 0, ?, ?, ?, ?, 0, NULL, 0, '2026-08-28T00:00:00Z')",
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
+         ) VALUES (?, 'gimi', 0, ?, ?, ?, ?, 0, NULL, 0,
+                   '2026-08-28T00:00:00Z', ?, ?)",
     )
     .bind(&imported.id)
     .bind(deployment.to_string_lossy().as_ref())
     .bind(target.to_string_lossy().as_ref())
     .bind(durable_directory_key(&env.game_mods))
     .bind(durable_directory_key(&deployment))
+    .bind(durable_directory_key(&target))
+    .bind(durable_directory_key(&imported.library_path))
     .execute(&pool)
     .await
     .expect("inject the durable disable witness that preceded the partial removal");
@@ -312,8 +316,10 @@ async fn audit_and_mutation_guard_share_enabled_transition_validation() {
         "INSERT INTO enabled_transitions (
             mod_id, game_code, intended_enabled, junction_path,
             junction_target, junction_parent_identity, junction_identity, owner_pid,
-            owner_started_at, owner_active, created_at
-         ) VALUES (?, 'gimi', 1, ?, ?, ?, NULL, 0, NULL, 0, 'not-a-timestamp')",
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
+         ) VALUES (?, 'gimi', 1, ?, ?, ?, NULL, 0, NULL, 0,
+                   'not-a-timestamp', ?, ?)",
     )
     .bind(&imported.id)
     .bind(
@@ -323,6 +329,8 @@ async fn audit_and_mutation_guard_share_enabled_transition_validation() {
     )
     .bind(imported.library_path.to_string_lossy().as_ref())
     .bind(durable_directory_key(&env.game_mods))
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&imported.library_path))
     .execute(&pool)
     .await
     .expect("insert malformed transition witness");
@@ -383,5 +391,74 @@ async fn unresolved_transition_records_the_error_on_the_affected_mod() {
     assert_eq!(
         recovery.junction_path,
         env.deployment("Recorded Recovery Failure")
+    );
+}
+
+/// A pre-identity witness whose numeric owner PID has been reused remains
+/// conservatively live at startup. The user-confirmed retirement path is the
+/// only safe way to release that uncertainty and complete the transition.
+///
+/// Mutation oracle: removing the retirement update leaves the named durable
+/// witness-count assertion red.
+#[tokio::test]
+async fn unknown_reused_owner_can_be_confirmed_retired_and_recovered() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Unknown Reused Owner").await;
+    let deployment = env.deployment("Unknown Reused Owner");
+    let pool = env.pool().await;
+    sqlx::query(
+        "INSERT INTO enabled_transitions (
+            mod_id, game_code, intended_enabled, junction_path,
+            junction_target, junction_parent_identity, junction_identity, owner_pid,
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
+         ) VALUES (?, 'gimi', 1, ?, ?, ?, NULL, ?, NULL, 1,
+                   '2026-08-28T00:00:00Z', ?, ?)",
+    )
+    .bind(&imported.id)
+    .bind(deployment.to_string_lossy().as_ref())
+    .bind(imported.library_path.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&env.game_mods))
+    .bind(std::process::id() as i64)
+    .bind(durable_directory_key(&imported.library_path))
+    .bind(durable_directory_key(&imported.library_path))
+    .execute(&pool)
+    .await
+    .expect("insert transition whose old owner PID has been reused");
+    pool.close().await;
+    drop(core);
+
+    let restarted = env.core().await;
+    let listed = restarted
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list Mods");
+    let recovery = listed[0]
+        .enabled_transition_recovery
+        .as_ref()
+        .expect("unknown owner identity must be surfaced for confirmation");
+    assert!(
+        recovery.owner_uncertain,
+        "the UI contract must distinguish producer uncertainty from a filesystem recovery error",
+    );
+    restarted
+        .retire_interrupted_enabled_transition(&imported.id)
+        .await
+        .expect("retire after the user confirms no original transition is running");
+    assert_flag_and_junction_agree(
+        &restarted,
+        &env,
+        &imported.id,
+        "Unknown Reused Owner",
+        true,
+        "user-confirmed retirement of an unknown reused owner",
+    )
+    .await;
+    let pool = env.pool().await;
+    assert_eq!(
+        enabled_transition_witness_count(&pool).await,
+        0,
+        "confirmed retirement must release and resolve the durable transition witness",
     );
 }

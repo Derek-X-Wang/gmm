@@ -180,6 +180,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_mods,
             commands::retry_reinstall_recovery,
+            commands::retire_interrupted_enabled_transition,
             commands::adopt_folder,
             commands::import_zip,
             commands::set_mod_enabled,

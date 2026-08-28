@@ -170,6 +170,8 @@ pub(super) struct EnabledTransitionWitness {
     intended_enabled: bool,
     junction_path: PathBuf,
     junction_target: Option<PathBuf>,
+    junction_target_identity: DirectoryIdentity,
+    library_identity: DirectoryIdentity,
     junction_parent_identity: DirectoryIdentity,
     junction_identity: Option<DirectoryIdentity>,
     owner_pid: u32,
@@ -179,6 +181,13 @@ pub(super) struct EnabledTransitionWitness {
     recovery_error: Option<String>,
     recovery_attempted_at: Option<String>,
     recovery_attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReconciledJunctionMutation {
+    Applied,
+    Quarantined,
+    Stale,
 }
 
 /// Declare every durable witness table once, deriving each raw row decoder,
@@ -299,6 +308,8 @@ define_unvalidated_witness_tables! {
         recovery_error: Option<String>,
         recovery_attempted_at: Option<String>,
         recovery_attempts: i64,
+        junction_target_identity: Option<String>,
+        library_identity: Option<String>,
     }
 }
 
@@ -611,6 +622,8 @@ impl UnvalidatedEnabledTransitionWitness {
             recovery_error,
             recovery_attempted_at,
             recovery_attempts,
+            junction_target_identity,
+            library_identity,
         } = self;
         let corrupt = |reason| Error::EnabledTransitionWitnessCorrupt {
             mod_id: mod_id.clone(),
@@ -641,6 +654,16 @@ impl UnvalidatedEnabledTransitionWitness {
         let junction_target = junction_target
             .map(PathBuf::from)
             .ok_or_else(|| corrupt("the recorded Junction target is missing".to_string()))?;
+        let junction_target_identity = junction_target_identity
+            .and_then(|identity| DirectoryIdentity::from_durable_key(&identity))
+            .ok_or_else(|| {
+                corrupt("the Junction-target identity is missing or not canonical".to_string())
+            })?;
+        let library_identity = library_identity
+            .and_then(|identity| DirectoryIdentity::from_durable_key(&identity))
+            .ok_or_else(|| {
+                corrupt("the Mod Library identity is missing or not canonical".to_string())
+            })?;
         let junction_parent_identity =
             DirectoryIdentity::from_durable_key(&junction_parent_identity).ok_or_else(|| {
                 corrupt(format!(
@@ -705,6 +728,8 @@ impl UnvalidatedEnabledTransitionWitness {
             intended_enabled,
             junction_path,
             junction_target: Some(junction_target),
+            junction_target_identity,
+            library_identity,
             junction_parent_identity,
             junction_identity,
             owner_pid,
@@ -739,6 +764,14 @@ impl EnabledTransitionWitness {
         self.junction_target.as_deref()
     }
 
+    fn junction_target_identity(&self) -> &DirectoryIdentity {
+        &self.junction_target_identity
+    }
+
+    pub(super) fn library_identity(&self) -> &DirectoryIdentity {
+        &self.library_identity
+    }
+
     fn junction_parent_identity(&self) -> &DirectoryIdentity {
         &self.junction_parent_identity
     }
@@ -754,10 +787,14 @@ impl EnabledTransitionWitness {
     fn owner_is_live(&self) -> bool {
         self.owner_active
             && matches!(
-                super::session::process_identity_state(self.owner_pid, self.owner_started_at),
+                self.owner_identity_state(),
                 super::session::ProcessIdentityState::Matches
                     | super::session::ProcessIdentityState::Unknown
             )
+    }
+
+    fn owner_identity_state(&self) -> super::session::ProcessIdentityState {
+        super::session::process_identity_state(self.owner_pid, self.owner_started_at)
     }
 
     fn corrupt<T>(&self, reason: impl Into<String>) -> Result<T> {
@@ -768,18 +805,29 @@ impl EnabledTransitionWitness {
     }
 
     pub(super) fn recovery(&self) -> Option<EnabledTransitionRecovery> {
-        self.recovery_error
-            .as_ref()
-            .map(|reason| EnabledTransitionRecovery {
-                intended_enabled: self.intended_enabled,
-                reason: reason.clone(),
-                attempted_at: self
-                    .recovery_attempted_at
-                    .clone()
-                    .expect("validated recovery errors have an attempt timestamp"),
-                attempts: self.recovery_attempts,
-                junction_path: self.junction_path.clone(),
-            })
+        let owner_uncertain = self.owner_active
+            && matches!(
+                self.owner_identity_state(),
+                super::session::ProcessIdentityState::Unknown
+            );
+        let reason = match (&self.recovery_error, owner_uncertain) {
+            (Some(reason), _) => reason.clone(),
+            (None, true) => {
+                "GMM cannot establish whether the original producer is still running".to_string()
+            }
+            (None, false) => return None,
+        };
+        Some(EnabledTransitionRecovery {
+            intended_enabled: self.intended_enabled,
+            reason,
+            attempted_at: self
+                .recovery_attempted_at
+                .clone()
+                .unwrap_or_else(|| self.created_at.to_rfc3339()),
+            attempts: self.recovery_attempts,
+            junction_path: self.junction_path.clone(),
+            owner_uncertain,
+        })
     }
 }
 
@@ -1399,13 +1447,23 @@ impl Core {
                 path: game_mods_dir.to_path_buf(),
                 source,
             })?;
+        let target_entry = IdentifiedDirectory::open(&target).map_err(|source| Error::Io {
+            path: target.clone(),
+            source,
+        })?;
+        let library_entry =
+            IdentifiedDirectory::open(&library_path).map_err(|source| Error::Io {
+                path: library_path.clone(),
+                source,
+            })?;
 
         sqlx::query(
             "INSERT INTO enabled_transitions (
                 mod_id, game_code, intended_enabled, junction_path,
                 junction_target, junction_parent_identity, junction_identity, owner_pid,
-                owner_started_at, owner_active, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                owner_started_at, owner_active, created_at,
+                junction_target_identity, library_identity
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
         )
         .bind(id)
         .bind(game.as_str())
@@ -1421,6 +1479,8 @@ impl Core {
         .bind(std::process::id() as i64)
         .bind(super::session::process_started_at(std::process::id()).map(|value| value as i64))
         .bind(Utc::now().to_rfc3339())
+        .bind(target_entry.identity().durable_key())
+        .bind(library_entry.identity().durable_key())
         .execute(&mut *fence.transaction)
         .await?;
         fence.commit().await?;
@@ -1490,15 +1550,30 @@ impl Core {
         if junction_parent.identity() != witness.junction_parent_identity() {
             return witness.corrupt("the recorded Junction parent changed filesystem identity");
         }
-        if witness.intended_enabled() && !path_within(target, &library_path) {
-            return witness.corrupt("the recorded Junction target is outside the Mod Library path");
-        }
-
         if witness.intended_enabled() {
-            let current_target = self
+            if !path_within(target, &library_path) {
+                return witness
+                    .corrupt("the recorded Junction target is outside the Mod Library path");
+            }
+            let current_library =
+                IdentifiedDirectory::open(&library_path).map_err(|source| Error::Io {
+                    path: library_path.clone(),
+                    source,
+                })?;
+            if current_library.identity() != witness.library_identity() {
+                return witness.corrupt("the recorded Mod Library changed filesystem identity");
+            }
+            let current_target = IdentifiedDirectory::open(target).map_err(|source| Error::Io {
+                path: target.to_path_buf(),
+                source,
+            })?;
+            if current_target.identity() != witness.junction_target_identity() {
+                return witness.corrupt("the recorded Junction target changed filesystem identity");
+            }
+            let selected_target = self
                 .junction_target_for(mod_id, &library_path, &mut *fence.transaction)
                 .await?;
-            if !super::same_path(target, &current_target) {
+            if !super::same_path(target, &selected_target) {
                 return witness.corrupt("the selected Library target changed during recovery");
             }
             if link_exists(witness.junction_path())? {
@@ -1614,6 +1689,46 @@ impl Core {
         Ok(resolved)
     }
 
+    /// Release an interrupted transition's producer only after explicit user
+    /// confirmation. Exact live ownership remains non-retirable; an unknown
+    /// identity is deliberately conservative at startup and user-actionable.
+    pub(super) async fn retire_interrupted_enabled_transition_in_library_mutation(
+        &self,
+        mod_id: &str,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(witness) = load_enabled_transition_witnesses(&mut transaction)
+            .await?
+            .into_iter()
+            .find(|witness| witness.mod_id() == mod_id)
+        else {
+            transaction.commit().await?;
+            return Ok(());
+        };
+        if witness.owner_active
+            && matches!(
+                witness.owner_identity_state(),
+                super::session::ProcessIdentityState::Matches
+            )
+        {
+            return Err(Error::EnabledTransitionStillOwned);
+        }
+        sqlx::query("UPDATE enabled_transitions SET owner_active = 0 WHERE mod_id = ?")
+            .bind(mod_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+
+        match self.resolve_enabled_transition(mod_id).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.record_enabled_transition_recovery_failure(mod_id, &error.to_string())
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
     /// Change the selected Variant and its enabled Junction while holding the
     /// same writer fence used by reinstall recovery and other Library changes.
     pub(super) async fn set_active_variant_in_library_mutation(
@@ -1682,17 +1797,32 @@ impl Core {
         link: &Path,
         target: &Path,
         replace_existing: bool,
-    ) -> Result<bool> {
-        let mut fence = self
+    ) -> Result<ReconciledJunctionMutation> {
+        let mut fence = match self
             .begin_library_mutation(LibraryMutation::ReconcileJunction)
+            .await
+        {
+            Ok(fence) => fence,
+            Err(Error::EnabledTransitionPending { .. }) => {
+                return Ok(ReconciledJunctionMutation::Stale)
+            }
+            Err(error) => return Err(error),
+        };
+        let enabled: i64 = sqlx::query_scalar("SELECT enabled FROM mods WHERE id = ?")
+            .bind(mod_id)
+            .fetch_one(&mut *fence.transaction)
             .await?;
+        if enabled == 0 {
+            fence.commit().await?;
+            return Ok(ReconciledJunctionMutation::Stale);
+        }
         let quarantined = load_reinstall_swap_witnesses(&mut fence.transaction)
             .await?
             .into_iter()
             .any(|witness| witness.mod_id() == mod_id && witness.is_quarantined());
         if quarantined {
             fence.commit().await?;
-            return Ok(false);
+            return Ok(ReconciledJunctionMutation::Quarantined);
         }
 
         if replace_existing {
@@ -1701,7 +1831,50 @@ impl Core {
         volume::require_ntfs_pair(game_mods_dir, target)?;
         junction::create(link, target)?;
         fence.commit().await?;
-        Ok(true)
+        Ok(ReconciledJunctionMutation::Applied)
+    }
+
+    /// Revalidate a cached disabled-row decision under the short writer fence
+    /// before withdrawing its Junction. A transition committed after the
+    /// caller's row snapshot either blocks this claim or changes the fresh
+    /// enabled flag, so the stale pass leaves the live deployment untouched.
+    pub(super) async fn remove_disabled_reconciled_junction_in_library_mutation(
+        &self,
+        mod_id: &str,
+        link: &Path,
+        expected_target: Option<&Path>,
+    ) -> Result<ReconciledJunctionMutation> {
+        let mut fence = match self
+            .begin_library_mutation(LibraryMutation::ReconcileJunction)
+            .await
+        {
+            Ok(fence) => fence,
+            Err(Error::EnabledTransitionPending { .. }) => {
+                return Ok(ReconciledJunctionMutation::Stale)
+            }
+            Err(error) => return Err(error),
+        };
+        let enabled: i64 = sqlx::query_scalar("SELECT enabled FROM mods WHERE id = ?")
+            .bind(mod_id)
+            .fetch_one(&mut *fence.transaction)
+            .await?;
+        if enabled != 0 || !link_exists(link)? {
+            fence.commit().await?;
+            return Ok(ReconciledJunctionMutation::Stale);
+        }
+        if let Some(expected_target) = expected_target {
+            let Some(actual_target) = resolve_link(link) else {
+                fence.commit().await?;
+                return Ok(ReconciledJunctionMutation::Stale);
+            };
+            if !super::same_path(&actual_target, expected_target) {
+                fence.commit().await?;
+                return Ok(ReconciledJunctionMutation::Stale);
+            }
+        }
+        junction::remove(link)?;
+        fence.commit().await?;
+        Ok(ReconciledJunctionMutation::Applied)
     }
 
     /// Take the first, short quarantine snapshot for a reconcile or rebuild

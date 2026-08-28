@@ -44,6 +44,7 @@ pub(super) struct LibraryOwnershipSnapshot {
     active_reinstall_directories: HashSet<DirectoryIdentity>,
     active_staging_directories: HashSet<DirectoryIdentity>,
     enabled_transition_mod_ids: HashSet<String>,
+    enabled_transition_directories: HashSet<DirectoryIdentity>,
 }
 
 impl LibraryOwnershipSnapshot {
@@ -54,19 +55,34 @@ impl LibraryOwnershipSnapshot {
             active_reinstall_directories: HashSet::new(),
             active_staging_directories: HashSet::new(),
             enabled_transition_mod_ids: HashSet::new(),
+            enabled_transition_directories: HashSet::new(),
         }
     }
 
     pub(super) async fn load(connection: &mut SqliteConnection) -> Result<Self> {
+        let enabled_transition_witnesses =
+            super::library_mutation::load_enabled_transition_witnesses(&mut *connection).await?;
+        let enabled_transition_mod_ids: HashSet<_> = enabled_transition_witnesses
+            .iter()
+            .map(|witness| witness.mod_id().to_string())
+            .collect();
+        let enabled_transition_directories = enabled_transition_witnesses
+            .iter()
+            .map(|witness| witness.library_identity().clone())
+            .collect();
+
         let rows = sqlx::query("SELECT id AS mod_id, library_path FROM mods")
             .fetch_all(&mut *connection)
             .await?;
         let mut mods: HashMap<DirectoryIdentity, Vec<String>> = HashMap::new();
         for row in rows {
+            let mod_id: String = row.try_get("mod_id")?;
+            if enabled_transition_mod_ids.contains(&mod_id) {
+                continue;
+            }
             let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
             match IdentifiedDirectory::open(&path) {
                 Ok(directory) => {
-                    let mod_id: String = row.try_get("mod_id")?;
                     mods.entry(directory.identity().clone())
                         .or_default()
                         .push(mod_id);
@@ -111,13 +127,12 @@ impl LibraryOwnershipSnapshot {
             }
         }
 
-        let enabled_transition_mod_ids = Self::enabled_transition_mod_ids(&mut *connection).await?;
-
         Ok(Self {
             mods,
             active_reinstall_directories,
             active_staging_directories,
             enabled_transition_mod_ids,
+            enabled_transition_directories,
         })
     }
 
@@ -135,6 +150,9 @@ impl LibraryOwnershipSnapshot {
     }
 
     pub(super) fn owner_of(&self, identity: &DirectoryIdentity) -> Option<LibraryDirectoryOwner> {
+        if self.enabled_transition_directories.contains(identity) {
+            return Some(LibraryDirectoryOwner::ModWithPendingEnabledTransition);
+        }
         if self.active_reinstall_directories.contains(identity) {
             return Some(LibraryDirectoryOwner::ActiveReinstall);
         }
