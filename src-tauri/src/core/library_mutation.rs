@@ -14,6 +14,9 @@
 //! deployment-state changes must not be observed or overwritten separately.
 //! Active-Variant retargeting uses the same fence so recovery quarantine and
 //! Variant deployment cannot pass one another after either operation's guard.
+//! Reconcile and rebuild keep their unbounded traversal outside the fence, then
+//! take one short claim to reload quarantine state and protect each bounded
+//! Junction create or retarget from a concurrent recovery decision.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -55,6 +58,7 @@ pub(super) enum LibraryMutation {
     ReinstallGamebananaMod,
     SetEnabled,
     SetActiveVariant,
+    ReconcileJunction,
     ResolveDuplicateMods,
 }
 
@@ -75,6 +79,7 @@ impl LibraryMutation {
             Self::ReinstallGamebananaMod => "reinstall_gamebanana_mod_with_endpoints",
             Self::SetEnabled => "set_enabled",
             Self::SetActiveVariant => "set_active_variant",
+            Self::ReconcileJunction => "reconcile_junction",
             Self::ResolveDuplicateMods => "resolve_duplicate_mods",
         }
     }
@@ -1162,6 +1167,58 @@ impl Core {
         }
 
         fence.commit().await
+    }
+
+    /// Revalidate one staged reconcile/rebuild deployment decision against the
+    /// current durable quarantine state, then keep that decision stable through
+    /// the bounded Junction mutation. The caller performs traversal and target
+    /// resolution before this short writer-fence window.
+    pub(super) async fn create_reconciled_junction_in_library_mutation(
+        &self,
+        mod_id: &str,
+        game_mods_dir: &Path,
+        link: &Path,
+        target: &Path,
+        replace_existing: bool,
+    ) -> Result<bool> {
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::ReconcileJunction)
+            .await?;
+        let quarantined = load_reinstall_swap_witnesses(&mut fence.transaction)
+            .await?
+            .into_iter()
+            .any(|witness| witness.mod_id() == mod_id && witness.is_quarantined());
+        if quarantined {
+            fence.commit().await?;
+            return Ok(false);
+        }
+
+        if replace_existing {
+            junction::remove(link)?;
+        }
+        volume::require_ntfs_pair(game_mods_dir, target)?;
+        junction::create(link, target)?;
+        fence.commit().await?;
+        Ok(true)
+    }
+
+    /// Take the first, short quarantine snapshot for a reconcile or rebuild
+    /// pass. Traversal starts only after this fence commits; every later
+    /// Junction create independently reloads the same durable state.
+    pub(super) async fn snapshot_quarantined_reinstalls_in_library_mutation(
+        &self,
+    ) -> Result<HashMap<String, String>> {
+        let mut fence = self
+            .begin_library_mutation(LibraryMutation::ReconcileJunction)
+            .await?;
+        let quarantined = load_reinstall_swap_witnesses(&mut fence.transaction)
+            .await?
+            .into_iter()
+            .filter(|witness| witness.is_quarantined())
+            .map(|witness| (witness.mod_id().to_string(), witness.token().to_string()))
+            .collect();
+        fence.commit().await?;
+        Ok(quarantined)
     }
 
     pub(super) async fn reinstall_swap_witness(
