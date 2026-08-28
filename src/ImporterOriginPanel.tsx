@@ -147,6 +147,7 @@ export function ImporterOriginPanel({
               <span>Recommend importer origins (all games)</span>
             </label>
           </div>
+          <CommandErrorNotice error={toggleRecommendations.error} />
 
           {data.installTarget.state === "installed" &&
           data.resolved.state === "inEffect" &&
@@ -226,6 +227,7 @@ export function ImporterOriginPanel({
                 </button>
               </div>
               <CommandErrorNotice error={accept.error} />
+              <CommandErrorNotice error={decline.error} />
             </div>
           ) : null}
 
@@ -247,6 +249,7 @@ export function ImporterOriginPanel({
               </ul>
             </div>
           ) : null}
+          <CommandErrorNotice error={undo.error} />
 
           {data.dismissalsError ? (
             <p className="error">

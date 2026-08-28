@@ -326,17 +326,38 @@ function ImporterStep() {
     queryFn: async () => {
       const games = supported.data ?? [];
       const entries = await Promise.all(
-        games.map(async (g) => [g.code, await getGameInstallPath(g.code)] as const),
+        games.map(async (g) => {
+          try {
+            return [
+              g.code,
+              { path: await getGameInstallPath(g.code), error: null },
+            ] as const;
+          } catch (error) {
+            // One unreadable Game must not hide every other install candidate.
+            // Keep the structured failure intact for CommandErrorNotice.
+            return [g.code, { path: null, error }] as const;
+          }
+        }),
       );
-      return Object.fromEntries(entries) as Record<GameCode, string | null>;
+      return Object.fromEntries(entries) as Record<
+        GameCode,
+        { path: string | null; error: unknown }
+      >;
     },
     refetchOnWindowFocus: false,
   });
 
   const candidates = useMemo<GameSummary[]>(
-    () => (supported.data ?? []).filter((g) => !!installPaths.data?.[g.code]),
+    () =>
+      (supported.data ?? []).filter(
+        (g) => !!installPaths.data?.[g.code]?.path,
+      ),
     [supported.data, installPaths.data],
   );
+  const installPathFailures = (supported.data ?? []).flatMap((game) => {
+    const error = installPaths.data?.[game.code]?.error;
+    return error == null ? [] : [{ game, error }];
+  });
 
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   useEffect(() => {
@@ -349,18 +370,22 @@ function ImporterStep() {
     );
   }, [candidates]);
 
-  const [statuses, setStatuses] = useState<Record<string, "queued" | "installing" | "done" | string>>({});
+  type InstallStatus =
+    | { state: "installing" }
+    | { state: "done" }
+    | { state: "error"; error: unknown };
+  const [statuses, setStatuses] = useState<Record<string, InstallStatus>>({});
   const [running, setRunning] = useState(false);
 
   const installOne = async (code: GameCode) => {
-    setStatuses((prev) => ({ ...prev, [code]: "installing" }));
+    setStatuses((prev) => ({ ...prev, [code]: { state: "installing" } }));
     try {
       await installImporter(code);
-      setStatuses((prev) => ({ ...prev, [code]: "done" }));
-    } catch (e) {
+      setStatuses((prev) => ({ ...prev, [code]: { state: "done" } }));
+    } catch (error) {
       setStatuses((prev) => ({
         ...prev,
-        [code]: `error: ${String(e)}`,
+        [code]: { state: "error", error },
       }));
     }
   };
@@ -371,7 +396,7 @@ function ImporterStep() {
       if (!selected[game.code]) continue;
       // Skip rows already installed in a prior pass of this same
       // wizard session.
-      if (statuses[game.code] === "done") continue;
+      if (statuses[game.code]?.state === "done") continue;
       await installOne(game.code);
     }
     setRunning(false);
@@ -386,7 +411,7 @@ function ImporterStep() {
     );
   }
 
-  if (candidates.length === 0) {
+  if (candidates.length === 0 && installPathFailures.length === 0) {
     return (
       <div className="card">
         <h2>Install Model Importers</h2>
@@ -406,12 +431,21 @@ function ImporterStep() {
         only when you click here — per ADR 0004 we never silently update
         the importer.
       </p>
-      <ul className="onboarding__importers">
-        {candidates.map((g) => {
-          const status = statuses[g.code];
-          const isError = typeof status === "string" && status.startsWith("error:");
-          return (
-            <li key={g.code} className="onboarding__importer-row">
+      {installPathFailures.map(({ game, error }) => (
+        <CommandErrorNotice
+          key={game.code}
+          error={error}
+          heading={`GMM could not check ${game.displayName}'s install path.`}
+          detail="That game is omitted below; any other successfully read detected games remain available."
+        />
+      ))}
+      {candidates.length > 0 ? (
+        <ul className="onboarding__importers">
+          {candidates.map((g) => {
+            const status = statuses[g.code];
+            const installError = status?.state === "error" ? status.error : null;
+            return (
+              <li key={g.code} className="onboarding__importer-row">
               <label className="toggle">
                 <input
                   type="checkbox"
@@ -427,28 +461,32 @@ function ImporterStep() {
                 <strong>{g.displayName}</strong>
               </label>
               <div className="row">
-                <span className={`muted small${isError ? " error" : ""}`}>
-                  {status === "installing"
+                <span className="muted small">
+                  {status?.state === "installing"
                     ? "Installing…"
-                    : status === "done"
+                    : status?.state === "done"
                       ? "✓ Done"
-                      : isError
-                        ? status
+                      : status?.state === "error"
+                        ? "Install failed"
                         : "Queued"}
                 </span>
-                {isError && !running ? (
+                {status?.state === "error" && !running ? (
                   <button onClick={() => installOne(g.code)}>Retry</button>
                 ) : null}
               </div>
-            </li>
-          );
-        })}
-      </ul>
-      <div className="row">
-        <button onClick={runInstall} disabled={running}>
-          {running ? "Installing…" : "Install selected"}
-        </button>
-      </div>
+                <CommandErrorNotice error={installError} />
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+      {candidates.length > 0 ? (
+        <div className="row">
+          <button onClick={runInstall} disabled={running}>
+            {running ? "Installing…" : "Install selected"}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

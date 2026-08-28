@@ -239,3 +239,56 @@ describe("OnboardingWizard — detection step", () => {
     expect(continueButton()).toBeEnabled();
   });
 });
+
+describe("OnboardingWizard — importer step failures", () => {
+  const structuredFailure = {
+    kind: "invalidActiveVariant",
+    message: "GMM could not read this Game's saved setup.",
+  };
+
+  it("shows one install-path failure without hiding another Game", async () => {
+    getGameInstallPath.mockImplementation((game: string) =>
+      game === "gimi"
+        ? Promise.reject(structuredFailure)
+        : Promise.resolve("C:\\Games\\Star Rail"),
+    );
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+
+    await advanceToStep(4);
+
+    const heading = await screen.findByText(
+      /could not check Genshin Impact's install path/i,
+    );
+    const alert = heading.closest('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert).toHaveAttribute(
+      "data-command-failure-kind",
+      "invalidActiveVariant",
+    );
+    expect(alert).toHaveTextContent(structuredFailure.message);
+    expect(screen.getByText("Star Rail")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/No detected games to install for/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps a structured importer-install failure for the shared renderer", async () => {
+    getGameInstallPath.mockImplementation((game: string) =>
+      Promise.resolve(game === "gimi" ? "C:\\Games\\Genshin" : null),
+    );
+    installImporter.mockRejectedValue(structuredFailure);
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+
+    await advanceToStep(4);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /install selected/i }),
+    );
+
+    const message = await screen.findByText(structuredFailure.message);
+    expect(message).toHaveAttribute(
+      "data-command-failure-kind",
+      "invalidActiveVariant",
+    );
+    expect(screen.getByRole("button", { name: /retry/i })).toBeEnabled();
+  });
+});

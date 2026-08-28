@@ -742,7 +742,7 @@ function ImporterPanel({
       </p>
       <div className="row">
         <span className="muted small">
-          Latest release: {release.data ? <code>{release.data.tag_name}</code> : release.isLoading ? "checking…" : release.isError ? "unavailable" : "—"}
+          Latest release: {release.data ? <code>{release.data.tag_name}</code> : release.isLoading ? "checking…" : "—"}
         </span>
         {update.data?.installedVersion ? (
           <span className="muted small">
@@ -751,6 +751,10 @@ function ImporterPanel({
         ) : null}
         {update.data?.pinned ? <span className="muted small"> · pinned</span> : null}
       </div>
+      <CommandErrorNotice
+        error={release.error}
+        heading="GMM could not check the latest Model Importer release."
+      />
       <div className="row">
         <button onClick={() => install.mutate()} disabled={install.isPending}>
           {install.isPending ? "Installing…" : update.data?.available ? "Apply update" : "Reinstall importer"}

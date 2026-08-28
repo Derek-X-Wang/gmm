@@ -876,7 +876,6 @@ pub async fn launch_game(
     launch::launch(&app, &core, &runtime, game, &LaunchOptions::default())
         .await
         .map(|outcome| outcome.info)
-        .map_err(CommandError::other)
 }
 
 /// Tauri command — return the structured AV / SmartScreen guidance the

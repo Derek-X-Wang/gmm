@@ -1,9 +1,17 @@
-//! The one error boundary shared by every Tauri command.
+//! The shared error boundary for Tauri commands authored in this crate.
 //!
 //! Core failures arrive here while they are still typed, so their stable
 //! classification and existing user-facing message cross IPC together.
+//!
+//! `tests/command_error_boundary.rs` structurally checks literal
+//! `#[tauri::command]` functions under this crate's `src/` tree and resolves
+//! direct imports of [`CommandResult`] to this module. Like any source parser,
+//! that gate cannot see macro-generated commands, an aliased command attribute,
+//! commands outside `src/`, or a type routed through an arbitrary re-export;
+//! those remain review responsibilities at the Tauri registration boundary.
 
 use serde::Serialize;
+use std::fmt;
 
 use crate::core::error::SurfaceFailureKind;
 use crate::core::Error;
@@ -15,6 +23,14 @@ pub struct CommandError {
     pub message: String,
 }
 
+impl fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CommandError {}
+
 impl CommandError {
     /// Construct an explicitly unclassified command failure.
     ///
@@ -25,6 +41,14 @@ impl CommandError {
         Self {
             kind: SurfaceFailureKind::Other,
             message: message.into(),
+        }
+    }
+
+    /// Rewrite presentation text without discarding the stable failure kind.
+    pub fn map_message(self, map: impl FnOnce(String) -> String) -> Self {
+        Self {
+            kind: self.kind,
+            message: map(self.message),
         }
     }
 }

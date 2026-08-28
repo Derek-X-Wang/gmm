@@ -47,6 +47,10 @@ let conflictError: {
   kind: "invalidActiveVariant";
   message: string;
 } | null = null;
+let importerReleaseError: {
+  kind: "invalidActiveVariant";
+  message: string;
+} | null = null;
 let relocationFailures: Array<{
   mod_id: string;
   game: "gimi";
@@ -63,8 +67,10 @@ function ipcResult(command: string) {
     case "current_session":
     case "clean_stale_session":
     case "get_game_install_path":
-    case "fetch_latest_importer_release":
     case "check_importer_update":
+      return null;
+    case "fetch_latest_importer_release":
+      if (importerReleaseError) throw importerReleaseError;
       return null;
     case "get_startup_reconcile_status":
       return { finished: true, failures: startupFailures };
@@ -109,9 +115,30 @@ beforeEach(() => {
   vi.clearAllMocks();
   startupFailures = [];
   conflictError = null;
+  importerReleaseError = null;
   relocationFailures = [];
   openDialog.mockResolvedValue("C:\\Moved");
   invoke.mockImplementation((command: string) => Promise.resolve(ipcResult(command)));
+});
+
+it("shows a latest-importer-release failure instead of calling it unavailable", async () => {
+  importerReleaseError = {
+    kind: "invalidActiveVariant",
+    message: "The importer release lookup failed.",
+  };
+  renderWithQuery(<App />);
+
+  const heading = await screen.findByText(
+    /could not check the latest Model Importer release/i,
+  );
+  const alert = heading.closest('[role="alert"]');
+  expect(alert).not.toBeNull();
+  expect(alert).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
+  );
+  expect(alert).toHaveTextContent("The importer release lookup failed.");
+  expect(screen.queryByText("unavailable")).not.toBeInTheDocument();
 });
 
 it("shows a conflict-detection failure instead of presenting unavailable data as no conflicts", async () => {

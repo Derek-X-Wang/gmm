@@ -449,7 +449,7 @@ async fn an_injection_timeout_leaves_no_session_and_no_stray_process() {
     .expect_err("a game that exits before injection cannot start a session");
 
     assert!(
-        err.contains("wait_for_injection"),
+        err.message.contains("wait_for_injection"),
         "error should name the step that gave up, got: {err}",
     );
     assert_eq!(
@@ -593,7 +593,7 @@ async fn a_live_session_with_no_persisted_row_refuses_the_next_launch() {
     .expect_err("a running game blocks the next launch");
 
     assert!(
-        err.to_lowercase().contains("running"),
+        err.message.to_lowercase().contains("running"),
         "error should say a game is still running, got: {err}",
     );
     assert!(
