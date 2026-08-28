@@ -410,7 +410,7 @@ mod tests {
             DEFAULT_BUNDLE_LOG_DAYS,
             |entry| {
                 fs::remove_file(entry.path()).expect("make log vanish");
-                entry.metadata().and_then(|metadata| metadata.modified())
+                Err(io::Error::new(io::ErrorKind::NotFound, "test log vanished"))
             },
         );
 
