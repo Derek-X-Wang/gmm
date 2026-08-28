@@ -50,7 +50,7 @@ $ManifestPeerReadTask = $null
 $ManifestPeerClosedMessage =
     "manifest refresh client closed its held request before the fixture released its response"
 $FailureClass = "PRODUCT"
-$FixtureMode = $env:GMM_INSTALLER_SMOKE_FIXTURE_MODE
+$FixtureMode = "pause-after-prewrite-peer-check"
 
 function Write-Section($msg) {
     Write-Host ""
