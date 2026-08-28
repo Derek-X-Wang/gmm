@@ -340,6 +340,26 @@ async fn a_junction_whose_target_was_deleted_is_not_healthy() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn reconcile_propagates_library_target_metadata_uncertainty() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let (core, _, game_mods) = fresh_core(&tmp).await;
+    let fixture = tmp.path().join("fixture/Uncertain");
+    let m = adopt_and_enable(&core, &game_mods, &fixture, "Uncertain Mod").await;
+    fs::remove_dir_all(&m.library_path).expect("remove readable Library target");
+    symlink(&m.library_path, &m.library_path).expect("self-referential Library target");
+
+    let result = core.reconcile_junctions(GameCode::Gimi, &game_mods).await;
+
+    assert!(
+        matches!(result, Err(Error::Io { ref path, .. }) if path == &m.library_path),
+        "an unreadable Library target must not be classified as healthy or conflicting, got {result:?}",
+    );
+}
+
 /// The inverse tear: the DB says a Mod is *disabled* but a Junction for
 /// it is still sitting in `<Game>/Mods/`.
 ///

@@ -1,0 +1,13 @@
+# This gate blocks three known collapsing Path methods in core. Clippy's
+# disallowed-methods cannot express the broader rule "do not collapse an
+# io::Result into a bool", so constructs such as metadata(...).is_ok() remain
+# review concerns and require a broader mechanism in follow-up work.
+#
+# Target-gated code is linted only when Clippy runs for that target. A green
+# non-Windows host run therefore does not prove that Windows-only core code
+# passes this deny; Windows CI remains required.
+disallowed-methods = [
+    { path = "std::path::Path::exists", reason = "Path::exists collapses every metadata error into false; use core::filesystem so only NotFound means absent" },
+    { path = "std::path::Path::is_dir", reason = "Path::is_dir collapses every metadata error into false; inspect fallible metadata or explicitly annotate a best-effort probe" },
+    { path = "std::path::Path::is_file", reason = "Path::is_file collapses every metadata error into false; inspect fallible metadata or explicitly annotate a best-effort probe" },
+]

@@ -31,6 +31,8 @@ pub const DATA_DIR_NAME: &str = "ZenlessZoneZero_Data";
 
 /// `true` iff `path` is a directory with the executable AND the
 /// matching Unity data directory.
+// Detection is a best-effort optional-install probe; an I/O error means this candidate is unusable.
+#[allow(clippy::disallowed_methods)]
 pub fn validate(path: &Path) -> bool {
     if !path.is_dir() {
         return false;

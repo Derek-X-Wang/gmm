@@ -110,6 +110,22 @@ fn dir_scan_walks_recursively() {
     assert_eq!(hashes, vec!["1".to_string(), "2".to_string()]);
 }
 
+#[cfg(unix)]
+#[test]
+fn dir_scan_propagates_directory_uncertainty() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let root = tmp.path().join("unreadable");
+    symlink(&root, &root).expect("self-referential directory");
+
+    let result = extract_hashes_from_dir(&root);
+    assert!(
+        matches!(result, Err(gmm_lib::core::Error::Io { ref path, .. }) if path == &root),
+        "an unreadable mod directory must not produce a confidently empty conflict scan, got {result:?}",
+    );
+}
+
 #[test]
 fn build_report_flags_only_shared_hashes() {
     let bindings = vec![

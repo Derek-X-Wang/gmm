@@ -79,6 +79,8 @@ fn main() -> ExitCode {
 /// Walking beats a fixed `../../..` because it does not encode how deep
 /// this crate happens to sit in the workspace; moving the crate would
 /// otherwise silently point the default at nothing.
+// This CLI probe tries ancestors opportunistically and returns an actionable fallback path on any miss.
+#[allow(clippy::disallowed_methods)]
 fn default_manifest_path() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for ancestor in here.ancestors() {

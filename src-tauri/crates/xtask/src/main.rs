@@ -181,6 +181,8 @@ fn workspace_root() -> PathBuf {
 mod test_loader {
     use super::workspace_root;
 
+    // This developer command only validates prerequisites and reports a missing file as an actionable error.
+    #[allow(clippy::disallowed_methods)]
     pub fn run() -> Result<(), String> {
         let ws = workspace_root();
         let vendor_dll = ws
@@ -292,6 +294,8 @@ mod test_loader {
             let _ = victim.wait();
         }
 
+        // This developer command only selects built fixtures and reports missing prerequisites.
+        #[allow(clippy::disallowed_methods)]
         pub fn run(workspace: &Path, vendor_dll: &Path) -> Result<(), String> {
             let target_dir = workspace.join("target");
             // Prefer release if it exists, else debug.

@@ -231,6 +231,7 @@ fn scan_game_root(
             path: path.clone(),
             source,
         })?;
+        // Safe: `symlink_metadata()` above propagated I/O uncertainty.
         if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
             continue;
         }
@@ -289,6 +290,7 @@ fn recheck_unreferenced_candidates(
                 continue;
             }
         };
+        // Safe: `symlink_metadata()` above propagated I/O uncertainty.
         if is_link_or_reparse_point(&metadata) || !metadata.file_type().is_dir() {
             continue;
         }
@@ -425,6 +427,7 @@ pub(super) fn directory_size_without_links(path: &Path) -> io::Result<u64> {
     if is_link_or_reparse_point(&metadata) {
         return Ok(0);
     }
+    // Safe: `symlink_metadata()` above propagated I/O uncertainty.
     if file_type.is_file() {
         return Ok(metadata.len());
     }
