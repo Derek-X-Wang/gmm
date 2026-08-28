@@ -111,18 +111,16 @@ where
             continue;
         };
         if file_type.is_dir() {
-            let descend = before_descend(&path).and_then(|()| {
-                visit_with_entry_lookups(
-                    &path,
-                    out,
-                    classify_file_type,
-                    before_descend,
-                    before_read_ini,
-                )
-            });
-            if resolve_enumerated_entry(descend)?.is_none() {
+            if resolve_enumerated_entry(before_descend(&path))?.is_none() {
                 continue;
             }
+            visit_with_entry_lookups(
+                &path,
+                out,
+                classify_file_type,
+                before_descend,
+                before_read_ini,
+            )?;
         } else if file_type.is_file()
             && path
                 .extension()
@@ -436,6 +434,71 @@ mod tests {
             matches!(result, Err(Error::Io { ref path, ref source })
                 if path == &unreadable && source.kind() == io::ErrorKind::PermissionDenied),
             "an unreadable enumerated directory must still fail the conflict scan, got {result:?}",
+        );
+    }
+
+    fn scan_with_not_found_inside_child_traversal() -> (std::path::PathBuf, Result<Vec<HashBinding>>)
+    {
+        let temp = tempfile::tempdir().expect("temporary mod directory");
+        let root = temp.path().join("mod");
+        let child = root.join("child");
+        let vanished = child.join("vanished");
+        fs::create_dir_all(&vanished).expect("create nested vanishing directory");
+        fs::write(
+            child.join("partial.ini"),
+            b"[TextureOverridePartial]\nhash = 0x2\n",
+        )
+        .expect("write readable sibling ini");
+        fs::write(
+            vanished.join("gone.ini"),
+            b"[TextureOverrideGone]\nhash = 0x1\n",
+        )
+        .expect("write vanishing ini");
+        let mut out = Vec::new();
+
+        let result = visit_with_entry_lookups(
+            &root,
+            &mut out,
+            &mut |entry| entry.file_type(),
+            &mut |path| {
+                if path == vanished {
+                    fs::remove_dir_all(&vanished).expect("make nested directory vanish");
+                }
+                Ok(())
+            },
+            &mut |_| Ok(()),
+        )
+        .map(|()| out);
+
+        (vanished, result)
+    }
+
+    #[test]
+    fn dir_scan_propagates_not_found_from_inside_child_traversal() {
+        let (vanished, result) = scan_with_not_found_inside_child_traversal();
+
+        assert!(
+            matches!(&result, Err(Error::Io { path, source })
+                if path == &vanished && source.kind() == io::ErrorKind::NotFound),
+            "NotFound after entering a child traversal must fail the conflict scan, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn dir_scan_does_not_return_partial_bindings_after_nested_not_found() {
+        let (_, result) = scan_with_not_found_inside_child_traversal();
+        let partial = vec![HashBinding {
+            hash: "2".to_string(),
+            section: "TextureOverridePartial".to_string(),
+        }];
+
+        assert!(
+            !matches!(&result, Ok(bindings) if bindings == &partial),
+            "a nested traversal failure must not return partial bindings, got {result:?}",
+        );
+        assert!(
+            result.is_err(),
+            "the nested traversal fixture must fail rather than return any confident result",
         );
     }
 

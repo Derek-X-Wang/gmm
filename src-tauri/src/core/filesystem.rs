@@ -15,6 +15,10 @@ use super::error::{Error, Result};
 /// `NotFound` means the enumerated entry vanished before the follow-up lookup,
 /// so its caller should skip that entry. Every other failure remains
 /// uncertainty and must abort the operation.
+///
+/// Pass only one immediate lookup on that entry. A composite result, loop, or
+/// recursive traversal widens this contract and can swallow `NotFound` from
+/// unrelated work performed after the lookup boundary.
 pub(super) fn resolve_enumerated_entry<T>(result: Result<T>) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
