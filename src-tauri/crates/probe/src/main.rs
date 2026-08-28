@@ -314,6 +314,14 @@ async fn run(args: &Args) -> Result<(), String> {
                 .map_err(|e| e.to_string())
         }
 
+        "rebuild" => {
+            let mods_dir = PathBuf::from(args.req("--mods-dir")?);
+            core.rebuild_junctions(args.game()?, &mods_dir)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+
         "start-session" => {
             let pid: u32 = args
                 .req("--pid")?
