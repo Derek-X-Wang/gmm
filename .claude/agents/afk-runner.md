@@ -69,7 +69,7 @@ Send the lead `STARTED issue #<n>`.
    && pnpm build
    ```
 
-6. Commit. Subject ≤70 chars, body explains why (per `/Users/derekxwang/.claude/CLAUDE.md` — git commits as project memory).
+6. Commit. Subject ≤70 chars, body explains why — git commits are this project's memory.
 7. Open the PR:
 
    ```bash
