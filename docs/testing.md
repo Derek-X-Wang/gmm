@@ -352,9 +352,13 @@ recent Application event-log errors — so a Windows-less maintainer can
 still diagnose from the CI output. Artifacts are uploaded too.
 
 The manifest fixture also keeps an asynchronous read pending on the accepted
-connection while its response is withheld. If GMM closes that request before
-the fixture releases it, the smoke reports a `PRODUCT` failure: abandoning the
-in-flight refresh is application behavior, not a fixture-server outage.
+connection while its response is withheld. The fixture withholds the final body
+byte, checks the read after flushing the incomplete response prefix, and checks
+again immediately before that byte releases the response. If GMM closes the
+request before release, including in the final response-preparation window, the
+smoke reports a `PRODUCT` failure: abandoning the in-flight refresh is
+application behavior, not a fixture-server outage. The fixture does not check
+after the complete response because a correct client may close normally then.
 
 This is the layer that would have caught a broken bundle, a missing
 WebView2 dependency, or a migration that fails on a clean machine.

@@ -191,25 +191,49 @@ function Assert-ManifestFixturePeerConnected {
 }
 
 function Complete-ManifestFixtureRequest {
-    Assert-ManifestFixturePeerConnected
-    $response = [System.Text.Encoding]::ASCII.GetBytes(
-        "HTTP/1.1 503 Service Unavailable`r`n" +
-        "Content-Length: 0`r`n" +
-        "Connection: close`r`n`r`n"
+    # Keep the final body byte separate: the HTTP response is not released to
+    # GMM until that byte is written, so a peer close after the prefix cannot be
+    # mistaken for a normal close after receiving a complete response.
+    $responsePrefix = [System.Text.Encoding]::ASCII.GetBytes(
+        "HTTP/1.1 200 OK`r`n" +
+        "Content-Length: 30`r`n" +
+        "Connection: close`r`n`r`n" +
+        '{"schemaVersion":1,"games":{}'
     )
+    $responseFinalByte = [System.Text.Encoding]::ASCII.GetBytes("}")
+    $stream = $script:HeldManifestConnection.GetStream()
+    # Keep the last pre-release check immediately beside the write. A FIN can
+    # otherwise arrive after the startup loop's final check while the response
+    # bytes and stream are being prepared.
+    Assert-ManifestFixturePeerConnected
+    # Deliberate mutation-proof seam: when CI selects this mode with a
+    # temporarily shortened client timeout, GMM closes after the pre-write
+    # check, during the response-work window that issue #219 exposed.
+    if ($FixtureMode -eq "pause-after-prewrite-peer-check") {
+        Write-Host "pausing after pre-write peer check for close-window mutation proof"
+        Start-Sleep -Seconds 105
+    }
     try {
-        $stream = $script:HeldManifestConnection.GetStream()
-        $stream.Write($response, 0, $response.Length)
+        $stream.Write($responsePrefix, 0, $responsePrefix.Length)
         $stream.Flush()
     } catch {
         $script:FailureClass = "PRODUCT"
         throw "$ManifestPeerClosedMessage`: $($_.Exception.Message)"
-    } finally {
-        $script:HeldManifestConnection.Dispose()
-        $script:HeldManifestConnection = $null
-        $script:ManifestPeerReadBuffer = $null
-        $script:ManifestPeerReadTask = $null
     }
+    # A graceful FIN may let the prefix write succeed. Recheck after that flush
+    # and immediately before the final body byte releases the response.
+    Assert-ManifestFixturePeerConnected
+    try {
+        $stream.Write($responseFinalByte, 0, $responseFinalByte.Length)
+        $stream.Flush()
+    } catch {
+        $script:FailureClass = "PRODUCT"
+        throw "$ManifestPeerClosedMessage`: $($_.Exception.Message)"
+    }
+    $script:HeldManifestConnection.Dispose()
+    $script:HeldManifestConnection = $null
+    $script:ManifestPeerReadBuffer = $null
+    $script:ManifestPeerReadTask = $null
     Write-Host "manifest fixture released the request after IPC readiness"
 }
 
@@ -312,7 +336,11 @@ function Invoke-StartupSmoke {
     Confirm-ManifestFixtureListening $script:ManifestListener $manifestPort
 
     if ($FixtureMode -and
-        $FixtureMode -notin @("unavailable", "unavailable-after-launch")) {
+        $FixtureMode -notin @(
+            "unavailable",
+            "unavailable-after-launch",
+            "pause-after-prewrite-peer-check"
+        )) {
         throw ("unknown GMM_INSTALLER_SMOKE_FIXTURE_MODE " +
                "'$FixtureMode'")
     }
