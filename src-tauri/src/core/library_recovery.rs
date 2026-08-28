@@ -364,6 +364,7 @@ impl Core {
             version: None,
             screenshot_url: None,
             reinstall_recovery: None,
+            enabled_transition_recovery: None,
         })
     }
 
@@ -681,6 +682,9 @@ impl Core {
                 let reason = match owner {
                     super::library_ownership::LibraryDirectoryOwner::Mod => {
                         "a Mod now references it — refresh the report"
+                    }
+                    super::library_ownership::LibraryDirectoryOwner::ModWithPendingEnabledTransition => {
+                        "an interrupted enable/disable transition owns that Mod directory"
                     }
                     super::library_ownership::LibraryDirectoryOwner::ActiveReinstall => {
                         "it is interrupted reinstall state owned by GMM"

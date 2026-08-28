@@ -5,9 +5,10 @@
 //!
 //! `tests/session.rs` covers crash recovery for a Game Session, which is
 //! easy because a Game Session has an external witness: a PID that is or
-//! is not alive. Ordinary mutations have no witness. `set_enabled`
-//! creates a Junction and *then* writes the row; nothing was stopping
-//! the process in between, so the invariant that matters —
+//! is not alive. Durable mutations either commit their own recovery witness
+//! before touching the filesystem or rely on startup reconciliation.
+//! `set_enabled` creates or removes a Junction and *then* writes the row, so
+//! the invariant that matters —
 //!
 //! > never a DB row saying enabled with a missing or wrong Junction
 //!
@@ -354,14 +355,32 @@ async fn enable_crashing_after_the_junction_is_created_recovers() {
         env.link("Enable Crash").exists(),
         "precondition: the crash left the Junction on disk",
     );
-    let core = env.restart().await;
-    assert!(
-        !core.list_mods(GameCode::Gimi).await.expect("list")[0].enabled,
-        "precondition: the row never got its update",
+    let pool = SqlitePool::connect(&env.db_url)
+        .await
+        .expect("inspect torn enable without running startup recovery");
+    let enabled: i64 = sqlx::query_scalar("SELECT enabled FROM mods WHERE id = ?")
+        .bind(&m.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read torn enabled flag");
+    assert_eq!(enabled, 0, "precondition: the row never got its update");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enabled_transitions")
+        .fetch_one(&pool)
+        .await
+        .expect("count torn enable witnesses");
+    assert_eq!(
+        witnesses, 1,
+        "the crash must leave a durable instruction for startup recovery",
     );
-    drop(core);
+    pool.close().await;
 
-    let core = recover_and_assert(&env, "enable crashed after junction create").await;
+    let core = env.restart().await;
+    assert_invariant(
+        &core,
+        &env.game_mods,
+        "enable crashed after junction create",
+    )
+    .await;
     assert_rows_match_disk(&core, &env, "enable crashed after junction create").await;
 }
 
@@ -396,14 +415,32 @@ async fn disable_crashing_after_the_junction_is_removed_recovers() {
         std::fs::symlink_metadata(env.link("Disable Crash")).is_err(),
         "precondition: the crash left no Junction",
     );
-    let core = env.restart().await;
-    assert!(
-        core.list_mods(GameCode::Gimi).await.expect("list")[0].enabled,
-        "precondition: the row still says enabled",
+    let pool = SqlitePool::connect(&env.db_url)
+        .await
+        .expect("inspect torn disable without running startup recovery");
+    let enabled: i64 = sqlx::query_scalar("SELECT enabled FROM mods WHERE id = ?")
+        .bind(&m.id)
+        .fetch_one(&pool)
+        .await
+        .expect("read torn enabled flag");
+    assert_eq!(enabled, 1, "precondition: the row still says enabled");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enabled_transitions")
+        .fetch_one(&pool)
+        .await
+        .expect("count torn disable witnesses");
+    assert_eq!(
+        witnesses, 1,
+        "the crash must leave a durable instruction for startup recovery",
     );
-    drop(core);
+    pool.close().await;
 
-    let core = recover_and_assert(&env, "disable crashed after junction remove").await;
+    let core = env.restart().await;
+    assert_invariant(
+        &core,
+        &env.game_mods,
+        "disable crashed after junction remove",
+    )
+    .await;
     assert_rows_match_disk(&core, &env, "disable crashed after junction remove").await;
 }
 

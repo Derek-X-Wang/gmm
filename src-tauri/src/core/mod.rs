@@ -51,10 +51,13 @@ pub use library_audit::{
 };
 #[doc(hidden)]
 pub use library_mutation::{
-    DURABLE_WITNESS_TABLES, REINSTALL_SWAP_COLUMNS, STAGED_LIBRARY_OPERATION_COLUMNS,
+    DURABLE_WITNESS_TABLES, ENABLED_TRANSITION_COLUMNS, REINSTALL_SWAP_COLUMNS,
+    STAGED_LIBRARY_OPERATION_COLUMNS,
 };
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
-pub use mods::{Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source};
+pub use mods::{
+    EnabledTransitionRecovery, Mod, ReinstallRecovery, ReinstallRecoveryOutcome, Source,
+};
 pub use session::{InterruptedSessionLaunch, SessionInfo, SessionLaunchClaim};
 pub use zip_import::ImportZipOptions;
 
@@ -164,6 +167,16 @@ impl Core {
             // durable witness for the next startup instead of moving Library
             // bytes while the process may still be loading them.
             return Ok(core);
+        }
+        if let Err(recovery) = core
+            .resolve_interrupted_enabled_transitions_at_startup()
+            .await
+        {
+            tracing::warn!(
+                target: "gmm::library",
+                error = %recovery,
+                "could not resolve interrupted enable/disable transitions at startup",
+            );
         }
         if let Err(recovery) = core.resolve_interrupted_staging_at_startup().await {
             tracing::warn!(
@@ -752,6 +765,7 @@ impl Core {
             version: None,
             screenshot_url: None,
             reinstall_recovery: None,
+            enabled_transition_recovery: None,
         })
     }
 
@@ -2805,6 +2819,7 @@ impl Core {
             version: None,
             screenshot_url: None,
             reinstall_recovery: None,
+            enabled_transition_recovery: None,
         })
     }
 
@@ -3474,6 +3489,16 @@ impl Core {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         self.prune_stale_session_launch_claims(&mut transaction)
             .await?;
+        if let Some(mod_id) =
+            library_ownership::LibraryOwnershipSnapshot::enabled_transition_mod_ids(
+                &mut transaction,
+            )
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Err(Error::EnabledTransitionPending { mod_id });
+        }
         sqlx::query(
             "INSERT INTO session_launch_claims (
                 token, game_code, owner_pid, owner_started_at,
@@ -3825,6 +3850,17 @@ impl Core {
                 witness.recovery().map(|recovery| (mod_id, recovery))
             })
             .collect();
+        let mut enabled_transition_recoveries: std::collections::HashMap<_, _> = {
+            let mut connection = self.pool.acquire().await?;
+            library_mutation::load_enabled_transition_witnesses(&mut connection)
+                .await?
+                .into_iter()
+                .filter_map(|witness| {
+                    let mod_id = witness.mod_id().to_string();
+                    witness.recovery().map(|recovery| (mod_id, recovery))
+                })
+                .collect()
+        };
         let rows = sqlx::query(
             "SELECT m.id, m.game_code, m.name, m.source, m.library_path, m.enabled,
                     m.gamebanana_id, m.source_url, m.author, m.version, m.screenshot_url
@@ -3845,6 +3881,7 @@ impl Core {
                 let library_path: String = row.try_get("library_path")?;
                 let enabled: i64 = row.try_get("enabled")?;
                 let reinstall_recovery = recoveries.remove(&id);
+                let enabled_transition_recovery = enabled_transition_recoveries.remove(&id);
 
                 Ok(Mod {
                     id,
@@ -3861,6 +3898,7 @@ impl Core {
                     version: row.try_get("version")?,
                     screenshot_url: row.try_get("screenshot_url")?,
                     reinstall_recovery,
+                    enabled_transition_recovery,
                 })
             })
             .collect()

@@ -21,6 +21,14 @@ export interface ReinstallRecovery {
   junctionWithdrawalError: string | null;
 }
 
+export interface EnabledTransitionRecovery {
+  intendedEnabled: boolean;
+  reason: string;
+  attemptedAt: string;
+  attempts: number;
+  junctionPath: string;
+}
+
 export type ReinstallRecoveryOutcome =
   | { status: "recovered" }
   | { status: "alreadyRecovered" }
@@ -39,6 +47,7 @@ export interface Mod {
   version: string | null;
   screenshotUrl: string | null;
   reinstallRecovery: ReinstallRecovery | null;
+  enabledTransitionRecovery: EnabledTransitionRecovery | null;
 }
 
 interface RawMod {
@@ -54,6 +63,7 @@ interface RawMod {
   version?: string | null;
   screenshot_url?: string | null;
   reinstall_recovery?: ReinstallRecovery | null;
+  enabled_transition_recovery?: EnabledTransitionRecovery | null;
 }
 
 const fromRaw = (m: RawMod): Mod => ({
@@ -69,6 +79,7 @@ const fromRaw = (m: RawMod): Mod => ({
   version: m.version ?? null,
   screenshotUrl: m.screenshot_url ?? null,
   reinstallRecovery: m.reinstall_recovery ?? null,
+  enabledTransitionRecovery: m.enabled_transition_recovery ?? null,
 });
 
 export async function listMods(game: GameCode): Promise<Mod[]> {

@@ -13,6 +13,7 @@ use super::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LibraryDirectoryOwner {
     Mod,
+    ModWithPendingEnabledTransition,
     ActiveReinstall,
     ActiveStaging,
 }
@@ -42,6 +43,7 @@ pub(super) struct LibraryOwnershipSnapshot {
     mods: HashMap<DirectoryIdentity, Vec<String>>,
     active_reinstall_directories: HashSet<DirectoryIdentity>,
     active_staging_directories: HashSet<DirectoryIdentity>,
+    enabled_transition_mod_ids: HashSet<String>,
 }
 
 impl LibraryOwnershipSnapshot {
@@ -51,6 +53,7 @@ impl LibraryOwnershipSnapshot {
             mods: HashMap::new(),
             active_reinstall_directories: HashSet::new(),
             active_staging_directories: HashSet::new(),
+            enabled_transition_mod_ids: HashSet::new(),
         }
     }
 
@@ -108,11 +111,27 @@ impl LibraryOwnershipSnapshot {
             }
         }
 
+        let enabled_transition_mod_ids = Self::enabled_transition_mod_ids(&mut *connection).await?;
+
         Ok(Self {
             mods,
             active_reinstall_directories,
             active_staging_directories,
+            enabled_transition_mod_ids,
         })
+    }
+
+    pub(super) async fn enabled_transition_mod_ids(
+        connection: &mut SqliteConnection,
+    ) -> Result<HashSet<String>> {
+        super::library_mutation::load_enabled_transition_witnesses(connection)
+            .await
+            .map(|witnesses| {
+                witnesses
+                    .into_iter()
+                    .map(|witness| witness.mod_id().to_string())
+                    .collect()
+            })
     }
 
     pub(super) fn owner_of(&self, identity: &DirectoryIdentity) -> Option<LibraryDirectoryOwner> {
@@ -122,9 +141,16 @@ impl LibraryOwnershipSnapshot {
         if self.active_staging_directories.contains(identity) {
             return Some(LibraryDirectoryOwner::ActiveStaging);
         }
-        self.mods
-            .contains_key(identity)
-            .then_some(LibraryDirectoryOwner::Mod)
+        self.mods.get(identity).map(|mod_ids| {
+            if mod_ids
+                .iter()
+                .any(|mod_id| self.enabled_transition_mod_ids.contains(mod_id))
+            {
+                LibraryDirectoryOwner::ModWithPendingEnabledTransition
+            } else {
+                LibraryDirectoryOwner::Mod
+            }
+        })
     }
 
     /// The one report/action rule for an immediate Library-root directory.

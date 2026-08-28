@@ -12,8 +12,9 @@
 //!
 //! `tests/session.rs` covers crash recovery for a Game Session because a
 //! Game Session has an obvious external witness: a PID that is or is not
-//! alive. Ordinary mutations have no such witness, so testing them needs
-//! a way to stop the process at a chosen instant.
+//! alive. Durable mutations either carry their own witness or rely on
+//! startup reconciliation, and testing both shapes needs a way to stop the
+//! process at a chosen instant.
 //!
 //! # The shape of the seam
 //!
@@ -101,6 +102,11 @@ pub const STAGING_AFTER_WITNESS_COMMIT: &str = "staging.after_witness_commit";
 /// writer fence is already held, so recovery cannot quarantine this Mod before
 /// the deployment-state transition commits.
 pub const SET_ENABLED_AFTER_REINSTALL_GUARD: &str = "set_enabled.after_reinstall_guard";
+
+/// `set_enabled`: the durable requested transition committed before the first
+/// Junction mutation. A process death from here onward leaves startup a
+/// durable instruction for completing the flag/Junction pair.
+pub const SET_ENABLED_AFTER_WITNESS_COMMIT: &str = "set_enabled.after_witness_commit";
 
 /// `set_enabled(true)`: the Junction now exists, the row still says
 /// disabled. Recoverable — see the Junction, believe the row, remove it.

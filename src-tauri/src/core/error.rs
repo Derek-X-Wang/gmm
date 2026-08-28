@@ -301,6 +301,17 @@ pub enum Error {
     StagingWitnessCorrupt { id: String, reason: String },
 
     #[error(
+        "GMM found corrupt enable/disable recovery state for Mod {mod_id}: {reason}. \
+         GMM stopped because corrupt database state is not proof that a deployment entry is safe to change."
+    )]
+    EnabledTransitionWitnessCorrupt { mod_id: String, reason: String },
+
+    #[error(
+        "Mod {mod_id} has an interrupted enable/disable transition that GMM must recover before another Library or deployment change can start"
+    )]
+    EnabledTransitionPending { mod_id: String },
+
+    #[error(
         "{prefix} {reason}. {guidance}",
         prefix = DUPLICATE_RESOLUTION_CHANGED_PREFIX,
         guidance = DUPLICATE_RESOLUTION_REVIEW_AGAIN

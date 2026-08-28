@@ -5141,6 +5141,7 @@ async fn assert_set_enabled_excludes_relocation(
 ) {
     for pause_point in [
         gmm_lib::core::crash_points::SET_ENABLED_AFTER_REINSTALL_GUARD,
+        gmm_lib::core::crash_points::SET_ENABLED_AFTER_WITNESS_COMMIT,
         junction_pause_point,
         gmm_lib::core::crash_points::SET_ENABLED_AFTER_DB_UPDATE,
     ] {
@@ -5278,9 +5279,15 @@ async fn assert_set_enabled_excludes_relocation_at(
             &relocated_root.display().to_string(),
         ])
         .run();
+    let expected_refusal =
+        if pause_point == gmm_lib::core::crash_points::SET_ENABLED_AFTER_WITNESS_COMMIT {
+            "interrupted enable/disable transition"
+        } else {
+            "database is locked"
+        };
     relocation.expect_refused(
         &format!("relocation while set_enabled paused at {pause_point}"),
-        "database is locked",
+        expected_refusal,
     );
 
     toggling.resume();
