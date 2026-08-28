@@ -35,6 +35,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 const { OnboardingWizard } = await import("./OnboardingWizard");
 
+const structuredFailure = {
+  kind: "invalidActiveVariant",
+  message: "GMM could not read this Game's saved setup.",
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   avGuidance.mockResolvedValue({
@@ -110,6 +115,20 @@ describe("OnboardingWizard — step 1 gating", () => {
 
     await userEvent.click(await avCheckbox());
     expect(continueButton()).toBeDisabled();
+  });
+
+  it("shows an antivirus-guidance failure instead of loading forever", async () => {
+    avGuidance.mockRejectedValue(structuredFailure);
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+
+    const message = await screen.findByText(structuredFailure.message);
+    expect(message).toHaveAttribute(
+      "data-command-failure-kind",
+      "invalidActiveVariant",
+    );
+    expect(
+      screen.queryByText(/Loading antivirus guidance/i),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the AV guidance headline fetched from the backend", async () => {
@@ -228,23 +247,76 @@ describe("OnboardingWizard — detection step", () => {
     expect(continueButton()).toBeEnabled();
   });
 
-  it("does not block the wizard when detection rejects", async () => {
-    detectAllGames.mockRejectedValue(new Error("registry unreadable"));
+  it("renders a structured detection failure without blocking the wizard", async () => {
+    detectAllGames.mockRejectedValue(structuredFailure);
     renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
 
     await userEvent.click(await avCheckbox());
     await userEvent.click(continueButton());
 
     expect(await screen.findByText(/step 2 of 4/i)).toBeInTheDocument();
+    const heading = screen.getByText(/couldn't run automatic detection/i);
+    const alert = heading.closest('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert).toHaveAttribute(
+      "data-command-failure-kind",
+      "invalidActiveVariant",
+    );
+    expect(alert).toHaveTextContent(structuredFailure.message);
     expect(continueButton()).toBeEnabled();
+  });
+
+  it("renders a structured failure when saving a manual Game path fails", async () => {
+    openDialog.mockResolvedValue("C:\\Games\\Moved Genshin");
+    setGameInstallPath.mockRejectedValue(structuredFailure);
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+
+    await advanceToStep(2);
+    await userEvent.click(
+      await screen.findByRole("button", { name: /Change/i }),
+    );
+
+    const message = await screen.findByText(structuredFailure.message);
+    expect(message).toHaveAttribute(
+      "data-command-failure-kind",
+      "invalidActiveVariant",
+    );
+  });
+});
+
+describe("OnboardingWizard — Library step failures", () => {
+  it("shows a Library-path failure instead of resolving forever", async () => {
+    getLibraryPaths.mockRejectedValue(structuredFailure);
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+
+    await advanceToStep(3);
+
+    const message = await screen.findByText(structuredFailure.message);
+    expect(message).toHaveAttribute(
+      "data-command-failure-kind",
+      "invalidActiveVariant",
+    );
+    expect(screen.queryByPlaceholderText(/Resolving/i)).not.toBeInTheDocument();
   });
 });
 
 describe("OnboardingWizard — importer step failures", () => {
-  const structuredFailure = {
-    kind: "invalidActiveVariant",
-    message: "GMM could not read this Game's saved setup.",
-  };
+  it("shows a supported-Games failure instead of loading forever", async () => {
+    listSupportedGames.mockRejectedValue(structuredFailure);
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+
+    await advanceToStep(4);
+
+    const heading = await screen.findByText(/could not list supported Games/i);
+    const alert = heading.closest('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert).toHaveAttribute(
+      "data-command-failure-kind",
+      "invalidActiveVariant",
+    );
+    expect(alert).toHaveTextContent(structuredFailure.message);
+    expect(screen.queryByText(/^Loading…$/i)).not.toBeInTheDocument();
+  });
 
   it("shows one install-path failure without hiding another Game", async () => {
     getGameInstallPath.mockImplementation((game: string) =>

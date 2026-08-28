@@ -3,9 +3,11 @@
 //! The source gate deliberately covers literal `#[tauri::command]` item
 //! functions under `src/`. It exactly matches that attribute and lexically
 //! resolves direct `crate::command_error::CommandResult` imports (including
-//! import aliases). It cannot inspect macro expansion, aliased attributes,
-//! commands outside `src/`, or arbitrary type re-exports; review of the Tauri
-//! registration list remains the backstop for those shapes.
+//! import aliases). Conditional imports are rejected as binding proof because
+//! another target can supply a shadow with the same name. The gate cannot
+//! inspect macro expansion, aliased attributes, commands outside `src/`, or
+//! arbitrary type re-exports; review of the Tauri registration list remains
+//! the backstop for those shapes.
 
 use std::collections::HashSet;
 use std::fs;
@@ -77,10 +79,48 @@ fn shared_command_result_bindings(items: &[Item]) -> HashSet<String> {
     let mut bindings = HashSet::new();
     for item in items {
         if let Item::Use(import) = item {
+            // A conditional import cannot establish what a one-segment alias
+            // names on every target. Fail closed: commands may use an
+            // unconditional shared import or the fully-qualified alias.
+            if import.attrs.iter().any(|attribute| {
+                matches!(
+                    attribute
+                        .path()
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string())
+                        .as_deref(),
+                    Some("cfg" | "cfg_attr")
+                )
+            }) {
+                continue;
+            }
             collect_use_bindings(&import.tree, &mut Vec::new(), &mut bindings);
         }
     }
     bindings
+}
+
+#[test]
+fn cfg_gated_shared_alias_does_not_authorize_an_active_shadow() {
+    let file = syn::parse_file(
+        r#"
+        #[cfg(not(windows))]
+        use crate::command_error::CommandResult;
+        #[cfg(windows)]
+        type CommandResult<T> = Result<T, String>;
+
+        #[tauri::command]
+        fn windows_only() -> CommandResult<()> { todo!() }
+        "#,
+    )
+    .expect("parse cfg-shadow fixture");
+
+    let bindings = shared_command_result_bindings(&file.items);
+    assert!(
+        !bindings.contains("CommandResult"),
+        "a cfg-gated import cannot prove that a one-segment command result names the shared envelope on every target"
+    );
 }
 
 fn returns_shared_command_result(
@@ -233,6 +273,13 @@ fn command_error_message_transform_preserves_classification() {
     );
 }
 
+/// This source guard proves that both launch layers return the shared alias and
+/// that the thin Tauri shell does not call `CommandError::other`. The behavioral
+/// `command_error_message_transform_preserves_classification` test separately
+/// proves that the launch message wrapper retains an existing kind. It does not
+/// prove every core call inside `runtime::launch`; none of today's launch core
+/// calls can produce the only non-`Other` kind, so that requires review until a
+/// classified launch failure has a real behavioral seam.
 #[test]
 fn launch_game_keeps_launch_failures_structured() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

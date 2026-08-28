@@ -51,6 +51,26 @@ let importerReleaseError: {
   kind: "invalidActiveVariant";
   message: string;
 } | null = null;
+let launchError: {
+  kind: "invalidActiveVariant";
+  message: string;
+} | null = null;
+let importerPinError: {
+  kind: "invalidActiveVariant";
+  message: string;
+} | null = null;
+let importerUpdateError: {
+  kind: "invalidActiveVariant";
+  message: string;
+} | null = null;
+let importerUpdate = {
+  available: false,
+  installedVersion: null as string | null,
+  latestVersion: null as string | null,
+  pinned: false,
+  upstreamAhead: false,
+  checkError: null as string | null,
+};
 let relocationFailures: Array<{
   mod_id: string;
   game: "gimi";
@@ -67,7 +87,15 @@ function ipcResult(command: string) {
     case "current_session":
     case "clean_stale_session":
     case "get_game_install_path":
+      return null;
     case "check_importer_update":
+      if (importerUpdateError) throw importerUpdateError;
+      return importerUpdate;
+    case "launch_game":
+      if (launchError) throw launchError;
+      return null;
+    case "set_importer_pinned":
+      if (importerPinError) throw importerPinError;
       return null;
     case "fetch_latest_importer_release":
       if (importerReleaseError) throw importerReleaseError;
@@ -116,9 +144,83 @@ beforeEach(() => {
   startupFailures = [];
   conflictError = null;
   importerReleaseError = null;
+  launchError = null;
+  importerPinError = null;
+  importerUpdateError = null;
+  importerUpdate = {
+    available: false,
+    installedVersion: null,
+    latestVersion: null,
+    pinned: false,
+    upstreamAhead: false,
+    checkError: null,
+  };
   relocationFailures = [];
   openDialog.mockResolvedValue("C:\\Moved");
   invoke.mockImplementation((command: string) => Promise.resolve(ipcResult(command)));
+});
+
+it("preserves a non-AV launch failure's kind through the shared renderer", async () => {
+  launchError = {
+    kind: "invalidActiveVariant",
+    message: "The selected Mod variant is unavailable.",
+  };
+  renderWithQuery(<App />);
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /Launch Genshin Impact/i }),
+  );
+
+  const message = await screen.findByText(launchError.message);
+  expect(message).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
+  );
+});
+
+it("renders a structured failure when changing an Importer Pin fails", async () => {
+  importerUpdate = {
+    available: false,
+    installedVersion: "v8.8.9",
+    latestVersion: "v8.8.9",
+    pinned: false,
+    upstreamAhead: false,
+    checkError: null,
+  };
+  importerPinError = {
+    kind: "invalidActiveVariant",
+    message: "Could not save the Importer Pin.",
+  };
+  renderWithQuery(<App />);
+
+  await userEvent.click(
+    await screen.findByRole("button", { name: /Pin to current/i }),
+  );
+
+  const message = await screen.findByText(importerPinError.message);
+  expect(message).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
+  );
+});
+
+it("renders a structured failure when the Importer update query rejects", async () => {
+  importerUpdateError = {
+    kind: "invalidActiveVariant",
+    message: "Could not read Importer update state.",
+  };
+  renderWithQuery(<App />);
+
+  const heading = await screen.findByText(
+    /could not check for a Model Importer update/i,
+  );
+  const alert = heading.closest('[role="alert"]');
+  expect(alert).not.toBeNull();
+  expect(alert).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
+  );
+  expect(alert).toHaveTextContent(importerUpdateError.message);
 });
 
 it("shows a latest-importer-release failure instead of calling it unavailable", async () => {

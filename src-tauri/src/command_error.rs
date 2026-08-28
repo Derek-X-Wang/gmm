@@ -9,6 +9,9 @@
 //! that gate cannot see macro-generated commands, an aliased command attribute,
 //! commands outside `src/`, or a type routed through an arbitrary re-export;
 //! those remain review responsibilities at the Tauri registration boundary.
+//! Conditional imports deliberately do not establish a shared binding: a
+//! cfg-gated command must name the fully qualified alias so another target
+//! cannot replace its one-segment result type.
 
 use serde::Serialize;
 use std::fmt;

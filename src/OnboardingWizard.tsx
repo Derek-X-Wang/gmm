@@ -140,6 +140,8 @@ function WelcomeStep({
             <span>I've read the AV note</span>
           </label>
         </div>
+      ) : guidance.isError ? (
+        <CommandErrorNotice error={guidance.error} />
       ) : (
         <p className="muted">Loading antivirus guidance…</p>
       )}
@@ -198,10 +200,11 @@ function DetectStep() {
     return (
       <div className="card">
         <h2>Find your games</h2>
-        <p className="error">
-          We couldn't run automatic detection. Browse manually for each game
-          you want to set up.
-        </p>
+        <CommandErrorNotice
+          error={detect.error}
+          heading="We couldn't run automatic detection."
+          detail="Browse manually for each game you want to set up."
+        />
       </div>
     );
   }
@@ -258,6 +261,7 @@ function DetectStep() {
           {detect.isFetching ? "Re-scanning…" : "Re-scan"}
         </button>
       </div>
+      <CommandErrorNotice error={setPath.error} />
     </div>
   );
 }
@@ -290,7 +294,7 @@ function LibraryStep() {
         <input
           className="path"
           value={paths.data?.effectiveRoot ?? ""}
-          placeholder="Resolving…"
+          placeholder={paths.isError ? "Unavailable" : "Resolving…"}
           readOnly
         />
         <button onClick={pickFolder} disabled={setRoot.isPending}>
@@ -300,6 +304,7 @@ function LibraryStep() {
       <p className="muted small">
         Per-game overrides are available in Settings later.
       </p>
+      <CommandErrorNotice error={paths.error} />
       <CommandErrorNotice error={setRoot.error} />
     </div>
   );
@@ -402,7 +407,19 @@ function ImporterStep() {
     setRunning(false);
   };
 
-  if (installPaths.isLoading || !supported.data) {
+  if (supported.isError) {
+    return (
+      <div className="card">
+        <h2>Install Model Importers</h2>
+        <CommandErrorNotice
+          error={supported.error}
+          heading="GMM could not list supported Games."
+        />
+      </div>
+    );
+  }
+
+  if (supported.isLoading || installPaths.isLoading) {
     return (
       <div className="card">
         <h2>Install Model Importers</h2>

@@ -9,6 +9,7 @@ const {
   detectConflicts,
   importGamebanana,
   importZip,
+  partitionLaunchError,
   recoverUnreferencedLibraryDir,
   resolveDuplicateMods,
   retryReinstallRecovery,
@@ -42,6 +43,23 @@ it("preserves a command failure's classification and user-facing message", async
   expect(failure).toMatchObject({
     kind: "invalidActiveVariant",
     message: "Select a valid Variant for this Mod, or reinstall it.",
+  });
+});
+
+it("partitions launch presentation without discarding failure classification", () => {
+  const partitioned = partitionLaunchError(
+    {
+      kind: "invalidActiveVariant",
+      message: "AV-PATTERN: Select a valid Variant.",
+    },
+    "AV-PATTERN: ",
+  );
+
+  expect(partitioned.isAvPattern).toBe(true);
+  expect(partitioned.failure).toBeInstanceOf(CommandFailure);
+  expect(partitioned.failure).toMatchObject({
+    kind: "invalidActiveVariant",
+    message: "Select a valid Variant.",
   });
 });
 

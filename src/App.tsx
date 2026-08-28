@@ -446,10 +446,10 @@ function LaunchGameButton({
       {partitioned && partitioned.isAvPattern && guidance.data ? (
         <AvGuidanceCallout
           guidance={guidance.data}
-          underlyingError={partitioned.message}
+          underlyingError={partitioned.failure.message}
         />
       ) : partitioned ? (
-        <p className="error">{partitioned.message}</p>
+        <CommandErrorNotice error={partitioned.failure} />
       ) : null}
     </section>
   );
@@ -755,6 +755,10 @@ function ImporterPanel({
         error={release.error}
         heading="GMM could not check the latest Model Importer release."
       />
+      <CommandErrorNotice
+        error={update.error}
+        heading="GMM could not check for a Model Importer update."
+      />
       <div className="row">
         <button onClick={() => install.mutate()} disabled={install.isPending}>
           {install.isPending ? "Installing…" : update.data?.available ? "Apply update" : "Reinstall importer"}
@@ -789,6 +793,7 @@ function ImporterPanel({
       ) : null}
       <CommandErrorNotice error={install.error} />
       <CommandErrorNotice error={rollback.error} />
+      <CommandErrorNotice error={pin.error} />
     </section>
   );
 }
