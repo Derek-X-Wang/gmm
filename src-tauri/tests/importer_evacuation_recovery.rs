@@ -178,6 +178,88 @@ async fn partial_importer_evacuation_keeps_its_witness_and_explains_the_recovery
 }
 
 #[tokio::test]
+async fn rollback_ignores_a_partial_backup_retained_by_recovery() {
+    let tmp = TempDir::new().expect("temporary app data");
+    let library = tmp.path().join("library");
+    let game = tmp.path().join("Genshin");
+    std::fs::create_dir_all(game.join("Core")).expect("create old Core");
+    std::fs::write(game.join("d3dx.ini"), b"old d3dx bytes").expect("write old d3dx");
+    std::fs::write(game.join("Core/original.ini"), b"old Core bytes").expect("write old Core");
+
+    let zip_path = tmp.path().join("fixture.zip");
+    build_importer_zip(&zip_path);
+    let upstream = FakeUpstream::start(std::fs::read(&zip_path).expect("read fixture zip")).await;
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_for_hook = Arc::clone(&fired);
+    let hook = Arc::new(move |point: &str| {
+        if point == importer::BACKUP_AFTER_ENTRY_TEST_SEAM
+            && fired_for_hook.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            panic!("injected failure after the first evacuated importer entry");
+        }
+    });
+    let core = Core::new(library.clone(), &db_url(&tmp))
+        .await
+        .expect("initialize Core")
+        .with_crash_hook(hook);
+    core.set_game_install_path(GameCode::Gimi, &game)
+        .await
+        .expect("set game path");
+    core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
+        .await
+        .expect("set importer origin");
+    core.install_importer_with_endpoints(GameCode::Gimi, &upstream.endpoints())
+        .await
+        .expect_err("the injected evacuation failure must fail the install");
+    let backup = core
+        .importer_evacuation_recovery(GameCode::Gimi)
+        .await
+        .expect("load recovery")
+        .expect("the interrupted evacuation must stay visible")
+        .backup_path;
+    std::fs::write(game.join("d3dx.ini"), b"old d3dx bytes")
+        .expect("restore an equal live entry before recovery");
+    drop(core);
+
+    let recovered = Core::new(library, &db_url(&tmp))
+        .await
+        .expect("startup must settle the equal live and backup entries");
+    assert!(
+        recovered
+            .importer_evacuation_recovery(GameCode::Gimi)
+            .await
+            .expect("read settled recovery state")
+            .is_none(),
+        "equal entries must let recovery retire the durable witness",
+    );
+    assert!(
+        backup.join("d3dx.ini").is_file() && !backup.join("Core").exists(),
+        "the fixture must retain a genuinely partial backup after recovery",
+    );
+
+    std::fs::write(game.join("d3dx.ini"), b"current importer bytes")
+        .expect("make a rollback from the remnant observable");
+    let rolled_back = recovered
+        .rollback_importer(GameCode::Gimi)
+        .await
+        .expect("attempt rollback after recovery retained a partial backup");
+    assert!(
+        rolled_back.is_none(),
+        "rollback must not select a partial backup retained by recovery: {rolled_back:?}",
+    );
+    assert_eq!(
+        std::fs::read(game.join("d3dx.ini")).expect("read current importer after rollback"),
+        b"current importer bytes",
+        "rollback must leave the live importer untouched when only a retained remnant exists",
+    );
+    assert_eq!(
+        std::fs::read(backup.join("d3dx.ini")).expect("read retained partial backup"),
+        b"old d3dx bytes",
+        "rejecting the retained remnant must preserve its bytes",
+    );
+}
+
+#[tokio::test]
 async fn recovery_preserves_a_user_repaired_importer_entry_and_its_backup() {
     let tmp = TempDir::new().expect("temporary app data");
     let library = tmp.path().join("library");
@@ -397,6 +479,97 @@ async fn backup_identity_change_becomes_retryable_when_the_original_directory_re
         .set_importer_origin_override(GameCode::Gimi, Some(&replacement))
         .await
         .expect("releasing terminal recovery must unblock importer operations for the Game");
+}
+
+#[tokio::test]
+async fn acknowledge_and_release_preserves_bytes_at_both_recorded_locations() {
+    let tmp = TempDir::new().expect("temporary app data");
+    let library = tmp.path().join("library");
+    let game = tmp.path().join("Genshin");
+    std::fs::create_dir_all(game.join("Core")).expect("create old Core");
+    std::fs::write(game.join("d3dx.ini"), b"old d3dx bytes").expect("write old d3dx");
+    std::fs::write(game.join("Core/original.ini"), b"old Core bytes").expect("write old Core");
+
+    let zip_path = tmp.path().join("fixture.zip");
+    build_importer_zip(&zip_path);
+    let upstream = FakeUpstream::start(std::fs::read(&zip_path).expect("read fixture zip")).await;
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_for_hook = Arc::clone(&fired);
+    let hook = Arc::new(move |point: &str| {
+        if point == importer::BACKUP_AFTER_ENTRY_TEST_SEAM
+            && fired_for_hook.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            panic!("injected failure after the first evacuated importer entry");
+        }
+    });
+    let core = Core::new(library.clone(), &db_url(&tmp))
+        .await
+        .expect("initialize Core")
+        .with_crash_hook(hook);
+    core.set_game_install_path(GameCode::Gimi, &game)
+        .await
+        .expect("set game path");
+    core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
+        .await
+        .expect("set importer origin");
+    core.install_importer_with_endpoints(GameCode::Gimi, &upstream.endpoints())
+        .await
+        .expect_err("the injected evacuation failure must fail the install");
+    let backup = core
+        .importer_evacuation_recovery(GameCode::Gimi)
+        .await
+        .expect("load recovery")
+        .expect("the interrupted evacuation must stay visible")
+        .backup_path;
+    drop(core);
+
+    let displaced = backup.with_extension("original");
+    std::fs::rename(&backup, &displaced).expect("move the recorded backup object aside");
+    std::fs::create_dir(&backup).expect("recreate the recorded backup directory");
+    std::fs::copy(displaced.join("d3dx.ini"), backup.join("d3dx.ini"))
+        .expect("preserve backup bytes at the recorded path");
+
+    let recovered = Core::new(library, &db_url(&tmp))
+        .await
+        .expect("startup must expose the identity mismatch");
+    let recovery = recovered
+        .importer_evacuation_recovery(GameCode::Gimi)
+        .await
+        .expect("load terminal recovery")
+        .expect("the identity mismatch must remain visible");
+    assert_eq!(
+        recovery.action,
+        importer::ImporterEvacuationRecoveryAction::AcknowledgeAndRelease,
+        "a changed backup identity must expose acknowledge-and-release",
+    );
+
+    recovered
+        .retire_interrupted_importer_evacuation(GameCode::Gimi)
+        .await
+        .expect("acknowledge and release the terminal recovery blocker");
+    assert!(
+        recovered
+            .importer_evacuation_recovery(GameCode::Gimi)
+            .await
+            .expect("read released recovery state")
+            .is_none(),
+        "acknowledge-and-release must retire only the durable witness",
+    );
+    assert_eq!(
+        std::fs::read(game.join("Core/original.ini")).expect("read recorded game location"),
+        b"old Core bytes",
+        "acknowledge-and-release must preserve bytes at the recorded game location",
+    );
+    assert_eq!(
+        std::fs::read(backup.join("d3dx.ini")).expect("read recorded backup location"),
+        b"old d3dx bytes",
+        "acknowledge-and-release must preserve bytes at the recorded backup location",
+    );
+    assert_eq!(
+        std::fs::read(displaced.join("d3dx.ini")).expect("read displaced original object"),
+        b"old d3dx bytes",
+        "acknowledge-and-release must not search for or delete the displaced original object",
+    );
 }
 
 #[tokio::test]

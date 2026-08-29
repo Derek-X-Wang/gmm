@@ -884,15 +884,17 @@ fn importer_entry_content_snapshot(path: &Path) -> Result<ImporterEntryContentSn
 /// the game directory. When a live entry is already present, even an equal
 /// comparison cannot authorize deleting its backup: directory trees can
 /// change while they are being read, so recovery leaves the redundant backup
-/// for explicit user cleanup. A private copy stage without a published backup
-/// is only removable when the original source still exists; otherwise its
-/// completeness is unknowable and recovery refuses to guess.
+/// and marks its directory as a non-authoritative recovery remnant. A private
+/// copy stage without a published backup is only removable when the original
+/// source still exists; otherwise its completeness is unknowable and recovery
+/// refuses to guess.
 pub(super) fn recover_evacuated_importer(
     game_dir: &Path,
     backup_dir: &Path,
     entries: &[String],
     crash_hook: Option<&super::CrashHook>,
 ) -> Result<()> {
+    let mut retained_backup_entry = false;
     for name in entries {
         let source = game_dir.join(name);
         let backup = backup_dir.join(name);
@@ -934,7 +936,9 @@ pub(super) fn recover_evacuated_importer(
                 // Comparison on a live directory tree is never a safe delete
                 // authorization. The durable witness may retire because both
                 // locations contain a usable entry, but recovery leaves the
-                // backup bytes for explicit user cleanup.
+                // backup bytes and excludes this possibly-partial directory
+                // from ordinary rollback selection.
+                retained_backup_entry = true;
                 continue;
             }
             if symlink_metadata_if_exists(&restore_copy)
@@ -986,6 +990,10 @@ pub(super) fn recover_evacuated_importer(
         {
             remove_any(&restore_copy)?;
         }
+    }
+
+    if retained_backup_entry {
+        mark_backup_as_recovery_remnant(backup_dir)?;
     }
 
     Ok(())
@@ -1144,6 +1152,24 @@ pub fn provenance_path(backup_dir: &Path) -> PathBuf {
     backup_dir.with_file_name(name)
 }
 
+/// Where recovery records that `backup_dir` may contain only a retained
+/// subset of the planned importer entries and is therefore not an
+/// authoritative rollback source.
+fn recovery_remnant_marker_path(backup_dir: &Path) -> PathBuf {
+    let mut name = backup_dir.file_name().unwrap_or_default().to_os_string();
+    name.push(".gmm-recovery-remnant");
+    backup_dir.with_file_name(name)
+}
+
+fn mark_backup_as_recovery_remnant(backup_dir: &Path) -> Result<()> {
+    let path = recovery_remnant_marker_path(backup_dir);
+    fs::write(
+        &path,
+        b"This directory was retained by interrupted Model Importer recovery and is not a complete rollback source.\n",
+    )
+    .map_err(|source| Error::Io { path, source })
+}
+
 /// Record what the files in `backup_dir` were, so a later rollback can
 /// restore GMM's bookkeeping along with the files.
 pub fn write_backup_provenance(backup_dir: &Path, provenance: &BackupProvenance) -> Result<()> {
@@ -1182,8 +1208,9 @@ pub fn read_backup_provenance(backup_dir: &Path) -> Option<BackupProvenance> {
     }
 }
 
-/// The most recent backup under `backups_root`, or `None` when there is
-/// nothing to roll back to.
+/// The most recent authoritative backup under `backups_root`, or `None` when
+/// there is nothing safe to roll back to. Recovery remnants are deliberately
+/// excluded because GMM cannot prove they contain the complete importer.
 ///
 /// Backups are named with an ISO-8601 timestamp, so lexicographic order
 /// is chronological order.
@@ -1214,6 +1241,16 @@ pub fn latest_backup(backups_root: &Path) -> Result<Option<PathBuf>> {
         };
         // Safe: `metadata_if_exists` propagated I/O uncertainty.
         if metadata.is_dir() {
+            let marker = recovery_remnant_marker_path(&path);
+            if metadata_if_exists(&marker)
+                .map_err(|source| Error::Io {
+                    path: marker,
+                    source,
+                })?
+                .is_some()
+            {
+                continue;
+            }
             entries.push(path);
         }
     }
