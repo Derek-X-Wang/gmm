@@ -2,33 +2,113 @@
 //!
 //! This test parses every checked-in production Rust module under `src/`. It
 //! follows syntactically visible Library paths (`library_root`, `library_path`,
-//! and values derived from them) through local bindings. Passing such a value
-//! to a helper is conservatively treated as a possible mutation; calls through
-//! `std::fs` (including aliases) are also treated as mutations unless they are
-//! in the closed non-mutating call set below. Consequently a new module, helper
-//! indirection, different formatting, or a previously unseen `std::fs` API
-//! cannot silently add a Library-content mutation without declaring policy.
+//! and values derived from them) through local bindings, call arguments, and
+//! method receivers. Passing such a value to a helper is conservatively treated
+//! as a possible mutation. Explicit `std::fs` imports and aliases are resolved
+//! to their original items before the closed non-mutating call set is applied;
+//! glob-imported `std::fs` calls are classified by their local item name.
+//! Consequently a new module, helper indirection, different formatting, or a
+//! previously unseen `std::fs` API cannot silently add a Library-content
+//! mutation without declaring policy.
 //!
-//! Policy evidence is lexical: the containing function must name a
-//! `LibraryMutation` policy or accept a `LibraryMutationFence`. A deliberate
-//! exception must instead annotate the single statement with
+//! Policy evidence is structural: the containing function must call a known
+//! fence/staging acquisition API or accept a `LibraryMutationFence`. The named
+//! high-risk call sites enforced by the predecessor gate also retain their
+//! specific acquisition, staging-commit, witness, and quarantine contracts. A
+//! deliberate exception must instead annotate one direct mutating call with
 //! `#[allow(clippy::disallowed_methods, reason = "Library mutation policy exemption: ...")]`;
-//! function-, impl-, and module-level exemptions are rejected.
+//! block, function, impl, and module blanket exemptions are rejected.
 //!
 //! This is deliberately not a type checker or control/dataflow proof. It cannot
 //! recognize a Library path whose meaning is hidden behind an unrelated name,
 //! an opaque return value, macro expansion, generated source, or a call outside
-//! checked-in `src/`. Most importantly, seeing policy evidence in a function
-//! does **not** prove that the fence is held across the mutation; that requires
-//! dataflow analysis and remains review's job.
+//! checked-in `src/`, and it does not model Rust name resolution beyond simple
+//! file-level `std::fs` imports. Most importantly, seeing a fence acquisition
+//! in a function does **not** prove that the fence is held across the mutation;
+//! that requires dataflow analysis and remains review's job.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use syn::visit::{self, Visit};
 
 const EXEMPTION_PREFIX: &str = "Library mutation policy exemption:";
+
+const ESTABLISHED_MUTATION_CONTRACTS: &[(&str, &[&str])] = &[
+    (
+        "finish_interrupted_library_deletes",
+        &[
+            "begin_library_mutation",
+            "LibraryMutation::FinishInterruptedDeletes",
+        ],
+    ),
+    (
+        "retry_reinstall_recovery",
+        &[
+            "begin_library_mutation",
+            "LibraryMutation::RetryReinstallRecovery",
+        ],
+    ),
+    (
+        "set_library_root",
+        &["begin_library_mutation", "LibraryMutation::SetLibraryRoot"],
+    ),
+    (
+        "set_library_path_for_game",
+        &[
+            "begin_library_mutation",
+            "LibraryMutation::SetLibraryPathForGame",
+        ],
+    ),
+    (
+        "adopt_folder",
+        &[
+            "create_staged_library_directory",
+            "commit_staged_mod",
+            "LibraryMutation::AdoptFolder",
+        ],
+    ),
+    (
+        "import_zip",
+        &[
+            "create_staged_library_directory",
+            "commit_staged_mod",
+            "LibraryMutation::ImportZip",
+        ],
+    ),
+    (
+        "recover_unreferenced_library_dir",
+        &[
+            "begin_guarded_library_mutation",
+            "LibraryMutation::RecoverUnreferencedLibraryDir",
+        ],
+    ),
+    (
+        "delete_unreferenced_library_dir",
+        &[
+            "begin_guarded_library_mutation",
+            "LibraryMutation::DeleteUnreferencedLibraryDir",
+        ],
+    ),
+    (
+        "resolve_duplicate_mods",
+        &[
+            "begin_library_mutation",
+            "LibraryMutation::ResolveDuplicateMods",
+            "withdraw_reinstall_junction",
+        ],
+    ),
+    (
+        "reinstall_gamebanana_mod_with_endpoints",
+        &[
+            "begin_library_mutation",
+            "LibraryMutation::ReinstallGamebananaMod",
+            "insert_reinstall_swap_witness",
+            "quarantine_library_directory_with_token",
+        ],
+    ),
+];
 
 #[test]
 fn library_content_mutations_declare_their_fence_policy() {
@@ -58,7 +138,7 @@ fn library_content_mutations_declare_their_fence_policy() {
     policy_functions.retain(|name| !non_policy_functions.contains(name));
     policy_methods.retain(|name| !non_policy_methods.contains(name));
 
-    let mut violations = Vec::new();
+    let mut violations = established_contract_violations(&parsed);
     for (path, syntax) in parsed {
         let aliases = FilesystemAliases::from_file(&syntax);
         let relative = path.strip_prefix(&source_root).unwrap_or(&path);
@@ -74,7 +154,7 @@ fn library_content_mutations_declare_their_fence_policy() {
 
     assert!(
         violations.is_empty(),
-        "Library-content mutation has no declared fence policy; name its LibraryMutation policy, pass a LibraryMutationFence, or annotate only the exceptional statement with a non-empty `{EXEMPTION_PREFIX} ...` reason: {violations:?}",
+        "Library-content mutation has no declared fence policy; acquire or accept the Library fence/staging policy, or annotate only the exceptional call with a non-empty `{EXEMPTION_PREFIX} ...` reason: {violations:?}",
     );
 }
 
@@ -118,6 +198,157 @@ fn function_level_library_mutation_exemption_is_rejected() {
     );
 }
 
+#[test]
+fn destructive_filesystem_alias_is_classified_by_original_item() {
+    let violations = fixture_violations(
+        r#"
+        use std::fs::remove_file as read;
+
+        fn aliased(library_path: &std::path::Path) -> std::io::Result<()> {
+            read(library_path)
+        }
+        "#,
+    );
+    assert_eq!(
+        violations,
+        ["fixture.rs::aliased: call to `std::fs::remove_file`"],
+        "a destructive alias must retain the original std::fs identity"
+    );
+}
+
+#[test]
+fn unaliased_destructive_filesystem_control_is_rejected() {
+    let violations = fixture_violations(
+        r#"
+        fn unaliased(library_path: &std::path::Path) -> std::io::Result<()> {
+            std::fs::remove_file(library_path)
+        }
+        "#,
+    );
+    assert_eq!(
+        violations,
+        ["fixture.rs::unaliased: call to `std::fs::remove_file`"],
+        "the unaliased control must remain rejected"
+    );
+}
+
+#[test]
+fn library_path_method_receiver_is_inspected() {
+    let violations = fixture_violations(
+        r#"
+        fn receiver(library_path: &std::path::Path) -> std::io::Result<()> {
+            library_path.some_destructive_method()
+        }
+        "#,
+    );
+    assert_eq!(
+        violations,
+        ["fixture.rs::receiver: call to `some_destructive_method`"],
+        "a Library path passed as the receiver must be treated like an argument"
+    );
+}
+
+#[test]
+fn unused_library_mutation_variant_is_not_policy_evidence() {
+    let violations = fixture_violations(
+        r#"
+        use super::library_mutation::LibraryMutation;
+
+        fn unused_policy(library_path: &std::path::Path) -> std::io::Result<()> {
+            let _policy = LibraryMutation::AdoptFolder;
+            std::fs::remove_dir_all(library_path)
+        }
+        "#,
+    );
+    assert_eq!(
+        violations,
+        ["fixture.rs::unused_policy: call to `std::fs::remove_dir_all`"],
+        "naming a policy without acquiring a fence must not satisfy the gate"
+    );
+}
+
+#[test]
+fn unawaited_fence_future_is_not_policy_evidence() {
+    let violations = fixture_violations(
+        r#"
+        async fn unused_future(library_path: &std::path::Path) -> std::io::Result<()> {
+            let _future = begin_library_mutation();
+            std::fs::remove_dir_all(library_path)
+        }
+        "#,
+    );
+    assert_eq!(
+        violations,
+        ["fixture.rs::unused_future: call to `std::fs::remove_dir_all`"],
+        "constructing but not awaiting the fence future must not satisfy the gate"
+    );
+}
+
+#[test]
+fn awaited_fence_acquisition_is_policy_evidence() {
+    let violations = fixture_violations(
+        r#"
+        async fn acquired(library_path: &std::path::Path) -> std::io::Result<()> {
+            let _fence = begin_library_mutation().await?;
+            std::fs::remove_dir_all(library_path)
+        }
+        "#,
+    );
+    assert!(
+        violations.is_empty(),
+        "an awaited fence acquisition must satisfy the structural policy check: {violations:?}"
+    );
+}
+
+#[test]
+fn block_library_mutation_exemption_is_rejected() {
+    let violations = fixture_violations(
+        r#"
+        fn blanket(library_path: &std::path::Path) -> std::io::Result<()> {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "Library mutation policy exemption: fixture tries to hide a block"
+            )]
+            {
+                std::fs::write(library_path.join("one"), b"one")?;
+                std::fs::rename(library_path.join("one"), library_path.join("two"))?;
+                std::fs::remove_dir_all(library_path)?;
+            }
+            Ok(())
+        }
+        "#,
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("one direct mutating call, not a block")),
+        "a block-level exemption must be rejected: {violations:?}"
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("call to `std::fs::write`")),
+        "nested mutations must remain visible after rejecting the block: {violations:?}"
+    );
+}
+
+#[test]
+fn aliased_file_open_is_non_mutating() {
+    let violations = fixture_violations(
+        r#"
+        use std::fs::File as FsFile;
+
+        fn open_for_read(library_path: &std::path::Path) -> std::io::Result<FsFile> {
+            FsFile::open(library_path)
+        }
+        "#,
+    );
+    assert!(
+        violations.is_empty(),
+        "File::open must stay non-mutating after alias resolution: {violations:?}"
+    );
+}
+
 fn fixture_violations(source: &str) -> Vec<String> {
     let syntax = syn::parse_file(source).expect("parse structural gate fixture");
     let aliases = FilesystemAliases::from_file(&syntax);
@@ -146,6 +377,117 @@ fn fixture_violations(source: &str) -> Vec<String> {
     violations
 }
 
+fn established_contract_violations(parsed: &[(PathBuf, syn::File)]) -> Vec<String> {
+    #[derive(Default)]
+    struct FunctionShape {
+        calls: HashSet<String>,
+        awaited_calls: HashSet<String>,
+        paths: HashSet<String>,
+    }
+
+    impl FunctionShape {
+        fn contains(&self, marker: &str) -> bool {
+            if marker.contains("::") {
+                self.paths.iter().any(|path| {
+                    path == marker
+                        || path
+                            .strip_suffix(marker)
+                            .is_some_and(|prefix| prefix.ends_with("::"))
+                })
+            } else {
+                if is_policy_acquisition_name(marker) {
+                    self.awaited_calls.contains(marker)
+                } else {
+                    self.calls.contains(marker)
+                }
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for FunctionShape {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = peel_expression(&call.func) {
+                if let Some(name) = path.path.segments.last() {
+                    self.calls.insert(name.ident.to_string());
+                }
+            }
+            visit::visit_expr_call(self, call);
+        }
+
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.calls.insert(call.method.to_string());
+            visit::visit_expr_method_call(self, call);
+        }
+
+        fn visit_expr_await(&mut self, awaited: &'ast syn::ExprAwait) {
+            if let Some(name) = call_name(&awaited.base) {
+                self.awaited_calls.insert(name);
+            }
+            visit::visit_expr_await(self, awaited);
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            self.paths.insert(path_segments(path).join("::"));
+            visit::visit_path(self, path);
+        }
+    }
+
+    struct Functions<'a> {
+        shapes: &'a mut HashMap<String, Vec<FunctionShape>>,
+    }
+
+    impl Functions<'_> {
+        fn inspect(&mut self, name: &syn::Ident, block: &syn::Block) {
+            if ESTABLISHED_MUTATION_CONTRACTS
+                .iter()
+                .any(|(expected, _)| name == expected)
+            {
+                let mut shape = FunctionShape::default();
+                shape.visit_block(block);
+                self.shapes.entry(name.to_string()).or_default().push(shape);
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for Functions<'_> {
+        fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+            self.inspect(&function.sig.ident, &function.block);
+            visit::visit_item_fn(self, function);
+        }
+
+        fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+            self.inspect(&function.sig.ident, &function.block);
+            visit::visit_impl_item_fn(self, function);
+        }
+    }
+
+    let mut shapes = HashMap::new();
+    for (_, syntax) in parsed {
+        Functions {
+            shapes: &mut shapes,
+        }
+        .visit_file(syntax);
+    }
+
+    let mut violations = Vec::new();
+    for (function, markers) in ESTABLISHED_MUTATION_CONTRACTS {
+        let Some(candidates) = shapes.get(*function) else {
+            violations.push(format!(
+                "established Library mutation contract function `{function}` is missing"
+            ));
+            continue;
+        };
+        for marker in *markers {
+            if !candidates.iter().any(|shape| shape.contains(marker)) {
+                violations.push(format!(
+                    "{function}: established Library mutation contract is missing `{marker}`"
+                ));
+            }
+        }
+    }
+    violations
+}
+
 fn rust_files_below(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -164,8 +506,8 @@ fn rust_files_below(root: &Path) -> Vec<PathBuf> {
 
 #[derive(Default)]
 struct FilesystemAliases {
-    modules: HashSet<String>,
-    functions: HashSet<String>,
+    explicit: HashMap<String, Vec<String>>,
+    glob: bool,
 }
 
 impl FilesystemAliases {
@@ -195,18 +537,35 @@ fn collect_use_tree(mut prefix: Vec<String>, tree: &syn::UseTree, aliases: &mut 
         syn::UseTree::Name(name) => {
             let ident = name.ident.to_string();
             if prefix == ["std"] && ident == "fs" {
-                aliases.modules.insert(ident);
+                aliases
+                    .explicit
+                    .insert(ident, vec!["std".to_string(), "fs".to_string()]);
             } else if prefix == ["std", "fs"] {
-                aliases.functions.insert(ident);
+                let local = if ident == "self" {
+                    "fs".to_string()
+                } else {
+                    ident.clone()
+                };
+                let mut canonical = prefix;
+                if ident != "self" {
+                    canonical.push(ident);
+                }
+                aliases.explicit.insert(local, canonical);
             }
         }
         syn::UseTree::Rename(rename) => {
             let ident = rename.ident.to_string();
             let renamed = rename.rename.to_string();
             if prefix == ["std"] && ident == "fs" {
-                aliases.modules.insert(renamed);
+                aliases
+                    .explicit
+                    .insert(renamed, vec!["std".to_string(), "fs".to_string()]);
             } else if prefix == ["std", "fs"] {
-                aliases.functions.insert(renamed);
+                let mut canonical = prefix;
+                if ident != "self" {
+                    canonical.push(ident);
+                }
+                aliases.explicit.insert(renamed, canonical);
             }
         }
         syn::UseTree::Group(group) => {
@@ -215,7 +574,7 @@ fn collect_use_tree(mut prefix: Vec<String>, tree: &syn::UseTree, aliases: &mut 
             }
         }
         syn::UseTree::Glob(_) if prefix == ["std", "fs"] => {
-            aliases.functions.insert("*".to_string());
+            aliases.glob = true;
         }
         syn::UseTree::Glob(_) => {}
     }
@@ -261,6 +620,13 @@ impl BoundaryVisitor<'_> {
 
         let mut policy = PolicyEvidence::default();
         policy.visit_block(block);
+        let mut delegated_policy = KnownPolicyCalls {
+            functions: self.policy_functions,
+            methods: self.policy_methods,
+            found: false,
+        };
+        delegated_policy.visit_block(block);
+        policy.found |= delegated_policy.found;
         if inputs.iter().any(|input| match input {
             syn::FnArg::Typed(typed) => type_mentions(&typed.ty, "LibraryMutationFence"),
             syn::FnArg::Receiver(_) => false,
@@ -273,10 +639,17 @@ impl BoundaryVisitor<'_> {
             policy_functions: self.policy_functions,
             policy_methods: self.policy_methods,
             tainted: &tainted,
-            exempt_statement_depth: 0,
+            exempt_mutation_budget: 0,
             found: Vec::new(),
+            invalid_exemptions: Vec::new(),
         };
         mutations.visit_block(block);
+        self.violations.extend(
+            mutations
+                .invalid_exemptions
+                .into_iter()
+                .map(|violation| format!("{}::{name}: {violation}", self.relative.display())),
+        );
         if !policy.found {
             self.violations.extend(
                 mutations
@@ -422,15 +795,35 @@ impl<'ast> Visit<'ast> for PolicyFunctions<'_> {
 }
 
 impl<'ast> Visit<'ast> for PolicyEvidence {
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        if path
-            .segments
-            .iter()
-            .any(|segment| segment.ident == "LibraryMutation")
-        {
-            self.found = true;
+    fn visit_expr_await(&mut self, awaited: &'ast syn::ExprAwait) {
+        self.found |=
+            call_name(&awaited.base).is_some_and(|name| is_policy_acquisition_name(&name));
+        visit::visit_expr_await(self, awaited);
+    }
+}
+
+fn is_policy_acquisition_name(name: &str) -> bool {
+    matches!(
+        name,
+        "begin_library_mutation"
+            | "begin_guarded_library_mutation"
+            | "create_staged_library_directory"
+            | "revalidate_library_root_for_mutation"
+    )
+}
+
+struct KnownPolicyCalls<'a> {
+    functions: &'a HashSet<String>,
+    methods: &'a HashSet<String>,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for KnownPolicyCalls<'_> {
+    fn visit_expr_await(&mut self, awaited: &'ast syn::ExprAwait) {
+        if let Some(name) = call_name(&awaited.base) {
+            self.found |= self.functions.contains(&name) || self.methods.contains(&name);
         }
-        visit::visit_path(self, path);
+        visit::visit_expr_await(self, awaited);
     }
 }
 
@@ -439,8 +832,9 @@ struct MutationVisitor<'a> {
     policy_functions: &'a HashSet<String>,
     policy_methods: &'a HashSet<String>,
     tainted: &'a HashSet<String>,
-    exempt_statement_depth: usize,
+    exempt_mutation_budget: usize,
     found: Vec<String>,
+    invalid_exemptions: Vec<String>,
 }
 
 impl MutationVisitor<'_> {
@@ -451,7 +845,9 @@ impl MutationVisitor<'_> {
         method: bool,
     ) {
         let segments = path_segments(callee);
-        let Some(name) = segments.last() else {
+        let resolved = resolve_filesystem_path(&segments, self.aliases);
+        let classified = resolved.as_deref().unwrap_or(&segments);
+        let Some(name) = classified.last() else {
             return;
         };
         let arguments = arguments.collect::<Vec<_>>();
@@ -461,19 +857,22 @@ impl MutationVisitor<'_> {
         {
             return;
         }
-        let filesystem = is_filesystem_path(&segments, self.aliases);
+        let filesystem = resolved.is_some();
         let policy_declared = if method {
             self.policy_methods.contains(name)
         } else {
             self.policy_functions.contains(name)
         };
-        if self.exempt_statement_depth == 0
-            && !is_non_mutating_call(&segments)
+        if !is_non_mutating_call(classified)
             && !policy_declared
             && (filesystem || !is_path_transform(name))
         {
-            self.found
-                .push(format!("call to `{}`", segments.join("::")));
+            if self.exempt_mutation_budget > 0 {
+                self.exempt_mutation_budget = self.exempt_mutation_budget.saturating_sub(1);
+            } else {
+                self.found
+                    .push(format!("call to `{}`", classified.join("::")));
+            }
         }
     }
 }
@@ -482,13 +881,33 @@ impl<'ast> Visit<'ast> for MutationVisitor<'_> {
     fn visit_stmt(&mut self, statement: &'ast syn::Stmt) {
         let exemption = statement_exemption(statement);
         if exemption.invalid {
-            self.found
+            self.invalid_exemptions
                 .push("Library mutation exemption has no non-empty reason".to_string());
         }
-        let exempt = exemption.valid;
-        self.exempt_statement_depth += usize::from(exempt);
+        if exemption.valid {
+            let expression = match statement {
+                syn::Stmt::Local(local) => local.init.as_ref().map(|init| init.expr.as_ref()),
+                syn::Stmt::Expr(expression, _) => Some(expression),
+                syn::Stmt::Item(_) | syn::Stmt::Macro(_) => None,
+            };
+            if expression.is_some_and(is_direct_call_expression) {
+                self.exempt_mutation_budget = 1;
+                visit::visit_stmt(self, statement);
+                if self.exempt_mutation_budget != 0 {
+                    self.invalid_exemptions.push(
+                        "a Library mutation exemption must annotate one direct mutating call"
+                            .to_string(),
+                    );
+                }
+                self.exempt_mutation_budget = 0;
+                return;
+            }
+            self.invalid_exemptions.push(
+                "a Library mutation exemption must annotate one direct mutating call, not a block"
+                    .to_string(),
+            );
+        }
         visit::visit_stmt(self, statement);
-        self.exempt_statement_depth -= usize::from(exempt);
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -500,7 +919,11 @@ impl<'ast> Visit<'ast> for MutationVisitor<'_> {
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let path = syn::Path::from(call.method.clone());
-        self.inspect_call(&path, call.args.iter().cloned(), true);
+        self.inspect_call(
+            &path,
+            std::iter::once((*call.receiver).clone()).chain(call.args.iter().cloned()),
+            true,
+        );
         visit::visit_expr_method_call(self, call);
     }
 }
@@ -552,11 +975,22 @@ fn is_library_path_name(name: &str) -> bool {
         || name.ends_with("_library_root")
 }
 
-fn is_filesystem_path(segments: &[String], aliases: &FilesystemAliases) -> bool {
-    if segments.len() == 1 {
-        return aliases.functions.contains(&segments[0]) || aliases.functions.contains("*");
+fn resolve_filesystem_path(
+    segments: &[String],
+    aliases: &FilesystemAliases,
+) -> Option<Vec<String>> {
+    if segments.windows(2).any(|pair| pair == ["std", "fs"]) {
+        return Some(segments.to_vec());
     }
-    segments.windows(2).any(|pair| pair == ["std", "fs"]) || aliases.modules.contains(&segments[0])
+    if let Some(canonical) = segments
+        .first()
+        .and_then(|first| aliases.explicit.get(first))
+    {
+        let mut resolved = canonical.clone();
+        resolved.extend_from_slice(&segments[1..]);
+        return Some(resolved);
+    }
+    (segments.len() == 1 && aliases.glob).then(|| segments.to_vec())
 }
 
 fn is_non_mutating_call(segments: &[String]) -> bool {
@@ -580,10 +1014,14 @@ fn is_non_mutating_call(segments: &[String]) -> bool {
             | "Ok"
             | "Some"
             | "bind"
+            | "and_then"
+            | "as_ref"
             | "canonicalize"
             | "collect"
             | "contains"
             | "exists"
+            | "execute"
+            | "expect"
             | "extract_hashes_from_dir"
             | "file_type"
             | "from"
@@ -606,6 +1044,7 @@ fn is_non_mutating_call(segments: &[String]) -> bool {
             | "symlink_metadata"
             | "try_exists"
             | "unwrap_or_else"
+            | "validate_paths"
     )
 }
 
@@ -800,6 +1239,21 @@ fn path_segments(path: &syn::Path) -> Vec<String> {
         .collect()
 }
 
+fn call_name(expression: &syn::Expr) -> Option<String> {
+    match peel_expression(expression) {
+        syn::Expr::Call(call) => match peel_expression(&call.func) {
+            syn::Expr::Path(path) => path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+            _ => None,
+        },
+        syn::Expr::MethodCall(call) => Some(call.method.to_string()),
+        _ => None,
+    }
+}
+
 fn path_ends_with(path: &syn::Path, expected: &[&str]) -> bool {
     let actual = path_segments(path);
     actual.len() >= expected.len()
@@ -817,5 +1271,22 @@ fn peel_expression(mut expression: &syn::Expr) -> &syn::Expr {
             syn::Expr::Reference(reference) => &reference.expr,
             _ => return expression,
         };
+    }
+}
+
+fn is_direct_call_expression(expression: &syn::Expr) -> bool {
+    matches!(
+        peel_exemption_expression(expression),
+        syn::Expr::Call(_) | syn::Expr::MethodCall(_)
+    )
+}
+
+fn peel_exemption_expression(expression: &syn::Expr) -> &syn::Expr {
+    match expression {
+        syn::Expr::Await(awaited) => peel_exemption_expression(&awaited.base),
+        syn::Expr::Group(group) => peel_exemption_expression(&group.expr),
+        syn::Expr::Paren(paren) => peel_exemption_expression(&paren.expr),
+        syn::Expr::Try(tried) => peel_exemption_expression(&tried.expr),
+        _ => expression,
     }
 }
