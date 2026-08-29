@@ -29,7 +29,7 @@ export function ImporterEvacuationRecoveryWarning({
         {recovery.action === "retireProducer"
           ? " GMM cannot retry while the original producer may still be running."
           : recovery.action === "acknowledgeAndRelease"
-            ? " A recorded directory now has a different filesystem identity, so retrying cannot prove or restore the original state."
+            ? " A directory at a recorded path is not the original filesystem object, so GMM cannot presently prove the recorded state."
             : " Fix the problem described below, then retry the recorded rollback here."}
       </p>
       <p>
@@ -52,17 +52,25 @@ export function ImporterEvacuationRecoveryWarning({
       ) : recovery.action === "acknowledgeAndRelease" ? (
         <>
           <p>
-            Review the recorded game and backup locations below. Acknowledging this state releases
-            GMM&apos;s importer-operation block only; it will not move, delete, or restore any files.
-            The game directory may remain incomplete, and you may need to restore files by hand
-            from the backup location.
+            GMM is looking for the original directory object at each exact recorded path below; it
+            will not search elsewhere. If that directory was moved or renamed, put the original
+            object back at its recorded path, then retry recovery here.
+          </p>
+          <button type="button" onClick={onRetry} disabled={pending}>
+            {pending ? "Retrying recovery…" : "Retry Model Importer recovery"}
+          </button>
+          <p>
+            If the original directory cannot be restored, review both recorded locations below.
+            Acknowledging this state releases GMM&apos;s importer-operation block only; it will not
+            move, delete, or restore any files. The game directory may remain incomplete, and you
+            may need to restore files by hand from the backup location.
           </p>
           <button type="button" onClick={onRetire} disabled={pending}>
             {pending
               ? "Releasing importer block…"
               : "I reviewed both locations — release the importer block"}
           </button>
-          {error ? <span className="error">Could not release the importer block: {error}</span> : null}
+          {error ? <span className="error">Could not resolve the importer recovery: {error}</span> : null}
         </>
       ) : (
         <>

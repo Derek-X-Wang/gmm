@@ -91,7 +91,8 @@ it("offers an in-session retry after an ordinary recovery failure", () => {
   expect(retried).toBe(true);
 });
 
-it("offers acknowledgement instead of a retry for terminal identity loss", () => {
+it("explains how identity loss can become retryable without removing acknowledgement", () => {
+  let retried = false;
   let released = false;
   render(
     <ImporterEvacuationRecoveryWarning
@@ -106,16 +107,20 @@ it("offers acknowledgement instead of a retry for terminal identity loss", () =>
         action: "acknowledgeAndRelease",
       }}
       pending={false}
-      onRetry={() => {}}
+      onRetry={() => {
+        retried = true;
+      }}
       onRetire={() => {
         released = true;
       }}
     />,
   );
 
-  expect(
-    screen.queryByRole("button", { name: /retry model importer recovery/i }),
-  ).not.toBeInTheDocument();
+  expect(screen.getByText(/original directory object at each exact recorded path/i)).toBeInTheDocument();
+  expect(screen.getByText(/will not search elsewhere/i)).toBeInTheDocument();
+  const retry = screen.getByRole("button", { name: /retry model importer recovery/i });
+  retry.click();
+  expect(retried).toBe(true);
   expect(screen.getByText(/will not move, delete, or restore any files/i)).toBeInTheDocument();
   expect(screen.getByText(/restore files by hand/i)).toBeInTheDocument();
   const release = screen.getByRole("button", {

@@ -1051,6 +1051,21 @@ impl ImporterEvacuationWitness {
             )
     }
 
+    fn recorded_directory_identities_match(&self) -> bool {
+        let matches = |path: &Path, expected: &DirectoryIdentity| {
+            matches!(
+                IdentifiedDirectory::open(path),
+                Ok(directory) if directory.identity() == expected
+            )
+        };
+        let Some(backup_root) = self.backup_path.parent() else {
+            return false;
+        };
+        matches(&self.game_path, &self.game_identity)
+            && matches(backup_root, &self.backup_root_identity)
+            && matches(&self.backup_path, &self.backup_identity)
+    }
+
     pub(super) fn recovery(&self) -> Option<ImporterEvacuationRecovery> {
         let owner_uncertain = self.owner_active
             && matches!(
@@ -1077,7 +1092,9 @@ impl ImporterEvacuationWitness {
             owner_uncertain,
             action: if owner_uncertain {
                 ImporterEvacuationRecoveryAction::RetireProducer
-            } else if self.recovery_action.as_deref() == Some("release") {
+            } else if self.recovery_action.as_deref() == Some("release")
+                && !self.recorded_directory_identities_match()
+            {
                 ImporterEvacuationRecoveryAction::AcknowledgeAndRelease
             } else {
                 ImporterEvacuationRecoveryAction::Retry
@@ -2193,7 +2210,10 @@ impl Core {
                 source,
             })?;
         if game_directory.identity() != &witness.game_identity {
-            return witness.unresolvable("the recorded Game directory changed filesystem identity");
+            return witness.unresolvable(format!(
+                "the recorded Game directory changed filesystem identity; restore the original directory object to {}",
+                witness.game_path.display(),
+            ));
         }
         let backup_root =
             IdentifiedDirectory::open(recorded_backup_root).map_err(|source| Error::Io {
@@ -2201,12 +2221,17 @@ impl Core {
                 source,
             })?;
         if backup_root.identity() != &witness.backup_root_identity {
-            return witness.unresolvable("the recorded backup root changed filesystem identity");
+            return witness.unresolvable(format!(
+                "the recorded backup root changed filesystem identity; restore the original directory object to {}",
+                recorded_backup_root.display(),
+            ));
         }
         match IdentifiedDirectory::open(&witness.backup_path) {
             Ok(backup_directory) if backup_directory.identity() != &witness.backup_identity => {
-                return witness
-                    .unresolvable("the recorded backup directory changed filesystem identity");
+                return witness.unresolvable(format!(
+                    "the recorded backup directory changed filesystem identity; restore the original directory object to {}",
+                    witness.backup_path.display(),
+                ));
             }
             Ok(_) => {}
             Err(source) if source.kind() == io::ErrorKind::NotFound => {}
@@ -2243,7 +2268,10 @@ impl Core {
         drop(connection);
         let mut resolved = 0;
         for witness in witnesses {
-            if witness.owner_is_live() || witness.recovery_action.as_deref() == Some("release") {
+            if witness.owner_is_live()
+                || (witness.recovery_action.as_deref() == Some("release")
+                    && !witness.recorded_directory_identities_match())
+            {
                 continue;
             }
             match self.resolve_importer_evacuation(witness.game).await {
@@ -2287,7 +2315,9 @@ impl Core {
         else {
             return Ok(());
         };
-        if witness.recovery_action.as_deref() == Some("release") {
+        if witness.recovery_action.as_deref() == Some("release")
+            && !witness.recorded_directory_identities_match()
+        {
             return Err(Error::ImporterEvacuationRetryUnavailable);
         }
         drop(connection);

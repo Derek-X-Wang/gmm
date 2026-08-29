@@ -5970,12 +5970,12 @@ async fn probe_importer_abort_leaves_a_witness_that_startup_replays() {
     );
 }
 
-/// Recovery must not retire the only backup using content evidence gathered
-/// before a concurrent repair changed the live entry. The pause is after the
-/// complete comparison and before deletion, so removing the revalidation makes
-/// this exact interleaving lose the backup deterministically.
+/// A content comparison on two live directory trees can never authorize a
+/// delete: the live entry can change after its snapshot but before the backup
+/// snapshot. Recovery may retire the witness after the stale snapshots compare
+/// equal, but the backup must remain reachable by construction.
 #[tokio::test]
-async fn importer_recovery_revalidates_equal_entries_before_deleting_the_backup() {
+async fn importer_recovery_retains_the_backup_when_the_live_entry_changes_between_snapshots() {
     let env = TestEnv::new();
     let game_dir = env.game_mods.parent().expect("game dir").to_path_buf();
     let zip = env._tmp.path().join("importer.zip");
@@ -6010,16 +6010,16 @@ async fn importer_recovery_revalidates_equal_entries_before_deleting_the_backup(
 
     std::fs::write(game_dir.join("d3dx.ini"), b"old d3dx bytes")
         .expect("create an initially identical repaired entry");
-    let pause = gmm_lib::core::importer::RECOVERY_AFTER_ENTRY_COMPARISON_TEST_SEAM;
+    let pause = gmm_lib::core::importer::RECOVERY_BETWEEN_ENTRY_SNAPSHOTS_TEST_SEAM;
     let mut recovery = probe(&env).pausing_at(pause).op(["startup"]).spawn();
     recovery.wait_for_pause(pause);
 
     std::fs::write(game_dir.join("d3dx.ini"), b"changed during recovery")
-        .expect("change the live entry inside the comparison/delete window");
+        .expect("change the live entry between the two snapshots");
     recovery.resume();
     recovery
         .wait_for_outcome()
-        .expect_ok("startup after the guarded recovery refusal");
+        .expect_ok("startup after the non-destructive comparison");
 
     assert_eq!(
         std::fs::read(game_dir.join("d3dx.ini")).expect("read concurrently repaired entry"),
@@ -6029,16 +6029,22 @@ async fn importer_recovery_revalidates_equal_entries_before_deleting_the_backup(
     assert_eq!(
         std::fs::read(backup.join("d3dx.ini")).expect("read retained unique backup"),
         b"old d3dx bytes",
-        "recovery must preserve the backup when an entry changes after comparison",
+        "recovery must retain the backup even when stale snapshots compare equal",
     );
-    let core = env.core().await;
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("inspect completed recovery state");
+    let recovery_state: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT recovery_error, recovery_action FROM importer_evacuations WHERE game_code = 'gimi'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("inspect importer evacuation witness");
     assert!(
-        core.importer_evacuation_recovery(GameCode::Gimi)
-            .await
-            .expect("read guarded recovery state")
-            .is_some(),
-        "the changed entry must keep the durable recovery witness visible",
+        recovery_state.is_none(),
+        "both locations remain usable, so recovery may retire the durable witness without deleting either entry: {recovery_state:?}",
     );
+    pool.close().await;
 }
 
 /// Two processes launch a game at the same instant. Exactly one may win

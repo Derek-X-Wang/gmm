@@ -87,13 +87,12 @@ pub const DEFAULT_LOADER_EXE: &str = "gmm.exe";
 #[doc(hidden)]
 pub const BACKUP_AFTER_ENTRY_TEST_SEAM: &str = "importer_backup.after_entry";
 
-/// Pause-only test seam after recovery found equal live and backup contents,
-/// before it revalidates that evidence and retires the backup. Kept outside
-/// `crash_points::ALL` because this barrier models a concurrent filesystem
-/// change, not a process death that startup must replay.
+/// Pause-only test seam between snapshotting the live entry and its backup.
+/// Kept outside `crash_points::ALL` because this barrier models a concurrent
+/// filesystem change, not a process death that startup must replay.
 #[doc(hidden)]
-pub const RECOVERY_AFTER_ENTRY_COMPARISON_TEST_SEAM: &str =
-    "importer_evacuation.after_entry_comparison";
+pub const RECOVERY_BETWEEN_ENTRY_SNAPSHOTS_TEST_SEAM: &str =
+    "importer_evacuation.between_entry_snapshots";
 
 /// Outcome of a single install attempt. Travels through tracing
 /// (NEW-LOG) and back to the UI for the success toast.
@@ -882,8 +881,11 @@ fn importer_entry_content_snapshot(path: &Path) -> Result<ImporterEntryContentSn
 /// A published backup entry is always a complete copy: the cross-volume
 /// fallback promotes its private copy stage before attempting source removal.
 /// Recovery therefore keeps that backup until a complete replacement is in
-/// the game directory. A private copy stage without a published backup is
-/// only removable when the original source still exists; otherwise its
+/// the game directory. When a live entry is already present, even an equal
+/// comparison cannot authorize deleting its backup: directory trees can
+/// change while they are being read, so recovery leaves the redundant backup
+/// for explicit user cleanup. A private copy stage without a published backup
+/// is only removable when the original source still exists; otherwise its
 /// completeness is unknowable and recovery refuses to guess.
 pub(super) fn recover_evacuated_importer(
     game_dir: &Path,
@@ -910,15 +912,15 @@ pub(super) fn recover_evacuated_importer(
         if backup_present.is_some() {
             if source_present.is_some() {
                 let source_snapshot = importer_entry_content_snapshot(&source)?;
+                if let Some(hook) = crash_hook {
+                    hook(RECOVERY_BETWEEN_ENTRY_SNAPSHOTS_TEST_SEAM);
+                }
                 let backup_snapshot = importer_entry_content_snapshot(&backup)?;
                 if source_snapshot != backup_snapshot {
                     return Err(Error::Importer(format!(
                         "the live importer entry {} differs from its recorded backup; GMM preserved both because it cannot safely choose which one is authoritative",
                         source.display(),
                     )));
-                }
-                if let Some(hook) = crash_hook {
-                    hook(RECOVERY_AFTER_ENTRY_COMPARISON_TEST_SEAM);
                 }
                 if symlink_metadata_if_exists(&restore_copy)
                     .map_err(|source_error| Error::Io {
@@ -929,15 +931,10 @@ pub(super) fn recover_evacuated_importer(
                 {
                     remove_any(&restore_copy)?;
                 }
-                let revalidated_source = importer_entry_content_snapshot(&source)?;
-                let revalidated_backup = importer_entry_content_snapshot(&backup)?;
-                if revalidated_source != source_snapshot || revalidated_backup != backup_snapshot {
-                    return Err(Error::Importer(format!(
-                        "the live importer entry {} or its recorded backup changed after GMM compared them; GMM preserved both because the evidence was no longer current",
-                        source.display(),
-                    )));
-                }
-                remove_any(&backup)?;
+                // Comparison on a live directory tree is never a safe delete
+                // authorization. The durable witness may retire because both
+                // locations contain a usable entry, but recovery leaves the
+                // backup bytes for explicit user cleanup.
                 continue;
             }
             if symlink_metadata_if_exists(&restore_copy)
@@ -991,14 +988,7 @@ pub(super) fn recover_evacuated_importer(
         }
     }
 
-    match fs::remove_dir(backup_dir) {
-        Ok(()) => Ok(()),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::Io {
-            path: backup_dir.to_path_buf(),
-            source,
-        }),
-    }
+    Ok(())
 }
 
 /// Swap files staged in `staging` into `game_dir`. Existing files are

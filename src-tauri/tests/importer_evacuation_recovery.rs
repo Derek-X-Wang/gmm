@@ -272,7 +272,7 @@ async fn recovery_preserves_a_user_repaired_importer_entry_and_its_backup() {
 }
 
 #[tokio::test]
-async fn terminal_backup_identity_change_can_be_acknowledged_without_deleting_its_bytes() {
+async fn backup_identity_change_becomes_retryable_when_the_original_directory_returns() {
     let tmp = TempDir::new().expect("temporary app data");
     let library = tmp.path().join("library");
     let game = tmp.path().join("Genshin");
@@ -328,13 +328,16 @@ async fn terminal_backup_identity_change_can_be_acknowledged_without_deleting_it
         .expect("load terminal recovery")
         .expect("the identity mismatch must remain visible");
     assert!(
-        recovery.reason.contains("changed filesystem identity"),
-        "the recovery state must explain the terminal identity mismatch: {recovery:?}",
+        recovery.reason.contains("changed filesystem identity")
+            && recovery.reason.contains("restore the original directory object")
+            && recovery.reason.contains(backup.to_string_lossy().as_ref())
+            && recovery.reason.contains("will not search"),
+        "the recovery state must explain what exact recorded object and path would make retry viable: {recovery:?}",
     );
     assert_eq!(
         recovery.action,
         importer::ImporterEvacuationRecoveryAction::AcknowledgeAndRelease,
-        "a filesystem identity mismatch must not offer a retry that cannot work",
+        "a presently mismatched directory must still offer the safe release path",
     );
     let attempts = recovery.attempts;
     drop(recovered);
@@ -355,24 +358,38 @@ async fn terminal_backup_identity_change_can_be_acknowledged_without_deleting_it
     recovered
         .retry_importer_evacuation_recovery(GameCode::Gimi)
         .await
-        .expect_err("retry must not claim an identity mismatch can heal by rerunning it");
+        .expect_err("retry must remain unavailable until the original directory object returns");
+
+    std::fs::remove_dir_all(&backup).expect("remove the replacement backup directory");
+    std::fs::rename(&displaced, &backup)
+        .expect("restore the original backup directory object to its recorded path");
+    let recovery = recovered
+        .importer_evacuation_recovery(GameCode::Gimi)
+        .await
+        .expect("reclassify the restored recorded state")
+        .expect("the witness remains until recovery completes");
+    assert_eq!(
+        recovery.action,
+        importer::ImporterEvacuationRecoveryAction::Retry,
+        "restoring the original directory object must make retry available again",
+    );
 
     recovered
-        .retire_interrupted_importer_evacuation(GameCode::Gimi)
+        .retry_importer_evacuation_recovery(GameCode::Gimi)
         .await
-        .expect("the explicit acknowledgement must release the terminal recovery block");
+        .expect("restoring the original directory object must let recovery complete");
     assert!(
         recovered
             .importer_evacuation_recovery(GameCode::Gimi)
             .await
             .expect("read released recovery state")
             .is_none(),
-        "acknowledgement must retire the durable blocker",
+        "successful retry must retire the durable blocker",
     );
     assert_eq!(
-        std::fs::read(backup.join("d3dx.ini")).expect("read preserved recreated backup"),
+        std::fs::read(game.join("d3dx.ini")).expect("read restored importer entry"),
         b"old d3dx bytes",
-        "releasing the block must not delete or rewrite the recorded backup bytes",
+        "retry must restore the original backup bytes",
     );
     let replacement =
         ImporterOrigin::github("example", "replacement-importer", r"replacement-v\d+\.zip");

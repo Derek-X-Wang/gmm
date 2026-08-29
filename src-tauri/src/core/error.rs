@@ -320,12 +320,12 @@ pub enum Error {
 
     #[error(
         "GMM cannot safely restore an interrupted Model Importer evacuation for {game}: {reason}. \
-         Retrying cannot restore the recorded filesystem identity; review both recorded locations, restore files by hand if needed, then explicitly acknowledge and release the block."
+         GMM cannot presently prove the recorded state. If the original directory object was moved, restore it to the exact recorded path and retry; GMM will not search for it. If it cannot be restored, review both recorded locations, restore files by hand if needed, then explicitly acknowledge and release the block."
     )]
     ImporterEvacuationRecoveryUnresolvable { game: String, reason: String },
 
     #[error(
-        "this Model Importer recovery cannot be resolved by retrying because a recorded filesystem identity changed; review both recorded locations and use the explicit acknowledge-and-release action"
+        "this Model Importer recovery cannot be retried while a recorded path does not contain the original directory object; restore that object to the exact recorded path first, or review both recorded locations and use the explicit acknowledge-and-release action"
     )]
     ImporterEvacuationRetryUnavailable,
 
