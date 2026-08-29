@@ -414,6 +414,15 @@ pub enum Error {
     LibraryRelocationBlockedByCleanup,
 
     #[error(
+        "GMM cannot use {path:?} as a Library root because it overlaps the Model Importer \
+         backup tree at {backups:?}. Importer backups and their sidecar markers are app-owned \
+         bookkeeping that GMM writes outside the Library writer fence, so the two trees must \
+         stay disjoint: a Library root may neither sit inside the backup tree nor contain it. \
+         Choose a Library root that does not overlap {backups:?}. No Library bytes were moved."
+    )]
+    LibraryRootOverlapsBackups { path: PathBuf, backups: PathBuf },
+
+    #[error(
         "GMM found interrupted reinstall state for Mod {mod_id} that it could not safely resolve: \
          {reason}. GMM left every directory it could not prove untouched."
     )]

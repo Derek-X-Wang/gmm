@@ -572,6 +572,119 @@ async fn acknowledge_and_release_preserves_bytes_at_both_recorded_locations() {
     );
 }
 
+/// Acknowledge-and-release stops trying to prove the evacuation completed,
+/// so the backup it releases is the most likely partial one. A later
+/// rollback must not select it.
+///
+/// Mutation oracle: deleting the `mark_retained_evacuation_backup` call in
+/// `retire_interrupted_importer_evacuation_in_library_mutation`'s release
+/// branch leaves the released backup unmarked and fires the named
+/// assertions below.
+#[tokio::test]
+async fn rollback_after_acknowledge_and_release_ignores_the_released_backup() {
+    let tmp = TempDir::new().expect("temporary app data");
+    let library = tmp.path().join("library");
+    let game = tmp.path().join("Genshin");
+    std::fs::create_dir_all(game.join("Core")).expect("create old Core");
+    std::fs::write(game.join("d3dx.ini"), b"old d3dx bytes").expect("write old d3dx");
+    std::fs::write(game.join("Core/original.ini"), b"old Core bytes").expect("write old Core");
+
+    let zip_path = tmp.path().join("fixture.zip");
+    build_importer_zip(&zip_path);
+    let upstream = FakeUpstream::start(std::fs::read(&zip_path).expect("read fixture zip")).await;
+    let fired = Arc::new(AtomicUsize::new(0));
+    let fired_for_hook = Arc::clone(&fired);
+    let hook = Arc::new(move |point: &str| {
+        if point == importer::BACKUP_AFTER_ENTRY_TEST_SEAM
+            && fired_for_hook.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            panic!("injected failure after the first evacuated importer entry");
+        }
+    });
+    let core = Core::new(library.clone(), &db_url(&tmp))
+        .await
+        .expect("initialize Core")
+        .with_crash_hook(hook);
+    core.set_game_install_path(GameCode::Gimi, &game)
+        .await
+        .expect("set game path");
+    core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
+        .await
+        .expect("set importer origin");
+    core.install_importer_with_endpoints(GameCode::Gimi, &upstream.endpoints())
+        .await
+        .expect_err("the injected evacuation failure must fail the install");
+    let backup = core
+        .importer_evacuation_recovery(GameCode::Gimi)
+        .await
+        .expect("load recovery")
+        .expect("the interrupted evacuation must stay visible")
+        .backup_path;
+    drop(core);
+
+    // Move the original backup object outside the backups root, so the
+    // only rollback candidate left behind the released witness is the
+    // recorded (possibly partial) directory itself.
+    let displaced = tmp.path().join("displaced-original");
+    std::fs::rename(&backup, &displaced).expect("move the recorded backup object aside");
+    std::fs::create_dir(&backup).expect("recreate the recorded backup directory");
+    std::fs::copy(displaced.join("d3dx.ini"), backup.join("d3dx.ini"))
+        .expect("preserve backup bytes at the recorded path");
+
+    let recovered = Core::new(library, &db_url(&tmp))
+        .await
+        .expect("startup must expose the identity mismatch");
+    let recovery = recovered
+        .importer_evacuation_recovery(GameCode::Gimi)
+        .await
+        .expect("load terminal recovery")
+        .expect("the identity mismatch must remain visible");
+    assert_eq!(
+        recovery.action,
+        importer::ImporterEvacuationRecoveryAction::AcknowledgeAndRelease,
+        "a changed backup identity must expose acknowledge-and-release"
+    );
+
+    recovered
+        .retire_interrupted_importer_evacuation(GameCode::Gimi)
+        .await
+        .expect("acknowledge and release the terminal recovery blocker");
+
+    let mut marker_name = backup.file_name().unwrap().to_os_string();
+    marker_name.push(".gmm-recovery-remnant");
+    let marker = backup.with_file_name(marker_name);
+    assert!(
+        marker.is_file(),
+        "acknowledge-and-release must mark the recorded backup as a non-authoritative remnant before releasing the witness"
+    );
+
+    std::fs::write(game.join("d3dx.ini"), b"current importer bytes")
+        .expect("make a rollback from the released backup observable");
+    let rolled_back = recovered
+        .rollback_importer(GameCode::Gimi)
+        .await
+        .expect("attempt rollback after acknowledge-and-release");
+    assert!(
+        rolled_back.is_none(),
+        "rollback must not select a backup released without proof the evacuation completed: {rolled_back:?}",
+    );
+    assert_eq!(
+        std::fs::read(game.join("d3dx.ini")).expect("read current importer after rollback"),
+        b"current importer bytes",
+        "rollback must leave the live importer untouched when only a released remnant exists",
+    );
+    assert_eq!(
+        std::fs::read(backup.join("d3dx.ini")).expect("read released partial backup"),
+        b"old d3dx bytes",
+        "refusing the released remnant must preserve its bytes",
+    );
+    assert_eq!(
+        std::fs::read(displaced.join("d3dx.ini")).expect("read displaced original object"),
+        b"old d3dx bytes",
+        "acknowledge-and-release must not search for or delete the displaced original object",
+    );
+}
+
 #[tokio::test]
 async fn pending_importer_evacuation_blocks_origin_override_change() {
     let tmp = TempDir::new().expect("temporary app data");

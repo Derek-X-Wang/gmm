@@ -2358,6 +2358,13 @@ impl Core {
             return Ok(());
         };
         if witness.recovery_action.as_deref() == Some("release") {
+            // Release is the exit GMM takes when it cannot prove the
+            // recorded evacuation completed, so the recorded backup is the
+            // most likely partial one. Mark it before the witness row is
+            // released: the witness is the only thing that has been keeping
+            // this directory out of ordinary rollback selection, so there
+            // must be no window where it is both selectable and unmarked.
+            super::importer::mark_retained_evacuation_backup(&witness.backup_path)?;
             let removed = sqlx::query("DELETE FROM importer_evacuations WHERE token = ?")
                 .bind(witness.token.to_string())
                 .execute(&mut *transaction)

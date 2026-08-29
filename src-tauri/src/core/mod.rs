@@ -383,6 +383,10 @@ impl Core {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.default_library_root.clone());
 
+        // Pure validation before anything moves: the Library root must
+        // never overlap the importer backup tree.
+        ensure_library_root_disjoint_from_backups(&next, &self.data_dir().join("backups"))?;
+
         if previous == next {
             put_setting(
                 &mut *fence.transaction,
@@ -448,6 +452,15 @@ impl Core {
         } else {
             next.clone()
         };
+
+        // Pure validation before anything moves: the Library root must
+        // never overlap the importer backup tree. The per-game override is
+        // an arbitrary user path, so this is the fence that keeps recovery
+        // remnant markers out of Library storage.
+        ensure_library_root_disjoint_from_backups(
+            &next_effective,
+            &self.data_dir().join("backups"),
+        )?;
 
         if previous == next_effective {
             put_setting(
@@ -4301,6 +4314,40 @@ fn same_path(a: &Path, b: &Path) -> bool {
         (Some(x), Some(y)) => x == y,
         _ => a == b,
     }
+}
+
+/// Refuse a proposed Library root that overlaps the Model Importer backup
+/// tree (`<data dir>/backups`).
+///
+/// Importer backups and their sidecar provenance and recovery-remnant
+/// files are written beside backup directories as app-owned bookkeeping,
+/// deliberately outside the Library writer fence. If a Library root were
+/// equal to, inside, or an ancestor of the backups root, those writes
+/// would land inside user-configured Library storage, and directories the
+/// Library creates inside the backups tree could become importer rollback
+/// candidates. This is **enforced** here — at the two entry points that
+/// accept a Library root, [`Core::set_library_root`] and
+/// [`Core::set_library_path_for_game`] — so the backups tree can never
+/// become Library-owned content; a comment alone would not stop it.
+///
+/// Both containment directions matter: a proposed root inside the backups
+/// tree puts Library bytes under rollback selection, and the backups tree
+/// inside a proposed root puts the unfenced marker writes inside the
+/// Library. Each direction is tested twice: [`path_within`] canonicalises
+/// and recognises NTFS/symlink aliases, while the raw component-wise
+/// [`Path::starts_with`] covers a side that does not exist yet and so
+/// cannot be canonicalised into the same spelling (the backups root may
+/// legitimately be absent until the first importer install).
+fn ensure_library_root_disjoint_from_backups(proposed: &Path, backups_root: &Path) -> Result<()> {
+    let overlaps =
+        |path: &Path, ancestor: &Path| path_within(path, ancestor) || path.starts_with(ancestor);
+    if overlaps(proposed, backups_root) || overlaps(backups_root, proposed) {
+        return Err(Error::LibraryRootOverlapsBackups {
+            path: proposed.to_path_buf(),
+            backups: backups_root.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 /// Is `path` inside `ancestor`?

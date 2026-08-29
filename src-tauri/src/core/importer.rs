@@ -1170,6 +1170,28 @@ fn mark_backup_as_recovery_remnant(backup_dir: &Path) -> Result<()> {
     .map_err(|source| Error::Io { path, source })
 }
 
+/// Mark `backup_dir` as a non-authoritative recovery remnant when an entry
+/// is still present at that path.
+///
+/// Acknowledge-and-release is the exit GMM takes when it **cannot** prove
+/// the recorded evacuation completed — a higher-uncertainty case than the
+/// successful recovery that marks its own retained backups — so anything
+/// still at the recorded backup path must be excluded from rollback
+/// selection from the moment the witness row is released. Callers must
+/// invoke this before releasing the witness so there is no window where
+/// the directory is both a rollback candidate and unmarked. An absent
+/// backup needs no marker: there is nothing left to roll back to.
+pub(super) fn mark_retained_evacuation_backup(backup_dir: &Path) -> Result<()> {
+    let present = symlink_metadata_if_exists(backup_dir).map_err(|source| Error::Io {
+        path: backup_dir.to_path_buf(),
+        source,
+    })?;
+    if present.is_some() {
+        mark_backup_as_recovery_remnant(backup_dir)?;
+    }
+    Ok(())
+}
+
 /// Record what the files in `backup_dir` were, so a later rollback can
 /// restore GMM's bookkeeping along with the files.
 pub fn write_backup_provenance(backup_dir: &Path, provenance: &BackupProvenance) -> Result<()> {
