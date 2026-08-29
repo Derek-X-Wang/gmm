@@ -399,6 +399,10 @@ impl UnvalidatedReinstallSwapWitness {
             junction_withdrawn,
             junction_withdrawal_error,
         };
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Library mutation policy exemption: ReinstallSwapWitness::validate_paths only validates the three recorded paths"
+        )]
         witness.validate_paths()?;
         Ok(witness)
     }
@@ -900,6 +904,10 @@ pub(super) async fn insert_reinstall_swap_witness(
     connection: &mut SqliteConnection,
     witness: NewReinstallSwapWitness<'_>,
 ) -> Result<()> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Library mutation policy exemption: sqlx Query::execute persists the witness row and does not mutate Library-owned bytes"
+    )]
     sqlx::query(
         "INSERT INTO reinstall_swaps (
             token, mod_id, game_code, library_path, staged_path,

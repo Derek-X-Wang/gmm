@@ -2,14 +2,12 @@
 //!
 //! This test parses every checked-in production Rust module under `src/`. It
 //! follows syntactically visible Library paths (`library_root`, `library_path`,
-//! and values derived from them) through local bindings, call arguments, and
-//! method receivers. Passing such a value to a helper is conservatively treated
-//! as a possible mutation. Explicit `std::fs` imports and aliases are resolved
-//! to their original items before the closed non-mutating call set is applied;
-//! glob-imported `std::fs` calls are classified by their local item name.
-//! Consequently a new module, helper indirection, different formatting, or a
-//! previously unseen `std::fs` API cannot silently add a Library-content
-//! mutation without declaring policy.
+//! and values derived from them) through local bindings, path-call arguments,
+//! and method receivers. An unknown path call that receives such a value is
+//! conservatively treated as a possible mutation. Direct `use std::fs::...`
+//! imports and aliases are resolved to their original items before the closed
+//! non-mutating call set is applied; glob-imported `std::fs` calls are
+//! classified by their local item name.
 //!
 //! Policy evidence is structural: the containing function must call a known
 //! fence/staging acquisition API or accept a `LibraryMutationFence`. The named
@@ -22,10 +20,16 @@
 //! This is deliberately not a type checker or control/dataflow proof. It cannot
 //! recognize a Library path whose meaning is hidden behind an unrelated name,
 //! an opaque return value, macro expansion, generated source, or a call outside
-//! checked-in `src/`, and it does not model Rust name resolution beyond simple
-//! file-level `std::fs` imports. Most importantly, seeing a fence acquisition
-//! in a function does **not** prove that the fence is held across the mutation;
-//! that requires dataflow analysis and remains review's job.
+//! checked-in `src/`. Policy evidence is syntactic: an acquisition-shaped call
+//! inside an unpolled async block or to a shadowed local function is accepted,
+//! as is a parameter such as `Option<LibraryMutationFence>` or an unrelated
+//! same-named type. The `std::fs` alias map is file-wide and scope-insensitive,
+//! so nested imports with the same local name can overwrite one another. Only
+//! calls whose callee is a path are inspected; immediate closures and function
+//! values reached through fields or indexes are missed. Most importantly,
+//! seeing a fence acquisition in a function does **not** prove that the fence is
+//! held across the mutation; that requires dataflow analysis and remains
+//! review's job.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -35,79 +39,95 @@ use syn::visit::{self, Visit};
 
 const EXEMPTION_PREFIX: &str = "Library mutation policy exemption:";
 
-const ESTABLISHED_MUTATION_CONTRACTS: &[(&str, &[&str])] = &[
-    (
-        "finish_interrupted_library_deletes",
-        &[
+struct EstablishedMutationContract {
+    source: &'static str,
+    function: &'static str,
+    markers: &'static [&'static str],
+}
+
+const ESTABLISHED_MUTATION_CONTRACTS: &[EstablishedMutationContract] = &[
+    EstablishedMutationContract {
+        source: "core/library_recovery.rs",
+        function: "finish_interrupted_library_deletes",
+        markers: &[
             "begin_library_mutation",
             "LibraryMutation::FinishInterruptedDeletes",
         ],
-    ),
-    (
-        "retry_reinstall_recovery",
-        &[
+    },
+    EstablishedMutationContract {
+        source: "core/library_mutation.rs",
+        function: "retry_reinstall_recovery",
+        markers: &[
             "begin_library_mutation",
             "LibraryMutation::RetryReinstallRecovery",
         ],
-    ),
-    (
-        "set_library_root",
-        &["begin_library_mutation", "LibraryMutation::SetLibraryRoot"],
-    ),
-    (
-        "set_library_path_for_game",
-        &[
+    },
+    EstablishedMutationContract {
+        source: "core/mod.rs",
+        function: "set_library_root",
+        markers: &["begin_library_mutation", "LibraryMutation::SetLibraryRoot"],
+    },
+    EstablishedMutationContract {
+        source: "core/mod.rs",
+        function: "set_library_path_for_game",
+        markers: &[
             "begin_library_mutation",
             "LibraryMutation::SetLibraryPathForGame",
         ],
-    ),
-    (
-        "adopt_folder",
-        &[
+    },
+    EstablishedMutationContract {
+        source: "core/mod.rs",
+        function: "adopt_folder",
+        markers: &[
             "create_staged_library_directory",
             "commit_staged_mod",
             "LibraryMutation::AdoptFolder",
         ],
-    ),
-    (
-        "import_zip",
-        &[
+    },
+    EstablishedMutationContract {
+        source: "core/mod.rs",
+        function: "import_zip",
+        markers: &[
             "create_staged_library_directory",
             "commit_staged_mod",
             "LibraryMutation::ImportZip",
         ],
-    ),
-    (
-        "recover_unreferenced_library_dir",
-        &[
+    },
+    EstablishedMutationContract {
+        source: "core/library_recovery.rs",
+        function: "recover_unreferenced_library_dir",
+        markers: &[
             "begin_guarded_library_mutation",
             "LibraryMutation::RecoverUnreferencedLibraryDir",
         ],
-    ),
-    (
-        "delete_unreferenced_library_dir",
-        &[
+    },
+    EstablishedMutationContract {
+        source: "core/library_recovery.rs",
+        function: "delete_unreferenced_library_dir",
+        markers: &[
             "begin_guarded_library_mutation",
             "LibraryMutation::DeleteUnreferencedLibraryDir",
         ],
-    ),
-    (
-        "resolve_duplicate_mods",
-        &[
+    },
+    EstablishedMutationContract {
+        source: "core/library_mutation.rs",
+        function: "resolve_duplicate_mods",
+        markers: &[
             "begin_library_mutation",
             "LibraryMutation::ResolveDuplicateMods",
             "withdraw_reinstall_junction",
         ],
-    ),
-    (
-        "reinstall_gamebanana_mod_with_endpoints",
-        &[
+    },
+    EstablishedMutationContract {
+        source: "core/mod.rs",
+        function: "reinstall_gamebanana_mod_with_endpoints",
+        markers: &[
             "begin_library_mutation",
             "LibraryMutation::ReinstallGamebananaMod",
             "insert_reinstall_swap_witness",
             "quarantine_library_directory_with_token",
         ],
-    ),
+    },
 ];
 
 #[test]
@@ -249,6 +269,74 @@ fn library_path_method_receiver_is_inspected() {
 }
 
 #[test]
+fn common_execute_method_name_is_not_globally_non_mutating() {
+    let violations = fixture_violations(
+        r#"
+        struct Job;
+
+        impl Job {
+            fn execute(&self, path: &std::path::Path) -> std::io::Result<()> {
+                std::fs::remove_dir_all(path)
+            }
+        }
+
+        fn runs(library_path: &std::path::Path) -> std::io::Result<()> {
+            Job.execute(library_path)
+        }
+        "#,
+    );
+    assert_eq!(
+        violations,
+        ["fixture.rs::runs: call to `execute`"],
+        "a benign helper's basename must not exempt every method with that name"
+    );
+}
+
+#[test]
+fn established_contract_markers_must_share_one_production_item() {
+    let parsed = [
+        (
+            PathBuf::from("core/mod.rs"),
+            syn::parse_file(
+                r#"
+                async fn target() {
+                    begin_library_mutation().await;
+                }
+
+                #[cfg(test)]
+                async fn target() {
+                    let _ = LibraryMutation::Target;
+                }
+                "#,
+            )
+            .expect("parse designated production fixture"),
+        ),
+        (
+            PathBuf::from("commands.rs"),
+            syn::parse_file(
+                r#"
+                async fn target() {
+                    let _ = LibraryMutation::Target;
+                }
+                "#,
+            )
+            .expect("parse same-named fixture"),
+        ),
+    ];
+    let contracts = [EstablishedMutationContract {
+        source: "core/mod.rs",
+        function: "target",
+        markers: &["begin_library_mutation", "LibraryMutation::Target"],
+    }];
+
+    assert_eq!(
+        established_contract_violations_for(&parsed, &contracts),
+        ["core/mod.rs::target: established Library mutation contract is missing `LibraryMutation::Target`"],
+        "markers from same-named or test-only items must not complete a production contract"
+    );
+}
+
+#[test]
 fn unused_library_mutation_variant_is_not_policy_evidence() {
     let violations = fixture_violations(
         r#"
@@ -378,6 +466,13 @@ fn fixture_violations(source: &str) -> Vec<String> {
 }
 
 fn established_contract_violations(parsed: &[(PathBuf, syn::File)]) -> Vec<String> {
+    established_contract_violations_for(parsed, ESTABLISHED_MUTATION_CONTRACTS)
+}
+
+fn established_contract_violations_for(
+    parsed: &[(PathBuf, syn::File)],
+    contracts: &[EstablishedMutationContract],
+) -> Vec<String> {
     #[derive(Default)]
     struct FunctionShape {
         calls: HashSet<String>,
@@ -433,54 +528,76 @@ fn established_contract_violations(parsed: &[(PathBuf, syn::File)]) -> Vec<Strin
     }
 
     struct Functions<'a> {
-        shapes: &'a mut HashMap<String, Vec<FunctionShape>>,
+        function: &'a str,
+        shapes: &'a mut Vec<FunctionShape>,
     }
 
     impl Functions<'_> {
-        fn inspect(&mut self, name: &syn::Ident, block: &syn::Block) {
-            if ESTABLISHED_MUTATION_CONTRACTS
-                .iter()
-                .any(|(expected, _)| name == expected)
-            {
+        fn inspect(&mut self, name: &syn::Ident, attrs: &[syn::Attribute], block: &syn::Block) {
+            if !is_test_only(attrs) && name == self.function {
                 let mut shape = FunctionShape::default();
                 shape.visit_block(block);
-                self.shapes.entry(name.to_string()).or_default().push(shape);
+                self.shapes.push(shape);
             }
         }
     }
 
     impl<'ast> Visit<'ast> for Functions<'_> {
         fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
-            self.inspect(&function.sig.ident, &function.block);
+            self.inspect(&function.sig.ident, &function.attrs, &function.block);
             visit::visit_item_fn(self, function);
         }
 
         fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
-            self.inspect(&function.sig.ident, &function.block);
+            self.inspect(&function.sig.ident, &function.attrs, &function.block);
             visit::visit_impl_item_fn(self, function);
         }
-    }
 
-    let mut shapes = HashMap::new();
-    for (_, syntax) in parsed {
-        Functions {
-            shapes: &mut shapes,
+        fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+            if !is_test_only(&implementation.attrs) {
+                visit::visit_item_impl(self, implementation);
+            }
         }
-        .visit_file(syntax);
+
+        fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+            if !is_test_only(&module.attrs) {
+                visit::visit_item_mod(self, module);
+            }
+        }
     }
 
     let mut violations = Vec::new();
-    for (function, markers) in ESTABLISHED_MUTATION_CONTRACTS {
-        let Some(candidates) = shapes.get(*function) else {
+    for contract in contracts {
+        let Some((_, syntax)) = parsed
+            .iter()
+            .find(|(path, _)| path.ends_with(contract.source))
+        else {
             violations.push(format!(
-                "established Library mutation contract function `{function}` is missing"
+                "established Library mutation contract source `{}` is missing",
+                contract.source
             ));
             continue;
         };
-        for marker in *markers {
-            if !candidates.iter().any(|shape| shape.contains(marker)) {
+        let function = contract.function;
+        let mut candidates = Vec::new();
+        Functions {
+            function,
+            shapes: &mut candidates,
+        }
+        .visit_file(syntax);
+        let [shape] = candidates.as_slice() else {
+            violations.push(format!(
+                "{}::{function}: established Library mutation contract must identify exactly one production item, found {}",
+                contract.source,
+                candidates.len()
+            ));
+            continue;
+        };
+        for marker in contract.markers {
+            if !shape.contains(marker) {
                 violations.push(format!(
-                    "{function}: established Library mutation contract is missing `{marker}`"
+                    "{}::{function}: established Library mutation contract is missing `{marker}`",
+                    contract.source
                 ));
             }
         }
@@ -1020,7 +1137,6 @@ fn is_non_mutating_call(segments: &[String]) -> bool {
             | "collect"
             | "contains"
             | "exists"
-            | "execute"
             | "expect"
             | "extract_hashes_from_dir"
             | "file_type"
@@ -1044,7 +1160,6 @@ fn is_non_mutating_call(segments: &[String]) -> bool {
             | "symlink_metadata"
             | "try_exists"
             | "unwrap_or_else"
-            | "validate_paths"
     )
 }
 
