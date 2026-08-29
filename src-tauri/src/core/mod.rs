@@ -2528,9 +2528,8 @@ impl Core {
             Err(join_error) => {
                 let error = Error::Importer(format!("install task join error: {join_error}"));
                 if witnessed {
-                    if let Err(record_error) = self
-                        .record_importer_evacuation_failure(token, &error.to_string())
-                        .await
+                    if let Err(record_error) =
+                        self.record_importer_evacuation_failure(token, &error).await
                     {
                         tracing::error!(
                             target: "gmm::importer",
@@ -2544,9 +2543,8 @@ impl Core {
             Ok(Ok(report)) => report,
             Ok(Err(error)) => {
                 if witnessed {
-                    if let Err(record_error) = self
-                        .record_importer_evacuation_failure(token, &error.to_string())
-                        .await
+                    if let Err(record_error) =
+                        self.record_importer_evacuation_failure(token, &error).await
                     {
                         tracing::error!(
                             target: "gmm::importer",
@@ -2561,9 +2559,8 @@ impl Core {
 
         if let Some(backup_dir) = report.backup_dir.as_deref() {
             if let Err(error) = importer::write_backup_provenance(backup_dir, &replacing) {
-                if let Err(record_error) = self
-                    .record_importer_evacuation_failure(token, &error.to_string())
-                    .await
+                if let Err(record_error) =
+                    self.record_importer_evacuation_failure(token, &error).await
                 {
                     tracing::error!(
                         target: "gmm::importer",
@@ -2576,9 +2573,8 @@ impl Core {
         }
         if witnessed {
             if let Err(error) = self.finish_importer_evacuation(token).await {
-                if let Err(record_error) = self
-                    .record_importer_evacuation_failure(token, &error.to_string())
-                    .await
+                if let Err(record_error) =
+                    self.record_importer_evacuation_failure(token, &error).await
                 {
                     tracing::error!(
                         target: "gmm::importer",

@@ -4,6 +4,9 @@ pub mod commands;
 pub mod core;
 pub mod runtime;
 
+#[cfg(test)]
+extern crate self as gmm_lib;
+
 use std::path::PathBuf;
 
 use crate::core::diagnostics;

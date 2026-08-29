@@ -389,6 +389,7 @@ export interface ImporterEvacuationRecovery {
   gamePath: string;
   backupPath: string;
   ownerUncertain: boolean;
+  action: "retry" | "retireProducer" | "acknowledgeAndRelease";
 }
 
 export async function fetchLatestImporterRelease(

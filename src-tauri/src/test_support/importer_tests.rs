@@ -21,6 +21,18 @@ use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
+fn fixture_exists(path: &Path) -> bool {
+    super::super::filesystem::symlink_metadata_if_exists(path)
+        .expect("inspect fixture path")
+        .is_some()
+}
+
+fn fixture_is_file(path: &Path) -> bool {
+    super::super::filesystem::symlink_metadata_if_exists(path)
+        .expect("inspect fixture file")
+        .is_some_and(|metadata| metadata.is_file())
+}
+
 /// A zip shaped like a real `*MI-Package` release: `d3dx.ini` at the
 /// root, `Core/`, `ShaderFixes/`, and **no compiled binaries** — the DLLs
 /// ship with the Loader (ADR 0001).
@@ -69,8 +81,8 @@ fn install_from_local_zip_places_files_and_rewrites_loader() {
     assert!(!report.sha256.is_empty());
     assert!(report.rewrote_files.iter().any(|p| p.ends_with("d3dx.ini")));
 
-    assert!(game_dir.join("Core/library.ini").is_file());
-    assert!(game_dir.join("ShaderFixes/sample.hlsl").is_file());
+    assert!(fixture_is_file(&game_dir.join("Core/library.ini")));
+    assert!(fixture_is_file(&game_dir.join("ShaderFixes/sample.hlsl")));
 
     let d3dx = fs::read_to_string(game_dir.join("d3dx.ini")).expect("read d3dx");
     assert!(
@@ -197,7 +209,7 @@ fn install_never_moves_an_existing_mods_directory() {
     .expect("install");
 
     assert!(
-        mods.join("Hu Tao Skin/merged.ini").exists(),
+        fixture_exists(&mods.join("Hu Tao Skin/merged.ini")),
         "an enabled mod's deployment directory must survive an importer install",
     );
     assert_eq!(
@@ -228,11 +240,11 @@ fn reinstall_leaves_mods_in_place_while_replacing_importer_files() {
         .expect("reinstall");
 
     assert!(
-        mods.join("Nahida/merged.ini").exists(),
+        fixture_exists(&mods.join("Nahida/merged.ini")),
         "reinstalling the importer must not orphan enabled mods",
     );
     assert!(
-        game.join("Core/library.ini").exists(),
+        fixture_exists(&game.join("Core/library.ini")),
         "importer files should still be replaced normally",
     );
 }
@@ -257,7 +269,7 @@ fn a_package_shipping_its_own_mods_folder_merges_instead_of_replacing() {
     .expect("install");
 
     assert!(
-        mods.join("Existing/merged.ini").exists(),
+        fixture_exists(&mods.join("Existing/merged.ini")),
         "the user's own mod must survive a package that ships Mods/",
     );
     assert_eq!(
@@ -265,7 +277,7 @@ fn a_package_shipping_its_own_mods_folder_merges_instead_of_replacing() {
         "mine\n",
     );
     assert!(
-        mods.join("ExampleMod.ini").exists(),
+        fixture_exists(&mods.join("ExampleMod.ini")),
         "the package's shipped example should still be merged in",
     );
 }
@@ -287,7 +299,7 @@ fn rollback_never_replaces_the_live_mods_directory() {
     rollback_to(&backup, &game).expect("rollback");
 
     assert!(
-        mods.join("live.ini").exists(),
+        fixture_exists(&mods.join("live.ini")),
         "rollback must never wholesale-replace the live Mods directory",
     );
     // NOTE: this assertion was inverted after code review. It
@@ -299,12 +311,12 @@ fn rollback_never_replaces_the_live_mods_directory() {
     // forever. Merge-preferring-live restores them without clobbering
     // anything current.
     assert!(
-        mods.join("stale.ini").exists(),
+        fixture_exists(&mods.join("stale.ini")),
         "a backed-up entry with no live counterpart must be brought back, \
          not stranded in the backup",
     );
     assert!(
-        game.join("d3d11.dll").exists(),
+        fixture_exists(&game.join("d3d11.dll")),
         "non-user-owned files should still roll back normally",
     );
 }
@@ -333,7 +345,7 @@ fn rollback_restores_mods_when_the_game_has_none() {
     rollback_to(&backup, &game).expect("rollback");
 
     assert!(
-        game.join("Mods/Hu Tao Skin/merged.ini").exists(),
+        fixture_exists(&game.join("Mods/Hu Tao Skin/merged.ini")),
         "rollback must restore a Mods/ directory the game no longer has — \
          this is the recovery path for backups taken by the old build",
     );
@@ -363,11 +375,11 @@ fn rollback_merges_backup_mods_into_a_live_one_preferring_live() {
     rollback_to(&backup, &game).expect("rollback");
 
     assert!(
-        mods.join("Current/merged.ini").exists(),
+        fixture_exists(&mods.join("Current/merged.ini")),
         "the live mod must survive",
     );
     assert!(
-        mods.join("Stranded/merged.ini").exists(),
+        fixture_exists(&mods.join("Stranded/merged.ini")),
         "the stranded backup entry must be brought back",
     );
     assert_eq!(
@@ -421,11 +433,11 @@ fn merging_a_shipped_mods_dir_recurses_into_existing_subdirectories() {
     .expect("install");
 
     assert!(
-        mods.join("Examples/mine.ini").exists(),
+        fixture_exists(&mods.join("Examples/mine.ini")),
         "the user's file must survive",
     );
     assert!(
-        mods.join("Examples/shipped.ini").exists(),
+        fixture_exists(&mods.join("Examples/shipped.ini")),
         "a shipped file nested under an existing directory must still be merged in — \
          a non-recursive merge would skip the whole subtree",
     );

@@ -29,6 +29,18 @@ use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
+fn fixture_exists(path: &Path) -> bool {
+    super::super::filesystem::symlink_metadata_if_exists(path)
+        .expect("inspect fixture path")
+        .is_some()
+}
+
+fn fixture_is_dir(path: &Path) -> bool {
+    super::super::filesystem::symlink_metadata_if_exists(path)
+        .expect("inspect fixture directory")
+        .is_some_and(|metadata| metadata.is_dir())
+}
+
 /// One live Model Importer package's entry listing, recorded verbatim
 /// from the real release asset.
 ///
@@ -46,8 +58,10 @@ struct RecordedLayout {
 }
 
 fn recorded_layouts() -> Vec<RecordedLayout> {
-    serde_json::from_str(include_str!("fixtures/importer_package_layouts.json"))
-        .expect("recorded package layouts must be valid JSON")
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/importer_package_layouts.json"
+    ))
+    .expect("recorded package layouts must be valid JSON")
 }
 
 /// Rebuild a zip with a recorded package's exact entry paths. Structural
@@ -97,7 +111,7 @@ fn snapshot(root: &Path) -> Vec<(String, Option<Vec<u8>>)> {
                 .expect("under base")
                 .to_string_lossy()
                 .to_string();
-            if path.is_dir() {
+            if fixture_is_dir(&path) {
                 out.push((rel, None));
                 walk(&path, base, out);
             } else {
@@ -141,7 +155,7 @@ fn a_zip_that_is_not_an_importer_leaves_the_game_directory_byte_for_byte_unchang
          nothing to roll back. Error was: {error}"
     );
     assert!(
-        !backups.exists(),
+        !fixture_exists(&backups),
         "no backup directory may be created for a rejected archive"
     );
 }
@@ -179,7 +193,7 @@ fn every_live_model_importer_package_still_installs() {
             layout.game
         );
         assert!(
-            game.join("Core").is_dir() && game.join("ShaderFixes").is_dir(),
+            fixture_is_dir(&game.join("Core")) && fixture_is_dir(&game.join("ShaderFixes")),
             "{}: the package's own directories must land",
             layout.game
         );

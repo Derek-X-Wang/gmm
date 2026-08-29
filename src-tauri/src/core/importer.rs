@@ -23,6 +23,7 @@
 //! orchestrator accepts a local ZIP path so integration tests can
 //! exercise the install/rollback flow without making HTTP calls.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -86,6 +87,14 @@ pub const DEFAULT_LOADER_EXE: &str = "gmm.exe";
 #[doc(hidden)]
 pub const BACKUP_AFTER_ENTRY_TEST_SEAM: &str = "importer_backup.after_entry";
 
+/// Pause-only test seam after recovery found equal live and backup contents,
+/// before it revalidates that evidence and retires the backup. Kept outside
+/// `crash_points::ALL` because this barrier models a concurrent filesystem
+/// change, not a process death that startup must replay.
+#[doc(hidden)]
+pub const RECOVERY_AFTER_ENTRY_COMPARISON_TEST_SEAM: &str =
+    "importer_evacuation.after_entry_comparison";
+
 /// Outcome of a single install attempt. Travels through tracing
 /// (NEW-LOG) and back to the UI for the success toast.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,6 +122,15 @@ pub struct ImporterEvacuationRecovery {
     pub backup_path: PathBuf,
     /// True when the numeric PID is live but its start identity is unknown.
     pub owner_uncertain: bool,
+    pub action: ImporterEvacuationRecoveryAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImporterEvacuationRecoveryAction {
+    Retry,
+    RetireProducer,
+    AcknowledgeAndRelease,
 }
 
 #[derive(Debug)]
@@ -442,7 +460,7 @@ pub fn find_d3dx_ini(game_dir: &Path) -> Result<PathBuf> {
 ///
 /// This symbol is absent from release builds so an ordinary app caller cannot
 /// accidentally reintroduce the process-abort gap from #227.
-#[cfg(debug_assertions)]
+#[cfg(test)]
 #[doc(hidden)]
 pub fn install_from_local_zip_unwitnessed_for_test(
     zip_path: &Path,
@@ -459,7 +477,7 @@ pub fn install_from_local_zip_unwitnessed_for_test(
     )
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn install_from_local_zip_with_staging_probe<F>(
     zip_path: &Path,
     game_dir: &Path,
@@ -488,7 +506,7 @@ where
         Ok(report) => Ok(report),
         Err(error) => {
             if let Some((game_dir, backup_dir, entries)) = recovery {
-                recover_evacuated_importer(&game_dir, &backup_dir, &entries).map_err(
+                recover_evacuated_importer(&game_dir, &backup_dir, &entries, None).map_err(
                     |recovery_error| {
                         Error::Importer(format!(
                             "{error}; restoring the partially evacuated importer also failed: {recovery_error}"
@@ -636,7 +654,7 @@ pub(super) fn execute_prepared_importer_install(
 
 /// Test-only low-level backup seam that intentionally has no durable witness.
 /// The release app cannot construct this operation.
-#[cfg(debug_assertions)]
+#[cfg(test)]
 #[doc(hidden)]
 pub fn backup_existing_unwitnessed_for_test(
     game_dir: &Path,
@@ -645,7 +663,7 @@ pub fn backup_existing_unwitnessed_for_test(
     backup_existing_with(game_dir, backups_root, symlink_metadata_if_exists)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn backup_existing_with<F>(
     game_dir: &Path,
     backups_root: &Path,
@@ -661,6 +679,14 @@ where
     execute_backup_plan(&plan, game_dir, None)?;
     Ok(Some(plan.destination))
 }
+
+#[cfg(test)]
+#[path = "../test_support/importer_tests.rs"]
+mod importer_tests;
+
+#[cfg(test)]
+#[path = "../test_support/importer_archive_validation_tests.rs"]
+mod importer_archive_validation_tests;
 
 fn plan_existing_backup_with<F>(
     game_dir: &Path,
@@ -768,113 +794,87 @@ fn restore_copy_staging_path(game_dir: &Path, entry: &str) -> PathBuf {
     game_dir.join(format!(".gmm-restore-{entry}"))
 }
 
-fn importer_entries_have_same_contents(left: &Path, right: &Path) -> Result<bool> {
-    let left_metadata = fs::symlink_metadata(left).map_err(|source| Error::Io {
-        path: left.to_path_buf(),
-        source,
-    })?;
-    let right_metadata = fs::symlink_metadata(right).map_err(|source| Error::Io {
-        path: right.to_path_buf(),
-        source,
-    })?;
-    let left_type = left_metadata.file_type();
-    let right_type = right_metadata.file_type();
+#[derive(Debug, PartialEq, Eq)]
+enum ImporterEntryContentSnapshot {
+    Link(PathBuf),
+    File { len: u64, sha256: [u8; 32] },
+    Directory(Vec<(OsString, ImporterEntryContentSnapshot)>),
+}
 
-    if left_type.is_symlink() || right_type.is_symlink() {
-        if !(left_type.is_symlink() && right_type.is_symlink()) {
-            return Ok(false);
-        }
-        let left_target = fs::read_link(left).map_err(|source| Error::Io {
-            path: left.to_path_buf(),
-            source,
-        })?;
-        let right_target = fs::read_link(right).map_err(|source| Error::Io {
-            path: right.to_path_buf(),
-            source,
-        })?;
-        return Ok(left_target == right_target);
+fn importer_entry_content_snapshot(path: &Path) -> Result<ImporterEntryContentSnapshot> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let file_type = metadata.file_type();
+
+    if file_type.is_symlink() {
+        return fs::read_link(path)
+            .map(ImporterEntryContentSnapshot::Link)
+            .map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            });
     }
 
-    if left_metadata.is_file() || right_metadata.is_file() {
-        if !(left_metadata.is_file() && right_metadata.is_file())
-            || left_metadata.len() != right_metadata.len()
-        {
-            return Ok(false);
-        }
-        let mut left_file = fs::File::open(left).map_err(|source| Error::Io {
-            path: left.to_path_buf(),
+    if metadata.is_file() {
+        let mut file = fs::File::open(path).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
             source,
         })?;
-        let mut right_file = fs::File::open(right).map_err(|source| Error::Io {
-            path: right.to_path_buf(),
-            source,
-        })?;
-        let mut left_buffer = [0_u8; 64 * 1024];
-        let mut right_buffer = [0_u8; 64 * 1024];
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut len = 0_u64;
         loop {
-            let left_read = left_file
-                .read(&mut left_buffer)
-                .map_err(|source| Error::Io {
-                    path: left.to_path_buf(),
-                    source,
-                })?;
-            let right_read = right_file
-                .read(&mut right_buffer)
-                .map_err(|source| Error::Io {
-                    path: right.to_path_buf(),
-                    source,
-                })?;
-            if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
-                return Ok(false);
+            let read = file.read(&mut buffer).map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            if read == 0 {
+                break;
             }
-            if left_read == 0 {
-                return Ok(true);
-            }
+            hasher.update(&buffer[..read]);
+            len = len.saturating_add(read as u64);
         }
+        if len != metadata.len() {
+            return Err(Error::Importer(format!(
+                "the importer entry {} changed while GMM was snapshotting it; GMM preserved both copies",
+                path.display(),
+            )));
+        }
+        return Ok(ImporterEntryContentSnapshot::File {
+            len,
+            sha256: hasher.finalize().into(),
+        });
     }
 
-    if !(left_metadata.is_dir() && right_metadata.is_dir()) {
-        return Ok(false);
+    if !metadata.is_dir() {
+        return Err(Error::Importer(format!(
+            "the importer entry {} has an unsupported filesystem type",
+            path.display(),
+        )));
     }
-    let mut left_entries = fs::read_dir(left)
+    let mut names = fs::read_dir(path)
         .map_err(|source| Error::Io {
-            path: left.to_path_buf(),
+            path: path.to_path_buf(),
             source,
         })?
         .map(|entry| {
             entry
                 .map(|entry| entry.file_name())
                 .map_err(|source| Error::Io {
-                    path: left.to_path_buf(),
+                    path: path.to_path_buf(),
                     source,
                 })
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut right_entries = fs::read_dir(right)
-        .map_err(|source| Error::Io {
-            path: right.to_path_buf(),
-            source,
-        })?
-        .map(|entry| {
-            entry
-                .map(|entry| entry.file_name())
-                .map_err(|source| Error::Io {
-                    path: right.to_path_buf(),
-                    source,
-                })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    left_entries.sort();
-    right_entries.sort();
-    if left_entries != right_entries {
-        return Ok(false);
+    names.sort();
+    let mut entries = Vec::with_capacity(names.len());
+    for name in names {
+        let snapshot = importer_entry_content_snapshot(&path.join(&name))?;
+        entries.push((name, snapshot));
     }
-    for name in left_entries {
-        if !importer_entries_have_same_contents(&left.join(&name), &right.join(name))? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(ImporterEntryContentSnapshot::Directory(entries))
 }
 
 /// Restore every entry named by a validated durable evacuation witness.
@@ -889,6 +889,7 @@ pub(super) fn recover_evacuated_importer(
     game_dir: &Path,
     backup_dir: &Path,
     entries: &[String],
+    crash_hook: Option<&super::CrashHook>,
 ) -> Result<()> {
     for name in entries {
         let source = game_dir.join(name);
@@ -908,11 +909,16 @@ pub(super) fn recover_evacuated_importer(
 
         if backup_present.is_some() {
             if source_present.is_some() {
-                if !importer_entries_have_same_contents(&source, &backup)? {
+                let source_snapshot = importer_entry_content_snapshot(&source)?;
+                let backup_snapshot = importer_entry_content_snapshot(&backup)?;
+                if source_snapshot != backup_snapshot {
                     return Err(Error::Importer(format!(
                         "the live importer entry {} differs from its recorded backup; GMM preserved both because it cannot safely choose which one is authoritative",
                         source.display(),
                     )));
+                }
+                if let Some(hook) = crash_hook {
+                    hook(RECOVERY_AFTER_ENTRY_COMPARISON_TEST_SEAM);
                 }
                 if symlink_metadata_if_exists(&restore_copy)
                     .map_err(|source_error| Error::Io {
@@ -922,6 +928,14 @@ pub(super) fn recover_evacuated_importer(
                     .is_some()
                 {
                     remove_any(&restore_copy)?;
+                }
+                let revalidated_source = importer_entry_content_snapshot(&source)?;
+                let revalidated_backup = importer_entry_content_snapshot(&backup)?;
+                if revalidated_source != source_snapshot || revalidated_backup != backup_snapshot {
+                    return Err(Error::Importer(format!(
+                        "the live importer entry {} or its recorded backup changed after GMM compared them; GMM preserved both because the evidence was no longer current",
+                        source.display(),
+                    )));
                 }
                 remove_any(&backup)?;
                 continue;

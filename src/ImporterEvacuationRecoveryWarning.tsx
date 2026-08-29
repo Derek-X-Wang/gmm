@@ -26,15 +26,17 @@ export function ImporterEvacuationRecoveryWarning({
         GMM recorded the backup location before moving any Model Importer files, but could not
         finish restoring every evacuated entry. The game directory may still contain only part of
         its previous Model Importer.
-        {recovery.ownerUncertain
+        {recovery.action === "retireProducer"
           ? " GMM cannot retry while the original producer may still be running."
-          : " Fix the problem described below, then retry the recorded rollback here."}
+          : recovery.action === "acknowledgeAndRelease"
+            ? " A recorded directory now has a different filesystem identity, so retrying cannot prove or restore the original state."
+            : " Fix the problem described below, then retry the recorded rollback here."}
       </p>
       <p>
         Until recovery succeeds, GMM blocks launching {displayName} and blocks another importer
         install or rollback so neither location can silently become authoritative.
       </p>
-      {recovery.ownerUncertain ? (
+      {recovery.action === "retireProducer" ? (
         <>
           <p>
             Close any other GMM instance, then retire the producer only after confirming no GMM is
@@ -46,6 +48,21 @@ export function ImporterEvacuationRecoveryWarning({
               : "I confirmed no other GMM is changing this importer — retire producer"}
           </button>
           {error ? <span className="error">Could not retire the producer: {error}</span> : null}
+        </>
+      ) : recovery.action === "acknowledgeAndRelease" ? (
+        <>
+          <p>
+            Review the recorded game and backup locations below. Acknowledging this state releases
+            GMM&apos;s importer-operation block only; it will not move, delete, or restore any files.
+            The game directory may remain incomplete, and you may need to restore files by hand
+            from the backup location.
+          </p>
+          <button type="button" onClick={onRetire} disabled={pending}>
+            {pending
+              ? "Releasing importer block…"
+              : "I reviewed both locations — release the importer block"}
+          </button>
+          {error ? <span className="error">Could not release the importer block: {error}</span> : null}
         </>
       ) : (
         <>
@@ -62,7 +79,7 @@ export function ImporterEvacuationRecoveryWarning({
           <dd><code>{recovery.gamePath}</code></dd>
           <dt>Backup directory</dt>
           <dd><code>{recovery.backupPath}</code></dd>
-          <dt>{recovery.ownerUncertain ? "Recovery status" : "Last recovery error"}</dt>
+          <dt>{recovery.action === "retireProducer" ? "Recovery status" : "Last recovery error"}</dt>
           <dd>{recovery.reason}</dd>
         </dl>
       </details>

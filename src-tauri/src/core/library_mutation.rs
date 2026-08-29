@@ -31,7 +31,7 @@ use sqlx::{Column, Row, Sqlite, SqliteConnection};
 use ulid::Ulid;
 
 use super::filesystem::metadata_if_exists;
-use super::importer::ImporterEvacuationRecovery;
+use super::importer::{ImporterEvacuationRecovery, ImporterEvacuationRecoveryAction};
 use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
 use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
@@ -202,6 +202,7 @@ pub(super) struct ImporterEvacuationWitness {
     recovery_error: Option<String>,
     recovery_attempted_at: Option<String>,
     recovery_attempts: u32,
+    recovery_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,6 +359,7 @@ define_unvalidated_witness_tables! {
         recovery_error: Option<String>,
         recovery_attempted_at: Option<String>,
         recovery_attempts: i64,
+        recovery_action: Option<String>,
     }
 }
 
@@ -897,6 +899,7 @@ impl UnvalidatedImporterEvacuationWitness {
             recovery_error,
             recovery_attempted_at,
             recovery_attempts,
+            recovery_action,
         } = self;
         let corrupt = |reason| Error::ImporterEvacuationWitnessCorrupt {
             game: game_code.clone(),
@@ -999,6 +1002,20 @@ impl UnvalidatedImporterEvacuationWitness {
                 "a recorded recovery error has no recovery-attempt timestamp".to_string(),
             ));
         }
+        if recovery_error.is_some() != recovery_action.is_some() {
+            return Err(corrupt(
+                "a recorded recovery error and its action must either both be present or both be absent"
+                    .to_string(),
+            ));
+        }
+        if recovery_action
+            .as_deref()
+            .is_some_and(|action| !matches!(action, "retry" | "release"))
+        {
+            return Err(corrupt(format!(
+                "the recovery action {recovery_action:?} is unsupported"
+            )));
+        }
         Ok(ImporterEvacuationWitness {
             token,
             game,
@@ -1015,6 +1032,7 @@ impl UnvalidatedImporterEvacuationWitness {
             recovery_error,
             recovery_attempted_at,
             recovery_attempts,
+            recovery_action,
         })
     }
 }
@@ -1057,6 +1075,13 @@ impl ImporterEvacuationWitness {
             game_path: self.game_path.clone(),
             backup_path: self.backup_path.clone(),
             owner_uncertain,
+            action: if owner_uncertain {
+                ImporterEvacuationRecoveryAction::RetireProducer
+            } else if self.recovery_action.as_deref() == Some("release") {
+                ImporterEvacuationRecoveryAction::AcknowledgeAndRelease
+            } else {
+                ImporterEvacuationRecoveryAction::Retry
+            },
         })
     }
 
@@ -1069,6 +1094,13 @@ impl ImporterEvacuationWitness {
 
     fn uncertain<T>(&self, reason: impl Into<String>) -> Result<T> {
         Err(Error::ImporterEvacuationRecoveryUncertain {
+            game: self.game.profile().display_name.to_string(),
+            reason: reason.into(),
+        })
+    }
+
+    fn unresolvable<T>(&self, reason: impl Into<String>) -> Result<T> {
+        Err(Error::ImporterEvacuationRecoveryUnresolvable {
             game: self.game.profile().display_name.to_string(),
             reason: reason.into(),
         })
@@ -2096,18 +2128,26 @@ impl Core {
     pub(super) async fn record_importer_evacuation_failure(
         &self,
         token: Ulid,
-        reason: &str,
+        error: &Error,
     ) -> Result<()> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         load_importer_evacuation_witnesses(&mut transaction).await?;
         sqlx::query(
             "UPDATE importer_evacuations
              SET recovery_error = ?, recovery_attempted_at = ?,
-                 recovery_attempts = recovery_attempts + 1, owner_active = 0
+                 recovery_attempts = recovery_attempts + 1, owner_active = 0,
+                 recovery_action = ?
              WHERE token = ?",
         )
-        .bind(reason)
+        .bind(error.to_string())
         .bind(Utc::now().to_rfc3339())
+        .bind(
+            if matches!(error, Error::ImporterEvacuationRecoveryUnresolvable { .. }) {
+                "release"
+            } else {
+                "retry"
+            },
+        )
         .bind(token.to_string())
         .execute(&mut *transaction)
         .await?;
@@ -2153,7 +2193,7 @@ impl Core {
                 source,
             })?;
         if game_directory.identity() != &witness.game_identity {
-            return witness.uncertain("the recorded Game directory changed filesystem identity");
+            return witness.unresolvable("the recorded Game directory changed filesystem identity");
         }
         let backup_root =
             IdentifiedDirectory::open(recorded_backup_root).map_err(|source| Error::Io {
@@ -2161,12 +2201,12 @@ impl Core {
                 source,
             })?;
         if backup_root.identity() != &witness.backup_root_identity {
-            return witness.uncertain("the recorded backup root changed filesystem identity");
+            return witness.unresolvable("the recorded backup root changed filesystem identity");
         }
         match IdentifiedDirectory::open(&witness.backup_path) {
             Ok(backup_directory) if backup_directory.identity() != &witness.backup_identity => {
                 return witness
-                    .uncertain("the recorded backup directory changed filesystem identity");
+                    .unresolvable("the recorded backup directory changed filesystem identity");
             }
             Ok(_) => {}
             Err(source) if source.kind() == io::ErrorKind::NotFound => {}
@@ -2181,6 +2221,7 @@ impl Core {
             &witness.game_path,
             &witness.backup_path,
             &witness.entries,
+            self.crash_hook.as_ref(),
         )?;
         let removed = sqlx::query("DELETE FROM importer_evacuations WHERE token = ?")
             .bind(witness.token.to_string())
@@ -2202,13 +2243,13 @@ impl Core {
         drop(connection);
         let mut resolved = 0;
         for witness in witnesses {
-            if witness.owner_is_live() {
+            if witness.owner_is_live() || witness.recovery_action.as_deref() == Some("release") {
                 continue;
             }
             match self.resolve_importer_evacuation(witness.game).await {
                 Ok(()) => resolved += 1,
                 Err(error) => {
-                    self.record_importer_evacuation_failure(witness.token, &error.to_string())
+                    self.record_importer_evacuation_failure(witness.token, &error)
                         .await?;
                     tracing::error!(
                         target: "gmm::importer",
@@ -2246,11 +2287,14 @@ impl Core {
         else {
             return Ok(());
         };
+        if witness.recovery_action.as_deref() == Some("release") {
+            return Err(Error::ImporterEvacuationRetryUnavailable);
+        }
         drop(connection);
         match self.resolve_importer_evacuation(game).await {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.record_importer_evacuation_failure(witness.token, &error.to_string())
+                self.record_importer_evacuation_failure(witness.token, &error)
                     .await?;
                 Err(error)
             }
@@ -2275,6 +2319,18 @@ impl Core {
             transaction.commit().await?;
             return Ok(());
         };
+        if witness.recovery_action.as_deref() == Some("release") {
+            let removed = sqlx::query("DELETE FROM importer_evacuations WHERE token = ?")
+                .bind(witness.token.to_string())
+                .execute(&mut *transaction)
+                .await?;
+            if removed.rows_affected() != 1 {
+                return witness
+                    .corrupt("the terminal evacuation witness changed before release committed");
+            }
+            transaction.commit().await?;
+            return Ok(());
+        }
         if witness.owner_active
             && matches!(
                 witness.owner_identity_state(),
@@ -2291,7 +2347,7 @@ impl Core {
         match self.resolve_importer_evacuation(game).await {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.record_importer_evacuation_failure(witness.token, &error.to_string())
+                self.record_importer_evacuation_failure(witness.token, &error)
                     .await?;
                 Err(error)
             }

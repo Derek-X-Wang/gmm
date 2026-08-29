@@ -319,6 +319,17 @@ pub enum Error {
     ImporterEvacuationRecoveryUncertain { game: String, reason: String },
 
     #[error(
+        "GMM cannot safely restore an interrupted Model Importer evacuation for {game}: {reason}. \
+         Retrying cannot restore the recorded filesystem identity; review both recorded locations, restore files by hand if needed, then explicitly acknowledge and release the block."
+    )]
+    ImporterEvacuationRecoveryUnresolvable { game: String, reason: String },
+
+    #[error(
+        "this Model Importer recovery cannot be resolved by retrying because a recorded filesystem identity changed; review both recorded locations and use the explicit acknowledge-and-release action"
+    )]
+    ImporterEvacuationRetryUnavailable,
+
+    #[error(
         "{game} has an interrupted Model Importer evacuation that GMM must recover before changing or launching that game"
     )]
     ImporterEvacuationPending { game: String },

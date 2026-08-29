@@ -14,6 +14,7 @@ it("explains the partial importer evacuation and automatic rollback", () => {
         gamePath: "C:\\Games\\Genshin",
         backupPath: "D:\\GMM\\backups\\gimi\\backup",
         ownerUncertain: false,
+        action: "retry",
       }}
       pending={false}
       onRetry={() => {}}
@@ -44,6 +45,7 @@ it("offers explicit producer retirement only when identity is uncertain", () => 
         gamePath: "C:\\Games\\Genshin",
         backupPath: "D:\\GMM\\backups\\gimi\\backup",
         ownerUncertain: true,
+        action: "retireProducer",
       }}
       pending={false}
       onRetry={() => {}}
@@ -73,6 +75,7 @@ it("offers an in-session retry after an ordinary recovery failure", () => {
         gamePath: "C:\\Games\\Genshin",
         backupPath: "D:\\GMM\\backups\\gimi\\backup",
         ownerUncertain: false,
+        action: "retry",
       }}
       pending={false}
       onRetire={() => {}}
@@ -86,4 +89,38 @@ it("offers an in-session retry after an ordinary recovery failure", () => {
   expect(screen.queryByText(/next time it starts/i)).not.toBeInTheDocument();
   retry.click();
   expect(retried).toBe(true);
+});
+
+it("offers acknowledgement instead of a retry for terminal identity loss", () => {
+  let released = false;
+  render(
+    <ImporterEvacuationRecoveryWarning
+      displayName="Genshin Impact"
+      recovery={{
+        reason: "the recorded backup directory changed filesystem identity",
+        attemptedAt: "2026-08-28T12:00:00Z",
+        attempts: 1,
+        gamePath: "C:\\Games\\Genshin",
+        backupPath: "D:\\GMM\\backups\\gimi\\backup",
+        ownerUncertain: false,
+        action: "acknowledgeAndRelease",
+      }}
+      pending={false}
+      onRetry={() => {}}
+      onRetire={() => {
+        released = true;
+      }}
+    />,
+  );
+
+  expect(
+    screen.queryByRole("button", { name: /retry model importer recovery/i }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByText(/will not move, delete, or restore any files/i)).toBeInTheDocument();
+  expect(screen.getByText(/restore files by hand/i)).toBeInTheDocument();
+  const release = screen.getByRole("button", {
+    name: /I reviewed both locations.*release the importer block/i,
+  });
+  release.click();
+  expect(released).toBe(true);
 });

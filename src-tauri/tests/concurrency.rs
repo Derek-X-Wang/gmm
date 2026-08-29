@@ -5970,6 +5970,77 @@ async fn probe_importer_abort_leaves_a_witness_that_startup_replays() {
     );
 }
 
+/// Recovery must not retire the only backup using content evidence gathered
+/// before a concurrent repair changed the live entry. The pause is after the
+/// complete comparison and before deletion, so removing the revalidation makes
+/// this exact interleaving lose the backup deterministically.
+#[tokio::test]
+async fn importer_recovery_revalidates_equal_entries_before_deleting_the_backup() {
+    let env = TestEnv::new();
+    let game_dir = env.game_mods.parent().expect("game dir").to_path_buf();
+    let zip = env._tmp.path().join("importer.zip");
+    build_importer_zip(&zip);
+    std::fs::create_dir_all(game_dir.join("Core")).expect("create old Core");
+    std::fs::write(game_dir.join("d3dx.ini"), b"old d3dx bytes").expect("write old d3dx");
+    std::fs::write(game_dir.join("Core/original.ini"), b"old Core bytes").expect("write old Core");
+    let zip_s = zip.display().to_string();
+    let game_s = game_dir.display().to_string();
+
+    let mut interrupted = probe(&env)
+        .crashing_at(gmm_lib::core::importer::BACKUP_AFTER_ENTRY_TEST_SEAM)
+        .op(["install-importer", "--zip", &zip_s, "--game-dir", &game_s])
+        .spawn();
+    interrupted.wait_for_crash();
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("inspect durable probe state");
+    let backup_path: String =
+        sqlx::query_scalar("SELECT backup_path FROM importer_evacuations WHERE game_code = 'gimi'")
+            .fetch_one(&pool)
+            .await
+            .expect("load recorded backup path");
+    pool.close().await;
+    let backup = PathBuf::from(backup_path);
+    assert_eq!(
+        std::fs::read(backup.join("d3dx.ini")).expect("read published backup"),
+        b"old d3dx bytes",
+        "the fixture must start with the unique old entry in the published backup",
+    );
+
+    std::fs::write(game_dir.join("d3dx.ini"), b"old d3dx bytes")
+        .expect("create an initially identical repaired entry");
+    let pause = gmm_lib::core::importer::RECOVERY_AFTER_ENTRY_COMPARISON_TEST_SEAM;
+    let mut recovery = probe(&env).pausing_at(pause).op(["startup"]).spawn();
+    recovery.wait_for_pause(pause);
+
+    std::fs::write(game_dir.join("d3dx.ini"), b"changed during recovery")
+        .expect("change the live entry inside the comparison/delete window");
+    recovery.resume();
+    recovery
+        .wait_for_outcome()
+        .expect_ok("startup after the guarded recovery refusal");
+
+    assert_eq!(
+        std::fs::read(game_dir.join("d3dx.ini")).expect("read concurrently repaired entry"),
+        b"changed during recovery",
+        "recovery must preserve the live importer entry changed after comparison",
+    );
+    assert_eq!(
+        std::fs::read(backup.join("d3dx.ini")).expect("read retained unique backup"),
+        b"old d3dx bytes",
+        "recovery must preserve the backup when an entry changes after comparison",
+    );
+    let core = env.core().await;
+    assert!(
+        core.importer_evacuation_recovery(GameCode::Gimi)
+            .await
+            .expect("read guarded recovery state")
+            .is_some(),
+        "the changed entry must keep the durable recovery witness visible",
+    );
+}
+
 /// Two processes launch a game at the same instant. Exactly one may win
 /// the Game Session: `active_session` is a singleton row keyed on
 /// `id = 1`, so the loser hits a primary-key conflict rather than
