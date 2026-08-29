@@ -141,6 +141,10 @@ impl Core {
         db_url: &str,
         crash_hook: Option<CrashHook>,
     ) -> Result<Self> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Library mutation policy exemption: Core construction creates only the empty root before any Library content or concurrent operation exists"
+        )]
         std::fs::create_dir_all(&default_library_root).map_err(|source| Error::Io {
             path: default_library_root.clone(),
             source,
@@ -2831,11 +2835,19 @@ impl Core {
             .parent()
             .map(|p| p.join("downloads").join("gamebanana"))
             .unwrap_or_else(|| std::path::PathBuf::from("./downloads/gamebanana"));
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Library mutation policy exemption: this creates the sibling download cache, not Library-owned content"
+        )]
         std::fs::create_dir_all(&cache).map_err(|source| Error::Io {
             path: cache.clone(),
             source,
         })?;
         let zip_path = cache.join(format!("{}-{}", id, submission.file_name));
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Library mutation policy exemption: this writes the sibling download cache, not Library-owned content"
+        )]
         gamebanana::download_to(&client, &submission.file_url, &zip_path).await?;
 
         // Reuse the slice-1b ingest path verbatim; that gives us
