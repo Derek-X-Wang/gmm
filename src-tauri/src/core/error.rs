@@ -307,6 +307,34 @@ pub enum Error {
     EnabledTransitionWitnessCorrupt { mod_id: String, reason: String },
 
     #[error(
+        "GMM found corrupt Model Importer evacuation state for {game}: {reason}. \
+         GMM stopped because corrupt database state is not proof that game-directory files are safe to change."
+    )]
+    ImporterEvacuationWitnessCorrupt { game: String, reason: String },
+
+    #[error(
+        "GMM could not safely restore an interrupted Model Importer evacuation for {game}: {reason}. \
+         The durable recovery record was kept and GMM will retry at the next startup."
+    )]
+    ImporterEvacuationRecoveryUncertain { game: String, reason: String },
+
+    #[error(
+        "GMM cannot safely restore an interrupted Model Importer evacuation for {game}: {reason}. \
+         GMM cannot presently prove the recorded state. If the original directory object was moved, restore it to the exact recorded path and retry; GMM will not search for it. If it cannot be restored, review both recorded locations, restore files by hand if needed, then explicitly acknowledge and release the block."
+    )]
+    ImporterEvacuationRecoveryUnresolvable { game: String, reason: String },
+
+    #[error(
+        "this Model Importer recovery cannot be retried while a recorded path does not contain the original directory object; restore that object to the exact recorded path first, or review both recorded locations and use the explicit acknowledge-and-release action"
+    )]
+    ImporterEvacuationRetryUnavailable,
+
+    #[error(
+        "{game} has an interrupted Model Importer evacuation that GMM must recover before changing or launching that game"
+    )]
+    ImporterEvacuationPending { game: String },
+
+    #[error(
         "Mod {mod_id} has an interrupted enable/disable transition that GMM must recover before another Library or deployment change can start"
     )]
     EnabledTransitionPending { mod_id: String },
@@ -386,6 +414,15 @@ pub enum Error {
     LibraryRelocationBlockedByCleanup,
 
     #[error(
+        "GMM cannot use {path:?} as a Library root because it overlaps the Model Importer \
+         backup tree at {backups:?}. Importer backups and their sidecar markers are app-owned \
+         bookkeeping that GMM writes outside the Library writer fence, so the two trees must \
+         stay disjoint: a Library root may neither sit inside the backup tree nor contain it. \
+         Choose a Library root that does not overlap {backups:?}. No Library bytes were moved."
+    )]
+    LibraryRootOverlapsBackups { path: PathBuf, backups: PathBuf },
+
+    #[error(
         "GMM found interrupted reinstall state for Mod {mod_id} that it could not safely resolve: \
          {reason}. GMM left every directory it could not prove untouched."
     )]
@@ -437,6 +474,11 @@ pub enum Error {
 
     #[error("the enable/disable transition is still owned by the GMM process that created it")]
     EnabledTransitionStillOwned,
+
+    #[error(
+        "GMM cannot retire this Model Importer evacuation while its original process is still running"
+    )]
+    ImporterEvacuationStillOwned,
 
     #[error("the durable game-launch claim was lost before the session became active")]
     SessionLaunchClaimLost,

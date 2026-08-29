@@ -49,8 +49,8 @@ use std::path::{Path, PathBuf};
 
 use gmm_lib::core::settings::keys;
 use gmm_lib::core::{
-    Core, GameCode, Source, ENABLED_TRANSITION_COLUMNS, REINSTALL_SWAP_COLUMNS,
-    STAGED_LIBRARY_OPERATION_COLUMNS,
+    Core, GameCode, Source, ENABLED_TRANSITION_COLUMNS, IMPORTER_EVACUATION_COLUMNS,
+    REINSTALL_SWAP_COLUMNS, STAGED_LIBRARY_OPERATION_COLUMNS,
 };
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::SqliteConnectOptions;
@@ -665,6 +665,71 @@ async fn enabled_transition_migration_enforces_the_durable_recovery_contract() {
     assert!(
         invalid_intent.is_err(),
         "the durable transition must reject an ambiguous requested state",
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn importer_evacuation_migration_enforces_the_durable_recovery_contract() {
+    let (_, fixture) = corpus()
+        .into_iter()
+        .find(|(version, _)| *version == 14)
+        .expect("schema-14 fixture");
+    let tmp = TempDir::new().expect("tmp");
+    let db = stage(&fixture, &tmp);
+    let core = open_core(&db, &tmp).await;
+    drop(core);
+    let pool = raw_pool(&db).await;
+
+    let columns = sqlx::query("PRAGMA table_info(importer_evacuations)")
+        .fetch_all(&pool)
+        .await
+        .expect("inspect importer_evacuations columns");
+    let column_names: Vec<String> = columns
+        .iter()
+        .map(|row| row.try_get("name").expect("column name"))
+        .collect();
+    assert_eq!(
+        column_names, IMPORTER_EVACUATION_COLUMNS,
+        "the migration must create the complete validated importer-evacuation witness",
+    );
+
+    sqlx::query(
+        "INSERT INTO importer_evacuations (
+            token, game_code, game_path, game_identity, backup_path, backup_identity,
+            backup_root_identity, entries_json, owner_pid, owner_started_at,
+            owner_active, created_at
+         ) VALUES (
+            '01JIMPORTEREVACUATION001', 'gimi', 'C:\\Games\\Genshin',
+            '0000000000000001:0000000000000002',
+            'D:\\GMM\\backups\\gimi\\20260828T000000-01JIMPORTEREVACUATION001',
+            '0000000000000003:0000000000000005',
+            '0000000000000003:0000000000000004', '[\"d3dx.ini\",\"Core\"]',
+            42, 1, 1, '2026-08-28T00:00:00Z'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("insert valid importer-evacuation witness");
+    let duplicate_game = sqlx::query(
+        "INSERT INTO importer_evacuations (
+            token, game_code, game_path, game_identity, backup_path, backup_identity,
+            backup_root_identity, entries_json, owner_pid, owner_started_at,
+            owner_active, created_at
+         ) VALUES (
+            '01JIMPORTEREVACUATION002', 'gimi', 'C:\\Games\\Genshin',
+            '0000000000000001:0000000000000002',
+            'D:\\GMM\\backups\\gimi\\20260828T000001-01JIMPORTEREVACUATION002',
+            '0000000000000003:0000000000000006',
+            '0000000000000003:0000000000000004', '[\"d3dx.ini\"]',
+            42, 1, 1, '2026-08-28T00:00:01Z'
+         )",
+    )
+    .execute(&pool)
+    .await;
+    assert!(
+        duplicate_game.is_err(),
+        "one Game must not carry two importer-evacuation witnesses",
     );
     pool.close().await;
 }

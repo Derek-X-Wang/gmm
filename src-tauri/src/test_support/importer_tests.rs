@@ -1,24 +1,37 @@
 //! Slice 3: GIMI Model Importer install + rollback.
 //!
-//! The tests here go through the local-zip orchestrator
-//! ([`install_from_local_zip`]) so no network is required. The full
-//! production path is identical apart from the zip-fetch step at the
-//! front.
+//! Low-level filesystem tests deliberately use the explicitly named
+//! `install_from_local_zip_unwitnessed_for_test` seam so no database or network
+//! is required. Process-abort coverage instead goes through `Core` and the
+//! durable production witness in `tests/concurrency.rs`.
 
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
 #[cfg(unix)]
-use gmm_lib::core::importer::{backup_existing, find_d3dx_ini, latest_backup};
+use gmm_lib::core::importer::{backup_existing_unwitnessed_for_test, find_d3dx_ini, latest_backup};
 use gmm_lib::core::importer::{
-    install_from_local_zip, rewrite_d3dx_loader, rollback_to, DEFAULT_LOADER_EXE,
+    install_from_local_zip_unwitnessed_for_test, rewrite_d3dx_loader, rollback_to,
+    DEFAULT_LOADER_EXE,
 };
 #[cfg(unix)]
 use gmm_lib::core::Error;
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
+
+fn fixture_exists(path: &Path) -> bool {
+    super::super::filesystem::symlink_metadata_if_exists(path)
+        .expect("inspect fixture path")
+        .is_some()
+}
+
+fn fixture_is_file(path: &Path) -> bool {
+    super::super::filesystem::symlink_metadata_if_exists(path)
+        .expect("inspect fixture file")
+        .is_some_and(|metadata| metadata.is_file())
+}
 
 /// A zip shaped like a real `*MI-Package` release: `d3dx.ini` at the
 /// root, `Core/`, `ShaderFixes/`, and **no compiled binaries** — the DLLs
@@ -56,15 +69,20 @@ fn install_from_local_zip_places_files_and_rewrites_loader() {
     let zip_path = tmp.path().join("gimi.zip");
     build_importer_zip(&zip_path);
 
-    let report = install_from_local_zip(&zip_path, &game_dir, &backups, DEFAULT_LOADER_EXE)
-        .expect("install");
+    let report = install_from_local_zip_unwitnessed_for_test(
+        &zip_path,
+        &game_dir,
+        &backups,
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
 
     assert!(report.backup_dir.is_none(), "no backup for a clean install");
     assert!(!report.sha256.is_empty());
     assert!(report.rewrote_files.iter().any(|p| p.ends_with("d3dx.ini")));
 
-    assert!(game_dir.join("Core/library.ini").is_file());
-    assert!(game_dir.join("ShaderFixes/sample.hlsl").is_file());
+    assert!(fixture_is_file(&game_dir.join("Core/library.ini")));
+    assert!(fixture_is_file(&game_dir.join("ShaderFixes/sample.hlsl")));
 
     let d3dx = fs::read_to_string(game_dir.join("d3dx.ini")).expect("read d3dx");
     assert!(
@@ -98,8 +116,13 @@ fn rollback_restores_byte_for_byte_after_simulated_failure() {
     let zip_path = tmp.path().join("gimi.zip");
     build_importer_zip(&zip_path);
 
-    let report = install_from_local_zip(&zip_path, &game_dir, &backups, DEFAULT_LOADER_EXE)
-        .expect("install");
+    let report = install_from_local_zip_unwitnessed_for_test(
+        &zip_path,
+        &game_dir,
+        &backups,
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
     assert!(report.backup_dir.is_some(), "must have backed up");
     let backup_dir = report.backup_dir.unwrap();
 
@@ -139,7 +162,7 @@ fn rewrite_d3dx_loader_idempotent() {
 //
 // `Mods/` is where GMM materialises Junctions for enabled mods
 // (ADR 0003). It used to be listed in IMPORTER_ROOT_DIRS, which meant
-// `backup_existing` renamed the whole directory into the backup folder
+// `backup_existing_unwitnessed_for_test` renamed the whole directory into the backup folder
 // on every install — silently stripping every enabled mod out of the
 // game while the DB still said `enabled = 1`. Caught by the Windows
 // end-to-end test on its first real run; these keep it dead.
@@ -177,11 +200,16 @@ fn install_never_moves_an_existing_mods_directory() {
     let zip = tmp.path().join("GIMI.zip");
     build_importer_zip(&zip);
 
-    install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
-        .expect("install");
+    install_from_local_zip_unwitnessed_for_test(
+        &zip,
+        &game,
+        &tmp.path().join("backups"),
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
 
     assert!(
-        mods.join("Hu Tao Skin/merged.ini").exists(),
+        fixture_exists(&mods.join("Hu Tao Skin/merged.ini")),
         "an enabled mod's deployment directory must survive an importer install",
     );
     assert_eq!(
@@ -200,21 +228,23 @@ fn reinstall_leaves_mods_in_place_while_replacing_importer_files() {
     build_importer_zip(&zip);
 
     // First install, then the user enables a mod.
-    install_from_local_zip(&zip, &game, &backups, DEFAULT_LOADER_EXE).expect("first install");
+    install_from_local_zip_unwitnessed_for_test(&zip, &game, &backups, DEFAULT_LOADER_EXE)
+        .expect("first install");
     let mods = game.join("Mods");
     fs::create_dir_all(mods.join("Nahida")).expect("mod dir");
     fs::write(mods.join("Nahida/merged.ini"), b"hash = 1234\n").expect("mod ini");
 
     // Reinstall — the exact flow behind "Reinstall importer" and an
     // importer update.
-    install_from_local_zip(&zip, &game, &backups, DEFAULT_LOADER_EXE).expect("reinstall");
+    install_from_local_zip_unwitnessed_for_test(&zip, &game, &backups, DEFAULT_LOADER_EXE)
+        .expect("reinstall");
 
     assert!(
-        mods.join("Nahida/merged.ini").exists(),
+        fixture_exists(&mods.join("Nahida/merged.ini")),
         "reinstalling the importer must not orphan enabled mods",
     );
     assert!(
-        game.join("Core/library.ini").exists(),
+        fixture_exists(&game.join("Core/library.ini")),
         "importer files should still be replaced normally",
     );
 }
@@ -230,11 +260,16 @@ fn a_package_shipping_its_own_mods_folder_merges_instead_of_replacing() {
     let zip = tmp.path().join("GIMI-with-mods.zip");
     build_importer_zip_with_mods(&zip);
 
-    install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
-        .expect("install");
+    install_from_local_zip_unwitnessed_for_test(
+        &zip,
+        &game,
+        &tmp.path().join("backups"),
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
 
     assert!(
-        mods.join("Existing/merged.ini").exists(),
+        fixture_exists(&mods.join("Existing/merged.ini")),
         "the user's own mod must survive a package that ships Mods/",
     );
     assert_eq!(
@@ -242,7 +277,7 @@ fn a_package_shipping_its_own_mods_folder_merges_instead_of_replacing() {
         "mine\n",
     );
     assert!(
-        mods.join("ExampleMod.ini").exists(),
+        fixture_exists(&mods.join("ExampleMod.ini")),
         "the package's shipped example should still be merged in",
     );
 }
@@ -264,7 +299,7 @@ fn rollback_never_replaces_the_live_mods_directory() {
     rollback_to(&backup, &game).expect("rollback");
 
     assert!(
-        mods.join("live.ini").exists(),
+        fixture_exists(&mods.join("live.ini")),
         "rollback must never wholesale-replace the live Mods directory",
     );
     // NOTE: this assertion was inverted after code review. It
@@ -276,12 +311,12 @@ fn rollback_never_replaces_the_live_mods_directory() {
     // forever. Merge-preferring-live restores them without clobbering
     // anything current.
     assert!(
-        mods.join("stale.ini").exists(),
+        fixture_exists(&mods.join("stale.ini")),
         "a backed-up entry with no live counterpart must be brought back, \
          not stranded in the backup",
     );
     assert!(
-        game.join("d3d11.dll").exists(),
+        fixture_exists(&game.join("d3d11.dll")),
         "non-user-owned files should still roll back normally",
     );
 }
@@ -310,7 +345,7 @@ fn rollback_restores_mods_when_the_game_has_none() {
     rollback_to(&backup, &game).expect("rollback");
 
     assert!(
-        game.join("Mods/Hu Tao Skin/merged.ini").exists(),
+        fixture_exists(&game.join("Mods/Hu Tao Skin/merged.ini")),
         "rollback must restore a Mods/ directory the game no longer has — \
          this is the recovery path for backups taken by the old build",
     );
@@ -340,11 +375,11 @@ fn rollback_merges_backup_mods_into_a_live_one_preferring_live() {
     rollback_to(&backup, &game).expect("rollback");
 
     assert!(
-        mods.join("Current/merged.ini").exists(),
+        fixture_exists(&mods.join("Current/merged.ini")),
         "the live mod must survive",
     );
     assert!(
-        mods.join("Stranded/merged.ini").exists(),
+        fixture_exists(&mods.join("Stranded/merged.ini")),
         "the stranded backup entry must be brought back",
     );
     assert_eq!(
@@ -389,15 +424,20 @@ fn merging_a_shipped_mods_dir_recurses_into_existing_subdirectories() {
         zw.finish().expect("finish");
     }
 
-    install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
-        .expect("install");
+    install_from_local_zip_unwitnessed_for_test(
+        &zip,
+        &game,
+        &tmp.path().join("backups"),
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
 
     assert!(
-        mods.join("Examples/mine.ini").exists(),
+        fixture_exists(&mods.join("Examples/mine.ini")),
         "the user's file must survive",
     );
     assert!(
-        mods.join("Examples/shipped.ini").exists(),
+        fixture_exists(&mods.join("Examples/shipped.ini")),
         "a shipped file nested under an existing directory must still be merged in — \
          a non-recursive merge would skip the whole subtree",
     );
@@ -450,7 +490,7 @@ fn backup_existing_propagates_directory_search_uncertainty() {
     let original = fs::metadata(&game).expect("game metadata").permissions();
     fs::set_permissions(&game, fs::Permissions::from_mode(0o000))
         .expect("deny game directory search");
-    let backup_result = backup_existing(&game, &backups);
+    let backup_result = backup_existing_unwitnessed_for_test(&game, &backups);
     fs::set_permissions(&game, original).expect("restore game directory search");
 
     assert!(

@@ -34,7 +34,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gmm_lib::core::{importer, instance_lock, Core, GameCode, SessionInfo};
+use gmm_lib::core::{instance_lock, Core, GameCode, SessionInfo};
 
 fn main() {
     let args = match Args::parse() {
@@ -362,16 +362,12 @@ async fn run(args: &Args) -> Result<(), String> {
         "install-importer" => {
             let zip = PathBuf::from(args.req("--zip")?);
             let game_dir = PathBuf::from(args.req("--game-dir")?);
-            let backups = PathBuf::from(args.req("--backups")?);
-            if let Some(info) = core.session_info().await.map_err(|e| e.to_string())? {
-                return Err(format!(
-                    "{} is running (game session active since {}); \
-                     close the game before installing an importer.",
-                    info.game.as_str(),
-                    info.started_at.to_rfc3339(),
-                ));
-            }
-            importer::install_from_local_zip(&zip, &game_dir, &backups, "GMM.exe")
+            let game = args.game()?;
+            core.set_game_install_path(game, &game_dir)
+                .await
+                .map_err(|e| e.to_string())?;
+            core.install_importer_from_local_zip(game, &zip, "GMM.exe")
+                .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         }

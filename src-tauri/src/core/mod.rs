@@ -46,14 +46,15 @@ use ulid::Ulid;
 
 pub use error::{Error, Result};
 pub use games::GameCode;
+pub use importer::ImporterEvacuationRecovery;
 pub use library_audit::{
     DuplicateModGroup, DuplicateModRecord, DuplicateModVariant, DuplicateResolution,
     LibraryAuditReport, ReviewedDuplicateMod, UnreferencedLibraryDir,
 };
 #[doc(hidden)]
 pub use library_mutation::{
-    DURABLE_WITNESS_TABLES, ENABLED_TRANSITION_COLUMNS, REINSTALL_SWAP_COLUMNS,
-    STAGED_LIBRARY_OPERATION_COLUMNS,
+    DURABLE_WITNESS_TABLES, ENABLED_TRANSITION_COLUMNS, IMPORTER_EVACUATION_COLUMNS,
+    REINSTALL_SWAP_COLUMNS, STAGED_LIBRARY_OPERATION_COLUMNS,
 };
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{
@@ -172,6 +173,16 @@ impl Core {
             // durable witness for the next startup instead of moving Library
             // bytes while the process may still be loading them.
             return Ok(core);
+        }
+        if let Err(recovery) = core
+            .resolve_interrupted_importer_evacuations_at_startup()
+            .await
+        {
+            tracing::warn!(
+                target: "gmm::importer",
+                error = %recovery,
+                "could not resolve interrupted Model Importer evacuations at startup",
+            );
         }
         if let Err(recovery) = core
             .resolve_interrupted_enabled_transitions_at_startup()
@@ -372,6 +383,10 @@ impl Core {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.default_library_root.clone());
 
+        // Pure validation before anything moves: the Library root must
+        // never overlap the importer backup tree.
+        ensure_library_root_disjoint_from_backups(&next, &self.data_dir().join("backups"))?;
+
         if previous == next {
             put_setting(
                 &mut *fence.transaction,
@@ -437,6 +452,15 @@ impl Core {
         } else {
             next.clone()
         };
+
+        // Pure validation before anything moves: the Library root must
+        // never overlap the importer backup tree. The per-game override is
+        // an arbitrary user path, so this is the fence that keeps recovery
+        // remnant markers out of Library storage.
+        ensure_library_root_disjoint_from_backups(
+            &next_effective,
+            &self.data_dir().join("backups"),
+        )?;
 
         if previous == next_effective {
             put_setting(
@@ -1634,7 +1658,8 @@ impl Core {
                 })?),
                 None => None,
             };
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        library_mutation::ensure_no_importer_evacuation_in(&mut tx, game).await?;
         put_setting(
             &mut *tx,
             &importer_origin::keys::origin_override(game),
@@ -2443,6 +2468,143 @@ impl Core {
         self.install_importer_from(game, &origin, endpoints).await
     }
 
+    /// Install a previously downloaded Model Importer archive through the
+    /// same durable evacuation protocol as the network-backed production path.
+    /// Test probes use this seam so a process abort exercises the real witness.
+    pub async fn install_importer_from_local_zip(
+        &self,
+        game: GameCode,
+        zip_path: &Path,
+        loader_exe: &str,
+    ) -> Result<importer::InstallReport> {
+        self.ensure_no_active_session().await?;
+        self.ensure_no_importer_evacuation(game).await?;
+        let install = self.game_install_path(game).await?.ok_or_else(|| {
+            Error::Importer(format!(
+                "set {}'s install path in Settings before installing its Model Importer",
+                game.profile().display_name,
+            ))
+        })?;
+        let backups_root = self.data_dir().join("backups").join(game.as_str());
+        let replacing = importer::BackupProvenance {
+            version: self.installed_importer_version(game).await?,
+            origin: match self.installed_importer_origin(game).await? {
+                importer_origin::InstalledOrigin::Known(origin) => Some(origin),
+                importer_origin::InstalledOrigin::Unknown
+                | importer_origin::InstalledOrigin::Unreadable { .. } => None,
+            },
+        };
+        self.install_importer_archive(
+            game,
+            zip_path.to_path_buf(),
+            install,
+            backups_root,
+            loader_exe.to_string(),
+            replacing,
+        )
+        .await
+    }
+
+    async fn install_importer_archive(
+        &self,
+        game: GameCode,
+        zip_path: PathBuf,
+        install: PathBuf,
+        backups_root: PathBuf,
+        loader_exe: String,
+        replacing: importer::BackupProvenance,
+    ) -> Result<importer::InstallReport> {
+        let token = Ulid::new();
+        let prepared = tokio::task::spawn_blocking(move || {
+            importer::prepare_install_from_local_zip(&zip_path, &install, &backups_root, token)
+        })
+        .await
+        .map_err(|e| Error::Importer(format!("install preparation task join error: {e}")))??;
+        let witnessed = prepared.backup_dir().is_some();
+        if witnessed {
+            if let Err(error) = self
+                .commit_importer_evacuation_witness(token, game, &prepared)
+                .await
+            {
+                if let Err(cleanup_error) = prepared.cleanup_unstarted_backup() {
+                    tracing::warn!(
+                        target: "gmm::importer",
+                        error = %cleanup_error,
+                        "could not remove an empty importer backup after witness creation failed",
+                    );
+                }
+                return Err(error);
+            }
+        }
+        let crash_hook = self.crash_hook.clone();
+        let execution = tokio::task::spawn_blocking(move || {
+            importer::execute_prepared_importer_install(prepared, &loader_exe, crash_hook.as_ref())
+        })
+        .await;
+        let report = match execution {
+            Err(join_error) => {
+                let error = Error::Importer(format!("install task join error: {join_error}"));
+                if witnessed {
+                    if let Err(record_error) =
+                        self.record_importer_evacuation_failure(token, &error).await
+                    {
+                        tracing::error!(
+                            target: "gmm::importer",
+                            error = %record_error,
+                            "could not annotate the durable importer evacuation after task failure",
+                        );
+                    }
+                }
+                return Err(error);
+            }
+            Ok(Ok(report)) => report,
+            Ok(Err(error)) => {
+                if witnessed {
+                    if let Err(record_error) =
+                        self.record_importer_evacuation_failure(token, &error).await
+                    {
+                        tracing::error!(
+                            target: "gmm::importer",
+                            error = %record_error,
+                            "could not annotate the durable importer evacuation after install failure",
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
+
+        if let Some(backup_dir) = report.backup_dir.as_deref() {
+            if let Err(error) = importer::write_backup_provenance(backup_dir, &replacing) {
+                if let Err(record_error) =
+                    self.record_importer_evacuation_failure(token, &error).await
+                {
+                    tracing::error!(
+                        target: "gmm::importer",
+                        error = %record_error,
+                        "could not annotate the durable importer evacuation after provenance failure",
+                    );
+                }
+                return Err(error);
+            }
+        }
+        if witnessed {
+            if let Err(error) = self.finish_importer_evacuation(token).await {
+                if let Err(record_error) =
+                    self.record_importer_evacuation_failure(token, &error).await
+                {
+                    tracing::error!(
+                        target: "gmm::importer",
+                        error = %record_error,
+                        "could not annotate the durable importer evacuation after witness-retirement failure",
+                    );
+                }
+                return Err(error);
+            }
+        }
+        Ok(report)
+    }
+
     /// Install `game`'s Model Importer from an **explicitly chosen**
     /// Importer Origin.
     ///
@@ -2462,6 +2624,7 @@ impl Core {
     ) -> Result<importer::InstallReport> {
         let origin = origin.clone();
         self.ensure_no_active_session().await?;
+        self.ensure_no_importer_evacuation(game).await?;
         let install = self.game_install_path(game).await?.ok_or_else(|| {
             Error::Importer(format!(
                 "set {}'s install path in Settings before installing its Model Importer",
@@ -2505,20 +2668,16 @@ impl Core {
             },
         };
 
-        let report = tokio::task::spawn_blocking(move || {
-            importer::install_from_local_zip(
-                &zip_path,
-                &install,
-                &backups_root,
-                importer::DEFAULT_LOADER_EXE,
+        let report = self
+            .install_importer_archive(
+                game,
+                zip_path,
+                install,
+                backups_root,
+                importer::DEFAULT_LOADER_EXE.to_string(),
+                replacing,
             )
-        })
-        .await
-        .map_err(|e| Error::Importer(format!("install task join error: {e}")))??;
-
-        if let Some(backup_dir) = report.backup_dir.as_deref() {
-            importer::write_backup_provenance(backup_dir, &replacing)?;
-        }
+            .await?;
 
         // Record the installed tag *and* the Importer Origin it came
         // from, so the update check can compare against it next launch
@@ -2553,6 +2712,7 @@ impl Core {
     /// convinced the switch had happened and with nothing to propose.
     pub async fn rollback_importer(&self, game: GameCode) -> Result<Option<PathBuf>> {
         self.ensure_no_active_session().await?;
+        self.ensure_no_importer_evacuation(game).await?;
         let install = self.game_install_path(game).await?.ok_or_else(|| {
             Error::Importer(format!(
                 "set {}'s install path in Settings before rolling back its Model Importer",
@@ -3085,6 +3245,7 @@ impl Core {
 
     /// Persist a game's install path.
     pub async fn set_game_install_path(&self, game: GameCode, path: &Path) -> Result<()> {
+        self.ensure_no_importer_evacuation(game).await?;
         sqlx::query("UPDATE games SET install_path = ? WHERE code = ?")
             .bind(path.to_string_lossy().as_ref())
             .bind(game.as_str())
@@ -3530,6 +3691,7 @@ impl Core {
     /// bounded injection wait. The committed row is the durable bridge across
     /// that unbounded work; every ordinary Library fence observes it.
     pub async fn begin_session_launch(&self, game: GameCode) -> Result<SessionLaunchClaim> {
+        self.ensure_no_importer_evacuation(game).await?;
         let claim = SessionLaunchClaim {
             token: Ulid::new().to_string(),
             game,
@@ -3887,6 +4049,24 @@ impl Core {
             .await
     }
 
+    pub async fn importer_evacuation_recovery(
+        &self,
+        game: GameCode,
+    ) -> Result<Option<ImporterEvacuationRecovery>> {
+        self.importer_evacuation_recovery_in_library_mutation(game)
+            .await
+    }
+
+    pub async fn retry_importer_evacuation_recovery(&self, game: GameCode) -> Result<()> {
+        self.retry_importer_evacuation_recovery_in_library_mutation(game)
+            .await
+    }
+
+    pub async fn retire_interrupted_importer_evacuation(&self, game: GameCode) -> Result<()> {
+        self.retire_interrupted_importer_evacuation_in_library_mutation(game)
+            .await
+    }
+
     /// Enable or disable a Mod. On enable, a Junction is created at
     /// `<game_mods_dir>/<mod-name>/` pointing at the Mod's Library path
     /// (joined with the active Variant's subpath when one is set).
@@ -4134,6 +4314,40 @@ fn same_path(a: &Path, b: &Path) -> bool {
         (Some(x), Some(y)) => x == y,
         _ => a == b,
     }
+}
+
+/// Refuse a proposed Library root that overlaps the Model Importer backup
+/// tree (`<data dir>/backups`).
+///
+/// Importer backups and their sidecar provenance and recovery-remnant
+/// files are written beside backup directories as app-owned bookkeeping,
+/// deliberately outside the Library writer fence. If a Library root were
+/// equal to, inside, or an ancestor of the backups root, those writes
+/// would land inside user-configured Library storage, and directories the
+/// Library creates inside the backups tree could become importer rollback
+/// candidates. This is **enforced** here — at the two entry points that
+/// accept a Library root, [`Core::set_library_root`] and
+/// [`Core::set_library_path_for_game`] — so the backups tree can never
+/// become Library-owned content; a comment alone would not stop it.
+///
+/// Both containment directions matter: a proposed root inside the backups
+/// tree puts Library bytes under rollback selection, and the backups tree
+/// inside a proposed root puts the unfenced marker writes inside the
+/// Library. Each direction is tested twice: [`path_within`] canonicalises
+/// and recognises NTFS/symlink aliases, while the raw component-wise
+/// [`Path::starts_with`] covers a side that does not exist yet and so
+/// cannot be canonicalised into the same spelling (the backups root may
+/// legitimately be absent until the first importer install).
+fn ensure_library_root_disjoint_from_backups(proposed: &Path, backups_root: &Path) -> Result<()> {
+    let overlaps =
+        |path: &Path, ancestor: &Path| path_within(path, ancestor) || path.starts_with(ancestor);
+    if overlaps(proposed, backups_root) || overlaps(backups_root, proposed) {
+        return Err(Error::LibraryRootOverlapsBackups {
+            path: proposed.to_path_buf(),
+            backups: backups_root.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 /// Is `path` inside `ancestor`?

@@ -7,6 +7,8 @@ Gacha Mod Manager: a Windows desktop mod manager for 3dmigoto-based gacha-game m
 ### Model Importer
 The per-game configuration installed into a game directory: `d3dx.ini`, `Core/`, `ShaderFixes/`, and an empty `Mods/`. It contains **no compiled binaries** — the DLLs it drives (`d3d11.dll`, `d3dcompiler_47.dll`) ship with the Loader package, not here. At runtime the Loader patches the game and the Model Importer's configuration recursively scans `<Game>/Mods/` for `.ini` mod definitions. One importer per supported game: GIMI (Genshin), SRMI (Star Rail), ZZMI (ZZZ), WWMI (Wuthering Waves), HIMI (Honkai Impact 3rd), EFMI (Endfield). Distributed as GitHub release ZIPs; GMM downloads and extracts on demand. Because a Model Importer is configuration and HLSL rather than a build artifact, fixing a broken one is a text edit, not a compile.
 
+Before replacing an existing Model Importer, GMM commits an `importer_evacuations` recovery witness naming the exact game directory, backup directory, filesystem identities, and planned entries. Witness presence means rollback: startup restores every completely evacuated entry, preserves the record under filesystem uncertainty, and blocks another importer change or game launch until the old importer is whole again. Cross-volume fallback publishes a complete backup copy before deleting its source, so a partial copy is never treated as authoritative recovery data.
+
 ### Game
 One of the six supported titles. Each Game has its own Model Importer, its own Library subdirectory, its own GameBanana category, and its own install-path detection logic.
 

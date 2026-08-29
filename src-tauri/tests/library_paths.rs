@@ -150,6 +150,111 @@ async fn relocation_stops_when_a_deployment_entry_survives_withdrawal() {
     );
 }
 
+/// A Library root may never overlap the Model Importer backup tree
+/// (`<data dir>/backups`): importer backups and their sidecar
+/// recovery-remnant markers are written there outside the Library writer
+/// fence, and Library content inside the backups tree could become an
+/// importer rollback candidate.
+///
+/// Mutation oracle: deleting the `ensure_library_root_disjoint_from_backups`
+/// call in `set_library_path_for_game` lets the override relocate Library
+/// bytes and fires the named refusal assertions below.
+#[tokio::test]
+async fn per_game_library_override_may_not_overlap_the_importer_backup_tree() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_default = tmp.path().join("default_library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_default.clone(), &db_url)
+        .await
+        .expect("init core");
+    let backups_root = tmp.path().join("backups");
+    let not_yet = backups_root.join("library");
+
+    // The backup tree does not exist until the first importer install, so
+    // the refusal cannot rely on canonicalising it.
+    let error = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&not_yet))
+        .await
+        .expect_err("a per-game override inside a not-yet-created backup tree must be refused");
+    assert!(
+        matches!(error, Error::LibraryRootOverlapsBackups { .. }),
+        "the refusal must cover a root inside a not-yet-created backup tree, got: {error}",
+    );
+
+    fs::create_dir_all(backups_root.join("gimi")).expect("backup tree");
+
+    let error = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&backups_root))
+        .await
+        .expect_err("a per-game override at the backup tree root must be refused");
+    assert!(
+        matches!(error, Error::LibraryRootOverlapsBackups { ref path, .. } if path == &backups_root),
+        "the refusal must name the overlapping root, got: {error}",
+    );
+
+    let inside = backups_root.join("gimi").join("library");
+    let error = core
+        .set_library_path_for_game(GameCode::Gimi, Some(&inside))
+        .await
+        .expect_err("a per-game override inside the backup tree must be refused");
+    assert!(
+        matches!(error, Error::LibraryRootOverlapsBackups { .. }),
+        "the refusal must also cover a root inside the backup tree, got: {error}",
+    );
+
+    // The data directory contains the backup tree, so the unfenced marker
+    // writes would land inside Library storage too.
+    let error = core
+        .set_library_path_for_game(GameCode::Gimi, Some(tmp.path()))
+        .await
+        .expect_err("a root containing the backup tree must be refused");
+    assert!(
+        matches!(error, Error::LibraryRootOverlapsBackups { .. }),
+        "the refusal must also cover a root containing the backup tree, got: {error}",
+    );
+
+    assert_eq!(
+        core.resolved_library_root_for(GameCode::Gimi)
+            .await
+            .expect("resolved root"),
+        library_default.join("gimi"),
+        "every refused override must leave the effective Library root untouched",
+    );
+}
+
+/// The global Library root obeys the same importer-backup-tree
+/// disjointness rule as the per-game override.
+///
+/// Mutation oracle: deleting the `ensure_library_root_disjoint_from_backups`
+/// call in `set_library_root` lets the global root relocate Library bytes
+/// into the backup tree and fires the named refusal assertion below.
+#[tokio::test]
+async fn global_library_root_may_not_overlap_the_importer_backup_tree() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_default = tmp.path().join("default_library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_default.clone(), &db_url)
+        .await
+        .expect("init core");
+    let backups_root = tmp.path().join("backups");
+    fs::create_dir_all(backups_root.join("gimi")).expect("backup tree");
+
+    let error = core
+        .set_library_root(Some(&backups_root))
+        .await
+        .expect_err("a global root at the backup tree must be refused");
+    assert!(
+        matches!(error, Error::LibraryRootOverlapsBackups { ref path, .. } if path == &backups_root),
+        "the refusal must name the overlapping root, got: {error}",
+    );
+
+    assert_eq!(
+        core.resolved_library_root().await.expect("resolved root"),
+        library_default,
+        "a refused global root must leave the effective Library root untouched",
+    );
+}
+
 #[tokio::test]
 async fn per_game_override_relocates_only_that_game() {
     let tmp = TempDir::new().expect("tmp");

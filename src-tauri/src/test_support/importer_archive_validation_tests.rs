@@ -1,8 +1,8 @@
 //! Issue #113: an archive is checked for the structural shape of a Model
 //! Importer *before* anything in the game directory is touched.
 //!
-//! `install_from_local_zip` validated nothing. Any zip — a mod, an
-//! unrelated archive — extracted into the game directory, replaced the
+//! The older unwitnessed local-ZIP path validated nothing. Any zip — a mod,
+//! an unrelated archive — extracted into the game directory, replaced the
 //! existing importer, and was reported as a successful install with a
 //! version recorded against it. `rollback_to` could undo it, but only if
 //! the user realised what had happened.
@@ -21,12 +21,25 @@ use std::path::Path;
 
 use gmm_lib::core::error::Error;
 use gmm_lib::core::importer::{
-    find_d3dx_ini, install_from_local_zip, validate_importer_archive, DEFAULT_LOADER_EXE,
+    find_d3dx_ini, install_from_local_zip_unwitnessed_for_test, validate_importer_archive,
+    DEFAULT_LOADER_EXE,
 };
 use serde::Deserialize;
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
+
+fn fixture_exists(path: &Path) -> bool {
+    super::super::filesystem::symlink_metadata_if_exists(path)
+        .expect("inspect fixture path")
+        .is_some()
+}
+
+fn fixture_is_dir(path: &Path) -> bool {
+    super::super::filesystem::symlink_metadata_if_exists(path)
+        .expect("inspect fixture directory")
+        .is_some_and(|metadata| metadata.is_dir())
+}
 
 /// One live Model Importer package's entry listing, recorded verbatim
 /// from the real release asset.
@@ -45,8 +58,10 @@ struct RecordedLayout {
 }
 
 fn recorded_layouts() -> Vec<RecordedLayout> {
-    serde_json::from_str(include_str!("fixtures/importer_package_layouts.json"))
-        .expect("recorded package layouts must be valid JSON")
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/importer_package_layouts.json"
+    ))
+    .expect("recorded package layouts must be valid JSON")
 }
 
 /// Rebuild a zip with a recorded package's exact entry paths. Structural
@@ -96,7 +111,7 @@ fn snapshot(root: &Path) -> Vec<(String, Option<Vec<u8>>)> {
                 .expect("under base")
                 .to_string_lossy()
                 .to_string();
-            if path.is_dir() {
+            if fixture_is_dir(&path) {
                 out.push((rel, None));
                 walk(&path, base, out);
             } else {
@@ -128,18 +143,19 @@ fn a_zip_that_is_not_an_importer_leaves_the_game_directory_byte_for_byte_unchang
     let zip = tmp.path().join("some-mod.zip");
     build_mod_zip(&zip);
 
-    let error = install_from_local_zip(&zip, &game, &backups, DEFAULT_LOADER_EXE)
-        .expect_err("a mod archive must not install as a Model Importer");
+    let error =
+        install_from_local_zip_unwitnessed_for_test(&zip, &game, &backups, DEFAULT_LOADER_EXE)
+            .expect_err("a mod archive must not install as a Model Importer");
 
     assert_eq!(
         snapshot(&game),
         before,
         "a rejected archive must leave the game directory byte-for-byte \
-         unchanged; validation has to run before backup_existing so there is \
+         unchanged; validation has to run before backup_existing_unwitnessed_for_test so there is \
          nothing to roll back. Error was: {error}"
     );
     assert!(
-        !backups.exists(),
+        !fixture_exists(&backups),
         "no backup directory may be created for a rejected archive"
     );
 }
@@ -158,14 +174,18 @@ fn every_live_model_importer_package_still_installs() {
         let zip = tmp.path().join(&layout.asset);
         build_zip_from_entries(&zip, &layout.entries);
 
-        let report =
-            install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "{}'s real package from {} no longer installs: {e}",
-                        layout.game, layout.repo
-                    )
-                });
+        let report = install_from_local_zip_unwitnessed_for_test(
+            &zip,
+            &game,
+            &tmp.path().join("backups"),
+            DEFAULT_LOADER_EXE,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}'s real package from {} no longer installs: {e}",
+                layout.game, layout.repo
+            )
+        });
 
         assert!(
             report.rewrote_files.iter().any(|p| p.ends_with("d3dx.ini")),
@@ -173,7 +193,7 @@ fn every_live_model_importer_package_still_installs() {
             layout.game
         );
         assert!(
-            game.join("Core").is_dir() && game.join("ShaderFixes").is_dir(),
+            fixture_is_dir(&game.join("Core")) && fixture_is_dir(&game.join("ShaderFixes")),
             "{}: the package's own directories must land",
             layout.game
         );
@@ -361,7 +381,7 @@ fn a_package_zipped_inside_a_wrapper_folder_is_still_recognised() {
 fn a_reinstall_backs_up_core_so_rollback_can_restore_it() {
     // Separate defect, found while deriving the shape rule from the real
     // packages: `Core/` is the largest thing every Model Importer ships,
-    // and `backup_existing` never captured it — `IMPORTER_ROOT_DIRS` was
+    // and `backup_existing_unwitnessed_for_test` never captured it — `IMPORTER_ROOT_DIRS` was
     // written from the same wrong picture of a package as the old test
     // fixtures (d3d11.dll plus ShaderFixes). So a reinstall deleted the
     // previous `Core/` outright and "Roll back importer" could not bring
@@ -372,7 +392,8 @@ fn a_reinstall_backs_up_core_so_rollback_can_restore_it() {
 
     let first = tmp.path().join("first.zip");
     build_minimal_importer_zip(&first, None, &[]);
-    install_from_local_zip(&first, &game, &backups, DEFAULT_LOADER_EXE).expect("first install");
+    install_from_local_zip_unwitnessed_for_test(&first, &game, &backups, DEFAULT_LOADER_EXE)
+        .expect("first install");
     let original_core = fs::read(game.join("Core/library.ini")).expect("read installed Core file");
 
     // A second install replaces Core/ wholesale.
@@ -388,7 +409,8 @@ fn a_reinstall_backs_up_core_so_rollback_can_restore_it() {
     zw.finish().expect("finish");
 
     let report =
-        install_from_local_zip(&second, &game, &backups, DEFAULT_LOADER_EXE).expect("reinstall");
+        install_from_local_zip_unwitnessed_for_test(&second, &game, &backups, DEFAULT_LOADER_EXE)
+            .expect("reinstall");
     let backup_dir = report
         .backup_dir
         .expect("a reinstall over an existing importer must produce a backup");
@@ -408,7 +430,7 @@ async fn a_wrong_asset_from_an_origin_is_refused_the_same_way_a_local_zip_is() {
     // A misconfigured Importer Origin (ADR 0005) that resolves to the
     // wrong asset is exactly as damaging as a wrong local file, so the
     // check has to cover the downloaded path too. Both paths funnel
-    // through `install_from_local_zip`; this drives the download half
+    // through `install_from_local_zip_unwitnessed_for_test`; this drives the download half
     // with the real `download_to` against a served payload.
     let tmp = TempDir::new().expect("tmp");
     let game = tmp.path().join("game");
@@ -442,7 +464,7 @@ async fn a_wrong_asset_from_an_origin_is_refused_the_same_way_a_local_zip_is() {
         .expect("the download itself succeeds — the archive is the problem");
     route.assert_async().await;
 
-    let error = install_from_local_zip(
+    let error = install_from_local_zip_unwitnessed_for_test(
         &downloaded,
         &game,
         &tmp.path().join("backups"),
