@@ -342,6 +342,10 @@ fn build_core(data_dir: &std::path::Path) -> Result<Core, Box<dyn std::error::Er
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Library mutation policy exemption: this synchronous startup adapter delegates only to Core construction, whose empty-root exemption is declared at the filesystem statement"
+    )]
     let core = rt.block_on(Core::new(library_root, &db_url))?;
     // Leak the runtime so it stays alive — Core's sqlx pool needs it for
     // future async calls invoked from Tauri commands.
