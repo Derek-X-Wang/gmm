@@ -24,8 +24,8 @@ use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
     Core, DeletedLibraryDir, DuplicateResolution, GameCode, ImportZipOptions,
-    InterruptedSessionLaunch, LibraryAuditReport, Mod, MoveReport, ReinstallRecoveryOutcome,
-    ReviewedDuplicateMod, SessionInfo,
+    ImporterEvacuationRecovery, InterruptedSessionLaunch, LibraryAuditReport, Mod, MoveReport,
+    ReinstallRecoveryOutcome, ReviewedDuplicateMod, SessionInfo,
 };
 use crate::runtime::launch::{self, LaunchOptions};
 use crate::runtime::SessionRuntime;
@@ -71,6 +71,26 @@ pub async fn retire_interrupted_enabled_transition(
     mod_id: String,
 ) -> CommandResult<()> {
     core.retire_interrupted_enabled_transition(&mod_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn get_importer_evacuation_recovery(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> CommandResult<Option<ImporterEvacuationRecovery>> {
+    core.importer_evacuation_recovery(game)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn retire_interrupted_importer_evacuation(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> CommandResult<()> {
+    core.retire_interrupted_importer_evacuation(game)
         .await
         .map_err(CommandError::from)
 }

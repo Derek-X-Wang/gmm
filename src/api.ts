@@ -382,6 +382,15 @@ export interface InstallReport {
   rewrote_files: string[];
 }
 
+export interface ImporterEvacuationRecovery {
+  reason: string;
+  attemptedAt: string;
+  attempts: number;
+  gamePath: string;
+  backupPath: string;
+  ownerUncertain: boolean;
+}
+
 export async function fetchLatestImporterRelease(
   game: GameCode,
 ): Promise<LatestRelease | null> {
@@ -392,6 +401,21 @@ export async function fetchLatestImporterRelease(
 
 export async function installImporter(game: GameCode): Promise<InstallReport> {
   return invoke<InstallReport>("install_importer", { game });
+}
+
+export async function getImporterEvacuationRecovery(
+  game: GameCode,
+): Promise<ImporterEvacuationRecovery | null> {
+  return (
+    (await invoke<ImporterEvacuationRecovery | null>(
+      "get_importer_evacuation_recovery",
+      { game },
+    )) ?? null
+  );
+}
+
+export async function retireInterruptedImporterEvacuation(game: GameCode): Promise<void> {
+  return invoke<void>("retire_interrupted_importer_evacuation", { game });
 }
 
 export async function rollbackImporter(game: GameCode): Promise<string | null> {

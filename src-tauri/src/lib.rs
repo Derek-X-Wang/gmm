@@ -182,6 +182,8 @@ pub fn run() {
             commands::list_mods,
             commands::retry_reinstall_recovery,
             commands::retire_interrupted_enabled_transition,
+            commands::get_importer_evacuation_recovery,
+            commands::retire_interrupted_importer_evacuation,
             commands::adopt_folder,
             commands::import_zip,
             commands::set_mod_enabled,

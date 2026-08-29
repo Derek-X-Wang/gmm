@@ -18,6 +18,7 @@ import {
   resetOnboarding,
   retryReinstallRecovery,
   retireInterruptedEnabledTransition,
+  retireInterruptedImporterEvacuation,
   retireInterruptedSessionLaunch,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
@@ -32,6 +33,7 @@ import {
   detectConflicts,
   detectGameInstallPath,
   fetchLatestImporterRelease,
+  getImporterEvacuationRecovery,
   getGameInstallPath,
   getLibraryPaths,
   getProxyConfig,
@@ -60,6 +62,7 @@ import {
 } from "./api";
 import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarning";
 import { EnabledTransitionRecoveryWarning } from "./EnabledTransitionRecoveryWarning";
+import { ImporterEvacuationRecoveryWarning } from "./ImporterEvacuationRecoveryWarning";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { LibraryAuditWarning } from "./LibraryAuditWarning";
@@ -713,14 +716,20 @@ function ImporterPanel({
     queryFn: () => checkImporterUpdate(game),
     retry: false,
   });
+  const evacuation = useQuery({
+    queryKey: ["importer", "evacuation", game],
+    queryFn: () => getImporterEvacuationRecovery(game),
+    retry: false,
+  });
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["importer", "update", game] });
+    qc.invalidateQueries({ queryKey: ["importer", "evacuation", game] });
   };
 
   const install = useMutation({
     mutationFn: () => installImporter(game),
-    onSuccess: invalidate,
+    onSettled: invalidate,
   });
   const rollback = useMutation({
     mutationFn: () => rollbackImporter(game),
@@ -728,6 +737,10 @@ function ImporterPanel({
   });
   const pin = useMutation({
     mutationFn: (version: string | null) => setImporterPinned(game, version),
+    onSuccess: invalidate,
+  });
+  const retireEvacuation = useMutation({
+    mutationFn: () => retireInterruptedImporterEvacuation(game),
     onSuccess: invalidate,
   });
 
@@ -765,11 +778,34 @@ function ImporterPanel({
         error={update.error}
         heading="GMM could not check for a Model Importer update."
       />
+      <CommandErrorNotice
+        error={evacuation.error}
+        heading="GMM could not validate Model Importer recovery state."
+      />
+      {evacuation.data ? (
+        <ImporterEvacuationRecoveryWarning
+          displayName={displayName}
+          recovery={evacuation.data}
+          pending={retireEvacuation.isPending}
+          error={
+            retireEvacuation.isError
+              ? commandFailureMessage(retireEvacuation.error)
+              : undefined
+          }
+          onRetire={() => retireEvacuation.mutate()}
+        />
+      ) : null}
       <div className="row">
-        <button onClick={() => install.mutate()} disabled={install.isPending}>
+        <button
+          onClick={() => install.mutate()}
+          disabled={install.isPending || evacuation.data !== null}
+        >
           {install.isPending ? "Installing…" : update.data?.available ? "Apply update" : "Reinstall importer"}
         </button>
-        <button onClick={() => rollback.mutate()} disabled={rollback.isPending}>
+        <button
+          onClick={() => rollback.mutate()}
+          disabled={rollback.isPending || evacuation.data !== null}
+        >
           {rollback.isPending ? "Rolling back…" : "Roll back importer"}
         </button>
         {update.data?.installedVersion ? (

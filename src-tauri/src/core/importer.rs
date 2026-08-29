@@ -29,9 +29,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use ulid::Ulid;
 
 use super::error::{Error, Result};
 use super::filesystem::{metadata_if_exists, symlink_metadata_if_exists};
+use super::library_identity::IdentifiedDirectory;
 use super::zip_import;
 
 /// Root-level filenames the backup-and-restore path must move out of
@@ -78,6 +80,12 @@ pub const USER_OWNED_DIRS: &[&str] = &["Mods"];
 /// runs as the loader process per ADR 0001.
 pub const DEFAULT_LOADER_EXE: &str = "gmm.exe";
 
+/// Test seam fired after one planned importer entry reaches its complete
+/// backup location. A test fails the blocking task here to exercise a real
+/// partial evacuation without relying on filesystem timing.
+#[doc(hidden)]
+pub const BACKUP_AFTER_ENTRY_TEST_SEAM: &str = "importer_backup.after_entry";
+
 /// Outcome of a single install attempt. Travels through tracing
 /// (NEW-LOG) and back to the UI for the success toast.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +98,82 @@ pub struct InstallReport {
     pub sha256: String,
     /// Files that were rewritten (e.g. `d3dx.ini`).
     pub rewrote_files: Vec<PathBuf>,
+}
+
+/// A Model Importer evacuation that startup could not safely settle yet.
+/// The backup remains the authoritative rollback source until recovery
+/// restores every planned entry and retires the durable witness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImporterEvacuationRecovery {
+    pub reason: String,
+    pub attempted_at: String,
+    pub attempts: u32,
+    pub game_path: PathBuf,
+    pub backup_path: PathBuf,
+    /// True when the numeric PID is live but its start identity is unknown.
+    pub owner_uncertain: bool,
+}
+
+#[derive(Debug)]
+pub(super) struct PreparedImporterInstall {
+    game_dir: PathBuf,
+    staging: PathBuf,
+    backup: Option<PreparedImporterBackup>,
+    sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedImporterBackup {
+    destination: PathBuf,
+    entries: Vec<String>,
+    game_identity: String,
+    backup_identity: String,
+    backup_root_identity: String,
+}
+
+impl PreparedImporterInstall {
+    pub(super) fn backup_dir(&self) -> Option<&Path> {
+        self.backup
+            .as_ref()
+            .map(|backup| backup.destination.as_path())
+    }
+
+    pub(super) fn backup_entries(&self) -> Option<&[String]> {
+        self.backup.as_ref().map(|backup| backup.entries.as_slice())
+    }
+
+    pub(super) fn game_dir(&self) -> &Path {
+        &self.game_dir
+    }
+
+    pub(super) fn game_identity(&self) -> Option<&str> {
+        self.backup
+            .as_ref()
+            .map(|backup| backup.game_identity.as_str())
+    }
+
+    pub(super) fn backup_root_identity(&self) -> Option<&str> {
+        self.backup
+            .as_ref()
+            .map(|backup| backup.backup_root_identity.as_str())
+    }
+
+    pub(super) fn backup_identity(&self) -> Option<&str> {
+        self.backup
+            .as_ref()
+            .map(|backup| backup.backup_identity.as_str())
+    }
+
+    pub(super) fn cleanup_unstarted_backup(&self) -> Result<()> {
+        let Some(backup) = self.backup.as_ref() else {
+            return Ok(());
+        };
+        fs::remove_dir(&backup.destination).map_err(|source| Error::Io {
+            path: backup.destination.clone(),
+            source,
+        })
+    }
 }
 
 /// Result of a successful HTTP fetch of the latest release metadata.
@@ -386,6 +470,66 @@ fn install_from_local_zip_with_staging_probe<F>(
 where
     F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
 {
+    let prepared = prepare_install_from_local_zip_with_staging_probe(
+        zip_path,
+        game_dir,
+        backups_root,
+        Ulid::new(),
+        &mut staging_probe,
+    )?;
+    let recovery = prepared.backup.as_ref().map(|backup| {
+        (
+            prepared.game_dir.clone(),
+            backup.destination.clone(),
+            backup.entries.clone(),
+        )
+    });
+    match execute_prepared_importer_install(prepared, loader_exe, None) {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            if let Some((game_dir, backup_dir, entries)) = recovery {
+                recover_evacuated_importer(&game_dir, &backup_dir, &entries).map_err(
+                    |recovery_error| {
+                        Error::Importer(format!(
+                            "{error}; restoring the partially evacuated importer also failed: {recovery_error}"
+                        ))
+                    },
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Validate and stage an importer archive, then resolve the complete backup
+/// plan without evacuating any importer entry. The caller commits the durable
+/// witness described by the returned plan before calling
+/// [`execute_prepared_importer_install`].
+pub(super) fn prepare_install_from_local_zip(
+    zip_path: &Path,
+    game_dir: &Path,
+    backups_root: &Path,
+    token: Ulid,
+) -> Result<PreparedImporterInstall> {
+    prepare_install_from_local_zip_with_staging_probe(
+        zip_path,
+        game_dir,
+        backups_root,
+        token,
+        &mut symlink_metadata_if_exists,
+    )
+}
+
+fn prepare_install_from_local_zip_with_staging_probe<F>(
+    zip_path: &Path,
+    game_dir: &Path,
+    backups_root: &Path,
+    token: Ulid,
+    staging_probe: &mut F,
+) -> Result<PreparedImporterInstall>
+where
+    F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
+{
     // 0. Refuse an archive that is not a Model Importer, before anything
     //    in the game directory is touched — not before the swap, and not
     //    before the backup, but before the first `create_dir_all`. A
@@ -416,14 +560,44 @@ where
     }
     zip_import::extract(zip_path, &staging, zip_import::ImportZipOptions::default())?;
 
-    // 2. Back up pre-existing importer files.
-    let backup_dir = backup_existing(game_dir, backups_root)?;
+    // 2. Resolve the whole backup plan. No importer entry moves until the
+    //    caller commits the durable witness for this exact plan.
+    let backup = plan_existing_backup_with(
+        game_dir,
+        backups_root,
+        token,
+        &mut symlink_metadata_if_exists,
+    )?;
+
+    Ok(PreparedImporterInstall {
+        game_dir: game_dir.to_path_buf(),
+        staging,
+        backup,
+        sha256,
+    })
+}
+
+pub(super) fn execute_prepared_importer_install(
+    prepared: PreparedImporterInstall,
+    loader_exe: &str,
+    crash_hook: Option<&super::CrashHook>,
+) -> Result<InstallReport> {
+    let PreparedImporterInstall {
+        game_dir,
+        staging,
+        backup,
+        sha256,
+    } = prepared;
+    let backup_dir = backup.as_ref().map(|backup| backup.destination.clone());
+    if let Some(backup) = backup.as_ref() {
+        execute_backup_plan(backup, &game_dir, crash_hook)?;
+    }
 
     // 3. Swap staged files into the game directory. From this point
     //    on, any failure triggers a rollback.
-    if let Err(e) = swap_in(&staging, game_dir) {
+    if let Err(e) = swap_in(&staging, &game_dir) {
         if let Some(bdir) = backup_dir.as_ref() {
-            let _ = rollback_to(bdir, game_dir);
+            let _ = rollback_to(bdir, &game_dir);
         }
         // Best-effort cleanup of the staging dir before surfacing the
         // failure.
@@ -439,7 +613,7 @@ where
     //    archive carries one, so a miss here is a failed install, never a
     //    step to skip.
     let mut rewrote_files = Vec::new();
-    let rewrite = find_d3dx_ini(game_dir).and_then(|d3dx| {
+    let rewrite = find_d3dx_ini(&game_dir).and_then(|d3dx| {
         rewrite_d3dx_loader(&d3dx, loader_exe)?;
         Ok(d3dx)
     });
@@ -447,7 +621,7 @@ where
         Ok(d3dx) => rewrote_files.push(d3dx),
         Err(e) => {
             if let Some(bdir) = backup_dir.as_ref() {
-                let _ = rollback_to(bdir, game_dir);
+                let _ = rollback_to(bdir, &game_dir);
             }
             return Err(e);
         }
@@ -475,10 +649,27 @@ fn backup_existing_with<F>(
 where
     F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
 {
+    let Some(plan) = plan_existing_backup_with(game_dir, backups_root, Ulid::new(), &mut probe)?
+    else {
+        return Ok(None);
+    };
+    execute_backup_plan(&plan, game_dir, None)?;
+    Ok(Some(plan.destination))
+}
+
+fn plan_existing_backup_with<F>(
+    game_dir: &Path,
+    backups_root: &Path,
+    token: Ulid,
+    probe: &mut F,
+) -> Result<Option<PreparedImporterBackup>>
+where
+    F: FnMut(&Path) -> std::io::Result<Option<fs::Metadata>>,
+{
     // Resolve the complete move set before creating a backup directory or
     // moving anything. An uncertain later entry must not leave an earlier
     // entry evacuated with no usable backup result.
-    let mut present = Vec::new();
+    let mut entries = Vec::new();
     for name in IMPORTER_ROOT_FILES
         .iter()
         .copied()
@@ -492,29 +683,178 @@ where
             })?
             .is_some()
         {
-            present.push((name, path));
+            entries.push(name.to_string());
         }
     }
-    if present.is_empty() {
+    if entries.is_empty() {
         return Ok(None);
     }
 
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-    let dest = backups_root.join(&timestamp);
-    fs::create_dir_all(&dest).map_err(|source| Error::Io {
-        path: dest.clone(),
+    fs::create_dir_all(backups_root).map_err(|source| Error::Io {
+        path: backups_root.to_path_buf(),
         source,
     })?;
+    let game = IdentifiedDirectory::open(game_dir).map_err(|source| Error::Io {
+        path: game_dir.to_path_buf(),
+        source,
+    })?;
+    let backup_root = IdentifiedDirectory::open(backups_root).map_err(|source| Error::Io {
+        path: backups_root.to_path_buf(),
+        source,
+    })?;
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let destination = backups_root.join(format!("{timestamp}-{token}"));
+    fs::create_dir(&destination).map_err(|source| Error::Io {
+        path: destination.clone(),
+        source,
+    })?;
+    let backup = IdentifiedDirectory::open(&destination).map_err(|source| Error::Io {
+        path: destination.clone(),
+        source,
+    })?;
+    Ok(Some(PreparedImporterBackup {
+        destination,
+        entries,
+        game_identity: game.identity().durable_key(),
+        backup_identity: backup.identity().durable_key(),
+        backup_root_identity: backup_root.identity().durable_key(),
+    }))
+}
 
-    for (name, from) in present {
-        let to = dest.join(name);
+fn backup_copy_staging_path(backup_dir: &Path, entry: &str) -> PathBuf {
+    backup_dir.join(format!(".gmm-copy-{entry}"))
+}
+
+fn execute_backup_plan(
+    plan: &PreparedImporterBackup,
+    game_dir: &Path,
+    crash_hook: Option<&super::CrashHook>,
+) -> Result<()> {
+    for name in &plan.entries {
+        let from = game_dir.join(name);
+        let to = plan.destination.join(name);
         if let Err(_e) = fs::rename(&from, &to) {
-            // Cross-volume; fall back to copy + delete.
-            copy_any(&from, &to)?;
+            // Cross-volume fallback. Publish a complete backup entry before
+            // deleting the source: a failed or partial delete then still has
+            // one authoritative copy for durable startup rollback.
+            let copy_staging = backup_copy_staging_path(&plan.destination, name);
+            copy_any(&from, &copy_staging)?;
+            fs::rename(&copy_staging, &to).map_err(|source| Error::Io {
+                path: copy_staging,
+                source,
+            })?;
             remove_any(&from)?;
         }
+        if let Some(hook) = crash_hook {
+            hook(BACKUP_AFTER_ENTRY_TEST_SEAM);
+        }
     }
-    Ok(Some(dest))
+    Ok(())
+}
+
+pub(super) fn is_importer_backup_entry(name: &str) -> bool {
+    IMPORTER_ROOT_FILES
+        .iter()
+        .chain(IMPORTER_ROOT_DIRS.iter())
+        .any(|candidate| *candidate == name)
+}
+
+fn restore_copy_staging_path(game_dir: &Path, entry: &str) -> PathBuf {
+    game_dir.join(format!(".gmm-restore-{entry}"))
+}
+
+/// Restore every entry named by a validated durable evacuation witness.
+///
+/// A published backup entry is always a complete copy: the cross-volume
+/// fallback promotes its private copy stage before attempting source removal.
+/// Recovery therefore keeps that backup until a complete replacement is in
+/// the game directory. A private copy stage without a published backup is
+/// only removable when the original source still exists; otherwise its
+/// completeness is unknowable and recovery refuses to guess.
+pub(super) fn recover_evacuated_importer(
+    game_dir: &Path,
+    backup_dir: &Path,
+    entries: &[String],
+) -> Result<()> {
+    for name in entries {
+        let source = game_dir.join(name);
+        let backup = backup_dir.join(name);
+        let backup_copy = backup_copy_staging_path(backup_dir, name);
+        let restore_copy = restore_copy_staging_path(game_dir, name);
+        let source_present =
+            symlink_metadata_if_exists(&source).map_err(|source_error| Error::Io {
+                path: source.clone(),
+                source: source_error,
+            })?;
+        let backup_present =
+            symlink_metadata_if_exists(&backup).map_err(|source_error| Error::Io {
+                path: backup.clone(),
+                source: source_error,
+            })?;
+
+        if backup_present.is_some() {
+            if symlink_metadata_if_exists(&restore_copy)
+                .map_err(|source_error| Error::Io {
+                    path: restore_copy.clone(),
+                    source: source_error,
+                })?
+                .is_some()
+            {
+                remove_any(&restore_copy)?;
+            }
+            copy_any(&backup, &restore_copy)?;
+            if source_present.is_some() {
+                remove_any(&source)?;
+            }
+            fs::rename(&restore_copy, &source).map_err(|source_error| Error::Io {
+                path: restore_copy.clone(),
+                source: source_error,
+            })?;
+            // The game now has a complete restored copy. Retaining the backup
+            // until this point makes any earlier failure safely retryable.
+            remove_any(&backup)?;
+            continue;
+        }
+
+        let backup_copy_present =
+            symlink_metadata_if_exists(&backup_copy).map_err(|source| Error::Io {
+                path: backup_copy.clone(),
+                source,
+            })?;
+        if backup_copy_present.is_some() {
+            if source_present.is_none() {
+                return Err(Error::Importer(format!(
+                    "the original importer entry {} is absent while its unpublished backup copy remains; GMM cannot prove that copy completed",
+                    source.display(),
+                )));
+            }
+            remove_any(&backup_copy)?;
+        }
+        if source_present.is_none() {
+            return Err(Error::Importer(format!(
+                "the interrupted evacuation recorded {}, but neither the game directory nor the backup contains it",
+                source.display(),
+            )));
+        }
+        if symlink_metadata_if_exists(&restore_copy)
+            .map_err(|source_error| Error::Io {
+                path: restore_copy.clone(),
+                source: source_error,
+            })?
+            .is_some()
+        {
+            remove_any(&restore_copy)?;
+        }
+    }
+
+    match fs::remove_dir(backup_dir) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::Io {
+            path: backup_dir.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// Swap files staged in `staging` into `game_dir`. Existing files are

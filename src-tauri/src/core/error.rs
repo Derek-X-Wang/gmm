@@ -307,6 +307,23 @@ pub enum Error {
     EnabledTransitionWitnessCorrupt { mod_id: String, reason: String },
 
     #[error(
+        "GMM found corrupt Model Importer evacuation state for {game}: {reason}. \
+         GMM stopped because corrupt database state is not proof that game-directory files are safe to change."
+    )]
+    ImporterEvacuationWitnessCorrupt { game: String, reason: String },
+
+    #[error(
+        "GMM could not safely restore an interrupted Model Importer evacuation for {game}: {reason}. \
+         The durable recovery record was kept and GMM will retry at the next startup."
+    )]
+    ImporterEvacuationRecoveryUncertain { game: String, reason: String },
+
+    #[error(
+        "{game} has an interrupted Model Importer evacuation that GMM must recover before changing or launching that game"
+    )]
+    ImporterEvacuationPending { game: String },
+
+    #[error(
         "Mod {mod_id} has an interrupted enable/disable transition that GMM must recover before another Library or deployment change can start"
     )]
     EnabledTransitionPending { mod_id: String },
@@ -437,6 +454,11 @@ pub enum Error {
 
     #[error("the enable/disable transition is still owned by the GMM process that created it")]
     EnabledTransitionStillOwned,
+
+    #[error(
+        "GMM cannot retire this Model Importer evacuation while its original process is still running"
+    )]
+    ImporterEvacuationStillOwned,
 
     #[error("the durable game-launch claim was lost before the session became active")]
     SessionLaunchClaimLost,

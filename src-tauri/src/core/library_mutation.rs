@@ -31,6 +31,7 @@ use sqlx::{Column, Row, Sqlite, SqliteConnection};
 use ulid::Ulid;
 
 use super::filesystem::metadata_if_exists;
+use super::importer::ImporterEvacuationRecovery;
 use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
 use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
 use super::library_ownership::{LibraryDirectoryOwner, LibraryOwnershipSnapshot};
@@ -184,6 +185,25 @@ pub(super) struct EnabledTransitionWitness {
     recovery_attempts: u32,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ImporterEvacuationWitness {
+    token: Ulid,
+    game: GameCode,
+    game_path: PathBuf,
+    game_identity: DirectoryIdentity,
+    backup_path: PathBuf,
+    backup_identity: DirectoryIdentity,
+    backup_root_identity: DirectoryIdentity,
+    entries: Vec<String>,
+    owner_pid: u32,
+    owner_started_at: Option<u64>,
+    owner_active: bool,
+    created_at: DateTime<FixedOffset>,
+    recovery_error: Option<String>,
+    recovery_attempted_at: Option<String>,
+    recovery_attempts: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReconciledJunctionMutation {
     Applied,
@@ -311,6 +331,33 @@ define_unvalidated_witness_tables! {
         recovery_attempts: i64,
         junction_target_identity: Option<String>,
         library_identity: Option<String>,
+    }
+
+    table IMPORTER_EVACUATIONS_TABLE = "importer_evacuations";
+    columns IMPORTER_EVACUATION_COLUMNS;
+    raw UnvalidatedImporterEvacuationWitness;
+    schema_error |raw, columns| Error::ImporterEvacuationWitnessCorrupt {
+        game: raw.game_code.clone(),
+        reason: format!(
+            "the importer_evacuations schema columns changed from the ruled set: {columns:?}"
+        ),
+    };
+    fields {
+        token: String,
+        game_code: String,
+        game_path: String,
+        game_identity: String,
+        backup_path: String,
+        backup_identity: String,
+        backup_root_identity: String,
+        entries_json: String,
+        owner_pid: i64,
+        owner_started_at: Option<i64>,
+        owner_active: i64,
+        created_at: String,
+        recovery_error: Option<String>,
+        recovery_attempted_at: Option<String>,
+        recovery_attempts: i64,
     }
 }
 
@@ -832,6 +879,202 @@ impl EnabledTransitionWitness {
     }
 }
 
+impl UnvalidatedImporterEvacuationWitness {
+    fn validate(self) -> Result<ImporterEvacuationWitness> {
+        let Self {
+            token,
+            game_code,
+            game_path,
+            game_identity,
+            backup_path,
+            backup_identity,
+            backup_root_identity,
+            entries_json,
+            owner_pid,
+            owner_started_at,
+            owner_active,
+            created_at,
+            recovery_error,
+            recovery_attempted_at,
+            recovery_attempts,
+        } = self;
+        let corrupt = |reason| Error::ImporterEvacuationWitnessCorrupt {
+            game: game_code.clone(),
+            reason,
+        };
+        let token = Ulid::from_string(&token)
+            .map_err(|_| corrupt(format!("the evacuation token {token:?} is not a ULID")))?;
+        let game = GameCode::from_str(&game_code).map_err(|_| {
+            corrupt(format!(
+                "the recorded value {game_code:?} is an invalid game code"
+            ))
+        })?;
+        let game_path = PathBuf::from(game_path);
+        let backup_path = PathBuf::from(backup_path);
+        let Some(backup_root) = backup_path.parent() else {
+            return Err(corrupt(
+                "the recorded backup path has no parent".to_string(),
+            ));
+        };
+        let expected_suffix = format!("-{token}");
+        if !game_path.is_absolute()
+            || !backup_path.is_absolute()
+            || backup_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_none_or(|name| !name.ends_with(&expected_suffix))
+            || super::same_path(&game_path, &backup_path)
+            || super::same_path(&game_path, backup_root)
+        {
+            return Err(corrupt(
+                "the recorded game and backup paths do not match the evacuation token".to_string(),
+            ));
+        }
+        let game_identity =
+            DirectoryIdentity::from_durable_key(&game_identity).ok_or_else(|| {
+                corrupt(format!(
+                    "the game-directory identity {game_identity:?} is not canonical"
+                ))
+            })?;
+        let backup_identity =
+            DirectoryIdentity::from_durable_key(&backup_identity).ok_or_else(|| {
+                corrupt(format!(
+                    "the backup-directory identity {backup_identity:?} is not canonical"
+                ))
+            })?;
+        let backup_root_identity = DirectoryIdentity::from_durable_key(&backup_root_identity)
+            .ok_or_else(|| {
+                corrupt(format!(
+                    "the backup-root identity {backup_root_identity:?} is not canonical"
+                ))
+            })?;
+        let entries: Vec<String> = serde_json::from_str(&entries_json)
+            .map_err(|error| corrupt(format!("the entry set is not valid JSON: {error}")))?;
+        if entries.is_empty() {
+            return Err(corrupt("the evacuation entry set is empty".to_string()));
+        }
+        let mut unique = HashSet::new();
+        for entry in &entries {
+            if !super::importer::is_importer_backup_entry(entry) || !unique.insert(entry.clone()) {
+                return Err(corrupt(format!(
+                    "the evacuation entry {entry:?} is unsupported or duplicated"
+                )));
+            }
+        }
+        let owner_pid = u32::try_from(owner_pid).map_err(|_| {
+            corrupt(format!(
+                "the owner PID {owner_pid} is outside the supported range"
+            ))
+        })?;
+        let owner_started_at = owner_started_at
+            .map(|value| {
+                u64::try_from(value).map_err(|_| {
+                    corrupt(format!(
+                        "the owner start time {value} is outside the supported range"
+                    ))
+                })
+            })
+            .transpose()?;
+        let owner_active = match owner_active {
+            0 => false,
+            1 => true,
+            value => {
+                return Err(corrupt(format!(
+                    "the owner-active flag {value} is not zero or one"
+                )))
+            }
+        };
+        let created_at = DateTime::parse_from_rfc3339(&created_at).map_err(|_| {
+            corrupt(format!(
+                "the created-at value {created_at:?} is not an RFC 3339 timestamp"
+            ))
+        })?;
+        let recovery_attempts = u32::try_from(recovery_attempts).map_err(|_| {
+            corrupt(format!(
+                "the recovery-attempt count {recovery_attempts} is outside the supported range"
+            ))
+        })?;
+        if recovery_error.is_some() && recovery_attempted_at.is_none() {
+            return Err(corrupt(
+                "a recorded recovery error has no recovery-attempt timestamp".to_string(),
+            ));
+        }
+        Ok(ImporterEvacuationWitness {
+            token,
+            game,
+            game_path,
+            game_identity,
+            backup_path,
+            backup_identity,
+            backup_root_identity,
+            entries,
+            owner_pid,
+            owner_started_at,
+            owner_active,
+            created_at,
+            recovery_error,
+            recovery_attempted_at,
+            recovery_attempts,
+        })
+    }
+}
+
+impl ImporterEvacuationWitness {
+    fn owner_identity_state(&self) -> super::session::ProcessIdentityState {
+        super::session::process_identity_state(self.owner_pid, self.owner_started_at)
+    }
+
+    fn owner_is_live(&self) -> bool {
+        self.owner_active
+            && matches!(
+                self.owner_identity_state(),
+                super::session::ProcessIdentityState::Matches
+                    | super::session::ProcessIdentityState::Unknown
+            )
+    }
+
+    pub(super) fn recovery(&self) -> Option<ImporterEvacuationRecovery> {
+        let owner_uncertain = self.owner_active
+            && matches!(
+                self.owner_identity_state(),
+                super::session::ProcessIdentityState::Unknown
+            );
+        let reason = match (&self.recovery_error, owner_uncertain) {
+            (Some(reason), _) => reason.clone(),
+            (None, true) => {
+                "GMM cannot establish whether the original importer producer is still running"
+                    .to_string()
+            }
+            (None, false) => return None,
+        };
+        Some(ImporterEvacuationRecovery {
+            reason,
+            attempted_at: self
+                .recovery_attempted_at
+                .clone()
+                .unwrap_or_else(|| self.created_at.to_rfc3339()),
+            attempts: self.recovery_attempts,
+            game_path: self.game_path.clone(),
+            backup_path: self.backup_path.clone(),
+            owner_uncertain,
+        })
+    }
+
+    fn corrupt<T>(&self, reason: impl Into<String>) -> Result<T> {
+        Err(Error::ImporterEvacuationWitnessCorrupt {
+            game: self.game.as_str().to_string(),
+            reason: reason.into(),
+        })
+    }
+
+    fn uncertain<T>(&self, reason: impl Into<String>) -> Result<T> {
+        Err(Error::ImporterEvacuationRecoveryUncertain {
+            game: self.game.profile().display_name.to_string(),
+            reason: reason.into(),
+        })
+    }
+}
+
 pub(super) async fn load_reinstall_swap_witnesses(
     connection: &mut SqliteConnection,
 ) -> Result<Vec<ReinstallSwapWitness>> {
@@ -893,6 +1136,19 @@ pub(super) async fn load_enabled_transition_witnesses(
         .await?
         .iter()
         .map(|row| UnvalidatedEnabledTransitionWitness::from_row(row)?.validate())
+        .collect()
+}
+
+pub(super) async fn load_importer_evacuation_witnesses(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<ImporterEvacuationWitness>> {
+    let query = format!("SELECT * FROM {IMPORTER_EVACUATIONS_TABLE}");
+    sqlx::query(&query)
+        .persistent(false)
+        .fetch_all(connection)
+        .await?
+        .iter()
+        .map(|row| UnvalidatedImporterEvacuationWitness::from_row(row)?.validate())
         .collect()
 }
 
@@ -1729,6 +1985,280 @@ impl Core {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.record_enabled_transition_recovery_failure(mod_id, &error.to_string())
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) async fn commit_importer_evacuation_witness(
+        &self,
+        token: Ulid,
+        game: GameCode,
+        prepared: &super::importer::PreparedImporterInstall,
+    ) -> Result<()> {
+        let Some(backup_path) = prepared.backup_dir() else {
+            return Ok(());
+        };
+        let entries = prepared
+            .backup_entries()
+            .expect("a prepared backup path carries its entry set");
+        let entries_json = serde_json::to_string(entries).map_err(|error| {
+            Error::Importer(format!(
+                "could not encode the Model Importer evacuation plan: {error}"
+            ))
+        })?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // The validated read is the trust boundary for any pre-existing row;
+        // the UNIQUE game constraint is only the final concurrency backstop.
+        if load_importer_evacuation_witnesses(&mut transaction)
+            .await?
+            .into_iter()
+            .any(|witness| witness.game == game)
+        {
+            return Err(Error::ImporterEvacuationPending {
+                game: game.profile().display_name.to_string(),
+            });
+        }
+        sqlx::query(
+            "INSERT INTO importer_evacuations (
+                token, game_code, game_path, game_identity, backup_path, backup_identity,
+                backup_root_identity, entries_json, owner_pid, owner_started_at,
+                owner_active, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+        )
+        .bind(token.to_string())
+        .bind(game.as_str())
+        .bind(prepared.game_dir().to_string_lossy().as_ref())
+        .bind(
+            prepared
+                .game_identity()
+                .expect("a prepared backup carries the game identity"),
+        )
+        .bind(backup_path.to_string_lossy().as_ref())
+        .bind(
+            prepared
+                .backup_identity()
+                .expect("a prepared backup carries its directory identity"),
+        )
+        .bind(
+            prepared
+                .backup_root_identity()
+                .expect("a prepared backup carries the backup-root identity"),
+        )
+        .bind(entries_json)
+        .bind(std::process::id() as i64)
+        .bind(super::session::process_started_at(std::process::id()).map(|value| value as i64))
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(super) async fn finish_importer_evacuation(&self, token: Ulid) -> Result<()> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let witnesses = load_importer_evacuation_witnesses(&mut transaction).await?;
+        let Some(witness) = witnesses.into_iter().find(|witness| witness.token == token) else {
+            return Err(Error::ImporterEvacuationWitnessCorrupt {
+                game: "unknown".to_string(),
+                reason: "the committed evacuation witness vanished before the install finished"
+                    .to_string(),
+            });
+        };
+        let removed = sqlx::query("DELETE FROM importer_evacuations WHERE token = ?")
+            .bind(token.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        if removed.rows_affected() != 1 {
+            return witness.corrupt("the evacuation witness changed before retirement committed");
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(super) async fn record_importer_evacuation_failure(
+        &self,
+        token: Ulid,
+        reason: &str,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        load_importer_evacuation_witnesses(&mut transaction).await?;
+        sqlx::query(
+            "UPDATE importer_evacuations
+             SET recovery_error = ?, recovery_attempted_at = ?,
+                 recovery_attempts = recovery_attempts + 1, owner_active = 0
+             WHERE token = ?",
+        )
+        .bind(reason)
+        .bind(Utc::now().to_rfc3339())
+        .bind(token.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn resolve_importer_evacuation(&self, game: GameCode) -> Result<()> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(witness) = load_importer_evacuation_witnesses(&mut transaction)
+            .await?
+            .into_iter()
+            .find(|witness| witness.game == game)
+        else {
+            transaction.commit().await?;
+            return Ok(());
+        };
+        let expected_backup_root = self.data_dir().join("backups").join(game.as_str());
+        let Some(recorded_backup_root) = witness.backup_path.parent() else {
+            return witness.corrupt("the recorded backup path has no parent");
+        };
+        if !super::same_path(recorded_backup_root, &expected_backup_root) {
+            return witness.corrupt("the recorded backup path is outside this Game's backup root");
+        }
+        let configured_game_path: Option<String> =
+            sqlx::query_scalar("SELECT install_path FROM games WHERE code = ?")
+                .bind(game.as_str())
+                .fetch_one(&mut *transaction)
+                .await?;
+        let Some(configured_game_path) = configured_game_path else {
+            return witness.uncertain("the recorded Game install path is no longer configured");
+        };
+        if !super::same_path(Path::new(&configured_game_path), &witness.game_path) {
+            return witness
+                .uncertain("the configured Game install path changed after evacuation began");
+        }
+        let game_directory =
+            IdentifiedDirectory::open(&witness.game_path).map_err(|source| Error::Io {
+                path: witness.game_path.clone(),
+                source,
+            })?;
+        if game_directory.identity() != &witness.game_identity {
+            return witness.uncertain("the recorded Game directory changed filesystem identity");
+        }
+        let backup_root =
+            IdentifiedDirectory::open(recorded_backup_root).map_err(|source| Error::Io {
+                path: recorded_backup_root.to_path_buf(),
+                source,
+            })?;
+        if backup_root.identity() != &witness.backup_root_identity {
+            return witness.uncertain("the recorded backup root changed filesystem identity");
+        }
+        match IdentifiedDirectory::open(&witness.backup_path) {
+            Ok(backup_directory) if backup_directory.identity() != &witness.backup_identity => {
+                return witness
+                    .uncertain("the recorded backup directory changed filesystem identity");
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: witness.backup_path.clone(),
+                    source,
+                })
+            }
+        }
+        super::importer::recover_evacuated_importer(
+            &witness.game_path,
+            &witness.backup_path,
+            &witness.entries,
+        )?;
+        let removed = sqlx::query("DELETE FROM importer_evacuations WHERE token = ?")
+            .bind(witness.token.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        if removed.rows_affected() != 1 {
+            return witness.corrupt("the evacuation witness changed before recovery committed");
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(super) async fn resolve_interrupted_importer_evacuations_at_startup(
+        &self,
+    ) -> Result<usize> {
+        let mut connection = self.pool.acquire().await?;
+        let mut witnesses = load_importer_evacuation_witnesses(&mut connection).await?;
+        witnesses.sort_by_key(|witness| witness.created_at);
+        drop(connection);
+        let mut resolved = 0;
+        for witness in witnesses {
+            if witness.owner_is_live() {
+                continue;
+            }
+            match self.resolve_importer_evacuation(witness.game).await {
+                Ok(()) => resolved += 1,
+                Err(error) => {
+                    self.record_importer_evacuation_failure(witness.token, &error.to_string())
+                        .await?;
+                    tracing::error!(
+                        target: "gmm::importer",
+                        game = witness.game.as_str(),
+                        error = %error,
+                        "could not recover an interrupted Model Importer evacuation",
+                    );
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
+    pub(super) async fn importer_evacuation_recovery_in_library_mutation(
+        &self,
+        game: GameCode,
+    ) -> Result<Option<ImporterEvacuationRecovery>> {
+        let mut connection = self.pool.acquire().await?;
+        Ok(load_importer_evacuation_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .find(|witness| witness.game == game)
+            .and_then(|witness| witness.recovery()))
+    }
+
+    pub(super) async fn ensure_no_importer_evacuation(&self, game: GameCode) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        if load_importer_evacuation_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .any(|witness| witness.game == game)
+        {
+            return Err(Error::ImporterEvacuationPending {
+                game: game.profile().display_name.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) async fn retire_interrupted_importer_evacuation_in_library_mutation(
+        &self,
+        game: GameCode,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(witness) = load_importer_evacuation_witnesses(&mut transaction)
+            .await?
+            .into_iter()
+            .find(|witness| witness.game == game)
+        else {
+            transaction.commit().await?;
+            return Ok(());
+        };
+        if witness.owner_active
+            && matches!(
+                witness.owner_identity_state(),
+                super::session::ProcessIdentityState::Matches
+            )
+        {
+            return Err(Error::ImporterEvacuationStillOwned);
+        }
+        sqlx::query("UPDATE importer_evacuations SET owner_active = 0 WHERE token = ?")
+            .bind(witness.token.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        match self.resolve_importer_evacuation(game).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.record_importer_evacuation_failure(witness.token, &error.to_string())
                     .await?;
                 Err(error)
             }

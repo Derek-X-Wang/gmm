@@ -46,14 +46,15 @@ use ulid::Ulid;
 
 pub use error::{Error, Result};
 pub use games::GameCode;
+pub use importer::ImporterEvacuationRecovery;
 pub use library_audit::{
     DuplicateModGroup, DuplicateModRecord, DuplicateModVariant, DuplicateResolution,
     LibraryAuditReport, ReviewedDuplicateMod, UnreferencedLibraryDir,
 };
 #[doc(hidden)]
 pub use library_mutation::{
-    DURABLE_WITNESS_TABLES, ENABLED_TRANSITION_COLUMNS, REINSTALL_SWAP_COLUMNS,
-    STAGED_LIBRARY_OPERATION_COLUMNS,
+    DURABLE_WITNESS_TABLES, ENABLED_TRANSITION_COLUMNS, IMPORTER_EVACUATION_COLUMNS,
+    REINSTALL_SWAP_COLUMNS, STAGED_LIBRARY_OPERATION_COLUMNS,
 };
 pub use library_recovery::{DeletedLibraryDir, LibraryReclamationOutcome};
 pub use mods::{
@@ -168,6 +169,16 @@ impl Core {
             // durable witness for the next startup instead of moving Library
             // bytes while the process may still be loading them.
             return Ok(core);
+        }
+        if let Err(recovery) = core
+            .resolve_interrupted_importer_evacuations_at_startup()
+            .await
+        {
+            tracing::warn!(
+                target: "gmm::importer",
+                error = %recovery,
+                "could not resolve interrupted Model Importer evacuations at startup",
+            );
         }
         if let Err(recovery) = core
             .resolve_interrupted_enabled_transitions_at_startup()
@@ -2458,6 +2469,7 @@ impl Core {
     ) -> Result<importer::InstallReport> {
         let origin = origin.clone();
         self.ensure_no_active_session().await?;
+        self.ensure_no_importer_evacuation(game).await?;
         let install = self.game_install_path(game).await?.ok_or_else(|| {
             Error::Importer(format!(
                 "set {}'s install path in Settings before installing its Model Importer",
@@ -2501,19 +2513,101 @@ impl Core {
             },
         };
 
-        let report = tokio::task::spawn_blocking(move || {
-            importer::install_from_local_zip(
-                &zip_path,
-                &install,
-                &backups_root,
-                importer::DEFAULT_LOADER_EXE,
-            )
+        let token = Ulid::new();
+        let prepared = tokio::task::spawn_blocking(move || {
+            importer::prepare_install_from_local_zip(&zip_path, &install, &backups_root, token)
         })
         .await
-        .map_err(|e| Error::Importer(format!("install task join error: {e}")))??;
+        .map_err(|e| Error::Importer(format!("install preparation task join error: {e}")))??;
+        let witnessed = prepared.backup_dir().is_some();
+        if witnessed {
+            if let Err(error) = self
+                .commit_importer_evacuation_witness(token, game, &prepared)
+                .await
+            {
+                if let Err(cleanup_error) = prepared.cleanup_unstarted_backup() {
+                    tracing::warn!(
+                        target: "gmm::importer",
+                        error = %cleanup_error,
+                        "could not remove an empty importer backup after witness creation failed",
+                    );
+                }
+                return Err(error);
+            }
+        }
+        let crash_hook = self.crash_hook.clone();
+        let execution = tokio::task::spawn_blocking(move || {
+            importer::execute_prepared_importer_install(
+                prepared,
+                importer::DEFAULT_LOADER_EXE,
+                crash_hook.as_ref(),
+            )
+        })
+        .await;
+        let report = match execution {
+            Err(join_error) => {
+                let error = Error::Importer(format!("install task join error: {join_error}"));
+                if witnessed {
+                    if let Err(record_error) = self
+                        .record_importer_evacuation_failure(token, &error.to_string())
+                        .await
+                    {
+                        tracing::error!(
+                            target: "gmm::importer",
+                            error = %record_error,
+                            "could not annotate the durable importer evacuation after task failure",
+                        );
+                    }
+                }
+                return Err(error);
+            }
+            Ok(Ok(report)) => report,
+            Ok(Err(error)) => {
+                if witnessed {
+                    if let Err(record_error) = self
+                        .record_importer_evacuation_failure(token, &error.to_string())
+                        .await
+                    {
+                        tracing::error!(
+                            target: "gmm::importer",
+                            error = %record_error,
+                            "could not annotate the durable importer evacuation after install failure",
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
 
         if let Some(backup_dir) = report.backup_dir.as_deref() {
-            importer::write_backup_provenance(backup_dir, &replacing)?;
+            if let Err(error) = importer::write_backup_provenance(backup_dir, &replacing) {
+                if let Err(record_error) = self
+                    .record_importer_evacuation_failure(token, &error.to_string())
+                    .await
+                {
+                    tracing::error!(
+                        target: "gmm::importer",
+                        error = %record_error,
+                        "could not annotate the durable importer evacuation after provenance failure",
+                    );
+                }
+                return Err(error);
+            }
+        }
+        if witnessed {
+            if let Err(error) = self.finish_importer_evacuation(token).await {
+                if let Err(record_error) = self
+                    .record_importer_evacuation_failure(token, &error.to_string())
+                    .await
+                {
+                    tracing::error!(
+                        target: "gmm::importer",
+                        error = %record_error,
+                        "could not annotate the durable importer evacuation after witness-retirement failure",
+                    );
+                }
+                return Err(error);
+            }
         }
 
         // Record the installed tag *and* the Importer Origin it came
@@ -2549,6 +2643,7 @@ impl Core {
     /// convinced the switch had happened and with nothing to propose.
     pub async fn rollback_importer(&self, game: GameCode) -> Result<Option<PathBuf>> {
         self.ensure_no_active_session().await?;
+        self.ensure_no_importer_evacuation(game).await?;
         let install = self.game_install_path(game).await?.ok_or_else(|| {
             Error::Importer(format!(
                 "set {}'s install path in Settings before rolling back its Model Importer",
@@ -3073,6 +3168,7 @@ impl Core {
 
     /// Persist a game's install path.
     pub async fn set_game_install_path(&self, game: GameCode, path: &Path) -> Result<()> {
+        self.ensure_no_importer_evacuation(game).await?;
         sqlx::query("UPDATE games SET install_path = ? WHERE code = ?")
             .bind(path.to_string_lossy().as_ref())
             .bind(game.as_str())
@@ -3518,6 +3614,7 @@ impl Core {
     /// bounded injection wait. The committed row is the durable bridge across
     /// that unbounded work; every ordinary Library fence observes it.
     pub async fn begin_session_launch(&self, game: GameCode) -> Result<SessionLaunchClaim> {
+        self.ensure_no_importer_evacuation(game).await?;
         let claim = SessionLaunchClaim {
             token: Ulid::new().to_string(),
             game,
@@ -3872,6 +3969,19 @@ impl Core {
     /// confirmed no original GMM operation is still changing the Mod.
     pub async fn retire_interrupted_enabled_transition(&self, mod_id: &str) -> Result<()> {
         self.retire_interrupted_enabled_transition_in_library_mutation(mod_id)
+            .await
+    }
+
+    pub async fn importer_evacuation_recovery(
+        &self,
+        game: GameCode,
+    ) -> Result<Option<ImporterEvacuationRecovery>> {
+        self.importer_evacuation_recovery_in_library_mutation(game)
+            .await
+    }
+
+    pub async fn retire_interrupted_importer_evacuation(&self, game: GameCode) -> Result<()> {
+        self.retire_interrupted_importer_evacuation_in_library_mutation(game)
             .await
     }
 
