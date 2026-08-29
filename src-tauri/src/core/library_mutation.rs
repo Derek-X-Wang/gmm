@@ -2908,6 +2908,10 @@ fn move_live_replacement_back_to_stage(
         return witness.uncertain("both the live and staging names contain replacement bytes");
     }
     drop(current_live);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Library mutation policy exemption: this private rollback helper is called only by rollback_reinstall_swap_in_mutation while its LibraryMutationFence is live"
+    )]
     fs::rename(&witness.library_path, &witness.staged_path).map_err(|source| Error::Io {
         path: witness.library_path.clone(),
         source,
