@@ -86,6 +86,16 @@ pub async fn get_importer_evacuation_recovery(
 }
 
 #[tauri::command]
+pub async fn retry_importer_evacuation_recovery(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> CommandResult<()> {
+    core.retry_importer_evacuation_recovery(game)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub async fn retire_interrupted_importer_evacuation(
     core: State<'_, Core>,
     game: GameCode,

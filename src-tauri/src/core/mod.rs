@@ -1641,7 +1641,8 @@ impl Core {
                 })?),
                 None => None,
             };
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        library_mutation::ensure_no_importer_evacuation_in(&mut tx, game).await?;
         put_setting(
             &mut *tx,
             &importer_origin::keys::origin_override(game),
@@ -2450,24 +2451,15 @@ impl Core {
         self.install_importer_from(game, &origin, endpoints).await
     }
 
-    /// Install `game`'s Model Importer from an **explicitly chosen**
-    /// Importer Origin.
-    ///
-    /// The origin is a parameter rather than something this function
-    /// resolves, because the two callers choose it by different rules
-    /// and that difference is the whole of #109. The ordinary Install /
-    /// Update action passes what
-    /// [`Core::importer_origin_for_install`] decided — the origin the
-    /// install came from, never a substitute. Accepting a proposal
-    /// passes the proposed origin, which is the one act that is allowed
-    /// to move an existing install.
-    async fn install_importer_from(
+    /// Install a previously downloaded Model Importer archive through the
+    /// same durable evacuation protocol as the network-backed production path.
+    /// Test probes use this seam so a process abort exercises the real witness.
+    pub async fn install_importer_from_local_zip(
         &self,
         game: GameCode,
-        origin: &importer_origin::ImporterOrigin,
-        endpoints: &importer::Endpoints,
+        zip_path: &Path,
+        loader_exe: &str,
     ) -> Result<importer::InstallReport> {
-        let origin = origin.clone();
         self.ensure_no_active_session().await?;
         self.ensure_no_importer_evacuation(game).await?;
         let install = self.game_install_path(game).await?.ok_or_else(|| {
@@ -2476,34 +2468,7 @@ impl Core {
                 game.profile().display_name,
             ))
         })?;
-        let pattern = importer::AssetPattern::new(origin.asset_pattern())?;
-
-        let client = self.http_client().await?;
-        let release =
-            importer::fetch_latest_release(&client, endpoints, &origin.repo_slug(), &pattern, None)
-                .await?
-                .ok_or_else(|| {
-                    Error::ReleaseMetadata(format!(
-                        "no release returned for {}",
-                        origin.repo_slug()
-                    ))
-                })?;
-
-        let data = self.data_dir();
-        let backups_root = data.join("backups").join(game.as_str());
-        let zip_path = data
-            .join("downloads")
-            .join(game.as_str())
-            .join(&release.asset_name);
-        importer::download_to(&client, &release.asset_url, &zip_path).await?;
-
-        // What is about to be replaced, captured *before* the swap. A
-        // backup is a pile of files and carries no provenance of its
-        // own, so without this a rollback can only restore the files
-        // and has to leave the record describing the install it just
-        // undid (#126). Either field may legitimately be `None` — an
-        // install over a hand-installed setup replaces files GMM never
-        // recorded, and unknown is the honest answer for those.
+        let backups_root = self.data_dir().join("backups").join(game.as_str());
         let replacing = importer::BackupProvenance {
             version: self.installed_importer_version(game).await?,
             origin: match self.installed_importer_origin(game).await? {
@@ -2512,7 +2477,26 @@ impl Core {
                 | importer_origin::InstalledOrigin::Unreadable { .. } => None,
             },
         };
+        self.install_importer_archive(
+            game,
+            zip_path.to_path_buf(),
+            install,
+            backups_root,
+            loader_exe.to_string(),
+            replacing,
+        )
+        .await
+    }
 
+    async fn install_importer_archive(
+        &self,
+        game: GameCode,
+        zip_path: PathBuf,
+        install: PathBuf,
+        backups_root: PathBuf,
+        loader_exe: String,
+        replacing: importer::BackupProvenance,
+    ) -> Result<importer::InstallReport> {
         let token = Ulid::new();
         let prepared = tokio::task::spawn_blocking(move || {
             importer::prepare_install_from_local_zip(&zip_path, &install, &backups_root, token)
@@ -2537,11 +2521,7 @@ impl Core {
         }
         let crash_hook = self.crash_hook.clone();
         let execution = tokio::task::spawn_blocking(move || {
-            importer::execute_prepared_importer_install(
-                prepared,
-                importer::DEFAULT_LOADER_EXE,
-                crash_hook.as_ref(),
-            )
+            importer::execute_prepared_importer_install(prepared, &loader_exe, crash_hook.as_ref())
         })
         .await;
         let report = match execution {
@@ -2609,6 +2589,82 @@ impl Core {
                 return Err(error);
             }
         }
+        Ok(report)
+    }
+
+    /// Install `game`'s Model Importer from an **explicitly chosen**
+    /// Importer Origin.
+    ///
+    /// The origin is a parameter rather than something this function
+    /// resolves, because the two callers choose it by different rules
+    /// and that difference is the whole of #109. The ordinary Install /
+    /// Update action passes what
+    /// [`Core::importer_origin_for_install`] decided — the origin the
+    /// install came from, never a substitute. Accepting a proposal
+    /// passes the proposed origin, which is the one act that is allowed
+    /// to move an existing install.
+    async fn install_importer_from(
+        &self,
+        game: GameCode,
+        origin: &importer_origin::ImporterOrigin,
+        endpoints: &importer::Endpoints,
+    ) -> Result<importer::InstallReport> {
+        let origin = origin.clone();
+        self.ensure_no_active_session().await?;
+        self.ensure_no_importer_evacuation(game).await?;
+        let install = self.game_install_path(game).await?.ok_or_else(|| {
+            Error::Importer(format!(
+                "set {}'s install path in Settings before installing its Model Importer",
+                game.profile().display_name,
+            ))
+        })?;
+        let pattern = importer::AssetPattern::new(origin.asset_pattern())?;
+
+        let client = self.http_client().await?;
+        let release =
+            importer::fetch_latest_release(&client, endpoints, &origin.repo_slug(), &pattern, None)
+                .await?
+                .ok_or_else(|| {
+                    Error::ReleaseMetadata(format!(
+                        "no release returned for {}",
+                        origin.repo_slug()
+                    ))
+                })?;
+
+        let data = self.data_dir();
+        let backups_root = data.join("backups").join(game.as_str());
+        let zip_path = data
+            .join("downloads")
+            .join(game.as_str())
+            .join(&release.asset_name);
+        importer::download_to(&client, &release.asset_url, &zip_path).await?;
+
+        // What is about to be replaced, captured *before* the swap. A
+        // backup is a pile of files and carries no provenance of its
+        // own, so without this a rollback can only restore the files
+        // and has to leave the record describing the install it just
+        // undid (#126). Either field may legitimately be `None` — an
+        // install over a hand-installed setup replaces files GMM never
+        // recorded, and unknown is the honest answer for those.
+        let replacing = importer::BackupProvenance {
+            version: self.installed_importer_version(game).await?,
+            origin: match self.installed_importer_origin(game).await? {
+                importer_origin::InstalledOrigin::Known(origin) => Some(origin),
+                importer_origin::InstalledOrigin::Unknown
+                | importer_origin::InstalledOrigin::Unreadable { .. } => None,
+            },
+        };
+
+        let report = self
+            .install_importer_archive(
+                game,
+                zip_path,
+                install,
+                backups_root,
+                importer::DEFAULT_LOADER_EXE.to_string(),
+                replacing,
+            )
+            .await?;
 
         // Record the installed tag *and* the Importer Origin it came
         // from, so the update check can compare against it next launch
@@ -3977,6 +4033,11 @@ impl Core {
         game: GameCode,
     ) -> Result<Option<ImporterEvacuationRecovery>> {
         self.importer_evacuation_recovery_in_library_mutation(game)
+            .await
+    }
+
+    pub async fn retry_importer_evacuation_recovery(&self, game: GameCode) -> Result<()> {
+        self.retry_importer_evacuation_recovery_in_library_mutation(game)
             .await
     }
 

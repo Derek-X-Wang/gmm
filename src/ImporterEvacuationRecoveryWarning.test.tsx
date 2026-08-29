@@ -16,6 +16,7 @@ it("explains the partial importer evacuation and automatic rollback", () => {
         ownerUncertain: false,
       }}
       pending={false}
+      onRetry={() => {}}
       onRetire={() => {}}
     />,
   );
@@ -24,7 +25,7 @@ it("explains the partial importer evacuation and automatic rollback", () => {
     name: /interrupted model importer recovery for genshin impact/i,
   });
   expect(warning).toHaveTextContent(/game directory may still contain only part/i);
-  expect(warning).toHaveTextContent(/retry the recorded rollback automatically.*next time/i);
+  expect(warning).toHaveTextContent(/fix the problem described below.*retry the recorded rollback here/i);
   expect(warning).toHaveTextContent(/blocks launching genshin impact.*another importer/i);
   expect(warning).toHaveTextContent(/temporarily locked/i);
   expect(warning).toHaveTextContent(/C:\\Games\\Genshin/i);
@@ -45,6 +46,7 @@ it("offers explicit producer retirement only when identity is uncertain", () => 
         ownerUncertain: true,
       }}
       pending={false}
+      onRetry={() => {}}
       onRetire={() => {
         retired = true;
       }}
@@ -57,4 +59,31 @@ it("offers explicit producer retirement only when identity is uncertain", () => 
   expect(screen.queryByText(/retry the recorded rollback automatically/i)).not.toBeInTheDocument();
   button.click();
   expect(retired).toBe(true);
+});
+
+it("offers an in-session retry after an ordinary recovery failure", () => {
+  let retried = false;
+  render(
+    <ImporterEvacuationRecoveryWarning
+      displayName="Genshin Impact"
+      recovery={{
+        reason: "the backup directory is temporarily locked",
+        attemptedAt: "2026-08-28T12:00:00Z",
+        attempts: 1,
+        gamePath: "C:\\Games\\Genshin",
+        backupPath: "D:\\GMM\\backups\\gimi\\backup",
+        ownerUncertain: false,
+      }}
+      pending={false}
+      onRetire={() => {}}
+      onRetry={() => {
+        retried = true;
+      }}
+    />,
+  );
+
+  const retry = screen.getByRole("button", { name: /retry model importer recovery/i });
+  expect(screen.queryByText(/next time it starts/i)).not.toBeInTheDocument();
+  retry.click();
+  expect(retried).toBe(true);
 });

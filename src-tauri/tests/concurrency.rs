@@ -5891,25 +5891,12 @@ async fn importer_install_is_refused_by_another_processs_game_session() {
     let game_dir = env.game_mods.parent().expect("game dir").to_path_buf();
     let zip = env._tmp.path().join("importer.zip");
     build_importer_zip(&zip);
-    let backups = env.data_dir.join("backups");
-    let (zip_s, game_s, backups_s) = (
-        zip.display().to_string(),
-        game_dir.display().to_string(),
-        backups.display().to_string(),
-    );
+    let (zip_s, game_s) = (zip.display().to_string(), game_dir.display().to_string());
 
     // Sanity: with no session the install is allowed. Otherwise the
     // refusal below could be caused by anything at all.
     probe(&env)
-        .op([
-            "install-importer",
-            "--zip",
-            &zip_s,
-            "--game-dir",
-            &game_s,
-            "--backups",
-            &backups_s,
-        ])
+        .op(["install-importer", "--zip", &zip_s, "--game-dir", &game_s])
         .run()
         .expect_ok("installing an importer with no session active");
 
@@ -5922,15 +5909,7 @@ async fn importer_install_is_refused_by_another_processs_game_session() {
         .expect_ok("claiming a game session from another process");
 
     probe(&env)
-        .op([
-            "install-importer",
-            "--zip",
-            &zip_s,
-            "--game-dir",
-            &game_s,
-            "--backups",
-            &backups_s,
-        ])
+        .op(["install-importer", "--zip", &zip_s, "--game-dir", &game_s])
         .run()
         .expect_refused(
             "installing an importer during another process's session",
@@ -5939,17 +5918,56 @@ async fn importer_install_is_refused_by_another_processs_game_session() {
 
     core.end_session().await.expect("end session");
     probe(&env)
-        .op([
-            "install-importer",
-            "--zip",
-            &zip_s,
-            "--game-dir",
-            &game_s,
-            "--backups",
-            &backups_s,
-        ])
+        .op(["install-importer", "--zip", &zip_s, "--game-dir", &game_s])
         .run()
         .expect_ok("installing an importer once the session ended");
+}
+
+#[tokio::test]
+async fn probe_importer_abort_leaves_a_witness_that_startup_replays() {
+    let env = TestEnv::new();
+    let game_dir = env.game_mods.parent().expect("game dir").to_path_buf();
+    let zip = env._tmp.path().join("importer.zip");
+    build_importer_zip(&zip);
+    std::fs::create_dir_all(game_dir.join("Core")).expect("create old Core");
+    std::fs::write(game_dir.join("d3dx.ini"), b"old d3dx bytes").expect("write old d3dx");
+    std::fs::write(game_dir.join("Core/original.ini"), b"old Core bytes").expect("write old Core");
+    let zip_s = zip.display().to_string();
+    let game_s = game_dir.display().to_string();
+
+    let mut interrupted = probe(&env)
+        .crashing_at(gmm_lib::core::importer::BACKUP_AFTER_ENTRY_TEST_SEAM)
+        .op(["install-importer", "--zip", &zip_s, "--game-dir", &game_s])
+        .spawn();
+    interrupted.wait_for_crash();
+
+    let pool = sqlx::SqlitePool::connect(&env.db_url)
+        .await
+        .expect("inspect durable probe state");
+    let witnesses: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM importer_evacuations")
+        .fetch_one(&pool)
+        .await
+        .expect("count probe evacuation witnesses");
+    assert_eq!(
+        witnesses, 1,
+        "the production-shaped probe must commit one durable importer evacuation witness before moving bytes",
+    );
+    pool.close().await;
+
+    let recovered = env.core().await;
+    assert_eq!(
+        std::fs::read(game_dir.join("d3dx.ini")).expect("read restored importer entry"),
+        b"old d3dx bytes",
+        "startup must replay the probe-created witness and restore the evacuated entry",
+    );
+    assert!(
+        recovered
+            .importer_evacuation_recovery(GameCode::Gimi)
+            .await
+            .expect("read recovery state")
+            .is_none(),
+        "startup must retire the probe-created witness after restoring the importer",
+    );
 }
 
 /// Two processes launch a game at the same instant. Exactly one may win

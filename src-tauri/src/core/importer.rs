@@ -436,16 +436,15 @@ pub fn find_d3dx_ini(game_dir: &Path) -> Result<PathBuf> {
     )))
 }
 
-/// Install a Model Importer into `game_dir` from a local ZIP file.
+/// Test-only low-level install seam that intentionally has no durable
+/// evacuation witness. Production and crash probes must call
+/// [`super::Core::install_importer_from_local_zip`] instead.
 ///
-/// The orchestrator that the production path calls: stage in a temp
-/// dir, back up existing files into a timestamped folder under
-/// `backups_root`, swap into `game_dir`, rewrite `d3dx.ini`'s loader
-/// line, and return the resulting [`InstallReport`].
-///
-/// Designed so the network fetch is *not* a prerequisite for testing
-/// — integration tests pass a fixture ZIP from disk.
-pub fn install_from_local_zip(
+/// This symbol is absent from release builds so an ordinary app caller cannot
+/// accidentally reintroduce the process-abort gap from #227.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn install_from_local_zip_unwitnessed_for_test(
     zip_path: &Path,
     game_dir: &Path,
     backups_root: &Path,
@@ -460,6 +459,7 @@ pub fn install_from_local_zip(
     )
 }
 
+#[cfg(debug_assertions)]
 fn install_from_local_zip_with_staging_probe<F>(
     zip_path: &Path,
     game_dir: &Path,
@@ -634,13 +634,18 @@ pub(super) fn execute_prepared_importer_install(
     })
 }
 
-/// Move pre-existing importer files (the known DLLs + dirs at
-/// `game_dir`'s root) into a timestamped backup folder under
-/// `backups_root`. Returns `None` if nothing was there to back up.
-pub fn backup_existing(game_dir: &Path, backups_root: &Path) -> Result<Option<PathBuf>> {
+/// Test-only low-level backup seam that intentionally has no durable witness.
+/// The release app cannot construct this operation.
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub fn backup_existing_unwitnessed_for_test(
+    game_dir: &Path,
+    backups_root: &Path,
+) -> Result<Option<PathBuf>> {
     backup_existing_with(game_dir, backups_root, symlink_metadata_if_exists)
 }
 
+#[cfg(debug_assertions)]
 fn backup_existing_with<F>(
     game_dir: &Path,
     backups_root: &Path,
@@ -763,6 +768,115 @@ fn restore_copy_staging_path(game_dir: &Path, entry: &str) -> PathBuf {
     game_dir.join(format!(".gmm-restore-{entry}"))
 }
 
+fn importer_entries_have_same_contents(left: &Path, right: &Path) -> Result<bool> {
+    let left_metadata = fs::symlink_metadata(left).map_err(|source| Error::Io {
+        path: left.to_path_buf(),
+        source,
+    })?;
+    let right_metadata = fs::symlink_metadata(right).map_err(|source| Error::Io {
+        path: right.to_path_buf(),
+        source,
+    })?;
+    let left_type = left_metadata.file_type();
+    let right_type = right_metadata.file_type();
+
+    if left_type.is_symlink() || right_type.is_symlink() {
+        if !(left_type.is_symlink() && right_type.is_symlink()) {
+            return Ok(false);
+        }
+        let left_target = fs::read_link(left).map_err(|source| Error::Io {
+            path: left.to_path_buf(),
+            source,
+        })?;
+        let right_target = fs::read_link(right).map_err(|source| Error::Io {
+            path: right.to_path_buf(),
+            source,
+        })?;
+        return Ok(left_target == right_target);
+    }
+
+    if left_metadata.is_file() || right_metadata.is_file() {
+        if !(left_metadata.is_file() && right_metadata.is_file())
+            || left_metadata.len() != right_metadata.len()
+        {
+            return Ok(false);
+        }
+        let mut left_file = fs::File::open(left).map_err(|source| Error::Io {
+            path: left.to_path_buf(),
+            source,
+        })?;
+        let mut right_file = fs::File::open(right).map_err(|source| Error::Io {
+            path: right.to_path_buf(),
+            source,
+        })?;
+        let mut left_buffer = [0_u8; 64 * 1024];
+        let mut right_buffer = [0_u8; 64 * 1024];
+        loop {
+            let left_read = left_file
+                .read(&mut left_buffer)
+                .map_err(|source| Error::Io {
+                    path: left.to_path_buf(),
+                    source,
+                })?;
+            let right_read = right_file
+                .read(&mut right_buffer)
+                .map_err(|source| Error::Io {
+                    path: right.to_path_buf(),
+                    source,
+                })?;
+            if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+                return Ok(false);
+            }
+            if left_read == 0 {
+                return Ok(true);
+            }
+        }
+    }
+
+    if !(left_metadata.is_dir() && right_metadata.is_dir()) {
+        return Ok(false);
+    }
+    let mut left_entries = fs::read_dir(left)
+        .map_err(|source| Error::Io {
+            path: left.to_path_buf(),
+            source,
+        })?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(|source| Error::Io {
+                    path: left.to_path_buf(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut right_entries = fs::read_dir(right)
+        .map_err(|source| Error::Io {
+            path: right.to_path_buf(),
+            source,
+        })?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(|source| Error::Io {
+                    path: right.to_path_buf(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    left_entries.sort();
+    right_entries.sort();
+    if left_entries != right_entries {
+        return Ok(false);
+    }
+    for name in left_entries {
+        if !importer_entries_have_same_contents(&left.join(&name), &right.join(name))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Restore every entry named by a validated durable evacuation witness.
 ///
 /// A published backup entry is always a complete copy: the cross-volume
@@ -793,6 +907,25 @@ pub(super) fn recover_evacuated_importer(
             })?;
 
         if backup_present.is_some() {
+            if source_present.is_some() {
+                if !importer_entries_have_same_contents(&source, &backup)? {
+                    return Err(Error::Importer(format!(
+                        "the live importer entry {} differs from its recorded backup; GMM preserved both because it cannot safely choose which one is authoritative",
+                        source.display(),
+                    )));
+                }
+                if symlink_metadata_if_exists(&restore_copy)
+                    .map_err(|source_error| Error::Io {
+                        path: restore_copy.clone(),
+                        source: source_error,
+                    })?
+                    .is_some()
+                {
+                    remove_any(&restore_copy)?;
+                }
+                remove_any(&backup)?;
+                continue;
+            }
             if symlink_metadata_if_exists(&restore_copy)
                 .map_err(|source_error| Error::Io {
                     path: restore_copy.clone(),
@@ -803,9 +936,6 @@ pub(super) fn recover_evacuated_importer(
                 remove_any(&restore_copy)?;
             }
             copy_any(&backup, &restore_copy)?;
-            if source_present.is_some() {
-                remove_any(&source)?;
-            }
             fs::rename(&restore_copy, &source).map_err(|source_error| Error::Io {
                 path: restore_copy.clone(),
                 source: source_error,

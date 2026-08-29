@@ -414,6 +414,10 @@ export async function getImporterEvacuationRecovery(
   );
 }
 
+export async function retryImporterEvacuationRecovery(game: GameCode): Promise<void> {
+  return invoke<void>("retry_importer_evacuation_recovery", { game });
+}
+
 export async function retireInterruptedImporterEvacuation(game: GameCode): Promise<void> {
   return invoke<void>("retire_interrupted_importer_evacuation", { game });
 }

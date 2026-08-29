@@ -6,12 +6,14 @@ export function ImporterEvacuationRecoveryWarning({
   recovery,
   pending,
   error,
+  onRetry,
   onRetire,
 }: {
   displayName: string;
   recovery: ImporterEvacuationRecovery;
   pending: boolean;
   error?: string;
+  onRetry: () => void;
   onRetire: () => void;
 }) {
   return (
@@ -26,7 +28,7 @@ export function ImporterEvacuationRecoveryWarning({
         its previous Model Importer.
         {recovery.ownerUncertain
           ? " GMM cannot retry while the original producer may still be running."
-          : " GMM will retry the recorded rollback automatically the next time it starts."}
+          : " Fix the problem described below, then retry the recorded rollback here."}
       </p>
       <p>
         Until recovery succeeds, GMM blocks launching {displayName} and blocks another importer
@@ -45,7 +47,14 @@ export function ImporterEvacuationRecoveryWarning({
           </button>
           {error ? <span className="error">Could not retire the producer: {error}</span> : null}
         </>
-      ) : null}
+      ) : (
+        <>
+          <button type="button" onClick={onRetry} disabled={pending}>
+            {pending ? "Retrying recovery…" : "Retry Model Importer recovery"}
+          </button>
+          {error ? <span className="error">Could not recover the Model Importer: {error}</span> : null}
+        </>
+      )}
       <details>
         <summary>Recorded paths and recovery status</summary>
         <dl>

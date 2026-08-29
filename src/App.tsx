@@ -17,6 +17,7 @@ import {
   partitionLaunchError,
   resetOnboarding,
   retryReinstallRecovery,
+  retryImporterEvacuationRecovery,
   retireInterruptedEnabledTransition,
   retireInterruptedImporterEvacuation,
   retireInterruptedSessionLaunch,
@@ -743,6 +744,10 @@ function ImporterPanel({
     mutationFn: () => retireInterruptedImporterEvacuation(game),
     onSuccess: invalidate,
   });
+  const retryEvacuation = useMutation({
+    mutationFn: () => retryImporterEvacuationRecovery(game),
+    onSuccess: invalidate,
+  });
 
   const importerLabel = game.toUpperCase();
 
@@ -786,12 +791,15 @@ function ImporterPanel({
         <ImporterEvacuationRecoveryWarning
           displayName={displayName}
           recovery={evacuation.data}
-          pending={retireEvacuation.isPending}
+          pending={retireEvacuation.isPending || retryEvacuation.isPending}
           error={
             retireEvacuation.isError
               ? commandFailureMessage(retireEvacuation.error)
+              : retryEvacuation.isError
+                ? commandFailureMessage(retryEvacuation.error)
               : undefined
           }
+          onRetry={() => retryEvacuation.mutate()}
           onRetire={() => retireEvacuation.mutate()}
         />
       ) : null}

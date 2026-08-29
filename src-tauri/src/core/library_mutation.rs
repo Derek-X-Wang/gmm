@@ -1152,6 +1152,22 @@ pub(super) async fn load_importer_evacuation_witnesses(
         .collect()
 }
 
+pub(super) async fn ensure_no_importer_evacuation_in(
+    connection: &mut SqliteConnection,
+    game: GameCode,
+) -> Result<()> {
+    if load_importer_evacuation_witnesses(connection)
+        .await?
+        .into_iter()
+        .any(|witness| witness.game == game)
+    {
+        return Err(Error::ImporterEvacuationPending {
+            game: game.profile().display_name.to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub(super) async fn insert_reinstall_swap_witness(
     connection: &mut SqliteConnection,
     witness: NewReinstallSwapWitness<'_>,
@@ -2109,6 +2125,9 @@ impl Core {
             transaction.commit().await?;
             return Ok(());
         };
+        if witness.owner_is_live() {
+            return Err(Error::ImporterEvacuationStillOwned);
+        }
         let expected_backup_root = self.data_dir().join("backups").join(game.as_str());
         let Some(recorded_backup_root) = witness.backup_path.parent() else {
             return witness.corrupt("the recorded backup path has no parent");
@@ -2215,18 +2234,32 @@ impl Core {
             .and_then(|witness| witness.recovery()))
     }
 
-    pub(super) async fn ensure_no_importer_evacuation(&self, game: GameCode) -> Result<()> {
+    pub(super) async fn retry_importer_evacuation_recovery_in_library_mutation(
+        &self,
+        game: GameCode,
+    ) -> Result<()> {
         let mut connection = self.pool.acquire().await?;
-        if load_importer_evacuation_witnesses(&mut connection)
+        let Some(witness) = load_importer_evacuation_witnesses(&mut connection)
             .await?
             .into_iter()
-            .any(|witness| witness.game == game)
-        {
-            return Err(Error::ImporterEvacuationPending {
-                game: game.profile().display_name.to_string(),
-            });
+            .find(|witness| witness.game == game)
+        else {
+            return Ok(());
+        };
+        drop(connection);
+        match self.resolve_importer_evacuation(game).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.record_importer_evacuation_failure(witness.token, &error.to_string())
+                    .await?;
+                Err(error)
+            }
         }
-        Ok(())
+    }
+
+    pub(super) async fn ensure_no_importer_evacuation(&self, game: GameCode) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        ensure_no_importer_evacuation_in(&mut connection, game).await
     }
 
     pub(super) async fn retire_interrupted_importer_evacuation_in_library_mutation(

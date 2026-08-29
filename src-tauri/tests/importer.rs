@@ -1,18 +1,19 @@
 //! Slice 3: GIMI Model Importer install + rollback.
 //!
-//! The tests here go through the local-zip orchestrator
-//! ([`install_from_local_zip`]) so no network is required. The full
-//! production path is identical apart from the zip-fetch step at the
-//! front.
+//! Low-level filesystem tests deliberately use the explicitly named
+//! `install_from_local_zip_unwitnessed_for_test` seam so no database or network
+//! is required. Process-abort coverage instead goes through `Core` and the
+//! durable production witness in `tests/concurrency.rs`.
 
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
 #[cfg(unix)]
-use gmm_lib::core::importer::{backup_existing, find_d3dx_ini, latest_backup};
+use gmm_lib::core::importer::{backup_existing_unwitnessed_for_test, find_d3dx_ini, latest_backup};
 use gmm_lib::core::importer::{
-    install_from_local_zip, rewrite_d3dx_loader, rollback_to, DEFAULT_LOADER_EXE,
+    install_from_local_zip_unwitnessed_for_test, rewrite_d3dx_loader, rollback_to,
+    DEFAULT_LOADER_EXE,
 };
 #[cfg(unix)]
 use gmm_lib::core::Error;
@@ -56,8 +57,13 @@ fn install_from_local_zip_places_files_and_rewrites_loader() {
     let zip_path = tmp.path().join("gimi.zip");
     build_importer_zip(&zip_path);
 
-    let report = install_from_local_zip(&zip_path, &game_dir, &backups, DEFAULT_LOADER_EXE)
-        .expect("install");
+    let report = install_from_local_zip_unwitnessed_for_test(
+        &zip_path,
+        &game_dir,
+        &backups,
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
 
     assert!(report.backup_dir.is_none(), "no backup for a clean install");
     assert!(!report.sha256.is_empty());
@@ -98,8 +104,13 @@ fn rollback_restores_byte_for_byte_after_simulated_failure() {
     let zip_path = tmp.path().join("gimi.zip");
     build_importer_zip(&zip_path);
 
-    let report = install_from_local_zip(&zip_path, &game_dir, &backups, DEFAULT_LOADER_EXE)
-        .expect("install");
+    let report = install_from_local_zip_unwitnessed_for_test(
+        &zip_path,
+        &game_dir,
+        &backups,
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
     assert!(report.backup_dir.is_some(), "must have backed up");
     let backup_dir = report.backup_dir.unwrap();
 
@@ -139,7 +150,7 @@ fn rewrite_d3dx_loader_idempotent() {
 //
 // `Mods/` is where GMM materialises Junctions for enabled mods
 // (ADR 0003). It used to be listed in IMPORTER_ROOT_DIRS, which meant
-// `backup_existing` renamed the whole directory into the backup folder
+// `backup_existing_unwitnessed_for_test` renamed the whole directory into the backup folder
 // on every install — silently stripping every enabled mod out of the
 // game while the DB still said `enabled = 1`. Caught by the Windows
 // end-to-end test on its first real run; these keep it dead.
@@ -177,8 +188,13 @@ fn install_never_moves_an_existing_mods_directory() {
     let zip = tmp.path().join("GIMI.zip");
     build_importer_zip(&zip);
 
-    install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
-        .expect("install");
+    install_from_local_zip_unwitnessed_for_test(
+        &zip,
+        &game,
+        &tmp.path().join("backups"),
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
 
     assert!(
         mods.join("Hu Tao Skin/merged.ini").exists(),
@@ -200,14 +216,16 @@ fn reinstall_leaves_mods_in_place_while_replacing_importer_files() {
     build_importer_zip(&zip);
 
     // First install, then the user enables a mod.
-    install_from_local_zip(&zip, &game, &backups, DEFAULT_LOADER_EXE).expect("first install");
+    install_from_local_zip_unwitnessed_for_test(&zip, &game, &backups, DEFAULT_LOADER_EXE)
+        .expect("first install");
     let mods = game.join("Mods");
     fs::create_dir_all(mods.join("Nahida")).expect("mod dir");
     fs::write(mods.join("Nahida/merged.ini"), b"hash = 1234\n").expect("mod ini");
 
     // Reinstall — the exact flow behind "Reinstall importer" and an
     // importer update.
-    install_from_local_zip(&zip, &game, &backups, DEFAULT_LOADER_EXE).expect("reinstall");
+    install_from_local_zip_unwitnessed_for_test(&zip, &game, &backups, DEFAULT_LOADER_EXE)
+        .expect("reinstall");
 
     assert!(
         mods.join("Nahida/merged.ini").exists(),
@@ -230,8 +248,13 @@ fn a_package_shipping_its_own_mods_folder_merges_instead_of_replacing() {
     let zip = tmp.path().join("GIMI-with-mods.zip");
     build_importer_zip_with_mods(&zip);
 
-    install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
-        .expect("install");
+    install_from_local_zip_unwitnessed_for_test(
+        &zip,
+        &game,
+        &tmp.path().join("backups"),
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
 
     assert!(
         mods.join("Existing/merged.ini").exists(),
@@ -389,8 +412,13 @@ fn merging_a_shipped_mods_dir_recurses_into_existing_subdirectories() {
         zw.finish().expect("finish");
     }
 
-    install_from_local_zip(&zip, &game, &tmp.path().join("backups"), DEFAULT_LOADER_EXE)
-        .expect("install");
+    install_from_local_zip_unwitnessed_for_test(
+        &zip,
+        &game,
+        &tmp.path().join("backups"),
+        DEFAULT_LOADER_EXE,
+    )
+    .expect("install");
 
     assert!(
         mods.join("Examples/mine.ini").exists(),
@@ -450,7 +478,7 @@ fn backup_existing_propagates_directory_search_uncertainty() {
     let original = fs::metadata(&game).expect("game metadata").permissions();
     fs::set_permissions(&game, fs::Permissions::from_mode(0o000))
         .expect("deny game directory search");
-    let backup_result = backup_existing(&game, &backups);
+    let backup_result = backup_existing_unwitnessed_for_test(&game, &backups);
     fs::set_permissions(&game, original).expect("restore game directory search");
 
     assert!(

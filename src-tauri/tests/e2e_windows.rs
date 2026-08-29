@@ -166,6 +166,12 @@ fn make_fake_mod(dir: &Path, hash: &str) {
 async fn full_vertical_against_a_fake_game_install() {
     let tmp = TempDir::new().expect("tmp");
     let game_dir = make_fake_game(tmp.path());
+    let library_root = tmp.path().join("library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_root, &db_url).await.expect("core");
+    core.set_game_install_path(GameCode::Gimi, &game_dir)
+        .await
+        .expect("persist install path");
 
     // ---- 1. detection ------------------------------------------------
     assert!(
@@ -179,8 +185,9 @@ async fn full_vertical_against_a_fake_game_install() {
     // ---- 2. importer install ----------------------------------------
     let zip_path = tmp.path().join("GIMI-Package.zip");
     make_fake_importer_zip(&zip_path);
-    let backups = tmp.path().join("backups");
-    let report = importer::install_from_local_zip(&zip_path, &game_dir, &backups, "gmm.exe")
+    let report = core
+        .install_importer_from_local_zip(GameCode::Gimi, &zip_path, "gmm.exe")
+        .await
         .expect("importer install");
     assert!(
         game_dir.join("Core/GIMI/library.ini").exists(),
@@ -199,13 +206,6 @@ async fn full_vertical_against_a_fake_game_install() {
     );
 
     // ---- 3. adopt a mod ----------------------------------------------
-    let library_root = tmp.path().join("library");
-    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
-    let core = Core::new(library_root, &db_url).await.expect("core");
-    core.set_game_install_path(GameCode::Gimi, &game_dir)
-        .await
-        .expect("persist install path");
-
     let fixture = tmp.path().join("downloads/HuTaoSkin");
     make_fake_mod(&fixture, "aabbccdd");
     let adopted = core
@@ -336,19 +336,28 @@ async fn full_vertical_against_a_fake_game_install() {
 async fn importer_rollback_restores_a_populated_game_dir() {
     let tmp = TempDir::new().expect("tmp");
     let game_dir = make_fake_game(tmp.path());
-    let backups = tmp.path().join("backups");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &db_url)
+        .await
+        .expect("core");
+    core.set_game_install_path(GameCode::Gimi, &game_dir)
+        .await
+        .expect("persist install path");
 
     let zip_path = tmp.path().join("GIMI-Package.zip");
     make_fake_importer_zip(&zip_path);
 
-    importer::install_from_local_zip(&zip_path, &game_dir, &backups, "gmm.exe")
+    core.install_importer_from_local_zip(GameCode::Gimi, &zip_path, "gmm.exe")
+        .await
         .expect("first install");
     let first_core =
         fs::read(game_dir.join("Core/GIMI/library.ini")).expect("read installed core ini");
     let first_ini = fs::read_to_string(game_dir.join("d3dx.ini")).expect("read installed ini");
 
     // A second install backs up the first one.
-    let report = importer::install_from_local_zip(&zip_path, &game_dir, &backups, "gmm.exe")
+    let report = core
+        .install_importer_from_local_zip(GameCode::Gimi, &zip_path, "gmm.exe")
+        .await
         .expect("second install");
     let backup_dir = report
         .backup_dir
