@@ -21,8 +21,12 @@
 //! review. Per-entry discards hidden in a closure such as
 //! `filter_map(|entry| entry.ok())`, iterator filtering such as
 //! `.filter(|entry| entry.is_ok())`, and `while let Some(Ok(entry))` iteration are
-//! also review concerns rather than structurally proven here. Because receiver
-//! types are unavailable, ordinary methods named `metadata`, `file_type`,
+//! also review concerns rather than structurally proven here. A per-entry discard
+//! reached through a receiver the visitor cannot trace back to `read_dir`, such
+//! as an intervening `.unwrap()` or `.expect()` or an iterator returned from a
+//! helper, is likewise a review concern rather than structurally proven here.
+//! Because receiver types are unavailable, ordinary methods named
+//! `metadata`, `file_type`,
 //! `read_dir`, or `try_exists` are conservatively treated as filesystem
 //! observations and can produce a false positive. Intentional collapses require
 //! a reasoned allow on the one `let` statement containing the probe;
