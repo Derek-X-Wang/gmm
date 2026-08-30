@@ -46,6 +46,7 @@ jobs:
       # uploads the binary + `latest.json` + `.sig` to a draft GitHub
       # Release. We publish manually after smoke-testing the artefacts.
       - uses: tauri-apps/tauri-action@v0
+        id: tauri
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -59,3 +60,78 @@ jobs:
           # configured in tauri.conf.json's plugins.updater.endpoints.
           includeUpdaterJson: true
           projectPath: src-tauri
+
+      # tauri-action reports the files it found after the bundler runs. Hash
+      # that output instead of naming an MSI here so adding or changing bundle
+      # targets cannot leave a shipped artefact out of the release notes.
+      - name: Add SHA-256 digests to the release body
+        shell: pwsh
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:ARTIFACT_PATHS)) {
+            throw "tauri-action reported no release artefacts to hash"
+          }
+
+          $artifactPaths = @($env:ARTIFACT_PATHS | ConvertFrom-Json)
+          if ($artifactPaths.Count -eq 0) {
+            throw "tauri-action reported no release artefacts to hash"
+          }
+
+          $hashRows = foreach ($artifactPath in $artifactPaths) {
+            if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+              throw "tauri-action reported a missing release artefact: $artifactPath"
+            }
+
+            $digest = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash
+            $name = [System.IO.Path]::GetFileName($artifactPath)
+            "| ``$name`` | ``$($digest.ToLowerInvariant())`` |"
+          }
+
+          $beginMarker = "<!-- gmm-release-sha256:start -->"
+          $endMarker = "<!-- gmm-release-sha256:end -->"
+          $digestSection = @(
+            $beginMarker
+            "## Verify the download"
+            ""
+            "Run ``Get-FileHash -LiteralPath <downloaded-file> -Algorithm SHA256`` and compare its ``Hash`` value with the matching artefact below."
+            ""
+            "| Artefact | SHA-256 |"
+            "| --- | --- |"
+            $hashRows
+            $endMarker
+          ) -join "`n"
+
+          $headers = @{
+            Accept = "application/vnd.github+json"
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+          $releaseUri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID"
+          $release = Invoke-RestMethod -Uri $releaseUri -Headers $headers
+          $existingBody = [string]$release.body
+          $sectionPattern = "(?s)$([regex]::Escape($beginMarker)).*?$([regex]::Escape($endMarker))"
+
+          if ($existingBody -match $sectionPattern) {
+            $releaseBody = [regex]::Replace(
+              $existingBody,
+              $sectionPattern,
+              $digestSection
+            )
+          } elseif ([string]::IsNullOrWhiteSpace($existingBody)) {
+            $releaseBody = $digestSection
+          } else {
+            $releaseBody = "$($existingBody.TrimEnd())`n`n$digestSection"
+          }
+
+          $payload = @{ body = $releaseBody } | ConvertTo-Json
+          Invoke-RestMethod `
+            -Uri $releaseUri `
+            -Method Patch `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body $payload | Out-Null
