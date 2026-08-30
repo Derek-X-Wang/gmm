@@ -13,6 +13,23 @@ use std::fs;
 use gmm_lib::core::{Core, Error, GameCode};
 use tempfile::TempDir;
 
+async fn persist_library_setting(tmp: &TempDir, key: &str, path: &std::path::Path) {
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open fixture database");
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .bind(path.to_string_lossy().as_ref())
+    .execute(&pool)
+    .await
+    .expect("persist pre-existing Library setting");
+    pool.close().await;
+}
+
 async fn make_mod(
     core: &Core,
     game: GameCode,
@@ -252,6 +269,139 @@ async fn global_library_root_may_not_overlap_the_importer_backup_tree() {
         core.resolved_library_root().await.expect("resolved root"),
         library_default,
         "a refused global root must leave the effective Library root untouched",
+    );
+}
+
+/// Existing settings written by an older GMM must pass through the same
+/// validating resolver as newly selected roots. Settings still reads the raw
+/// override, and changing away from the unsafe root repairs only the setting.
+///
+/// Mutation oracle: removing validation from `resolved_library_root` or
+/// `resolved_library_root_for` fires the named existing-overlap assertions.
+#[tokio::test]
+async fn existing_overlapping_library_configuration_is_refused_when_used_but_remains_fixable() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_default = tmp.path().join("default_library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_default.clone(), &db_url)
+        .await
+        .expect("init core");
+    let backups_root = tmp.path().join("backups");
+    let unsafe_global = backups_root.join("legacy-library");
+    fs::create_dir_all(&unsafe_global).expect("legacy overlapping root");
+    fs::write(unsafe_global.join("must-stay.txt"), b"untouched").expect("unsafe-root sentinel");
+    persist_library_setting(&tmp, "library.root", &unsafe_global).await;
+
+    let global = core.resolved_library_root().await;
+    assert!(
+        matches!(
+            global,
+            Err(Error::LibraryRootOverlapsBackups { ref path, ref backups })
+                if path == &unsafe_global && backups == &backups_root
+        ),
+        "an existing global overlap must be refused when GMM resolves it for use and name both paths, got: {global:?}",
+    );
+    assert_eq!(
+        core.library_root_override()
+            .await
+            .expect("read raw global override"),
+        Some(unsafe_global.clone()),
+        "Settings must still be able to read the unsafe override so the user can repair it",
+    );
+
+    let safe_global = tmp.path().join("safe-library");
+    core.set_library_root(Some(&safe_global))
+        .await
+        .expect("repair unsafe global setting");
+    assert_eq!(
+        core.resolved_library_root()
+            .await
+            .expect("resolved repaired global"),
+        safe_global,
+    );
+    assert_eq!(
+        fs::read(unsafe_global.join("must-stay.txt")).expect("read unsafe-root sentinel"),
+        b"untouched",
+        "repair must not read, move, or delete bytes from the overlapping root",
+    );
+
+    let unsafe_game = backups_root.join("legacy-gimi");
+    fs::create_dir_all(&unsafe_game).expect("legacy per-game overlapping root");
+    persist_library_setting(&tmp, "library.gimi", &unsafe_game).await;
+    let per_game = core.resolved_library_root_for(GameCode::Gimi).await;
+    assert!(
+        matches!(
+            per_game,
+            Err(Error::LibraryRootOverlapsBackups { ref path, ref backups })
+                if path == &unsafe_game && backups == &backups_root
+        ),
+        "an existing per-game overlap must be refused when GMM resolves it for use and name both paths, got: {per_game:?}",
+    );
+    assert_eq!(
+        core.library_root_override_for_game(GameCode::Gimi)
+            .await
+            .expect("read raw per-game override"),
+        Some(unsafe_game),
+        "Settings must still be able to read the unsafe per-game override",
+    );
+
+    let safe_game = tmp.path().join("safe-gimi");
+    core.set_library_path_for_game(GameCode::Gimi, Some(&safe_game))
+        .await
+        .expect("repair unsafe per-game setting");
+    assert_eq!(
+        core.resolved_library_root_for(GameCode::Gimi)
+            .await
+            .expect("resolved repaired per-game root"),
+        safe_game,
+    );
+}
+
+/// Canonicalisation can fail for an ordinary future descendant, for a missing
+/// tail reached through a junction/symlink, or because the spelling contains
+/// `..`. The fallback must retain case-insensitive overlap evidence for all
+/// three shapes.
+///
+/// Mutation oracle: making the fallback case-sensitive fires the first named
+/// refusal assertion; bypassing ancestor resolution or lexical normalisation
+/// fires the corresponding later assertion.
+#[tokio::test]
+async fn overlap_fallback_handles_case_missing_descendants_links_and_parent_segments() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_default = tmp.path().join("default_library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_default, &db_url)
+        .await
+        .expect("init core");
+    let backups_root = tmp.path().join("backups");
+
+    let differently_cased_missing = tmp.path().join("BACKUPS").join("Future-Library");
+    let error = core
+        .set_library_root(Some(&differently_cased_missing))
+        .await;
+    assert!(
+        matches!(error, Err(Error::LibraryRootOverlapsBackups { .. })),
+        "the fallback must refuse a differently-cased not-yet-created descendant of the backup tree, got: {error:?}",
+    );
+
+    fs::create_dir_all(&backups_root).expect("backup tree");
+    let alias = tmp.path().join("backup-alias");
+    gmm_lib::core::junction::create(&alias, &backups_root).expect("backup tree alias");
+    let through_alias = alias.join("future-library");
+    let error = core.set_library_root(Some(&through_alias)).await;
+    assert!(
+        matches!(error, Err(Error::LibraryRootOverlapsBackups { .. })),
+        "the fallback must refuse a missing descendant reached through a junction or symlink ancestor, got: {error:?}",
+    );
+
+    let with_parent = backups_root
+        .join("not-created")
+        .join("..")
+        .join("future-library");
+    let error = core.set_library_root(Some(&with_parent)).await;
+    assert!(
+        matches!(error, Err(Error::LibraryRootOverlapsBackups { .. })),
+        "the fallback must refuse an overlapping path whose spelling contains a parent segment, got: {error:?}",
     );
 }
 

@@ -581,7 +581,7 @@ async fn acknowledge_and_release_preserves_bytes_at_both_recorded_locations() {
 /// branch leaves the released backup unmarked and fires the named
 /// assertions below.
 #[tokio::test]
-async fn rollback_after_acknowledge_and_release_ignores_the_released_backup() {
+async fn rollback_after_absent_acknowledge_release_ignores_the_reappeared_backup() {
     let tmp = TempDir::new().expect("temporary app data");
     let library = tmp.path().join("library");
     let game = tmp.path().join("Genshin");
@@ -622,12 +622,11 @@ async fn rollback_after_acknowledge_and_release_ignores_the_released_backup() {
         .backup_path;
     drop(core);
 
-    // Move the original backup object outside the backups root, so the
-    // only rollback candidate left behind the released witness is the
-    // recorded (possibly partial) directory itself.
+    // Replace the recorded backup object so startup exposes the terminal
+    // acknowledge-and-release action.
     let displaced = tmp.path().join("displaced-original");
     std::fs::rename(&backup, &displaced).expect("move the recorded backup object aside");
-    std::fs::create_dir(&backup).expect("recreate the recorded backup directory");
+    std::fs::create_dir(&backup).expect("replace the recorded backup directory");
     std::fs::copy(displaced.join("d3dx.ini"), backup.join("d3dx.ini"))
         .expect("preserve backup bytes at the recorded path");
 
@@ -645,6 +644,10 @@ async fn rollback_after_acknowledge_and_release_ignores_the_released_backup() {
         "a changed backup identity must expose acknowledge-and-release"
     );
 
+    // The changed object disappears after the user sees the action but before
+    // release. The durable marker must still outlive the witness.
+    std::fs::remove_dir_all(&backup).expect("make recorded backup absent before release");
+
     recovered
         .retire_interrupted_importer_evacuation(GameCode::Gimi)
         .await
@@ -655,8 +658,14 @@ async fn rollback_after_acknowledge_and_release_ignores_the_released_backup() {
     let marker = backup.with_file_name(marker_name);
     assert!(
         marker.is_file(),
-        "acknowledge-and-release must mark the recorded backup as a non-authoritative remnant before releasing the witness"
+        "acknowledge-and-release must durably mark an absent recorded backup path before releasing the witness"
     );
+
+    // Reappearance after the witness is gone must not create a new
+    // authoritative rollback source at the released path.
+    std::fs::create_dir(&backup).expect("recreate the recorded backup directory");
+    std::fs::copy(displaced.join("d3dx.ini"), backup.join("d3dx.ini"))
+        .expect("restore backup bytes at the recorded path");
 
     std::fs::write(game.join("d3dx.ini"), b"current importer bytes")
         .expect("make a rollback from the released backup observable");

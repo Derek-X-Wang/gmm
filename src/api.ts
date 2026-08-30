@@ -219,6 +219,13 @@ export interface LibraryPaths {
   effectiveRoot: string;
   perGameOverrides: Record<string, string | null>;
   perGameEffective: Record<string, string>;
+  overlaps: LibraryRootOverlap[];
+}
+
+export interface LibraryRootOverlap {
+  game: GameCode | null;
+  path: string;
+  backups: string;
 }
 
 export interface MoveReport {

@@ -227,6 +227,7 @@ fn library_paths_response_uses_camel_case() {
         effective_root: "/default".into(),
         per_game_overrides,
         per_game_effective,
+        overlaps: Vec::new(),
     };
     let v = to_json(&lp);
     let obj = v.as_object().expect("object");
@@ -235,6 +236,7 @@ fn library_paths_response_uses_camel_case() {
     assert!(obj.contains_key("effectiveRoot"));
     assert!(obj.contains_key("perGameOverrides"));
     assert!(obj.contains_key("perGameEffective"));
+    assert!(obj.contains_key("overlaps"));
 }
 
 #[test]

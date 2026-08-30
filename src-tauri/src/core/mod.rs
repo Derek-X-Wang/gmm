@@ -36,7 +36,8 @@ pub mod volume;
 mod windows_directory_delete;
 pub mod zip_import;
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -242,9 +243,15 @@ impl Core {
     /// construction time.
     pub async fn resolved_library_root(&self) -> Result<PathBuf> {
         let override_path = get_setting(&self.pool, keys::library_root()).await?;
-        Ok(override_path
+        let resolved = override_path
             .map(PathBuf::from)
-            .unwrap_or_else(|| self.default_library_root.clone()))
+            .unwrap_or_else(|| self.default_library_root.clone());
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Library mutation policy exemption: this pure overlap validation performs no filesystem mutation"
+        )]
+        self.ensure_library_root_disjoint_from_backups(&resolved)?;
+        Ok(resolved)
     }
 
     /// Effective Library subtree for `game`. Per-game override wins; if
@@ -252,9 +259,28 @@ impl Core {
     pub async fn resolved_library_root_for(&self, game: GameCode) -> Result<PathBuf> {
         let per_game = get_setting(&self.pool, &keys::library_root_for_game(game)).await?;
         if let Some(p) = per_game {
-            return Ok(PathBuf::from(p));
+            let resolved = PathBuf::from(p);
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "Library mutation policy exemption: this pure overlap validation performs no filesystem mutation"
+            )]
+            self.ensure_library_root_disjoint_from_backups(&resolved)?;
+            return Ok(resolved);
         }
-        Ok(self.resolved_library_root().await?.join(game.as_str()))
+        let resolved = self.resolved_library_root().await?.join(game.as_str());
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Library mutation policy exemption: this pure overlap validation performs no filesystem mutation"
+        )]
+        self.ensure_library_root_disjoint_from_backups(&resolved)?;
+        Ok(resolved)
+    }
+
+    /// Validate an effective Library root against app-owned importer backups.
+    /// Kept on `Core` so Settings can report an invalid persisted override
+    /// without duplicating how the backup tree is located.
+    fn ensure_library_root_disjoint_from_backups(&self, root: &Path) -> Result<()> {
+        ensure_library_root_disjoint_from_backups(root, &self.data_dir().join("backups"))
     }
 
     /// Slice 16-b (#24): read the persisted onboarding state. The
@@ -378,14 +404,31 @@ impl Core {
         let mut fence = self
             .begin_library_mutation(library_mutation::LibraryMutation::SetLibraryRoot)
             .await?;
-        let previous = self.resolved_library_root_in_mutation(&mut fence).await?;
+        let previous = self.configured_library_root_in_mutation(&mut fence).await?;
         let next = new_root
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.default_library_root.clone());
 
         // Pure validation before anything moves: the Library root must
         // never overlap the importer backup tree.
-        ensure_library_root_disjoint_from_backups(&next, &self.data_dir().join("backups"))?;
+        self.ensure_library_root_disjoint_from_backups(&next)?;
+
+        // A persisted overlap predating this guard is unsafe to inspect or
+        // relocate. Repair the setting without touching that tree; the
+        // Settings warning tells the user those existing bytes stay put.
+        if self
+            .ensure_library_root_disjoint_from_backups(&previous)
+            .is_err()
+        {
+            put_setting(
+                &mut *fence.transaction,
+                keys::library_root(),
+                new_root.map(|p| p.to_string_lossy().to_string()).as_deref(),
+            )
+            .await?;
+            fence.commit().await?;
+            return Ok(MoveReport::default());
+        }
 
         if previous == next {
             put_setting(
@@ -431,7 +474,7 @@ impl Core {
             .begin_library_mutation(library_mutation::LibraryMutation::SetLibraryPathForGame)
             .await?;
         let previous = self
-            .resolved_library_root_for_in_mutation(game, &mut fence)
+            .configured_library_root_for_in_mutation(game, &mut fence)
             .await?;
         let next = new_path.map(Path::to_path_buf).unwrap_or_else(|| {
             // When clearing, the effective path becomes
@@ -444,7 +487,7 @@ impl Core {
         });
 
         let fallback = self
-            .resolved_library_root_in_mutation(&mut fence)
+            .configured_library_root_in_mutation(&mut fence)
             .await?
             .join(game.as_str());
         let next_effective = if next.as_os_str().is_empty() {
@@ -457,10 +500,23 @@ impl Core {
         // never overlap the importer backup tree. The per-game override is
         // an arbitrary user path, so this is the fence that keeps recovery
         // remnant markers out of Library storage.
-        ensure_library_root_disjoint_from_backups(
-            &next_effective,
-            &self.data_dir().join("backups"),
-        )?;
+        self.ensure_library_root_disjoint_from_backups(&next_effective)?;
+
+        // See the global repair branch above: changing away from a legacy
+        // overlap must update only the setting, never read or move that tree.
+        if self
+            .ensure_library_root_disjoint_from_backups(&previous)
+            .is_err()
+        {
+            put_setting(
+                &mut *fence.transaction,
+                &keys::library_root_for_game(game),
+                new_path.map(|p| p.to_string_lossy().to_string()).as_deref(),
+            )
+            .await?;
+            fence.commit().await?;
+            return Ok(MoveReport::default());
+        }
 
         if previous == next_effective {
             put_setting(
@@ -4325,22 +4381,21 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// equal to, inside, or an ancestor of the backups root, those writes
 /// would land inside user-configured Library storage, and directories the
 /// Library creates inside the backups tree could become importer rollback
-/// candidates. This is **enforced** here — at the two entry points that
-/// accept a Library root, [`Core::set_library_root`] and
-/// [`Core::set_library_path_for_game`] — so the backups tree can never
-/// become Library-owned content; a comment alone would not stop it.
+/// candidates. This is enforced both when configuration changes and every
+/// time an effective Library root is resolved for filesystem work. Settings
+/// reads use the raw override values so a legacy overlap remains visible and
+/// fixable.
 ///
 /// Both containment directions matter: a proposed root inside the backups
 /// tree puts Library bytes under rollback selection, and the backups tree
 /// inside a proposed root puts the unfenced marker writes inside the
-/// Library. Each direction is tested twice: [`path_within`] canonicalises
-/// and recognises NTFS/symlink aliases, while the raw component-wise
-/// [`Path::starts_with`] covers a side that does not exist yet and so
-/// cannot be canonicalised into the same spelling (the backups root may
-/// legitimately be absent until the first importer install).
+/// Library. Each direction first uses [`path_within`] for fully existing
+/// aliases, then a case-insensitive fallback that resolves the deepest
+/// existing ancestor and lexically normalises the missing tail.
 fn ensure_library_root_disjoint_from_backups(proposed: &Path, backups_root: &Path) -> Result<()> {
-    let overlaps =
-        |path: &Path, ancestor: &Path| path_within(path, ancestor) || path.starts_with(ancestor);
+    let overlaps = |path: &Path, ancestor: &Path| {
+        path_within(path, ancestor) || case_insensitive_path_within(path, ancestor)
+    };
     if overlaps(proposed, backups_root) || overlaps(backups_root, proposed) {
         return Err(Error::LibraryRootOverlapsBackups {
             path: proposed.to_path_buf(),
@@ -4348,6 +4403,74 @@ fn ensure_library_root_disjoint_from_backups(proposed: &Path, backups_root: &Pat
         });
     }
     Ok(())
+}
+
+/// Case-insensitive containment evidence for paths that cannot both be fully
+/// canonicalised.
+///
+/// This fallback is necessarily heuristic: it can resolve aliases only through
+/// the deepest ancestor that exists, and it cannot prove the identity of a
+/// missing tail. It does handle ordinary Windows spelling differences,
+/// symlink/junction ancestors, and lexical `..` components; positive matches
+/// fail closed while uncertain non-matches remain non-proof.
+fn case_insensitive_path_within(path: &Path, ancestor: &Path) -> bool {
+    let path = canonicalize_existing_prefix(&lexically_normalized(path));
+    let ancestor = canonicalize_existing_prefix(&lexically_normalized(ancestor));
+    let path_components = case_folded_components(&path);
+    let ancestor_components = case_folded_components(&ancestor);
+    path_components.starts_with(&ancestor_components)
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    let mut candidate = path;
+    let mut missing = Vec::<OsString>::new();
+    loop {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the overlap fallback deliberately resolves only an existing ancestor and retains the missing tail as lexical evidence"
+        )]
+        if let Ok(mut canonical) = std::fs::canonicalize(candidate) {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return lexically_normalized(&canonical);
+        }
+        let Some(name) = candidate.file_name() else {
+            return path.to_path_buf();
+        };
+        missing.push(name.to_os_string());
+        let Some(parent) = candidate.parent() else {
+            return path.to_path_buf();
+        };
+        candidate = parent;
+    }
+}
+
+fn lexically_normalized(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn case_folded_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+        .collect()
 }
 
 /// Is `path` inside `ancestor`?
