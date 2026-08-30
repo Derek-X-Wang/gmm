@@ -10,8 +10,8 @@
 //! against the matched error's `kind()`. It also rejects direct follow-up
 //! filesystem lookups on entries yielded by `read_dir` unless the lookup is
 //! inside `resolve_enumerated_entry`, plus per-entry errors discarded with
-//! `filter_map(Result::ok)`, `.flatten()`, or `.ok()` on a loop-bound entry
-//! `Result`.
+//! `filter_map(Result::ok)` or `.flatten()` on a `ReadDir` iterator, or with
+//! `.ok()`, `if let`, let-else, or `match` on a loop-bound entry `Result`.
 //!
 //! This is deliberately not a Rust type checker. It recognizes standard-library
 //! filesystem calls and values that remain syntactically connected through a
@@ -19,12 +19,17 @@
 //! an unrelated function name, a value passed across a function boundary, or
 //! filesystem access emitted by a declarative or procedural macro still requires
 //! review. Per-entry discards hidden in a closure such as
-//! `filter_map(|entry| entry.ok())`, iterator filtering such as
-//! `.filter(|entry| entry.is_ok())`, and `while let Some(Ok(entry))` iteration are
-//! also review concerns rather than structurally proven here. A per-entry discard
-//! reached through a receiver the visitor cannot trace back to `read_dir`, such
-//! as an intervening `.unwrap()` or `.expect()` or an iterator returned from a
-//! helper, is likewise a review concern rather than structurally proven here.
+//! `filter_map(|entry| entry.ok())`, an `IoResult` alias in place of `Result::ok`,
+//! iterator filtering such as `.filter(|entry| entry.is_ok())`, `map_while`,
+//! `flat_map`, `while let Some(Ok(entry))` iteration, and
+//! `entry.as_ref().ok()` are also review concerns rather than structurally proven
+//! here. The iterator receiver rules recognize a direct `read_dir` expression,
+//! including `?`, `await`, or a block tail, and a local binding initialized to
+//! exactly that expression. Any intervening iterator adapter defeats both
+//! iterator rules, including `.into_iter()`, `.take()`, `.filter()`, and
+//! `collect(...).into_iter()`; so do `.unwrap()`, `.expect()`, and an iterator
+//! returned from a helper. An `.enumerate()` adapter before a loop likewise
+//! prevents the visitor from recognizing the loop-bound entry `Result`.
 //! Because receiver types are unavailable, ordinary methods named
 //! `metadata`, `file_type`,
 //! `read_dir`, or `try_exists` are conservatively treated as filesystem
@@ -357,22 +362,33 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
             visit::visit_expr(self, &init.expr);
             let mut bindings = Vec::new();
             collect_bindings(&local.pat, &mut bindings);
-            if self.is_filesystem_result(&init.expr) {
+            let filesystem_result = self.is_filesystem_result(&init.expr);
+            let read_dir_entry_result = self.is_read_dir_entry_result(&init.expr);
+            if filesystem_result {
                 self.filesystem_results.extend(bindings.iter().cloned());
             }
-            if contains_read_dir(&init.expr, self.aliases) {
+            if self.is_read_dir_iterator(&init.expr) {
                 self.directory_iterators.extend(bindings.iter().cloned());
             }
             if is_entry_path(&init.expr, &self.enumerated_entries) {
                 self.enumerated_paths.extend(bindings);
             }
-            if self.is_filesystem_result(&init.expr)
+            if (filesystem_result || read_dir_entry_result)
                 && init
                     .diverge
                     .as_ref()
                     .is_some_and(|(_, diverge)| collapses_to_bool_or_option(diverge))
             {
                 self.report("let-else collapses a filesystem Result");
+            }
+            if read_dir_entry_result
+                && pattern_contains_ok(&local.pat)
+                && init
+                    .diverge
+                    .as_ref()
+                    .is_some_and(|(_, diverge)| skips_current_iteration(diverge))
+            {
+                self.report("let-else discards a per-entry read_dir error");
             }
         }
     }
@@ -483,6 +499,7 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
 
     fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
         let filesystem_result = self.is_filesystem_result(&expression.expr);
+        let read_dir_entry_result = self.is_read_dir_entry_result(&expression.expr);
         let unclassified_error_collapse = expression.arms.iter().any(|arm| {
             pattern_contains_err(&arm.pat)
                 && !arm
@@ -491,19 +508,34 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
                     .is_some_and(|(_, guard)| guard_proves_not_found(&arm.pat, guard))
                 && collapses_to_bool_or_option(&arm.body)
         });
+        let unclassified_entry_error_discard = expression.arms.iter().any(|arm| {
+            pattern_contains_err(&arm.pat)
+                && !arm
+                    .guard
+                    .as_ref()
+                    .is_some_and(|(_, guard)| guard_proves_not_found(&arm.pat, guard))
+                && skips_current_iteration(&arm.body)
+        });
         let result_reduced_to_bool_or_option = !expression.arms.is_empty()
             && expression
                 .arms
                 .iter()
                 .all(|arm| collapses_to_bool_or_option(&arm.body));
-        if filesystem_result && (unclassified_error_collapse || result_reduced_to_bool_or_option) {
+        if (filesystem_result || read_dir_entry_result)
+            && (unclassified_error_collapse || result_reduced_to_bool_or_option)
+        {
             self.report("match arm collapses a filesystem error to bool or Option");
+        }
+        if read_dir_entry_result && unclassified_entry_error_discard {
+            self.report("match arm discards a per-entry read_dir error");
         }
         visit::visit_expr_match(self, expression);
     }
 
     fn visit_expr_if(&mut self, expression: &'ast syn::ExprIf) {
         if let syn::Expr::Let(condition) = peel_expression(&expression.cond) {
+            let filesystem_result = self.is_filesystem_result(&condition.expr);
+            let read_dir_entry_result = self.is_read_dir_entry_result(&condition.expr);
             let then_collapses = block_collapses(&expression.then_branch);
             let else_collapses = expression
                 .else_branch
@@ -512,10 +544,24 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
             let unclassified_error_collapse =
                 pattern_contains_err(&condition.pat) && (then_collapses || else_collapses);
             let result_reduced_to_bool_or_option = then_collapses && else_collapses;
-            if self.is_filesystem_result(&condition.expr)
+            if (filesystem_result || read_dir_entry_result)
                 && (unclassified_error_collapse || result_reduced_to_bool_or_option)
             {
                 self.report("if-let collapses a filesystem error to bool or Option");
+            }
+            let entry_error_is_implicitly_discarded =
+                pattern_contains_ok(&condition.pat) && expression.else_branch.is_none();
+            let entry_error_is_explicitly_discarded = (pattern_contains_err(&condition.pat)
+                && block_skips_current_iteration(&expression.then_branch))
+                || (pattern_contains_ok(&condition.pat)
+                    && expression
+                        .else_branch
+                        .as_ref()
+                        .is_some_and(|(_, branch)| skips_current_iteration(branch)));
+            if read_dir_entry_result
+                && (entry_error_is_implicitly_discarded || entry_error_is_explicitly_discarded)
+            {
+                self.report("if-let discards a per-entry read_dir error");
             }
         }
         visit::visit_expr_if(self, expression);
@@ -881,6 +927,22 @@ fn block_collapses(block: &syn::Block) -> bool {
         .any(collapses_to_bool_or_option)
 }
 
+fn skips_current_iteration(expression: &syn::Expr) -> bool {
+    match peel_expression(expression) {
+        syn::Expr::Continue(_) => true,
+        syn::Expr::Block(block) => block_skips_current_iteration(&block.block),
+        _ => false,
+    }
+}
+
+fn block_skips_current_iteration(block: &syn::Block) -> bool {
+    block
+        .stmts
+        .last()
+        .and_then(statement_expression)
+        .is_some_and(skips_current_iteration)
+}
+
 fn pattern_contains_err(pattern: &syn::Pat) -> bool {
     match pattern {
         syn::Pat::TupleStruct(tuple) => {
@@ -894,6 +956,23 @@ fn pattern_contains_err(pattern: &syn::Pat) -> bool {
         syn::Pat::Or(or) => or.cases.iter().any(pattern_contains_err),
         syn::Pat::Paren(paren) => pattern_contains_err(&paren.pat),
         syn::Pat::Reference(reference) => pattern_contains_err(&reference.pat),
+        _ => false,
+    }
+}
+
+fn pattern_contains_ok(pattern: &syn::Pat) -> bool {
+    match pattern {
+        syn::Pat::TupleStruct(tuple) => {
+            tuple
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "Ok")
+                || tuple.elems.iter().any(pattern_contains_ok)
+        }
+        syn::Pat::Or(or) => or.cases.iter().any(pattern_contains_ok),
+        syn::Pat::Paren(paren) => pattern_contains_ok(&paren.pat),
+        syn::Pat::Reference(reference) => pattern_contains_ok(&reference.pat),
         _ => false,
     }
 }
