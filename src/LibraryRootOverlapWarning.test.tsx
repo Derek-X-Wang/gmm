@@ -31,6 +31,7 @@ it("names both paths and explains how to repair an unsafe root", () => {
   expect(warning).toHaveTextContent(
     /enable, disable, and Junction reconciliation still use each Mod's recorded path/i,
   );
+  expect(warning).not.toHaveTextContent(/no in-app action clears/i);
   expect(warning).not.toHaveTextContent(/GMM will not use these Library roots/i);
 });
 
@@ -57,7 +58,11 @@ it("keeps naming Mods left in the backup tree after the configured root is repai
   expect(warning).toHaveTextContent(
     "C:\\Users\\user\\AppData\\Roaming\\GMM\\backups\\legacy\\01STRANDED",
   );
-  expect(warning).toHaveTextContent(/warning remains until no Mod record points there/i);
+  expect(warning).toHaveTextContent(/no in-app action clears these stranded Mod records/i);
+  expect(warning).toHaveTextContent(/move the named folders into the current Library root by hand/i);
+  expect(warning).toHaveTextContent(/re-adopt them/i);
+  expect(warning).not.toHaveTextContent(/GMM blocks Library-wide operations/i);
+  expect(warning).not.toHaveTextContent(/choose a different root/i);
 });
 
 it("renders no empty-state noise for disjoint roots", () => {

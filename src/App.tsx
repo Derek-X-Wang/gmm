@@ -878,6 +878,19 @@ function LibraryPathsPanel() {
     if (typeof picked === "string") apply(picked);
   };
 
+  if (paths.isError) {
+    return (
+      <section className="card">
+        <h2>Library</h2>
+        <CommandErrorNotice
+          error={paths.error}
+          heading="Could not resolve Library paths."
+          detail="Library settings are unavailable until GMM can read their current paths."
+        />
+      </section>
+    );
+  }
+
   if (!paths.data) {
     return (
       <section className="card">

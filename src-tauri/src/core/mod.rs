@@ -4234,10 +4234,12 @@ impl Core {
         .fetch_all(&self.pool)
         .await?;
         let backups = self.data_dir().join("backups");
+        let canonical_backups = canonicalized_or_original(&backups);
+        let case_insensitive_backups = case_insensitive_components(&backups);
         let mut overlaps = Vec::new();
         for row in rows {
             let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
-            if !path_resolves_within(&path, &backups) {
+            if !path_resolves_within(&path, &canonical_backups, &case_insensitive_backups) {
                 continue;
             }
             overlaps.push(ModLibraryPathOverlap {
@@ -4499,6 +4501,10 @@ fn case_insensitive_path_within(path: &Path, ancestor: &Path) -> bool {
     path_components.starts_with(&ancestor_components)
 }
 
+fn case_insensitive_components(path: &Path) -> Vec<String> {
+    case_folded_components(&canonicalize_existing_prefix(&lexically_normalized(path)))
+}
+
 fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
     let mut candidate = path;
     let mut missing = Vec::<OsString>::new();
@@ -4555,8 +4561,22 @@ fn case_folded_components(path: &Path) -> Vec<String> {
 /// tree. Unlike the configured-root guard, this is intentionally one-way and
 /// does not preserve a merely lexical overlap when an existing Junction or
 /// symlink resolves outside the tree.
-fn path_resolves_within(path: &Path, ancestor: &Path) -> bool {
-    path_within(path, ancestor) || case_insensitive_path_within(path, ancestor)
+fn path_resolves_within(
+    path: &Path,
+    canonical_ancestor: &Path,
+    case_insensitive_ancestor: &[String],
+) -> bool {
+    canonicalized_or_original(path).starts_with(canonical_ancestor)
+        || case_insensitive_components(path).starts_with(case_insensitive_ancestor)
+}
+
+fn canonicalized_or_original(path: &Path) -> PathBuf {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "canonicalization feeds only positive containment evidence; false refuses or preserves bytes"
+    )]
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical
 }
 
 /// Is `path` inside `ancestor`?

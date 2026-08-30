@@ -63,6 +63,10 @@ let importerUpdateError: {
   kind: "invalidActiveVariant";
   message: string;
 } | null = null;
+let libraryPathsError: {
+  kind: "invalidActiveVariant";
+  message: string;
+} | null = null;
 let importerUpdate = {
   available: false,
   installedVersion: null as string | null,
@@ -118,6 +122,7 @@ function ipcResult(command: string) {
     case "mod_updates_globally_enabled":
       return true;
     case "get_library_paths":
+      if (libraryPathsError) throw libraryPathsError;
       return {
         defaultRoot: "C:\\GMM\\library",
         rootOverride: null,
@@ -157,6 +162,7 @@ beforeEach(() => {
   launchError = null;
   importerPinError = null;
   importerUpdateError = null;
+  libraryPathsError = null;
   importerUpdate = {
     available: false,
     installedVersion: null,
@@ -256,6 +262,24 @@ it("renders a structured failure when the Importer update query rejects", async 
     "invalidActiveVariant",
   );
   expect(alert).toHaveTextContent(importerUpdateError.message);
+});
+
+it("shows a Library path failure instead of resolving forever", async () => {
+  libraryPathsError = {
+    kind: "invalidActiveVariant",
+    message: "Could not read the configured Library paths.",
+  };
+  renderWithQuery(<App />);
+
+  const heading = await screen.findByText(/could not resolve Library paths/i);
+  const alert = heading.closest('[role="alert"]');
+  expect(alert).not.toBeNull();
+  expect(alert).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
+  );
+  expect(alert).toHaveTextContent(libraryPathsError.message);
+  expect(screen.queryByText(/resolving paths/i)).not.toBeInTheDocument();
 });
 
 it("shows a latest-importer-release failure instead of calling it unavailable", async () => {
