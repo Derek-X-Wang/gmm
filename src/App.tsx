@@ -67,6 +67,7 @@ import { ImporterEvacuationRecoveryWarning } from "./ImporterEvacuationRecoveryW
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { LibraryAuditWarning } from "./LibraryAuditWarning";
+import { LibraryRootOverlapWarning } from "./LibraryRootOverlapWarning";
 import {
   ReinstallRecoveryNotices,
   ReinstallRecoveryWarning,
@@ -897,6 +898,8 @@ function LibraryPathsPanel() {
         moves the bytes, then re-enables them against the new location. Non-NTFS targets
         are refused before any move.
       </p>
+
+      <LibraryRootOverlapWarning overlaps={p.overlaps ?? []} />
 
       <div className="row">
         <input

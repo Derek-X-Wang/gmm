@@ -1163,6 +1163,12 @@ fn recovery_remnant_marker_path(backup_dir: &Path) -> PathBuf {
 
 fn mark_backup_as_recovery_remnant(backup_dir: &Path) -> Result<()> {
     let path = recovery_remnant_marker_path(backup_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| Error::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
     fs::write(
         &path,
         b"This directory was retained by interrupted Model Importer recovery and is not a complete rollback source.\n",
@@ -1170,8 +1176,8 @@ fn mark_backup_as_recovery_remnant(backup_dir: &Path) -> Result<()> {
     .map_err(|source| Error::Io { path, source })
 }
 
-/// Mark `backup_dir` as a non-authoritative recovery remnant when an entry
-/// is still present at that path.
+/// Mark `backup_dir` as a non-authoritative recovery remnant, whether or not
+/// an entry is currently present at that path.
 ///
 /// Acknowledge-and-release is the exit GMM takes when it **cannot** prove
 /// the recorded evacuation completed — a higher-uncertainty case than the
@@ -1179,17 +1185,15 @@ fn mark_backup_as_recovery_remnant(backup_dir: &Path) -> Result<()> {
 /// still at the recorded backup path must be excluded from rollback
 /// selection from the moment the witness row is released. Callers must
 /// invoke this before releasing the witness so there is no window where
-/// the directory is both a rollback candidate and unmarked. An absent
-/// backup needs no marker: there is nothing left to roll back to.
+/// the directory is both a rollback candidate and unmarked. The sibling marker
+/// is durable even when the directory is absent, so bytes that later reappear
+/// at the released path cannot silently become an authoritative rollback source.
+/// If the marker parent cannot be created or the marker cannot be written, this
+/// returns an error so the caller retains the witness and the user can retry
+/// after the storage becomes writable. Deliberately releasing without the marker
+/// would let a partial backup that later reappears become authoritative.
 pub(super) fn mark_retained_evacuation_backup(backup_dir: &Path) -> Result<()> {
-    let present = symlink_metadata_if_exists(backup_dir).map_err(|source| Error::Io {
-        path: backup_dir.to_path_buf(),
-        source,
-    })?;
-    if present.is_some() {
-        mark_backup_as_recovery_remnant(backup_dir)?;
-    }
-    Ok(())
+    mark_backup_as_recovery_remnant(backup_dir)
 }
 
 /// Record what the files in `backup_dir` were, so a later rollback can

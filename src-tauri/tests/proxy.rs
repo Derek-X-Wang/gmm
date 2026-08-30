@@ -84,6 +84,7 @@ async fn snapshot_redacts_userinfo_pasted_into_url() {
     // the snapshot serialiser still has to strip the userinfo.
     let snapshot = SettingsSnapshot {
         library_root: None,
+        library_root_overlaps_importer_backups: false,
         game_install_paths: Default::default(),
         proxy_url: Some("http://user:pass@proxy.local:8080".into()),
     };

@@ -3320,6 +3320,103 @@ async fn quarantined_reinstall_preserves_old_and_unproved_byte_trees() {
     assert!(listed[0].reinstall_recovery.is_some());
 }
 
+/// A persisted Library configuration is user-repairable state, not database
+/// corruption. Even when an interrupted reinstall must defer until that
+/// configuration is repaired, Core construction must leave the witness intact
+/// and make the Settings surface reachable. Both global and per-game
+/// persisted overrides obey the same startup invariant.
+///
+/// Mutation oracle: propagating `LibraryRootOverlapsBackups` from reinstall
+/// recovery in `Core::new` fires the case-specific construction assertion.
+#[tokio::test]
+async fn persisted_library_configuration_never_prevents_core_construction() {
+    for (scope, setting_key) in [("global", "library.root"), ("per-game", "library.gimi")] {
+        let env = TestEnv::new();
+        let core = env.core().await;
+        let imported = env.seed_mod(&core, "Configuration Blocked Recovery").await;
+        let root = imported.library_path.parent().expect("game Library root");
+        let token = Ulid::new();
+        let stage = root.join(format!(".gmm-reinstall-{token}"));
+        let quarantine = root.join(format!(".gmm-delete-{token}"));
+        std::fs::create_dir(&stage).expect("reinstall stage");
+        std::fs::write(stage.join("replacement.ini"), b"staged replacement")
+            .expect("staged replacement bytes");
+        let unsafe_root = env
+            .data_dir
+            .join("backups")
+            .join(format!("legacy-{scope}-library"));
+
+        let pool = sqlx::SqlitePool::connect(&env.db_url)
+            .await
+            .expect("open DB for recovery witness and legacy setting");
+        sqlx::query(
+            "INSERT INTO reinstall_swaps (
+                token, mod_id, game_code, library_path, staged_path,
+                quarantine_path, old_identity, staged_identity, created_at
+             ) VALUES (?, ?, 'gimi', ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(token.to_string())
+        .bind(&imported.id)
+        .bind(imported.library_path.to_string_lossy().as_ref())
+        .bind(stage.to_string_lossy().as_ref())
+        .bind(quarantine.to_string_lossy().as_ref())
+        .bind(durable_directory_key(&imported.library_path))
+        .bind(durable_directory_key(&stage))
+        .bind("2026-08-29T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("insert valid reinstall witness");
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(setting_key)
+        .bind(unsafe_root.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .expect("persist legacy overlapping Library setting");
+        pool.close().await;
+        drop(core);
+
+        let started = match Core::new(env.library.clone(), &env.db_url).await {
+            Ok(started) => started,
+            Err(error) => panic!(
+                "persisted {scope} Library configuration must never prevent Core construction: {error}"
+            ),
+        };
+        let configured = if scope == "global" {
+            started
+                .library_root_override()
+                .await
+                .expect("read raw global override")
+        } else {
+            started
+                .library_root_override_for_game(GameCode::Gimi)
+                .await
+                .expect("read raw per-game override")
+        };
+        assert_eq!(
+            configured,
+            Some(unsafe_root),
+            "startup must preserve the overlapping setting for in-app repair",
+        );
+
+        let pool = sqlx::SqlitePool::connect(&env.db_url)
+            .await
+            .expect("open DB after configuration-blocked startup");
+        let witness_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM reinstall_swaps WHERE token = ?")
+                .bind(token.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count deferred reinstall witness");
+        assert_eq!(
+            witness_count, 1,
+            "configuration-blocked recovery must leave the witness for a later boot",
+        );
+    }
+}
+
 /// A malformed witness is database corruption, not evidence about one Mod's
 /// filesystem bytes. This fixture is deliberately artificial: it disables
 /// SQLite foreign keys on one connection to model a corrupt or incorrectly

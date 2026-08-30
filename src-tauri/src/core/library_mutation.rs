@@ -3472,7 +3472,7 @@ impl Core {
         }
     }
 
-    pub(super) async fn resolved_library_root_in_mutation(
+    pub(super) async fn configured_library_root_in_mutation(
         &self,
         fence: &mut LibraryMutationFence,
     ) -> Result<PathBuf> {
@@ -3482,7 +3482,7 @@ impl Core {
             .unwrap_or_else(|| self.default_library_root.clone()))
     }
 
-    pub(super) async fn resolved_library_root_for_in_mutation(
+    pub(super) async fn configured_library_root_for_in_mutation(
         &self,
         game: GameCode,
         fence: &mut LibraryMutationFence,
@@ -3493,9 +3493,21 @@ impl Core {
             return Ok(PathBuf::from(path));
         }
         Ok(self
-            .resolved_library_root_in_mutation(fence)
+            .configured_library_root_in_mutation(fence)
             .await?
             .join(game.as_str()))
+    }
+
+    pub(super) async fn resolved_library_root_for_in_mutation(
+        &self,
+        game: GameCode,
+        fence: &mut LibraryMutationFence,
+    ) -> Result<PathBuf> {
+        let resolved = self
+            .configured_library_root_for_in_mutation(game, fence)
+            .await?;
+        self.ensure_library_root_disjoint_from_backups(&resolved)?;
+        Ok(resolved)
     }
 
     async fn ensure_no_active_session_in_library_mutation(

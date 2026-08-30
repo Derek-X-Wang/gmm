@@ -23,7 +23,7 @@ use crate::core::reconcile::{ReconcileResult, StartupReconcileState, StartupReco
 use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
 use crate::core::{
-    Core, DeletedLibraryDir, DuplicateResolution, GameCode, ImportZipOptions,
+    Core, DeletedLibraryDir, DuplicateResolution, Error, GameCode, ImportZipOptions,
     ImporterEvacuationRecovery, InterruptedSessionLaunch, LibraryAuditReport, Mod, MoveReport,
     ReinstallRecoveryOutcome, ReviewedDuplicateMod, SessionInfo,
 };
@@ -244,6 +244,20 @@ pub struct LibraryPaths {
     pub per_game_overrides: HashMap<String, Option<PathBuf>>,
     /// Effective per-game library path (always present).
     pub per_game_effective: HashMap<String, PathBuf>,
+    /// Persisted roots that cannot safely be used until the user changes them.
+    /// This is report data, not a command failure: Settings must remain open so
+    /// the invalid configuration can be repaired in-app.
+    pub overlaps: Vec<LibraryRootOverlap>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryRootOverlap {
+    /// `None` means the global root; otherwise this is one explicit per-game
+    /// override. Inherited per-game paths are covered by the global report.
+    pub game: Option<GameCode>,
+    pub path: PathBuf,
+    pub backups: PathBuf,
 }
 
 const ALL_GAMES: &[GameCode] = &[
@@ -262,10 +276,21 @@ pub async fn get_library_paths(core: State<'_, Core>) -> CommandResult<LibraryPa
         .library_root_override()
         .await
         .map_err(CommandError::from)?;
-    let effective_root = core
-        .resolved_library_root()
-        .await
-        .map_err(CommandError::from)?;
+    let effective_root = root_override
+        .clone()
+        .unwrap_or_else(|| default_root.clone());
+    let mut overlaps = Vec::new();
+    match core.resolved_library_root().await {
+        Ok(_) => {}
+        Err(Error::LibraryRootOverlapsBackups { path, backups }) => {
+            overlaps.push(LibraryRootOverlap {
+                game: None,
+                path,
+                backups,
+            });
+        }
+        Err(error) => return Err(CommandError::from(error)),
+    }
 
     let mut per_game_overrides = HashMap::new();
     let mut per_game_effective = HashMap::new();
@@ -275,10 +300,22 @@ pub async fn get_library_paths(core: State<'_, Core>) -> CommandResult<LibraryPa
             .library_root_override_for_game(*game)
             .await
             .map_err(CommandError::from)?;
-        let eff = core
-            .resolved_library_root_for(*game)
-            .await
-            .map_err(CommandError::from)?;
+        if over.is_some() {
+            match core.resolved_library_root_for(*game).await {
+                Ok(_) => {}
+                Err(Error::LibraryRootOverlapsBackups { path, backups }) => {
+                    overlaps.push(LibraryRootOverlap {
+                        game: Some(*game),
+                        path,
+                        backups,
+                    });
+                }
+                Err(error) => return Err(CommandError::from(error)),
+            }
+        }
+        let eff = over
+            .clone()
+            .unwrap_or_else(|| effective_root.join(game.as_str()));
         per_game_overrides.insert(key.clone(), over);
         per_game_effective.insert(key, eff);
     }
@@ -289,6 +326,7 @@ pub async fn get_library_paths(core: State<'_, Core>) -> CommandResult<LibraryPa
         effective_root,
         per_game_overrides,
         per_game_effective,
+        overlaps,
     })
 }
 
