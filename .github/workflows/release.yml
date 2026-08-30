@@ -73,6 +73,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
+          if ([string]::IsNullOrWhiteSpace($env:ARTIFACT_PATHS)) {
+            throw "tauri-action reported no release artefacts to hash"
+          }
+
           $artifactPaths = @($env:ARTIFACT_PATHS | ConvertFrom-Json)
           if ($artifactPaths.Count -eq 0) {
             throw "tauri-action reported no release artefacts to hash"

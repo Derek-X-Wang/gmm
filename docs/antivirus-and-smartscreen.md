@@ -38,8 +38,9 @@ matching SHA-256 in the release's **Verify the download** table:
 Get-FileHash -LiteralPath <downloaded-file> -Algorithm SHA256
 ```
 
-The release workflow lists every installer artefact produced by the bundler.
-GMM does not ship loose binaries outside its installer packages.
+The release workflow lists every release artefact reported by the bundler,
+including installer packages and their updater signature files. GMM does not
+ship loose binaries outside its installer packages.
 
 ## How to add an exclusion in Windows Defender
 
