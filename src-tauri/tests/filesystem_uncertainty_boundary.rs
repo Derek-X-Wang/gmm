@@ -9,18 +9,24 @@
 //! `NotFound` exception is accepted only when the AST proves an equality check
 //! against the matched error's `kind()`. It also rejects direct follow-up
 //! filesystem lookups on entries yielded by `read_dir` unless the lookup is
-//! inside `resolve_enumerated_entry`.
+//! inside `resolve_enumerated_entry`, plus per-entry errors discarded with
+//! `filter_map(Result::ok)`, `.flatten()`, or `.ok()` on a loop-bound entry
+//! `Result`.
 //!
 //! This is deliberately not a Rust type checker. It recognizes standard-library
 //! filesystem calls and values that remain syntactically connected through a
 //! local binding or ordinary `Result` combinator. A helper that hides I/O behind
 //! an unrelated function name, a value passed across a function boundary, or
 //! filesystem access emitted by a declarative or procedural macro still requires
-//! review. Because receiver types are unavailable, ordinary methods named
-//! `metadata`, `file_type`, `read_dir`, or `try_exists` are conservatively treated
-//! as filesystem observations and can produce a false positive. Intentional
-//! collapses require a reasoned allow on the one `let` statement containing the
-//! probe; function-level allows are rejected. Core cannot make `std::fs`
+//! review. Per-entry discards hidden in a closure such as
+//! `filter_map(|entry| entry.ok())`, iterator filtering such as
+//! `.filter(|entry| entry.is_ok())`, and `while let Some(Ok(entry))` iteration are
+//! also review concerns rather than structurally proven here. Because receiver
+//! types are unavailable, ordinary methods named `metadata`, `file_type`,
+//! `read_dir`, or `try_exists` are conservatively treated as filesystem
+//! observations and can produce a false positive. Intentional collapses require
+//! a reasoned allow on the one `let` statement containing the probe;
+//! function-level allows are rejected. Core cannot make `std::fs`
 //! unconstructible, so the safe helpers in `core::filesystem` remain preferred.
 
 use std::collections::HashSet;
@@ -185,6 +191,7 @@ impl BoundaryVisitor<'_> {
             violations: self.violations,
             filesystem_results: HashSet::new(),
             directory_iterators: HashSet::new(),
+            read_dir_entry_results: HashSet::new(),
             enumerated_entries: HashSet::new(),
             enumerated_paths: HashSet::new(),
             inside_enumerated_entry_resolver: 0,
@@ -232,6 +239,7 @@ struct FunctionAnalyzer<'a> {
     violations: &'a mut Vec<String>,
     filesystem_results: HashSet<String>,
     directory_iterators: HashSet<String>,
+    read_dir_entry_results: HashSet<String>,
     enumerated_entries: HashSet<String>,
     enumerated_paths: HashSet<String>,
     inside_enumerated_entry_resolver: usize,
@@ -280,6 +288,36 @@ impl FunctionAnalyzer<'_> {
             syn::Expr::MethodCall(call) => self.is_enumerated_value(&call.receiver),
             _ => false,
         }
+    }
+
+    fn is_read_dir_iterator(&self, expression: &syn::Expr) -> bool {
+        match peel_expression(expression) {
+            syn::Expr::Path(path) => single_ident(&path.path)
+                .is_some_and(|ident| self.directory_iterators.contains(&ident)),
+            syn::Expr::Call(call) => call_path(&call.func).is_some_and(|path| {
+                path.segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "read_dir")
+                    && is_filesystem_call(path, self.aliases)
+            }),
+            syn::Expr::MethodCall(call) => call.method == "read_dir",
+            syn::Expr::Try(tried) => self.is_read_dir_iterator(&tried.expr),
+            syn::Expr::Await(awaited) => self.is_read_dir_iterator(&awaited.base),
+            syn::Expr::Block(block) => block
+                .block
+                .stmts
+                .last()
+                .and_then(statement_expression)
+                .is_some_and(|expression| self.is_read_dir_iterator(expression)),
+            _ => false,
+        }
+    }
+
+    fn is_read_dir_entry_result(&self, expression: &syn::Expr) -> bool {
+        let syn::Expr::Path(path) = peel_expression(expression) else {
+            return false;
+        };
+        single_ident(&path.path).is_some_and(|ident| self.read_dir_entry_results.contains(&ident))
     }
 
     fn is_unwrapped_enumerated_lookup(&self, expression: &syn::Expr) -> bool {
@@ -340,28 +378,52 @@ impl<'ast> Visit<'ast> for FunctionAnalyzer<'_> {
         let enumerates_directory = contains_read_dir(&loop_expression.expr, self.aliases)
             || path_ident(&loop_expression.expr)
                 .is_some_and(|ident| self.directory_iterators.contains(&ident));
-        // Different enumeration loops have different contracts. Conflict and
-        // diagnostics scans deliberately skip an immediate child that vanishes;
-        // copy and mutation loops deliberately propagate the same race. Once a
-        // loop establishes the skip-on-NotFound policy through the resolver,
-        // every direct follow-up lookup in that loop must use it too.
-        if !enumerates_directory || !block_contains_resolver(&loop_expression.body) {
+        if !enumerates_directory {
             visit::visit_block(self, &loop_expression.body);
             return;
         }
 
         let mut bindings = Vec::new();
         collect_bindings(&loop_expression.pat, &mut bindings);
+        let previous_entry_results = self.read_dir_entry_results.clone();
+        if self.is_read_dir_iterator(&loop_expression.expr) {
+            self.read_dir_entry_results.extend(bindings.iter().cloned());
+        }
+
+        // Different enumeration loops have different contracts. Conflict and
+        // diagnostics scans deliberately skip an immediate child that vanishes;
+        // copy and mutation loops deliberately propagate the same race. Once a
+        // loop establishes the skip-on-NotFound policy through the resolver,
+        // every direct follow-up lookup in that loop must use it too.
+        if !block_contains_resolver(&loop_expression.body) {
+            visit::visit_block(self, &loop_expression.body);
+            self.read_dir_entry_results = previous_entry_results;
+            return;
+        }
+
         let previous_entries = self.enumerated_entries.clone();
         let previous_paths = self.enumerated_paths.clone();
         self.enumerated_entries.extend(bindings);
         visit::visit_block(self, &loop_expression.body);
         self.enumerated_entries = previous_entries;
         self.enumerated_paths = previous_paths;
+        self.read_dir_entry_results = previous_entry_results;
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         let method = call.method.to_string();
+        if method == "flatten" && self.is_read_dir_iterator(&call.receiver) {
+            self.report(".flatten() discards per-entry read_dir errors");
+        }
+        if method == "filter_map"
+            && self.is_read_dir_iterator(&call.receiver)
+            && call.args.first().is_some_and(is_result_ok_path)
+        {
+            self.report("filter_map(Result::ok) discards per-entry read_dir errors");
+        }
+        if method == "ok" && self.is_read_dir_entry_result(&call.receiver) {
+            self.report(".ok() discards a per-entry read_dir error");
+        }
         let explicitly_classifies_not_found =
             method == "is_err_and" && call.args.first().is_some_and(closure_proves_not_found);
         if collapses_result(&method)
@@ -565,6 +627,19 @@ fn is_known_filesystem_function(ident: &str) -> bool {
             | "symlink_metadata"
             | "write"
     )
+}
+
+fn is_result_ok_path(expression: &syn::Expr) -> bool {
+    let syn::Expr::Path(path) = peel_expression(expression) else {
+        return false;
+    };
+    let segments: Vec<String> = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect();
+    segments.ends_with(&["Result".to_string(), "ok".to_string()])
 }
 
 fn is_filesystem_result_method(method: &str) -> bool {
