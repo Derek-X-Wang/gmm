@@ -248,6 +248,9 @@ pub struct LibraryPaths {
     /// This is report data, not a command failure: Settings must remain open so
     /// the invalid configuration can be repaired in-app.
     pub overlaps: Vec<LibraryRootOverlap>,
+    /// Mods whose recorded Library path still resolves inside the importer
+    /// backup tree, including after the configured root itself is repaired.
+    pub mod_overlaps: Vec<LibraryModPathOverlap>,
 }
 
 #[derive(Debug, Serialize)]
@@ -256,6 +259,16 @@ pub struct LibraryRootOverlap {
     /// `None` means the global root; otherwise this is one explicit per-game
     /// override. Inherited per-game paths are covered by the global report.
     pub game: Option<GameCode>,
+    pub path: PathBuf,
+    pub backups: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryModPathOverlap {
+    pub mod_id: String,
+    pub mod_name: String,
+    pub game: GameCode,
     pub path: PathBuf,
     pub backups: PathBuf,
 }
@@ -271,6 +284,11 @@ const ALL_GAMES: &[GameCode] = &[
 
 #[tauri::command]
 pub async fn get_library_paths(core: State<'_, Core>) -> CommandResult<LibraryPaths> {
+    library_paths_for_core(&core).await
+}
+
+#[doc(hidden)]
+pub async fn library_paths_for_core(core: &Core) -> CommandResult<LibraryPaths> {
     let default_root = core.default_library_root().to_path_buf();
     let root_override = core
         .library_root_override()
@@ -320,6 +338,20 @@ pub async fn get_library_paths(core: State<'_, Core>) -> CommandResult<LibraryPa
         per_game_effective.insert(key, eff);
     }
 
+    let mod_overlaps = core
+        .mod_library_path_overlaps()
+        .await
+        .map_err(CommandError::from)?
+        .into_iter()
+        .map(|overlap| LibraryModPathOverlap {
+            mod_id: overlap.mod_id,
+            mod_name: overlap.mod_name,
+            game: overlap.game,
+            path: overlap.path,
+            backups: overlap.backups,
+        })
+        .collect();
+
     Ok(LibraryPaths {
         default_root,
         root_override,
@@ -327,6 +359,7 @@ pub async fn get_library_paths(core: State<'_, Core>) -> CommandResult<LibraryPa
         per_game_overrides,
         per_game_effective,
         overlaps,
+        mod_overlaps,
     })
 }
 

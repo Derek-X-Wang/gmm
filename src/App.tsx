@@ -878,6 +878,19 @@ function LibraryPathsPanel() {
     if (typeof picked === "string") apply(picked);
   };
 
+  if (paths.isError) {
+    return (
+      <section className="card">
+        <h2>Library</h2>
+        <CommandErrorNotice
+          error={paths.error}
+          heading="Could not resolve Library paths."
+          detail="Library settings are unavailable until GMM can read their current paths."
+        />
+      </section>
+    );
+  }
+
   if (!paths.data) {
     return (
       <section className="card">
@@ -894,12 +907,16 @@ function LibraryPathsPanel() {
     <section className="card">
       <h2>Library</h2>
       <p className="muted">
-        Where GMM keeps each game's Mod copies. Changing a path disables affected mods,
-        moves the bytes, then re-enables them against the new location. Non-NTFS targets
-        are refused before any move.
+        Where GMM keeps each game's Mod copies. Changing a safe path disables affected
+        mods, moves the bytes, then re-enables them against the new location. Repairing
+        an overlap changes only the setting and leaves the old tree untouched. Non-NTFS
+        targets are refused before any move.
       </p>
 
-      <LibraryRootOverlapWarning overlaps={p.overlaps ?? []} />
+      <LibraryRootOverlapWarning
+        overlaps={p.overlaps ?? []}
+        modOverlaps={p.modOverlaps ?? []}
+      />
 
       <div className="row">
         <input
@@ -923,6 +940,7 @@ function LibraryPathsPanel() {
         </button>
       </div>
       <CommandErrorNotice error={setRoot.error} />
+      <LibraryOverlapRepairNotice report={setRoot.data} />
       <JunctionRestoreFailures failures={setRoot.data?.failed_junction_restores} />
 
       <h3 className="muted small">Per-game overrides</h3>
@@ -951,8 +969,20 @@ function LibraryPathsPanel() {
         );
       })}
       <CommandErrorNotice error={setPerGame.error} />
+      <LibraryOverlapRepairNotice report={setPerGame.data} />
       <JunctionRestoreFailures failures={setPerGame.data?.failed_junction_restores} />
     </section>
+  );
+}
+
+function LibraryOverlapRepairNotice({ report }: { report?: MoveReport }) {
+  if (!report?.overlap_repair) return null;
+  return (
+    <div className="reinstall-action-notice error" role="alert">
+      <strong>Library setting changed, but existing Mod folders were not moved.</strong>{" "}
+      GMM did not read the overlapping path. The warning remains while any Mod is still
+      recorded there; inspect and recover those folders manually.
+    </div>
   );
 }
 

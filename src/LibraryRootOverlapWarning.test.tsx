@@ -11,13 +11,14 @@ it("names both paths and explains how to repair an unsafe root", () => {
         path: "C:\\Users\\user\\AppData\\Roaming\\GMM\\backups\\library",
         backups: "C:\\Users\\user\\AppData\\Roaming\\GMM\\backups",
       }]}
+      modOverlaps={[]}
     />,
   );
 
   const warning = screen.getByRole("region", {
-    name: /unsafe library path configuration/i,
+    name: /unsafe library paths/i,
   });
-  expect(warning).toHaveTextContent(/GIMI override/i);
+  expect(warning).toHaveTextContent(/GIMI configured root/i);
   expect(warning).toHaveTextContent(
     "C:\\Users\\user\\AppData\\Roaming\\GMM\\backups\\library",
   );
@@ -26,9 +27,47 @@ it("names both paths and explains how to repair an unsafe root", () => {
   );
   expect(warning).toHaveTextContent(/choose a different root/i);
   expect(warning).toHaveTextContent(/without reading or moving anything/i);
+  expect(warning).toHaveTextContent(/audit, import, and relocation/i);
+  expect(warning).toHaveTextContent(
+    /enable, disable, and Junction reconciliation still use each Mod's recorded path/i,
+  );
+  expect(warning).not.toHaveTextContent(/no in-app action clears/i);
+  expect(warning).not.toHaveTextContent(/GMM will not use these Library roots/i);
+});
+
+it("keeps naming Mods left in the backup tree after the configured root is repaired", () => {
+  render(
+    <LibraryRootOverlapWarning
+      overlaps={[]}
+      modOverlaps={[{
+        modId: "01STRANDED",
+        modName: "Stranded Mod",
+        game: "gimi",
+        path: "C:\\Users\\user\\AppData\\Roaming\\GMM\\backups\\legacy\\01STRANDED",
+        backups: "C:\\Users\\user\\AppData\\Roaming\\GMM\\backups",
+      }]}
+    />,
+  );
+
+  const warning = screen.getByRole("region", {
+    name: /unsafe library paths/i,
+  });
+  expect(warning).toHaveTextContent(/Mods still recorded inside the backup tree/i);
+  expect(warning).toHaveTextContent(/Stranded Mod/i);
+  expect(warning).toHaveTextContent(/01STRANDED/i);
+  expect(warning).toHaveTextContent(
+    "C:\\Users\\user\\AppData\\Roaming\\GMM\\backups\\legacy\\01STRANDED",
+  );
+  expect(warning).toHaveTextContent(/no in-app action clears these stranded Mod records/i);
+  expect(warning).toHaveTextContent(/move the named folders into the current Library root by hand/i);
+  expect(warning).toHaveTextContent(/re-adopt them/i);
+  expect(warning).not.toHaveTextContent(/GMM blocks Library-wide operations/i);
+  expect(warning).not.toHaveTextContent(/choose a different root/i);
 });
 
 it("renders no empty-state noise for disjoint roots", () => {
-  const { container } = render(<LibraryRootOverlapWarning overlaps={[]} />);
+  const { container } = render(
+    <LibraryRootOverlapWarning overlaps={[]} modOverlaps={[]} />,
+  );
   expect(container).toBeEmptyDOMElement();
 });

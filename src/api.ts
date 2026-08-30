@@ -220,10 +220,19 @@ export interface LibraryPaths {
   perGameOverrides: Record<string, string | null>;
   perGameEffective: Record<string, string>;
   overlaps: LibraryRootOverlap[];
+  modOverlaps: LibraryModPathOverlap[];
 }
 
 export interface LibraryRootOverlap {
   game: GameCode | null;
+  path: string;
+  backups: string;
+}
+
+export interface LibraryModPathOverlap {
+  modId: string;
+  modName: string;
+  game: GameCode;
   path: string;
   backups: string;
 }
@@ -237,6 +246,7 @@ export interface MoveReport {
     kind: SurfaceFailureKind;
     error: string;
   }>;
+  overlap_repair: boolean;
 }
 
 export async function getLibraryPaths(): Promise<LibraryPaths> {
@@ -359,6 +369,7 @@ const fromRawMoveReport = (r: Partial<MoveReport>): MoveReport => ({
   relocated: r.relocated ?? [],
   moved_directories: r.moved_directories ?? [],
   failed_junction_restores: r.failed_junction_restores ?? [],
+  overlap_repair: r.overlap_repair ?? false,
 });
 
 export async function setLibraryRoot(path: string | null): Promise<MoveReport> {

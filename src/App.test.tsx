@@ -63,6 +63,10 @@ let importerUpdateError: {
   kind: "invalidActiveVariant";
   message: string;
 } | null = null;
+let libraryPathsError: {
+  kind: "invalidActiveVariant";
+  message: string;
+} | null = null;
 let importerUpdate = {
   available: false,
   installedVersion: null as string | null,
@@ -77,6 +81,7 @@ let relocationFailures: Array<{
   kind: "invalidActiveVariant" | "other";
   error: string;
 }> = [];
+let overlapRepair = false;
 
 function ipcResult(command: string) {
   switch (command) {
@@ -117,6 +122,7 @@ function ipcResult(command: string) {
     case "mod_updates_globally_enabled":
       return true;
     case "get_library_paths":
+      if (libraryPathsError) throw libraryPathsError;
       return {
         defaultRoot: "C:\\GMM\\library",
         rootOverride: null,
@@ -141,6 +147,7 @@ function ipcResult(command: string) {
         relocated: ["01INTERNALMODID"],
         moved_directories: ["C:\\Moved"],
         failed_junction_restores: relocationFailures,
+        overlap_repair: overlapRepair,
       };
     default:
       return null;
@@ -155,6 +162,7 @@ beforeEach(() => {
   launchError = null;
   importerPinError = null;
   importerUpdateError = null;
+  libraryPathsError = null;
   importerUpdate = {
     available: false,
     installedVersion: null,
@@ -164,6 +172,7 @@ beforeEach(() => {
     checkError: null,
   };
   relocationFailures = [];
+  overlapRepair = false;
   openDialog.mockResolvedValue("C:\\Moved");
   invoke.mockImplementation((command: string) => Promise.resolve(ipcResult(command)));
 });
@@ -253,6 +262,24 @@ it("renders a structured failure when the Importer update query rejects", async 
     "invalidActiveVariant",
   );
   expect(alert).toHaveTextContent(importerUpdateError.message);
+});
+
+it("shows a Library path failure instead of resolving forever", async () => {
+  libraryPathsError = {
+    kind: "invalidActiveVariant",
+    message: "Could not read the configured Library paths.",
+  };
+  renderWithQuery(<App />);
+
+  const heading = await screen.findByText(/could not resolve Library paths/i);
+  const alert = heading.closest('[role="alert"]');
+  expect(alert).not.toBeNull();
+  expect(alert).toHaveAttribute(
+    "data-command-failure-kind",
+    "invalidActiveVariant",
+  );
+  expect(alert).toHaveTextContent(libraryPathsError.message);
+  expect(screen.queryByText(/resolving paths/i)).not.toBeInTheDocument();
 });
 
 it("shows a latest-importer-release failure instead of calling it unavailable", async () => {
@@ -348,4 +375,27 @@ it("routes a relocation Variant failure to selection repair and never recommends
     screen.queryByText(/Use “Rebuild junctions” on the game card below/i),
   ).not.toBeInTheDocument();
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_library_root", { path: "C:\\Moved" }));
+});
+
+it("reports a setting-only overlap repair instead of presenting it as a successful move", async () => {
+  overlapRepair = true;
+  renderWithQuery(<App />);
+
+  const changeRoot = await screen.findByRole("button", { name: /change global root/i });
+  expect(
+    screen.queryByText(/library setting changed, but existing mod folders were not moved/i),
+    "setting-only repair feedback must not be shown before the repair finishes",
+  ).not.toBeInTheDocument();
+  await userEvent.click(changeRoot);
+
+  const message = await screen.findByText(
+    /library setting changed, but existing mod folders were not moved/i,
+  );
+  const alert = message.closest('[role="alert"]');
+  expect(
+    alert,
+    "a setting-only overlap repair must produce visible action feedback",
+  ).not.toBeNull();
+  expect(alert).toHaveTextContent(/did not read the overlapping path/i);
+  expect(alert).toHaveTextContent(/warning remains while any Mod is still recorded there/i);
 });
