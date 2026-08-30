@@ -644,9 +644,12 @@ async fn rollback_after_absent_acknowledge_release_ignores_the_reappeared_backup
         "a changed backup identity must expose acknowledge-and-release"
     );
 
-    // The changed object disappears after the user sees the action but before
-    // release. The durable marker must still outlive the witness.
+    // The changed object and its per-game backups root disappear after the user
+    // sees the action but before release. The durable marker must still outlive
+    // the witness.
     std::fs::remove_dir_all(&backup).expect("make recorded backup absent before release");
+    std::fs::remove_dir_all(backup.parent().expect("backup must have a parent"))
+        .expect("make per-game backups root absent before release");
 
     recovered
         .retire_interrupted_importer_evacuation(GameCode::Gimi)

@@ -1163,6 +1163,12 @@ fn recovery_remnant_marker_path(backup_dir: &Path) -> PathBuf {
 
 fn mark_backup_as_recovery_remnant(backup_dir: &Path) -> Result<()> {
     let path = recovery_remnant_marker_path(backup_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| Error::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
     fs::write(
         &path,
         b"This directory was retained by interrupted Model Importer recovery and is not a complete rollback source.\n",
@@ -1182,6 +1188,10 @@ fn mark_backup_as_recovery_remnant(backup_dir: &Path) -> Result<()> {
 /// the directory is both a rollback candidate and unmarked. The sibling marker
 /// is durable even when the directory is absent, so bytes that later reappear
 /// at the released path cannot silently become an authoritative rollback source.
+/// If the marker parent cannot be created or the marker cannot be written, this
+/// returns an error so the caller retains the witness and the user can retry
+/// after the storage becomes writable. Deliberately releasing without the marker
+/// would let a partial backup that later reappears become authoritative.
 pub(super) fn mark_retained_evacuation_backup(backup_dir: &Path) -> Result<()> {
     mark_backup_as_recovery_remnant(backup_dir)
 }
