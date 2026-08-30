@@ -202,7 +202,15 @@ impl Core {
                 "could not release interrupted Library staging witnesses at startup",
             );
         }
-        core.recover_interrupted_reinstalls_at_startup().await?;
+        match core.recover_interrupted_reinstalls_at_startup().await {
+            Ok(_) => {}
+            Err(recovery @ Error::LibraryRootOverlapsBackups { .. }) => tracing::warn!(
+                target: "gmm::library",
+                error = %recovery,
+                "could not recover interrupted reinstalls until the overlapping Library configuration is repaired",
+            ),
+            Err(recovery) => return Err(recovery),
+        }
         core.crash_point(crash_points::STARTUP_AFTER_REINSTALL_RECOVERY);
         if let Err(recovery) = core.finish_interrupted_library_deletes().await {
             tracing::warn!(
@@ -3694,8 +3702,24 @@ impl Core {
             game_install_paths.insert(code, install_path.map(PathBuf::from));
         }
 
+        let library_root = self
+            .library_root_override()
+            .await?
+            .unwrap_or_else(|| self.default_library_root.clone());
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Library mutation policy exemption: diagnostics reporting performs only pure overlap validation"
+        )]
+        let overlap = self.ensure_library_root_disjoint_from_backups(&library_root);
+        let library_root_overlaps_importer_backups = match overlap {
+            Ok(()) => false,
+            Err(Error::LibraryRootOverlapsBackups { .. }) => true,
+            Err(error) => return Err(error),
+        };
+
         Ok(diagnostics::SettingsSnapshot {
-            library_root: Some(self.resolved_library_root().await?),
+            library_root: Some(library_root),
+            library_root_overlaps_importer_backups,
             game_install_paths,
             // Populated by slice 10 (proxy settings). Leaving blank here
             // means the bundle just shows `null` until then.
@@ -4389,12 +4413,15 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// Both containment directions matter: a proposed root inside the backups
 /// tree puts Library bytes under rollback selection, and the backups tree
 /// inside a proposed root puts the unfenced marker writes inside the
-/// Library. Each direction first uses [`path_within`] for fully existing
-/// aliases, then a case-insensitive fallback that resolves the deepest
-/// existing ancestor and lexically normalises the missing tail.
+/// Library. Each direction uses [`path_within`] for fully existing aliases,
+/// preserves lexical containment evidence even when a link resolves outside
+/// its apparent parent, and adds a case-insensitive fallback that resolves the
+/// deepest existing ancestor and lexically normalises the missing tail.
 fn ensure_library_root_disjoint_from_backups(proposed: &Path, backups_root: &Path) -> Result<()> {
     let overlaps = |path: &Path, ancestor: &Path| {
-        path_within(path, ancestor) || case_insensitive_path_within(path, ancestor)
+        path_within(path, ancestor)
+            || path.starts_with(ancestor)
+            || case_insensitive_path_within(path, ancestor)
     };
     if overlaps(proposed, backups_root) || overlaps(backups_root, proposed) {
         return Err(Error::LibraryRootOverlapsBackups {

@@ -166,6 +166,8 @@ fn is_gmm_log(path: &Path) -> bool {
 pub struct SettingsSnapshot {
     /// Library root (file paths are not considered secret).
     pub library_root: Option<PathBuf>,
+    /// Whether the persisted Library root overlaps GMM's importer backup tree.
+    pub library_root_overlaps_importer_backups: bool,
     /// Per-game install paths keyed by lowercased game code.
     pub game_install_paths: HashMap<String, Option<PathBuf>>,
     /// Configured proxy URL, if any. The host/port stays; the
@@ -186,6 +188,7 @@ impl SettingsSnapshot {
             .map(|raw| redact_proxy_userinfo(raw));
         Self {
             library_root: self.library_root.clone(),
+            library_root_overlaps_importer_backups: self.library_root_overlaps_importer_backups,
             game_install_paths: self.game_install_paths.clone(),
             proxy_url,
         }

@@ -405,6 +405,127 @@ async fn overlap_fallback_handles_case_missing_descendants_links_and_parent_segm
     );
 }
 
+/// Diagnostics is a Settings reporting path, so it must preserve the raw
+/// effective root and describe an overlap instead of asking the validating
+/// filesystem-use resolver to reject the export.
+///
+/// Mutation oracle: restoring `resolved_library_root` in `settings_snapshot`
+/// fires the named export-availability assertion below.
+#[tokio::test]
+async fn settings_snapshot_reports_legacy_library_overlap_without_refusing_export() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_default = tmp.path().join("default_library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_default, &db_url)
+        .await
+        .expect("init core");
+    let unsafe_root = tmp.path().join("backups").join("legacy-library");
+    persist_library_setting(&tmp, "library.root", &unsafe_root).await;
+
+    let snapshot = match core.settings_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => panic!(
+            "diagnostics export must remain available for an overlapping Library configuration: {error}"
+        ),
+    };
+    assert_eq!(
+        snapshot.library_root,
+        Some(unsafe_root),
+        "diagnostics must report the raw effective Library root",
+    );
+    assert!(
+        snapshot.library_root_overlaps_importer_backups,
+        "diagnostics must explicitly record that the Library root overlaps importer backups",
+    );
+}
+
+/// The case-insensitive missing-tail fallback is additive to the legacy
+/// overlap evidence. In particular, a link entry lexically inside `backups`
+/// remains refused even if its target resolves outside that tree.
+///
+/// Mutation oracle: removing the raw `Path::starts_with` disjunct records the
+/// symlink-leaf case as loosened and fires the named differential assertion.
+#[tokio::test]
+async fn overlap_guard_is_never_looser_than_legacy_corpus() {
+    let tmp = TempDir::new().expect("tmp");
+    let library_default = tmp.path().join("default_library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(library_default, &db_url)
+        .await
+        .expect("init core");
+    let backups_root = tmp.path().join("backups");
+    fs::create_dir_all(backups_root.join("inside-existing")).expect("backup tree");
+
+    let outside_target = tmp.path().join("outside-target");
+    fs::create_dir(&outside_target).expect("outside link target");
+    let symlink_leaf = backups_root.join("symlink-leaf");
+    gmm_lib::core::junction::create(&symlink_leaf, &outside_target)
+        .expect("symlink leaf inside backups");
+
+    let backup_alias = tmp.path().join("backup-alias");
+    gmm_lib::core::junction::create(&backup_alias, &backups_root).expect("backup tree alias");
+
+    let cases = [
+        ("inside, existing", backups_root.join("inside-existing")),
+        (
+            "inside, UPPER missing",
+            tmp.path().join("BACKUPS").join("future-library"),
+        ),
+        ("symlink leaf inside backups", symlink_leaf),
+        (
+            "missing tail through alias",
+            backup_alias.join("future-library"),
+        ),
+        (
+            "parent segment inside backups",
+            backups_root
+                .join("not-created")
+                .join("..")
+                .join("future-library"),
+        ),
+        ("sibling prefix", tmp.path().join("backups2")),
+        ("separate root", tmp.path().join("safe-library")),
+        ("ancestor of backups", tmp.path().to_path_buf()),
+    ];
+
+    let legacy_path_within = |path: &std::path::Path, ancestor: &std::path::Path| {
+        let canonical = |candidate: &std::path::Path| {
+            fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf())
+        };
+        canonical(path).starts_with(canonical(ancestor))
+    };
+    let legacy_overlap = |path: &std::path::Path, ancestor: &std::path::Path| {
+        legacy_path_within(path, ancestor) || path.starts_with(ancestor)
+    };
+
+    let mut tightened = Vec::new();
+    let mut loosened = Vec::new();
+    for (name, candidate) in cases {
+        let base =
+            legacy_overlap(&candidate, &backups_root) || legacy_overlap(&backups_root, &candidate);
+        persist_library_setting(&tmp, "library.root", &candidate).await;
+        let current = matches!(
+            core.resolved_library_root().await,
+            Err(Error::LibraryRootOverlapsBackups { .. })
+        );
+        match (base, current) {
+            (false, true) => tightened.push(name),
+            (true, false) => loosened.push(name),
+            _ => {}
+        }
+    }
+
+    assert!(
+        loosened.is_empty(),
+        "the overlap guard must never be looser than base; loosened cases: {loosened:?}",
+    );
+    assert!(
+        tightened.contains(&"inside, UPPER missing"),
+        "the differential must retain the intended case-insensitive tightening: {tightened:?}",
+    );
+    eprintln!("overlap differential: tightened={tightened:?}; loosened={loosened:?}");
+}
+
 #[tokio::test]
 async fn per_game_override_relocates_only_that_game() {
     let tmp = TempDir::new().expect("tmp");
