@@ -228,6 +228,7 @@ fn library_paths_response_uses_camel_case() {
         per_game_overrides,
         per_game_effective,
         overlaps: Vec::new(),
+        mod_overlaps: Vec::new(),
     };
     let v = to_json(&lp);
     let obj = v.as_object().expect("object");
@@ -237,6 +238,7 @@ fn library_paths_response_uses_camel_case() {
     assert!(obj.contains_key("perGameOverrides"));
     assert!(obj.contains_key("perGameEffective"));
     assert!(obj.contains_key("overlaps"));
+    assert!(obj.contains_key("modOverlaps"));
 }
 
 #[test]

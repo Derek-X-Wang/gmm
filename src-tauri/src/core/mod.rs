@@ -435,7 +435,7 @@ impl Core {
             )
             .await?;
             fence.commit().await?;
-            return Ok(MoveReport::default());
+            return Ok(MoveReport::overlap_repair());
         }
 
         if previous == next {
@@ -523,7 +523,7 @@ impl Core {
             )
             .await?;
             fence.commit().await?;
-            return Ok(MoveReport::default());
+            return Ok(MoveReport::overlap_repair());
         }
 
         if previous == next_effective {
@@ -4220,6 +4220,45 @@ impl Core {
             })
             .collect()
     }
+
+    /// Mods whose recorded Library path still resolves inside GMM's Model
+    /// Importer backup tree. This is reporting evidence for Settings, not a
+    /// use-time guard: enable, disable, and Junction reconciliation continue
+    /// to use each Mod's recorded path during a manual overlap repair.
+    pub async fn mod_library_path_overlaps(&self) -> Result<Vec<ModLibraryPathOverlap>> {
+        let rows = sqlx::query(
+            "SELECT id, game_code, name, library_path
+             FROM mods
+             ORDER BY created_at ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let backups = self.data_dir().join("backups");
+        let mut overlaps = Vec::new();
+        for row in rows {
+            let path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+            if !path_resolves_within(&path, &backups) {
+                continue;
+            }
+            overlaps.push(ModLibraryPathOverlap {
+                mod_id: row.try_get("id")?,
+                mod_name: row.try_get("name")?,
+                game: GameCode::from_str(&row.try_get::<String, _>("game_code")?)?,
+                path,
+                backups: backups.clone(),
+            });
+        }
+        Ok(overlaps)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModLibraryPathOverlap {
+    pub mod_id: String,
+    pub mod_name: String,
+    pub game: GameCode,
+    pub path: PathBuf,
+    pub backups: PathBuf,
 }
 
 /// Convert a Mod's display name into a directory name that NTFS will
@@ -4280,6 +4319,18 @@ pub struct MoveReport {
     /// authoritative Library move still committed; Rebuild Junctions retries
     /// these reconstructible projections from the committed rows.
     pub failed_junction_restores: Vec<JunctionRestoreFailure>,
+    /// `true` when GMM repaired a legacy configured-root overlap by changing
+    /// only the setting, without reading or relocating the old tree.
+    pub overlap_repair: bool,
+}
+
+impl MoveReport {
+    fn overlap_repair() -> Self {
+        Self {
+            overlap_repair: true,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -4498,6 +4549,14 @@ fn case_folded_components(path: &Path) -> Vec<String> {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
         .collect()
+}
+
+/// Positive evidence that a Mod's recorded path resolves inside the backup
+/// tree. Unlike the configured-root guard, this is intentionally one-way and
+/// does not preserve a merely lexical overlap when an existing Junction or
+/// symlink resolves outside the tree.
+fn path_resolves_within(path: &Path, ancestor: &Path) -> bool {
+    path_within(path, ancestor) || case_insensitive_path_within(path, ancestor)
 }
 
 /// Is `path` inside `ancestor`?

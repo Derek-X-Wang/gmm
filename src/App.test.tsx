@@ -77,6 +77,7 @@ let relocationFailures: Array<{
   kind: "invalidActiveVariant" | "other";
   error: string;
 }> = [];
+let overlapRepair = false;
 
 function ipcResult(command: string) {
   switch (command) {
@@ -141,6 +142,7 @@ function ipcResult(command: string) {
         relocated: ["01INTERNALMODID"],
         moved_directories: ["C:\\Moved"],
         failed_junction_restores: relocationFailures,
+        overlap_repair: overlapRepair,
       };
     default:
       return null;
@@ -164,6 +166,7 @@ beforeEach(() => {
     checkError: null,
   };
   relocationFailures = [];
+  overlapRepair = false;
   openDialog.mockResolvedValue("C:\\Moved");
   invoke.mockImplementation((command: string) => Promise.resolve(ipcResult(command)));
 });
@@ -348,4 +351,27 @@ it("routes a relocation Variant failure to selection repair and never recommends
     screen.queryByText(/Use “Rebuild junctions” on the game card below/i),
   ).not.toBeInTheDocument();
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_library_root", { path: "C:\\Moved" }));
+});
+
+it("reports a setting-only overlap repair instead of presenting it as a successful move", async () => {
+  overlapRepair = true;
+  renderWithQuery(<App />);
+
+  const changeRoot = await screen.findByRole("button", { name: /change global root/i });
+  expect(
+    screen.queryByText(/library setting changed, but existing mod folders were not moved/i),
+    "setting-only repair feedback must not be shown before the repair finishes",
+  ).not.toBeInTheDocument();
+  await userEvent.click(changeRoot);
+
+  const message = await screen.findByText(
+    /library setting changed, but existing mod folders were not moved/i,
+  );
+  const alert = message.closest('[role="alert"]');
+  expect(
+    alert,
+    "a setting-only overlap repair must produce visible action feedback",
+  ).not.toBeNull();
+  expect(alert).toHaveTextContent(/did not read the overlapping path/i);
+  expect(alert).toHaveTextContent(/warning remains while any Mod is still recorded there/i);
 });

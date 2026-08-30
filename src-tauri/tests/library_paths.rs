@@ -10,7 +10,10 @@
 
 use std::fs;
 
-use gmm_lib::core::{Core, Error, GameCode};
+use gmm_lib::{
+    commands,
+    core::{Core, Error, GameCode},
+};
 use tempfile::TempDir;
 
 async fn persist_library_setting(tmp: &TempDir, key: &str, path: &std::path::Path) {
@@ -27,6 +30,20 @@ async fn persist_library_setting(tmp: &TempDir, key: &str, path: &std::path::Pat
     .execute(&pool)
     .await
     .expect("persist pre-existing Library setting");
+    pool.close().await;
+}
+
+async fn persist_mod_library_path(tmp: &TempDir, mod_id: &str, path: &std::path::Path) {
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let pool = sqlx::SqlitePool::connect(&db_url)
+        .await
+        .expect("open fixture database");
+    sqlx::query("UPDATE mods SET library_path = ? WHERE id = ?")
+        .bind(path.to_string_lossy().as_ref())
+        .bind(mod_id)
+        .execute(&pool)
+        .await
+        .expect("persist legacy Mod Library path");
     pool.close().await;
 }
 
@@ -354,6 +371,110 @@ async fn existing_overlapping_library_configuration_is_refused_when_used_but_rem
             .await
             .expect("resolved repaired per-game root"),
         safe_game,
+    );
+}
+
+/// Repairing a configured-root overlap deliberately leaves every recorded Mod
+/// path untouched. Settings must therefore keep reporting the real remaining
+/// condition even after the configured root itself is safe.
+///
+/// Mutation oracle: removing the Mod-path overlap collection from the Settings
+/// response fires the named post-repair assertion below.
+#[tokio::test]
+async fn repaired_root_still_reports_mods_resolving_inside_importer_backups() {
+    let tmp = TempDir::new().expect("tmp");
+    let safe_root = tmp.path().join("safe-library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(safe_root.clone(), &db_url)
+        .await
+        .expect("init core");
+
+    let stranded = make_mod(
+        &core,
+        GameCode::Gimi,
+        "Stranded Mod",
+        &tmp.path().join("stranded-fixture"),
+    )
+    .await;
+    let outside = make_mod(
+        &core,
+        GameCode::Gimi,
+        "Outside Mod",
+        &tmp.path().join("outside-fixture"),
+    )
+    .await;
+
+    let backups_root = tmp.path().join("backups");
+    let legacy_root = backups_root.join("legacy-library");
+    let stranded_path = legacy_root.join("gimi").join(&stranded.id);
+    fs::create_dir_all(stranded_path.parent().expect("stranded parent"))
+        .expect("legacy Library parent");
+    fs::rename(&stranded.library_path, &stranded_path).expect("move legacy Mod fixture");
+    persist_mod_library_path(&tmp, &stranded.id, &stranded_path).await;
+
+    // A path spelled inside backups but resolving through a Junction to a
+    // disjoint directory is not the condition this warning describes.
+    let outside_alias = backups_root.join("outside-alias");
+    gmm_lib::core::junction::create(&outside_alias, &outside.library_path)
+        .expect("create outside alias");
+    persist_mod_library_path(&tmp, &outside.id, &outside_alias).await;
+
+    persist_library_setting(&tmp, "library.root", &legacy_root).await;
+    core.set_library_root(Some(&safe_root))
+        .await
+        .expect("repair configured root");
+
+    let paths = commands::library_paths_for_core(&core)
+        .await
+        .expect("read Settings Library paths after repair");
+    assert!(
+        paths.overlaps.is_empty(),
+        "precondition: the configured root itself is repaired: {:?}",
+        paths.overlaps,
+    );
+    assert_eq!(
+        paths.mod_overlaps
+            .iter()
+            .map(|overlap| (&overlap.mod_id, &overlap.path))
+            .collect::<Vec<_>>(),
+        vec![(&stranded.id, &stranded_path)],
+        "Settings must keep warning about every Mod still resolving inside the backup tree without flagging a path that resolves outside it",
+    );
+}
+
+/// A setting-only repair is a different outcome from an ordinary successful
+/// relocation, for both global and per-game legacy configurations.
+///
+/// Mutation oracle: returning `MoveReport::default()` from either repair branch
+/// fires the corresponding named outcome assertion below.
+#[tokio::test]
+async fn overlap_repairs_report_that_no_library_move_was_attempted() {
+    let tmp = TempDir::new().expect("tmp");
+    let safe_root = tmp.path().join("safe-library");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(safe_root.clone(), &db_url)
+        .await
+        .expect("init core");
+    let backups_root = tmp.path().join("backups");
+
+    persist_library_setting(&tmp, "library.root", &backups_root.join("legacy-global")).await;
+    let global = core
+        .set_library_root(Some(&safe_root))
+        .await
+        .expect("repair global overlap");
+    assert!(
+        global.overlap_repair,
+        "global overlap repair must report a setting-only repair instead of looking like a successful Library move: {global:?}",
+    );
+
+    persist_library_setting(&tmp, "library.gimi", &backups_root.join("legacy-gimi")).await;
+    let per_game = core
+        .set_library_path_for_game(GameCode::Gimi, None)
+        .await
+        .expect("repair per-game overlap");
+    assert!(
+        per_game.overlap_repair,
+        "per-game overlap repair must report a setting-only repair instead of looking like a successful Library move: {per_game:?}",
     );
 }
 
