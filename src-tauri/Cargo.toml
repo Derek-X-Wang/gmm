@@ -18,7 +18,7 @@ repository = "https://github.com/Derek-X-Wang/gmm"
 
 [package]
 name = "gmm"
-version = "0.2.0"
+version = "0.2.1"
 description = "Gacha Mod Manager — Tauri desktop mod manager for XXMI-family model importers"
 authors = ["Derek Wang <derek@getbite.com>"]
 edition.workspace = true
