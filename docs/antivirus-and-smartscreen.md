@@ -29,9 +29,17 @@ cost we have deferred until v1 user numbers justify it; the XXMI ecosystem
 GMM grew out of has the same gap. Until a signed build exists, every release
 triggers SmartScreen's "Windows protected your PC" prompt on first launch.
 
-You can verify a GMM build by comparing its SHA-256 against the value
-attached to the release on GitHub. The release page lists the digest of the
-installer and of the loose binaries.
+You can verify a GMM build by comparing its SHA-256 against the value on the
+release page. In PowerShell, replace the example path below with the path to
+the artefact you downloaded, then compare the command's `Hash` value with the
+matching SHA-256 in the release's **Verify the download** table:
+
+```powershell
+Get-FileHash -LiteralPath <downloaded-file> -Algorithm SHA256
+```
+
+The release workflow lists every installer artefact produced by the bundler.
+GMM does not ship loose binaries outside its installer packages.
 
 ## How to add an exclusion in Windows Defender
 
