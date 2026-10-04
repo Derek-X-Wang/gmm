@@ -10,6 +10,7 @@ use thiserror::Error;
 #[serde(rename_all = "camelCase")]
 pub enum SurfaceFailureKind {
     InvalidActiveVariant,
+    AlreadyRunning,
     Other,
 }
 

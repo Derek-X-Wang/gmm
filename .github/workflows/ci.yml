@@ -186,8 +186,14 @@ jobs:
         run: cargo run -p gmm-manifest-validator --bin validate-manifest
 
       - name: cargo test
+        id: rust-tests
         working-directory: src-tauri
         run: cargo test --workspace
+
+      - name: Verify standalone CLI and report Windows loader dependencies
+        if: always() && runner.os == 'Windows' && (steps.rust-tests.outcome == 'success' || steps.rust-tests.outcome == 'failure')
+        shell: pwsh
+        run: .github/scripts/diagnose-cli-loader.ps1
 
 
       # Windows-only: smoke-test the gmm-loader FFI binding against the
@@ -313,9 +319,15 @@ jobs:
       # Release profile: `tauri build` has already compiled this
       # dependency graph, so the fixture costs seconds rather than a
       # from-scratch debug build of everything.
-      - name: Build the lifecycle fixture
-        run: cargo build --release -p gmm-lifecycle-fixture
+      # Verify the CLI's shipping profile using these already-built release
+      # dependencies; no bundling configuration is changed by this check.
+      - name: Build the lifecycle fixture and release CLI
+        run: cargo build --release -p gmm-lifecycle-fixture -p gmm-cli
         working-directory: src-tauri
+
+      - name: Verify standalone release CLI
+        shell: pwsh
+        run: .github/scripts/diagnose-cli-loader.ps1 -BuildProfile release
 
       - name: Upgrade, refuse downgrade, repair, uninstall
         shell: pwsh

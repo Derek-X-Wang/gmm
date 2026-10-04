@@ -168,6 +168,27 @@ pub async fn launch<R: Runtime>(
     game: GameCode,
     opts: &LaunchOptions,
 ) -> CommandResult<LaunchOutcome> {
+    launch_inner(Some(app), core, runtime, game, opts).await
+}
+
+/// Launch without a window, retaining the same claims, injection and exit watcher.
+/// The CLI must await the watcher before releasing its Loader and instance lock.
+pub async fn launch_headless(
+    core: &Core,
+    runtime: &SessionRuntime,
+    game: GameCode,
+    opts: &LaunchOptions,
+) -> CommandResult<LaunchOutcome> {
+    launch_inner::<tauri::Wry>(None, core, runtime, game, opts).await
+}
+
+async fn launch_inner<R: Runtime>(
+    app: Option<&AppHandle<R>>,
+    core: &Core,
+    runtime: &SessionRuntime,
+    game: GameCode,
+    opts: &LaunchOptions,
+) -> CommandResult<LaunchOutcome> {
     let result: CommandResult<LaunchOutcome> = async {
         // Deal with whatever the last session left in the live slot
         // before consulting the DB — a dead watcher can leave a stale
@@ -354,12 +375,14 @@ pub async fn launch<R: Runtime>(
             }
 
             // Emit to the frontend so the banner appears immediately.
-            let _ = app.emit(SESSION_STARTED_EVENT, &info);
+            if let Some(app) = app {
+                let _ = app.emit(SESSION_STARTED_EVENT, &info);
+            }
 
             // Spawn the exit watcher. It polls until the child exits, then
             // drops the LiveSession (which unhooks via RAII), clears the DB
             // row, and emits SESSION_ENDED_EVENT.
-            let watcher = spawn_exit_watcher(app.clone(), core.clone(), runtime.inner_clone(), opts);
+            let watcher = spawn_exit_watcher(app.cloned(), core.clone(), runtime.inner_clone(), opts);
 
             Ok(LaunchOutcome { info, watcher })
         }
@@ -418,7 +441,7 @@ async fn reconcile_live_slot(core: &Core, runtime: &SessionRuntime) -> CommandRe
 
 /// The exit watcher: the only place a healthy Game Session ends.
 fn spawn_exit_watcher<R: Runtime>(
-    app: AppHandle<R>,
+    app: Option<AppHandle<R>>,
     core: Core,
     runtime: SessionRuntime,
     opts: &LaunchOptions,
@@ -446,6 +469,8 @@ fn spawn_exit_watcher<R: Runtime>(
         if let Err(e) = core.end_session().await {
             tracing::warn!(error = %e, "end_session failed in watcher");
         }
-        let _ = app.emit(SESSION_ENDED_EVENT, ());
+        if let Some(app) = app {
+            let _ = app.emit(SESSION_ENDED_EVENT, ());
+        }
     })
 }

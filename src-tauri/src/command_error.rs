@@ -65,4 +65,17 @@ impl From<Error> for CommandError {
     }
 }
 
+impl From<crate::core::instance_lock::InstanceLockError> for CommandError {
+    fn from(error: crate::core::instance_lock::InstanceLockError) -> Self {
+        use crate::core::instance_lock::InstanceLockError;
+        Self {
+            kind: match &error {
+                InstanceLockError::AlreadyRunning { .. } => SurfaceFailureKind::AlreadyRunning,
+                InstanceLockError::Io { .. } => SurfaceFailureKind::Other,
+            },
+            message: error.to_string(),
+        }
+    }
+}
+
 pub type CommandResult<T> = std::result::Result<T, CommandError>;

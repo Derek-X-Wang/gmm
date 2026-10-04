@@ -4,6 +4,7 @@
 //! integration tests in `src-tauri/tests/` exercise this module directly so
 //! they can run on macOS without spinning up the Tauri runtime.
 
+pub mod attention;
 pub mod av;
 pub mod conflicts;
 pub mod crash_points;
@@ -142,26 +143,8 @@ impl Core {
         db_url: &str,
         crash_hook: Option<CrashHook>,
     ) -> Result<Self> {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "Library mutation policy exemption: Core construction creates only the empty root before any Library content or concurrent operation exists"
-        )]
-        std::fs::create_dir_all(&default_library_root).map_err(|source| Error::Io {
-            path: default_library_root.clone(),
-            source,
-        })?;
-
-        let opts: SqliteConnectOptions = db_url
-            .parse::<SqliteConnectOptions>()?
-            .create_if_missing(true);
-        let pool = SqlitePool::connect_with(opts).await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
-
-        let core = Self {
-            pool,
-            default_library_root,
-            crash_hook,
-        };
+        let mut core = Self::new_without_recovery(default_library_root, db_url).await?;
+        core.crash_hook = crash_hook;
         // A launch reservation is written before spawning and normally filled
         // with the child PID immediately afterwards. Retire it when both
         // recorded process identities are provably gone. If a crash left no
@@ -220,6 +203,92 @@ impl Core {
             );
         }
         Ok(core)
+    }
+
+    /// Open or create the database and migrate it without replaying recovery.
+    ///
+    /// CLI writes use this constructor so an agent must inspect pending witnesses
+    /// and explicitly choose whether to proceed; opening the Core cannot repair
+    /// the evidence before that decision. The app continues to use `new`.
+    pub async fn new_without_recovery(default_library_root: PathBuf, db_url: &str) -> Result<Self> {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "Library mutation policy exemption: Core construction creates only the empty root before any Library content or concurrent operation exists"
+        )]
+        std::fs::create_dir_all(&default_library_root).map_err(|source| Error::Io {
+            path: default_library_root.clone(),
+            source,
+        })?;
+
+        let opts: SqliteConnectOptions = db_url
+            .parse::<SqliteConnectOptions>()?
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(opts).await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
+
+        Ok(Self {
+            pool,
+            default_library_root,
+            crash_hook: None,
+        })
+    }
+
+    /// Inspect existing state without creating directories, migrating, or recovering.
+    ///
+    /// The database is opened read-only and an outdated or unrecognised schema
+    /// is refused rather than changed by inspection. A missing database is
+    /// represented by a migrated in-memory database, including for fresh dry runs.
+    pub async fn for_inspection(default_library_root: PathBuf, db_url: &str) -> Result<Self> {
+        let opts: SqliteConnectOptions = db_url.parse()?;
+        let pool = match std::fs::metadata(opts.get_filename()) {
+            Ok(_) => {
+                let pool =
+                    SqlitePool::connect_with(opts.read_only(true).create_if_missing(false)).await?;
+                let applied = sqlx::query(
+                    "SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version",
+                )
+                .fetch_all(&pool)
+                .await?;
+                let migrator = sqlx::migrate!("./migrations");
+                let expected: Vec<_> = migrator
+                    .iter()
+                    .filter(|migration| !migration.migration_type.is_down_migration())
+                    .collect();
+                if applied.len() != expected.len()
+                    || applied.iter().zip(expected).any(|(row, migration)| {
+                        row.try_get::<i64, _>("version").ok() != Some(migration.version)
+                            || row.try_get::<Vec<u8>, _>("checksum").ok().as_deref()
+                                != Some(migration.checksum.as_ref())
+                            || row.try_get::<bool, _>("success").ok() != Some(true)
+                    })
+                {
+                    pool.close().await;
+                    return Err(Error::Diagnostics("Inspection requires the current database schema. Open GMM to migrate it first.".into()));
+                }
+                pool
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let pool = SqlitePool::connect("sqlite::memory:").await?;
+                sqlx::migrate!("./migrations").run(&pool).await?;
+                pool
+            }
+            Err(source) => {
+                return Err(Error::Io {
+                    path: opts.get_filename().to_path_buf(),
+                    source,
+                })
+            }
+        };
+        Ok(Self {
+            pool,
+            default_library_root,
+            crash_hook: None,
+        })
+    }
+
+    /// Close the pool before releasing the CLI's instance lock.
+    pub async fn close(&self) {
+        self.pool.close().await;
     }
 
     /// Install a failure-injection hook (issue #59). Test-only: nothing
@@ -4156,6 +4225,40 @@ impl Core {
             .await
     }
 
+    /// Read the persisted deployment name and active or requested Variant target for a preview.
+    /// Display names cannot substitute for the stored name, which may be deduplicated.
+    pub async fn mod_deployment_paths(
+        &self,
+        id: &str,
+        game_mods_dir: &Path,
+        variant_id: Option<&str>,
+    ) -> Result<(PathBuf, PathBuf)> {
+        let mut connection = self.pool.acquire().await?;
+        let row = sqlx::query("SELECT junction_dir_name, library_path FROM mods WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *connection)
+            .await?;
+        let link = game_mods_dir.join(row.try_get::<String, _>("junction_dir_name")?);
+        let library_path = PathBuf::from(row.try_get::<String, _>("library_path")?);
+        let target = match variant_id {
+            Some(variant_id) => {
+                let subpath: String = sqlx::query_scalar(
+                    "SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?",
+                )
+                .bind(variant_id)
+                .bind(id)
+                .fetch_one(&mut *connection)
+                .await?;
+                library_path.join(subpath)
+            }
+            None => {
+                self.junction_target_for(id, &library_path, &mut *connection)
+                    .await?
+            }
+        };
+        Ok((link, target))
+    }
+
     /// List every Mod for a given game, ordered by creation time ascending.
     pub async fn list_mods(&self, game: GameCode) -> Result<Vec<Mod>> {
         let mut recoveries: std::collections::HashMap<_, _> = self
@@ -4254,7 +4357,8 @@ impl Core {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModLibraryPathOverlap {
     pub mod_id: String,
     pub mod_name: String,

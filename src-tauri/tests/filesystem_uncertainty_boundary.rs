@@ -1,4 +1,4 @@
-//! Structural gate for filesystem uncertainty inside `core`.
+//! Structural gate for filesystem uncertainty inside `core` and the CLI crate.
 //!
 //! Rust's lint configuration can deny named methods, but the unsafe behavior
 //! is a shape: a fallible filesystem observation becomes a boolean or `Option`
@@ -53,6 +53,7 @@ fn core_filesystem_uncertainty_is_never_collapsed() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let core = crate_root.join(CORE);
     let mut files = rust_files_below(&core);
+    files.extend(rust_files_below(&crate_root.join("crates/cli/src")));
     files.sort();
 
     let mut violations = Vec::new();
@@ -63,8 +64,8 @@ fn core_filesystem_uncertainty_is_never_collapsed() {
             .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
         let aliases = FilesystemAliases::from_file(&syntax);
         let relative = path
-            .strip_prefix(&core)
-            .expect("core source is below core root")
+            .strip_prefix(crate_root)
+            .expect("source is below the workspace root")
             .to_path_buf();
         let mut boundary = BoundaryVisitor {
             aliases: &aliases,

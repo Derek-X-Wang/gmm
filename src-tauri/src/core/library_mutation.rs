@@ -159,6 +159,8 @@ enum StagedLibraryOperation {
 #[derive(Debug, Clone)]
 pub(super) struct StagedLibraryOperationWitness {
     id: Ulid,
+    game: GameCode,
+    operation: StagedLibraryOperation,
     staged_path: PathBuf,
     staged_identity: DirectoryIdentity,
     created_at: DateTime<FixedOffset>,
@@ -586,12 +588,12 @@ impl UnvalidatedStagedLibraryOperationWitness {
         };
         let parsed_id = Ulid::from_string(&id)
             .map_err(|_| corrupt(format!("the operation ID {id:?} is not a ULID")))?;
-        let _game = GameCode::from_str(&game_code).map_err(|_| {
+        let game = GameCode::from_str(&game_code).map_err(|_| {
             corrupt(format!(
                 "the recorded value {game_code:?} is an invalid game code"
             ))
         })?;
-        let _operation = match operation.as_str() {
+        let operation = match operation.as_str() {
             "adopt" => StagedLibraryOperation::AdoptFolder,
             "import_zip" => StagedLibraryOperation::ImportZip,
             _ => {
@@ -629,6 +631,8 @@ impl UnvalidatedStagedLibraryOperationWitness {
         }
         Ok(StagedLibraryOperationWitness {
             id: parsed_id,
+            game,
+            operation,
             staged_path,
             staged_identity,
             created_at,
@@ -1271,6 +1275,65 @@ impl StagedLibraryDirectory {
 }
 
 impl Core {
+    pub(super) async fn attention_witnesses(
+        &self,
+    ) -> Result<(
+        Vec<super::attention::ReinstallAttention>,
+        Vec<super::attention::EnabledTransitionAttention>,
+        Vec<super::attention::ImporterEvacuationAttention>,
+        Vec<super::attention::StagedLibraryOperationAttention>,
+    )> {
+        let mut connection = self.pool.acquire().await?;
+        let reinstalls = load_reinstall_swap_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .map(|witness| super::attention::ReinstallAttention {
+                mod_id: witness.mod_id.clone(),
+                game: witness.game,
+                library_path: witness.library_path.clone(),
+                recovery: witness.recovery(),
+            })
+            .collect();
+        let transitions = load_enabled_transition_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .map(|witness| super::attention::EnabledTransitionAttention {
+                mod_id: witness.mod_id.clone(),
+                game: witness.game,
+                intended_enabled: witness.intended_enabled,
+                junction_path: witness.junction_path.clone(),
+                recovery: witness.recovery(),
+            })
+            .collect();
+        let evacuations = load_importer_evacuation_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .map(|witness| super::attention::ImporterEvacuationAttention {
+                game: witness.game,
+                game_path: witness.game_path.clone(),
+                backup_path: witness.backup_path.clone(),
+                recovery: witness.recovery(),
+            })
+            .collect();
+        let staged = load_staged_library_operation_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .map(
+                |witness| super::attention::StagedLibraryOperationAttention {
+                    id: witness.id(),
+                    game: witness.game,
+                    operation: match witness.operation {
+                        StagedLibraryOperation::AdoptFolder => "adopt",
+                        StagedLibraryOperation::ImportZip => "import_zip",
+                    },
+                    staged_path: witness.staged_path,
+                    recovery_error: witness.recovery_error,
+                },
+            )
+            .collect();
+        Ok((reinstalls, transitions, evacuations, staged))
+    }
+
     pub(super) async fn reinstall_swap_witnesses(&self) -> Result<Vec<ReinstallSwapWitness>> {
         let mut connection = self.pool.acquire().await?;
         load_reinstall_swap_witnesses(&mut connection).await

@@ -1,11 +1,11 @@
 //! Structural and behavioral guards for the Tauri command-error boundary.
 //!
 //! The source gate deliberately covers literal `#[tauri::command]` item
-//! functions under `src/`. It exactly matches that attribute and lexically
-//! resolves direct `crate::command_error::CommandResult` imports (including
+//! functions under `src/` and `crates/cli/src/`. It exactly matches that
+//! attribute and lexically resolves direct `crate::command_error::CommandResult` imports (including
 //! import aliases). Conditional imports are rejected as binding proof because
 //! another target can supply a shadow with the same name. The gate cannot
-//! inspect macro expansion, aliased attributes, commands outside `src/`, or
+//! inspect macro expansion, aliased attributes, commands outside those roots, or
 //! arbitrary type re-exports; review of the Tauri registration list remains
 //! the backstop for those shapes.
 
@@ -196,6 +196,10 @@ fn every_tauri_command_uses_structured_command_result() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut sources = Vec::new();
     rust_sources_below(&source_root, &mut sources);
+    rust_sources_below(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/cli/src"),
+        &mut sources,
+    );
 
     let mut command_count = 0;
     let mut violations = Vec::new();
