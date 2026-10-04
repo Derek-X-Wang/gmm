@@ -1271,6 +1271,48 @@ impl StagedLibraryDirectory {
 }
 
 impl Core {
+    pub(super) async fn attention_witnesses(
+        &self,
+    ) -> Result<(
+        Vec<super::attention::ReinstallAttention>,
+        Vec<super::attention::EnabledTransitionAttention>,
+        Vec<super::attention::ImporterEvacuationAttention>,
+    )> {
+        let mut connection = self.pool.acquire().await?;
+        let reinstalls = load_reinstall_swap_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .map(|witness| super::attention::ReinstallAttention {
+                mod_id: witness.mod_id.clone(),
+                game: witness.game,
+                library_path: witness.library_path.clone(),
+                recovery: witness.recovery(),
+            })
+            .collect();
+        let transitions = load_enabled_transition_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .map(|witness| super::attention::EnabledTransitionAttention {
+                mod_id: witness.mod_id.clone(),
+                game: witness.game,
+                intended_enabled: witness.intended_enabled,
+                junction_path: witness.junction_path.clone(),
+                recovery: witness.recovery(),
+            })
+            .collect();
+        let evacuations = load_importer_evacuation_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .map(|witness| super::attention::ImporterEvacuationAttention {
+                game: witness.game,
+                game_path: witness.game_path.clone(),
+                backup_path: witness.backup_path.clone(),
+                recovery: witness.recovery(),
+            })
+            .collect();
+        Ok((reinstalls, transitions, evacuations))
+    }
+
     pub(super) async fn reinstall_swap_witnesses(&self) -> Result<Vec<ReinstallSwapWitness>> {
         let mut connection = self.pool.acquire().await?;
         load_reinstall_swap_witnesses(&mut connection).await

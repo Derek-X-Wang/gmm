@@ -4,6 +4,7 @@
 //! integration tests in `src-tauri/tests/` exercise this module directly so
 //! they can run on macOS without spinning up the Tauri runtime.
 
+pub mod attention;
 pub mod av;
 pub mod conflicts;
 pub mod crash_points;
@@ -4254,7 +4255,8 @@ impl Core {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModLibraryPathOverlap {
     pub mod_id: String,
     pub mod_name: String,
