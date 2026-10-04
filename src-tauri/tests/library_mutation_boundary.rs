@@ -1,7 +1,7 @@
 //! Structural gate for Library-content mutation fence policy.
 //!
-//! This test parses every checked-in production Rust module under `src/`. It
-//! follows syntactically visible Library paths (`library_root`, `library_path`,
+//! This test parses checked-in production Rust modules under `src/` and
+//! `crates/cli/src/`. It follows syntactically visible Library paths (`library_root`, `library_path`,
 //! and values derived from them) through local bindings, path-call arguments,
 //! and method receivers. An unknown path call that receives such a value is
 //! conservatively treated as a possible mutation. Direct `use std::fs::...`
@@ -20,8 +20,8 @@
 //! This is deliberately not a type checker or control/dataflow proof. It cannot
 //! recognize a Library path whose meaning is hidden behind an unrelated name,
 //! an opaque return value, macro expansion, generated source, or a call outside
-//! checked-in `src/`. Policy evidence is syntactic: an acquisition-shaped call
-//! inside an unpolled async block or to a shadowed local function is accepted,
+//! the scanned production roots. Policy evidence is syntactic: an
+//! acquisition-shaped call inside an unpolled async block or to a shadowed local function is accepted,
 //! as is a parameter such as `Option<LibraryMutationFence>` or an unrelated
 //! same-named type. The `std::fs` alias map is file-wide and scope-insensitive,
 //! so nested imports with the same local name can overwrite one another. Only
@@ -134,6 +134,9 @@ const ESTABLISHED_MUTATION_CONTRACTS: &[EstablishedMutationContract] = &[
 fn library_content_mutations_declare_their_fence_policy() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut sources = rust_files_below(&source_root);
+    sources.extend(rust_files_below(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/cli/src"),
+    ));
     sources.sort();
 
     let mut parsed = Vec::new();

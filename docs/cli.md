@@ -12,8 +12,15 @@ Errors reuse GMM's command-error classification, including
 0 success, 1 invalid usage, 2 operation failure or refusal.
 
 `--data-dir PATH` defaults to the same resolved OS data directory plus `GMM`
-as the app. Every valid invocation takes that directory's instance lock;
+as the app. Every valid invocation attempts to take that directory's instance lock;
 close the GMM window first. Usage errors are returned before state is opened.
+
+The CLI refuses both lock contention and lock I/O failures. The window app
+deliberately fails open on lock I/O failures (for example, an unopenable lock
+file during antivirus interference), logging the failure and starting without
+a lock. It still refuses detected contention. The shared lock therefore does
+not guarantee exclusion when the app has started without it; close that app
+before using the CLI against the same data directory.
 
 | Command | Required options | Result |
 | --- | --- | --- |
@@ -57,6 +64,11 @@ Inspect `status` and resolve the issue in the window first. After explicit
 user agreement, `--allow-attention` bypasses this aggregate refusal; it does
 not bypass any Core ownership, recovery, or Game Session guard. An unreadable
 sub-report remains an error when the aggregate guard is used.
+
+Status includes pending staged Library imports and adoptions in
+`stagedLibraryOperations`, naming the witness ID, Game, operation, staged path,
+and any recovery error. These witnesses make `safeToProceed` false even when
+their owned partial directory is hidden from the unreferenced-directory audit.
 
 Inspection never runs startup recovery or migrations. Existing databases open
 read-only, and a stale, failed, or unrecognised migration record is refused;

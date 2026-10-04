@@ -498,23 +498,142 @@ async fn launch_failure_is_classified_and_retires_its_claim() {
 
 #[tokio::test]
 async fn failed_status_subreport_never_becomes_safe() {
+    for table in ["session_launch_claims", "staged_library_operations"] {
+        let env = Fixture::new();
+        let core = env.core().await;
+        let pool = SqlitePool::connect(&env.url).await.unwrap();
+        sqlx::query(&format!("DROP TABLE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        core.close().await;
+        let outcome = env.invoke(&["status"]).await;
+        assert_eq!(outcome.exit_code, 2);
+        assert!(outcome.result.is_none());
+        assert!(outcome.error.unwrap().message.contains(table));
+    }
+}
+
+#[tokio::test]
+async fn cli_holds_instance_lock_until_blocked_operation_finishes() {
+    use gmm_lib::core::instance_lock;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    // Kill and reap the exact test child on assertion failure as well as success.
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     let env = Fixture::new();
-    let core = env.core().await;
+    env.core().await.close().await;
+    let source = env.source();
     let pool = SqlitePool::connect(&env.url).await.unwrap();
-    sqlx::query("DROP TABLE session_launch_claims")
-        .execute(&pool)
-        .await
+    // Hold the database writer so the CLI cannot finish the real adoption.
+    let blocker = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let library = env.data.join("library");
+    std::fs::remove_dir(&library).unwrap();
+    let mut child = Child(
+        Command::new(env!("CARGO_BIN_EXE_gmm-cli"))
+            .args([
+                "--data-dir",
+                env.data.to_str().unwrap(),
+                "adopt",
+                "--game",
+                "gimi",
+                "--from",
+                source.to_str().unwrap(),
+                "--name",
+                "Blocked",
+                "--allow-attention",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+
+    // Root creation is an operation checkpoint after lock acquisition. Waiting
+    // for it avoids testing only the fleeting acquisition itself.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::exists(&library).unwrap() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "CLI must reach the blocked operation"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "CLI operation checkpoint timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "precondition: operation is still pending"
+    );
+    let competitor = Command::new(env!("CARGO_BIN_EXE_gmm-cli"))
+        .args(["--data-dir", env.data.to_str().unwrap(), "status"])
+        .output()
         .unwrap();
+    let competitor_json: Value = serde_json::from_slice(&competitor.stdout).unwrap();
+    assert_eq!(
+        competitor_json["error"]["kind"], "alreadyRunning",
+        "CLI must retain its instance lock while the operation is pending"
+    );
+    assert_eq!(competitor.status.code(), Some(2));
+    assert!(
+        child.0.try_wait().unwrap().is_none(),
+        "the writer barrier must still block completion"
+    );
+
+    blocker.rollback().await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let completed = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "CLI did not finish after the writer was released"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    use std::io::Read;
+    let mut output = String::new();
+    child
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut output)
+        .unwrap();
+    assert!(
+        completed.success(),
+        "blocked CLI operation should finish successfully: {output}"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&output).unwrap()["result"]["mod"]["name"],
+        "Blocked"
+    );
+    let _released =
+        instance_lock::acquire(&env.data).expect("CLI releases its lock after completion");
     pool.close().await;
-    core.close().await;
+}
+
+#[tokio::test]
+async fn lock_io_failure_refuses_cli_before_opening_state() {
+    let env = Fixture::new();
+    std::fs::create_dir_all(env.data.join("instance.lock")).unwrap();
     let outcome = env.invoke(&["status"]).await;
     assert_eq!(outcome.exit_code, 2);
     assert!(outcome.result.is_none());
-    assert!(outcome
-        .error
-        .unwrap()
-        .message
-        .contains("session_launch_claims"));
+    assert!(outcome.error.unwrap().message.contains("instance lock"));
+    assert!(!std::fs::exists(env.data.join("gmm.db")).unwrap());
+    assert!(!std::fs::exists(env.data.join("library")).unwrap());
 }
 
 #[tokio::test]

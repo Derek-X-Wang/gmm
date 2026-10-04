@@ -16,6 +16,7 @@ pub struct AttentionReport {
     pub reinstalls: Vec<ReinstallAttention>,
     pub enabled_transitions: Vec<EnabledTransitionAttention>,
     pub importer_evacuations: Vec<ImporterEvacuationAttention>,
+    pub staged_library_operations: Vec<StagedLibraryOperationAttention>,
     pub session_launches: Vec<InterruptedSessionLaunch>,
     pub active_session: Option<SessionInfo>,
     pub library_audits: Vec<LibraryAuditReport>,
@@ -59,11 +60,21 @@ pub struct LibraryRootOverlap {
     pub backups: PathBuf,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedLibraryOperationAttention {
+    pub id: String,
+    pub game: GameCode,
+    pub operation: &'static str,
+    pub staged_path: PathBuf,
+    pub recovery_error: Option<String>,
+}
+
 impl Core {
     /// Read existing reports without repairing or dismissing evidence.
     /// An unavailable report is an error, never an apparently healthy status.
     pub async fn attention_status(&self) -> Result<AttentionReport> {
-        let (reinstalls, enabled_transitions, importer_evacuations) =
+        let (reinstalls, enabled_transitions, importer_evacuations, staged_library_operations) =
             self.attention_witnesses().await?;
         let session_launches = self.interrupted_session_launches().await?;
         let active_session = self.session_info().await?;
@@ -84,6 +95,7 @@ impl Core {
         let safe_to_proceed = reinstalls.is_empty()
             && enabled_transitions.is_empty()
             && importer_evacuations.is_empty()
+            && staged_library_operations.is_empty()
             && session_launches.is_empty()
             && active_session.is_none()
             && library_root_overlaps.is_empty()
@@ -96,6 +108,7 @@ impl Core {
             reinstalls,
             enabled_transitions,
             importer_evacuations,
+            staged_library_operations,
             session_launches,
             active_session,
             library_audits,

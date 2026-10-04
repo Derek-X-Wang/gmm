@@ -128,6 +128,54 @@ async fn pending_importer_evacuation_needs_attention_without_recovery_error() {
 }
 
 #[tokio::test]
+async fn interrupted_staged_import_needs_attention_even_when_audit_hides_directory() {
+    let (tmp, core, pool) = fixture().await;
+    let id = ulid::Ulid::new().to_string();
+    let staged_path = tmp.path().join("library/gimi").join(&id);
+    std::fs::create_dir_all(&staged_path).unwrap();
+    std::fs::write(staged_path.join("partial.ini"), "interrupted import bytes").unwrap();
+    sqlx::query("INSERT INTO staged_library_operations (id, game_code, operation, staged_path, staged_identity, created_at) VALUES (?, 'gimi', 'import_zip', ?, ?, '2026-08-28T00:00:00Z')")
+        .bind(&id).bind(staged_path.to_string_lossy().as_ref())
+        .bind(durable_directory_key(&staged_path)).execute(&pool).await.unwrap();
+
+    let status = core.attention_status().await.unwrap();
+    assert!(
+        status
+            .library_audits
+            .iter()
+            .all(|audit| audit.unreferenced.is_empty()),
+        "precondition: the staging witness hides its partial directory from the Library audit"
+    );
+    assert!(
+        !status.safe_to_proceed,
+        "an interrupted staged Library import must make status unsafe even when its directory is hidden from the audit"
+    );
+    let encoded = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        encoded["stagedLibraryOperations"][0]["id"], id,
+        "status must name the interrupted staged Library witness"
+    );
+    assert_eq!(encoded["stagedLibraryOperations"][0]["game"], "gimi");
+    assert_eq!(
+        encoded["stagedLibraryOperations"][0]["operation"],
+        "import_zip"
+    );
+    assert_eq!(status.staged_library_operations[0].staged_path, staged_path);
+    assert!(status.staged_library_operations[0].recovery_error.is_none());
+}
+
+#[tokio::test]
+async fn invalid_staging_subreport_is_an_error_instead_of_safe() {
+    let (_tmp, core, pool) = fixture().await;
+    sqlx::query("INSERT INTO staged_library_operations (id, game_code, operation, staged_path, staged_identity, created_at) VALUES ('invalid', 'gimi', 'adopt', 'invalid', 'invalid', '2026-08-28T00:00:00Z')")
+        .execute(&pool).await.unwrap();
+    assert!(matches!(
+        core.attention_status().await,
+        Err(gmm_lib::core::Error::StagingWitnessCorrupt { .. })
+    ));
+}
+
+#[tokio::test]
 async fn duplicate_mod_records_need_attention() {
     let (tmp, core, pool) = fixture().await;
     let item = adopt(&tmp, &core).await;
