@@ -1,10 +1,15 @@
 # Loader evidence and standalone startup verification on Windows. Compare the
 # CLI with the probe, then launch only the CLI from an isolated directory.
+param(
+    [ValidateSet("debug", "release")]
+    [string]$Profile = "debug"
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$DebugDir = Join-Path $Repo "src-tauri/target/debug"
+$BinaryDir = Join-Path $Repo "src-tauri/target/$Profile"
 $VsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
 $VsRoot = & $VsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 $DumpBin = Get-ChildItem -Path "$VsRoot/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" |
@@ -13,7 +18,7 @@ $ManifestTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}/Windows Kits/10/bi
     Sort-Object FullName -Descending | Select-Object -First 1
 
 foreach ($Name in @("gmm-cli.exe", "concurrency-probe.exe", "gmm_lib.dll")) {
-    $Binary = Join-Path $DebugDir $Name
+    $Binary = Join-Path $BinaryDir $Name
     if (-not (Test-Path -LiteralPath $Binary)) {
         Write-Host "missing binary: $Binary"
         continue
@@ -38,7 +43,7 @@ foreach ($Name in @("gmm-cli.exe", "concurrency-probe.exe", "gmm_lib.dll")) {
 }
 
 Write-Host "=== app-local DLL candidates ==="
-Get-ChildItem -Path $DebugDir, (Join-Path $DebugDir "deps") -Filter *.dll |
+Get-ChildItem -Path $BinaryDir, (Join-Path $BinaryDir "deps") -Filter *.dll |
     Select-Object FullName, Length | Format-Table -AutoSize
 
 # No Cargo/probe environment or app-local DLL may make this load check pass.
@@ -49,7 +54,7 @@ $null = New-Item -Path $IsolatedDir -ItemType Directory
 $Process = [System.Diagnostics.Process]::new()
 try {
     $IsolatedCli = Join-Path $IsolatedDir "gmm-cli.exe"
-    Copy-Item -LiteralPath (Join-Path $DebugDir "gmm-cli.exe") -Destination $IsolatedCli
+    Copy-Item -LiteralPath (Join-Path $BinaryDir "gmm-cli.exe") -Destination $IsolatedCli
     $Process.StartInfo.FileName = $IsolatedCli
     $Process.StartInfo.WorkingDirectory = $IsolatedDir
     $Process.StartInfo.UseShellExecute = $false
