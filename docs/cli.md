@@ -83,6 +83,22 @@ invocation alive while playing. Native injection requires Windows and the
 existing Loader resolution rules (`GMM_LOADER_DLL`, beside the executable,
 or the vendored development copy).
 
+Headless launch supplies no session-event adapter and instantiates no Tauri
+runtime. The Windows CI loader diagnostic rejects GUI system imports in both
+debug and release CLI executables, so the CLI no longer needs the app's
+Common-Controls v6 manifest. The window app still embeds its own manifest.
+
+The CLI releases its own launch reservation on an ordinary launch failure and
+clears its active Game Session when the exit watcher observes the Game ending.
+Force-killing the CLI prevents that cleanup and does not prove the Game exited:
+dropping a child-process handle does not terminate the Game. `status` deliberately
+preserves these records because inspection does not run recovery. Close the Game
+and open the window to recover an interrupted launch or stale active session.
+If a crash happened before the child PID was recorded, recovery cannot prove
+whether a Game was spawned; use the window's explicit retirement action after
+confirming the Game is closed. Adding automatic CLI recovery would change the
+reviewed inspection/write contract and is outside this launch refactor.
+
 Example workflow:
 
 ```sh

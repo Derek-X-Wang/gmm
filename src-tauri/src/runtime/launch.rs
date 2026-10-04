@@ -11,9 +11,11 @@
 //! Why the indirection: `tauri::test::mock_builder()` ships no ACL, so
 //! routing a command through the mock runtime fails with
 //! `"<cmd> not allowed. Plugin not found"` (issue #26). Testing the
-//! orchestration therefore means calling it as a plain function. It stays
-//! generic over `R: Runtime` so tests can hand it a `MockRuntime` handle
-//! and still exercise the real `Emitter` implementation.
+//! orchestration therefore means calling it as a plain function. The
+//! window adapter stays generic over `R: Runtime` so tests can hand it a
+//! `MockRuntime` handle and still exercise the real `Emitter` implementation.
+//! The shared launch flow only knows about session events; headless callers
+//! supply `()` without instantiating a Tauri runtime.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -62,6 +64,32 @@ impl Default for LaunchOptions {
 pub struct LaunchOutcome {
     pub info: SessionInfo,
     pub watcher: tokio::task::JoinHandle<()>,
+}
+
+/// Event delivery is the only window-specific part of a Game Session.
+/// Keep it separate from Loader ownership, injection and durable claims.
+trait SessionEvents: Clone + Send + Sync + 'static {
+    fn started(&self, info: &SessionInfo);
+    fn ended(&self);
+}
+
+impl<R: Runtime> SessionEvents for Option<AppHandle<R>> {
+    fn started(&self, info: &SessionInfo) {
+        if let Some(app) = self {
+            let _ = app.emit(SESSION_STARTED_EVENT, info);
+        }
+    }
+
+    fn ended(&self) {
+        if let Some(app) = self {
+            let _ = app.emit(SESSION_ENDED_EVENT, ());
+        }
+    }
+}
+
+impl SessionEvents for () {
+    fn started(&self, _info: &SessionInfo) {}
+    fn ended(&self) {}
 }
 
 /// RAII wrapper that kills + reaps the wrapped child on drop. Used
@@ -168,7 +196,7 @@ pub async fn launch<R: Runtime>(
     game: GameCode,
     opts: &LaunchOptions,
 ) -> CommandResult<LaunchOutcome> {
-    launch_inner(Some(app), core, runtime, game, opts).await
+    launch_inner(Some(app.clone()), core, runtime, game, opts).await
 }
 
 /// Launch without a window, retaining the same claims, injection and exit watcher.
@@ -179,11 +207,11 @@ pub async fn launch_headless(
     game: GameCode,
     opts: &LaunchOptions,
 ) -> CommandResult<LaunchOutcome> {
-    launch_inner::<tauri::Wry>(None, core, runtime, game, opts).await
+    launch_inner((), core, runtime, game, opts).await
 }
 
-async fn launch_inner<R: Runtime>(
-    app: Option<&AppHandle<R>>,
+async fn launch_inner<E: SessionEvents>(
+    events: E,
     core: &Core,
     runtime: &SessionRuntime,
     game: GameCode,
@@ -375,14 +403,13 @@ async fn launch_inner<R: Runtime>(
             }
 
             // Emit to the frontend so the banner appears immediately.
-            if let Some(app) = app {
-                let _ = app.emit(SESSION_STARTED_EVENT, &info);
-            }
+            events.started(&info);
 
             // Spawn the exit watcher. It polls until the child exits, then
             // drops the LiveSession (which unhooks via RAII), clears the DB
             // row, and emits SESSION_ENDED_EVENT.
-            let watcher = spawn_exit_watcher(app.cloned(), core.clone(), runtime.inner_clone(), opts);
+            let watcher =
+                spawn_exit_watcher(events.clone(), core.clone(), runtime.inner_clone(), opts);
 
             Ok(LaunchOutcome { info, watcher })
         }
@@ -440,8 +467,8 @@ async fn reconcile_live_slot(core: &Core, runtime: &SessionRuntime) -> CommandRe
 }
 
 /// The exit watcher: the only place a healthy Game Session ends.
-fn spawn_exit_watcher<R: Runtime>(
-    app: Option<AppHandle<R>>,
+fn spawn_exit_watcher<E: SessionEvents>(
+    events: E,
     core: Core,
     runtime: SessionRuntime,
     opts: &LaunchOptions,
@@ -469,8 +496,6 @@ fn spawn_exit_watcher<R: Runtime>(
         if let Err(e) = core.end_session().await {
             tracing::warn!(error = %e, "end_session failed in watcher");
         }
-        if let Some(app) = app {
-            let _ = app.emit(SESSION_ENDED_EVENT, ());
-        }
+        events.ended();
     })
 }

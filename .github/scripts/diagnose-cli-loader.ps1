@@ -1,5 +1,5 @@
-# Loader evidence and standalone startup verification on Windows. Compare the
-# CLI with the probe, then launch only the CLI from an isolated directory.
+# Assert the CLI has no GUI imports, report loader evidence, and verify
+# standalone startup on Windows in an isolated directory.
 param(
     [ValidateSet("debug", "release")]
     [string]$BuildProfile = "debug"
@@ -26,8 +26,22 @@ foreach ($Name in @("gmm-cli.exe", "concurrency-probe.exe", "gmm_lib.dll")) {
     $File = Get-Item -LiteralPath $Binary
     Write-Host "executable: $($File.FullName); exists: True; size: $($File.Length)"
     Write-Host "=== imports: $Name ==="
-    & $DumpBin.FullName /imports $Binary
-    Write-Host "dumpbin exit code: $LASTEXITCODE"
+    $Imports = @(& $DumpBin.FullName /imports $Binary)
+    $DumpBinExit = $LASTEXITCODE
+    $Imports | ForEach-Object { Write-Host $_ }
+    Write-Host "dumpbin exit code: $DumpBinExit"
+    if ($Name -eq "gmm-cli.exe") {
+        if ($DumpBinExit -ne 0) {
+            throw "CLI GUI import assertion could not inspect gmm-cli.exe: dumpbin exited $DumpBinExit"
+        }
+        $GuiImports = @($Imports | Where-Object {
+            $_ -match '^\s*(comctl32|user32|gdi32|dwmapi|ole32)\.dll\s*$'
+        } | ForEach-Object { $_.Trim().ToLowerInvariant() } | Sort-Object -Unique)
+        if ($GuiImports.Count -gt 0) {
+            throw "CLI GUI import assertion failed: gmm-cli.exe imports $($GuiImports -join ', ')"
+        }
+        Write-Host "CLI GUI import assertion passed: gmm-cli.exe imports no GUI system libraries"
+    }
 
     # EXEs use manifest resource 1; DLLs conventionally use resource 2.
     # Try both, preserving mt's raw error when a resource is absent.
