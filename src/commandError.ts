@@ -1,6 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
-export type SurfaceFailureKind = "invalidActiveVariant" | "other";
+export type SurfaceFailureKind = "invalidActiveVariant" | "alreadyRunning" | "other";
 
 export interface CommandErrorEnvelope {
   kind: SurfaceFailureKind;

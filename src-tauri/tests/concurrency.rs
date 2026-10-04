@@ -285,7 +285,13 @@ impl Probe {
     /// Spawn without waiting. Used for the probe that holds a lock open
     /// while the test does something else.
     fn spawn(self) -> RunningProbe {
-        let mut child = self.command().spawn().expect("spawn probe");
+        let command = self.command();
+        self.spawn_command(command)
+    }
+
+    /// Share deadlines, stream draining and owned cleanup with the CLI lock test.
+    fn spawn_command(self, mut command: Command) -> RunningProbe {
+        let mut child = command.spawn().expect("spawn process");
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
@@ -1405,6 +1411,65 @@ fn a_second_gmm_process_is_refused_the_instance_lock() {
         .op(["hold-lock", "--ms", "0"])
         .run()
         .expect_ok("a fresh process after the holder was killed");
+}
+
+/// The shipped CLI always acquires the same lock as the app. Readiness is
+/// reported by the existing probe only after the kernel has granted its lock.
+#[test]
+fn a_second_cli_process_is_refused_with_classified_lock_failure() {
+    let env = TestEnv::new();
+    let mut holder = probe(&env)
+        .honouring_the_lock()
+        .op(["hold-lock", "--ms", "30000"])
+        .spawn();
+    holder
+        .wait_for_outcome()
+        .expect_ok("the holder taking the instance lock");
+    let name = if cfg!(windows) {
+        "gmm-cli.exe"
+    } else {
+        "gmm-cli"
+    };
+    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/debug")
+        .join(name);
+    let invoke = || {
+        let mut command = Command::new(&cli);
+        command
+            .args(["--data-dir", env.data_dir.to_str().unwrap(), "status"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut running = probe(&env).op(["status"]).spawn_command(command);
+        running.stdin.take();
+        let line = running.recv_stdout_line("report CLI outcome", None);
+        let status = running.wait_for_exit("finish CLI invocation", None);
+        let remaining = running.finish_stdout().expect("finish CLI stdout");
+        let stderr = running.finish_stderr();
+        assert!(
+            remaining.is_empty(),
+            "CLI must print exactly one JSON line: {remaining:?}; stderr: {stderr}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&line).expect("one JSON outcome");
+        (status.code(), value)
+    };
+    let (code, value) = invoke();
+    assert_eq!(
+        code,
+        Some(2),
+        "a second CLI process must refuse the held instance lock"
+    );
+    assert_eq!(
+        value["error"]["kind"], "alreadyRunning",
+        "lock refusal must retain its stable failure kind"
+    );
+    holder.kill();
+    let (code, value) = invoke();
+    assert_eq!(
+        code,
+        Some(0),
+        "the CLI must acquire the lock after its holder is killed: {value}"
+    );
 }
 
 // ---------------------------------------------------------------------
