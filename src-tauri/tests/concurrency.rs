@@ -284,15 +284,84 @@ impl Probe {
 
     /// Spawn without waiting. Used for the probe that holds a lock open
     /// while the test does something else.
-    fn spawn(self) -> RunningProbe {
+    fn spawn(self) -> RunningProcess {
         let command = self.command();
-        self.spawn_command(command, "probe")
+        let operation = self
+            .args
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<missing operation>".to_string());
+        RunningProcess::spawn_command(
+            command,
+            "probe",
+            operation,
+            ProcessSettings {
+                pause_at: self.pause_at,
+                crash_at: self.crash_at,
+                timeout: self.timeout,
+                cleanup_timeout: self.cleanup_timeout,
+                stdout_reader_delay: self.stdout_reader_delay,
+                stderr_reader_delay: self.stderr_reader_delay,
+                force_reap_timeout: self.force_reap_timeout,
+            },
+        )
     }
+}
 
+/// Settings for the shared child I/O and cleanup harness. Probe-only pause and
+/// crash expectations are absent for ordinary executables such as the CLI.
+struct ProcessSettings {
+    pause_at: Option<&'static str>,
+    crash_at: Option<&'static str>,
+    timeout: Duration,
+    cleanup_timeout: Duration,
+    stdout_reader_delay: Duration,
+    stderr_reader_delay: Duration,
+    force_reap_timeout: bool,
+}
+
+impl Default for ProcessSettings {
+    fn default() -> Self {
+        Self {
+            pause_at: None,
+            crash_at: None,
+            timeout: PROBE_TIMEOUT,
+            cleanup_timeout: PROBE_CLEANUP_TIMEOUT,
+            stdout_reader_delay: Duration::ZERO,
+            stderr_reader_delay: Duration::ZERO,
+            force_reap_timeout: false,
+        }
+    }
+}
+
+struct RunningProcess {
+    child: Child,
+    process_name: &'static str,
+    process_details: String,
+    stdin: Option<ChildStdin>,
+    stdout: Receiver<std::io::Result<String>>,
+    stdout_reader: Option<JoinHandle<()>>,
+    stderr_reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+    operation: String,
+    pause_at: Option<&'static str>,
+    crash_at: Option<&'static str>,
+    timeout: Duration,
+    cleanup_timeout: Duration,
+    force_reap_timeout: bool,
+    cleanup_attempted: bool,
+    cleanup_deadline: Option<Instant>,
+}
+
+impl RunningProcess {
     /// Share only deadlines, stream draining and owned cleanup. The supplied
     /// command owns its arguments, environment, working directory and pipes;
     /// this helper does not inject the probe's command-line protocol.
-    fn spawn_command(self, mut command: Command, process_name: &'static str) -> RunningProbe {
+    fn spawn_command(
+        mut command: Command,
+        process_name: &'static str,
+        operation: String,
+        settings: ProcessSettings,
+    ) -> Self {
         let program = PathBuf::from(command.get_program());
         let metadata = std::fs::metadata(&program);
         let process_details = format!(
@@ -310,8 +379,8 @@ impl Probe {
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let stdout_reader_delay = self.stdout_reader_delay;
-        let stderr_reader_delay = self.stderr_reader_delay;
+        let stdout_reader_delay = settings.stdout_reader_delay;
+        let stderr_reader_delay = settings.stderr_reader_delay;
 
         // Pipe reads are blocking on both Unix and Windows. Dedicated readers
         // let the harness enforce its own deadline while continuously draining
@@ -344,12 +413,7 @@ impl Probe {
             result
         });
 
-        let operation = self
-            .args
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "<missing operation>".to_string());
-        RunningProbe {
+        RunningProcess {
             child,
             process_name,
             process_details,
@@ -358,36 +422,15 @@ impl Probe {
             stdout_reader: Some(stdout_reader),
             stderr_reader: Some(stderr_reader),
             operation,
-            pause_at: self.pause_at,
-            crash_at: self.crash_at,
-            timeout: self.timeout,
-            cleanup_timeout: self.cleanup_timeout,
-            force_reap_timeout: self.force_reap_timeout,
+            pause_at: settings.pause_at,
+            crash_at: settings.crash_at,
+            timeout: settings.timeout,
+            cleanup_timeout: settings.cleanup_timeout,
+            force_reap_timeout: settings.force_reap_timeout,
             cleanup_attempted: false,
             cleanup_deadline: None,
         }
     }
-}
-
-struct RunningProbe {
-    child: Child,
-    process_name: &'static str,
-    process_details: String,
-    stdin: Option<ChildStdin>,
-    stdout: Receiver<std::io::Result<String>>,
-    stdout_reader: Option<JoinHandle<()>>,
-    stderr_reader: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
-    operation: String,
-    pause_at: Option<&'static str>,
-    crash_at: Option<&'static str>,
-    timeout: Duration,
-    cleanup_timeout: Duration,
-    force_reap_timeout: bool,
-    cleanup_attempted: bool,
-    cleanup_deadline: Option<Instant>,
-}
-
-impl RunningProbe {
     fn pid(&self) -> u32 {
         self.child.id()
     }
@@ -400,13 +443,16 @@ impl RunningProbe {
         match self.stdout.recv_timeout(self.timeout) {
             Ok(Ok(line)) => line,
             Ok(Err(error)) => self.fail_after_kill(
-                format!("failed to read probe stdout while waiting to {action}: {error}"),
+                format!(
+                    "failed to read {} stdout while waiting to {action}: {error}",
+                    self.process_name
+                ),
                 expected_crash_point,
             ),
             Err(RecvTimeoutError::Timeout) => self.fail_after_kill(
                 format!(
-                    "timed out after {:?} waiting for probe to {action}",
-                    self.timeout
+                    "timed out after {:?} waiting for {} to {action}",
+                    self.timeout, self.process_name
                 ),
                 expected_crash_point,
             ),
@@ -430,13 +476,16 @@ impl RunningProbe {
                 }
                 Ok(None) => self.fail_after_kill(
                     format!(
-                        "timed out after {:?} waiting for probe to {action}",
-                        self.timeout
+                        "timed out after {:?} waiting for {} to {action}",
+                        self.timeout, self.process_name
                     ),
                     expected_crash_point,
                 ),
                 Err(error) => self.fail_after_kill(
-                    format!("failed while waiting for probe to {action}: {error}"),
+                    format!(
+                        "failed while waiting for {} to {action}: {error}",
+                        self.process_name
+                    ),
                     expected_crash_point,
                 ),
             }
@@ -651,7 +700,7 @@ fn finish_reader<T>(
     reader.join().map_err(|_| format!("{reader_name} panicked"))
 }
 
-impl Drop for RunningProbe {
+impl Drop for RunningProcess {
     fn drop(&mut self) {
         let cleanup_deadline = self.begin_cleanup();
         if !self.cleanup_attempted && self.child.try_wait().ok().flatten().is_none() {
@@ -1376,7 +1425,7 @@ fn drop_bounds_and_kills_a_live_unreaped_child_during_unwinding() {
             let _running = running;
             panic!("live-child Drop unwind sentinel");
         }))
-        .expect_err("the sentinel panic should unwind through RunningProbe::drop");
+        .expect_err("the sentinel panic should unwind through RunningProcess::drop");
         let message = failure
             .downcast_ref::<String>()
             .cloned()
@@ -1466,7 +1515,12 @@ fn a_second_cli_process_is_refused_with_classified_lock_failure() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut running = probe(&env).op(["status"]).spawn_command(command, "CLI");
+        let mut running = RunningProcess::spawn_command(
+            command,
+            "CLI",
+            "status".into(),
+            ProcessSettings::default(),
+        );
         running.stdin.take();
         let line = running.recv_stdout_line("report CLI outcome", None);
         let status = running.wait_for_exit("finish CLI invocation", None);
@@ -4400,7 +4454,7 @@ async fn replacement_at_witnessed_staging_path_remains_unowned() {
     );
 
     // The producer is deliberately not resumed: it has lost its staged name,
-    // so RunningProbe's bounded Drop terminates it without manufacturing a
+    // so RunningProcess's bounded Drop terminates it without manufacturing a
     // second pathname replacement and testing a different commit question.
     drop(adopting);
 }

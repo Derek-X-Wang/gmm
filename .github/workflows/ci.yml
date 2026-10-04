@@ -190,8 +190,8 @@ jobs:
         working-directory: src-tauri
         run: cargo test --workspace
 
-      - name: Diagnose CLI Windows loader dependencies
-        if: failure() && runner.os == 'Windows' && steps.rust-tests.outcome == 'failure'
+      - name: Verify standalone CLI and report Windows loader dependencies
+        if: always() && runner.os == 'Windows' && (steps.rust-tests.outcome == 'success' || steps.rust-tests.outcome == 'failure')
         shell: pwsh
         run: .github/scripts/diagnose-cli-loader.ps1
 
