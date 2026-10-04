@@ -2,14 +2,14 @@
 # CLI with the probe, then launch only the CLI from an isolated directory.
 param(
     [ValidateSet("debug", "release")]
-    [string]$Profile = "debug"
+    [string]$BuildProfile = "debug"
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$BinaryDir = Join-Path $Repo "src-tauri/target/$Profile"
+$BinaryDir = Join-Path $Repo "src-tauri/target/$BuildProfile"
 $VsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
 $VsRoot = & $VsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 $DumpBin = Get-ChildItem -Path "$VsRoot/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" |

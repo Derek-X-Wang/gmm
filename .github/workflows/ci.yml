@@ -327,7 +327,7 @@ jobs:
 
       - name: Verify standalone release CLI
         shell: pwsh
-        run: .github/scripts/diagnose-cli-loader.ps1 -Profile release
+        run: .github/scripts/diagnose-cli-loader.ps1 -BuildProfile release
 
       - name: Upgrade, refuse downgrade, repair, uninstall
         shell: pwsh
