@@ -343,7 +343,9 @@ async fn dry_run_enable_does_not_change_state() {
         plan["effects"]["junctionPath"],
         env.tmp
             .path()
-            .join("Game/Mods/Example")
+            .join("Game")
+            .join("Mods")
+            .join("Example")
             .to_string_lossy()
             .as_ref()
     );
