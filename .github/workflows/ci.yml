@@ -186,8 +186,14 @@ jobs:
         run: cargo run -p gmm-manifest-validator --bin validate-manifest
 
       - name: cargo test
+        id: rust-tests
         working-directory: src-tauri
         run: cargo test --workspace
+
+      - name: Diagnose CLI Windows loader dependencies
+        if: failure() && runner.os == 'Windows' && steps.rust-tests.outcome == 'failure'
+        shell: pwsh
+        run: .github/scripts/diagnose-cli-loader.ps1
 
 
       # Windows-only: smoke-test the gmm-loader FFI binding against the

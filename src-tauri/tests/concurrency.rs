@@ -286,12 +286,27 @@ impl Probe {
     /// while the test does something else.
     fn spawn(self) -> RunningProbe {
         let command = self.command();
-        self.spawn_command(command)
+        self.spawn_command(command, "probe")
     }
 
-    /// Share deadlines, stream draining and owned cleanup with the CLI lock test.
-    fn spawn_command(self, mut command: Command) -> RunningProbe {
-        let mut child = command.spawn().expect("spawn process");
+    /// Share only deadlines, stream draining and owned cleanup. The supplied
+    /// command owns its arguments, environment, working directory and pipes;
+    /// this helper does not inject the probe's command-line protocol.
+    fn spawn_command(self, mut command: Command, process_name: &'static str) -> RunningProbe {
+        let program = PathBuf::from(command.get_program());
+        let metadata = std::fs::metadata(&program);
+        let process_details = format!(
+            "{process_name} executable: {program:?}; exists: {}; size in bytes: {:?}; working directory: {:?}",
+            program.exists(),
+            metadata.map(|metadata| metadata.len()),
+            command.get_current_dir(),
+        );
+        let mut child = command.spawn().unwrap_or_else(|error| {
+            panic!(
+                "{process_details}; spawn error: {error:?}; raw OS error: {:?}",
+                error.raw_os_error(),
+            )
+        });
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
@@ -336,6 +351,8 @@ impl Probe {
             .unwrap_or_else(|| "<missing operation>".to_string());
         RunningProbe {
             child,
+            process_name,
+            process_details,
             stdin: Some(stdin),
             stdout: stdout_rx,
             stdout_reader: Some(stdout_reader),
@@ -354,6 +371,8 @@ impl Probe {
 
 struct RunningProbe {
     child: Child,
+    process_name: &'static str,
+    process_details: String,
     stdin: Option<ChildStdin>,
     stdout: Receiver<std::io::Result<String>>,
     stdout_reader: Option<JoinHandle<()>>,
@@ -392,7 +411,10 @@ impl RunningProbe {
                 expected_crash_point,
             ),
             Err(RecvTimeoutError::Disconnected) => self.fail_after_kill(
-                format!("probe closed stdout before it could {action}"),
+                format!(
+                    "{} closed stdout before it could {action}",
+                    self.process_name
+                ),
                 expected_crash_point,
             ),
         }
@@ -447,8 +469,8 @@ impl RunningProbe {
             .unwrap_or_default();
         panic!(
             "{message}{expected_crash_point} (operation {:?}); child cleanup: {status}; \
-             stderr:\n{stderr}{stdout_cleanup}",
-            self.operation,
+             {}; spawn succeeded (no spawn error); stderr:\n{stderr}{stdout_cleanup}",
+            self.operation, self.process_details,
         );
     }
 
@@ -1433,6 +1455,10 @@ fn a_second_cli_process_is_refused_with_classified_lock_failure() {
     let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target/debug")
         .join(name);
+    assert!(
+        cli.exists(),
+        "{name} missing at {cli:?} — run `cargo build --workspace` before this test",
+    );
     let invoke = || {
         let mut command = Command::new(&cli);
         command
@@ -1440,7 +1466,7 @@ fn a_second_cli_process_is_refused_with_classified_lock_failure() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut running = probe(&env).op(["status"]).spawn_command(command);
+        let mut running = probe(&env).op(["status"]).spawn_command(command, "CLI");
         running.stdin.take();
         let line = running.recv_stdout_line("report CLI outcome", None);
         let status = running.wait_for_exit("finish CLI invocation", None);
