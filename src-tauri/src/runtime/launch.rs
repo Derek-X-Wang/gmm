@@ -207,7 +207,7 @@ pub async fn launch_headless(
     game: GameCode,
     opts: &LaunchOptions,
 ) -> CommandResult<LaunchOutcome> {
-    launch_inner((), core, runtime, game, opts).await
+    launch_inner::<Option<AppHandle<tauri::Wry>>>(None, core, runtime, game, opts).await
 }
 
 async fn launch_inner<E: SessionEvents>(
