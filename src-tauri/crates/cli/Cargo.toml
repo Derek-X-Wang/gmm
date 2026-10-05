@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[target.'cfg(windows)'.build-dependencies]
+serde_json = "1"
+tauri-winres = "0.3"
+
 [dependencies]
 gmm = { path = "../.." }
 serde = { version = "1", features = ["derive"] }

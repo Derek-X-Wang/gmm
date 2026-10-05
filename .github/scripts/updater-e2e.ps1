@@ -211,7 +211,7 @@ function Build-Version($version, $destDir) {
     $conf | ConvertTo-Json -Depth 8 | Set-Content -Path $confPath -Encoding utf8
 
     if (Test-Path $BundleRoot) { Remove-Item $BundleRoot -Recurse -Force }
-    pnpm tauri build --config $confPath
+    pnpm tauri build --config src-tauri/tauri.bundle.conf.json --config $confPath
     if ($LASTEXITCODE -ne 0) { throw "tauri build ($version) exited $LASTEXITCODE" }
 
     if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force }

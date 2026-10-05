@@ -1596,6 +1596,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tauri-winres",
  "tempfile",
  "tokio",
  "ulid",
