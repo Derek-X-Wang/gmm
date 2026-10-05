@@ -635,9 +635,9 @@ Write-Host "all six game codes present in gmm.db"
 Write-Section "Verify installed CLI"
 $cliProcess = [System.Diagnostics.Process]::new()
 try {
-    $cliProcess.StartInfo.FileName = Join-Path $installDir "gmm-missing.exe"
+    $cliProcess.StartInfo.FileName = $cli
     $cliProcess.StartInfo.WorkingDirectory = $installDir
-    $cliProcess.StartInfo.ArgumentList.Add("status")
+    $cliProcess.StartInfo.ArgumentList.Add("mods")
     $cliProcess.StartInfo.UseShellExecute = $false
     $cliProcess.StartInfo.CreateNoWindow = $true
     $cliProcess.StartInfo.RedirectStandardOutput = $true
