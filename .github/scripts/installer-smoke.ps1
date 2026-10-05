@@ -637,7 +637,7 @@ $cliProcess = [System.Diagnostics.Process]::new()
 try {
     $cliProcess.StartInfo.FileName = $cli
     $cliProcess.StartInfo.WorkingDirectory = $installDir
-    $cliProcess.StartInfo.ArgumentList.Add("mods")
+    $cliProcess.StartInfo.ArgumentList.Add("status")
     $cliProcess.StartInfo.UseShellExecute = $false
     $cliProcess.StartInfo.CreateNoWindow = $true
     $cliProcess.StartInfo.RedirectStandardOutput = $true
@@ -690,6 +690,8 @@ $p = Start-Process msiexec.exe `
 if ($p.ExitCode -ne 0) {
     throw "msiexec uninstall exited $($p.ExitCode)"
 }
+New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+Copy-Item -LiteralPath (Join-Path $RepoRoot "src-tauri\target\release\gmm-cli.exe") -Destination $cli
 if (Test-Path $exe) {
     throw "uninstall left $exe behind"
 }
