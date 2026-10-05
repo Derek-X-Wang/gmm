@@ -690,7 +690,6 @@ $p = Start-Process msiexec.exe `
 if ($p.ExitCode -ne 0) {
     throw "msiexec uninstall exited $($p.ExitCode)"
 }
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 if (Test-Path $exe) {
     throw "uninstall left $exe behind"
 }
