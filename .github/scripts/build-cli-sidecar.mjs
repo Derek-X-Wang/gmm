@@ -19,7 +19,9 @@ const config = JSON.parse(process.env.TAURI_CONFIG ?? "{}");
 // gmm-cli depends on the app library. tauri-build copies externalBin even
 // for a plain Cargo build, so bootstrap it without the not-yet-built sidecar.
 config.bundle = { ...config.bundle, externalBin: [] };
-const args = ["build", "--locked", "-p", "gmm-cli", "--target", target];
+// Tauri can rewrite the app package version for a bundle override (the
+// updater test does this); let Cargo reconcile that workspace lock entry.
+const args = ["build", "-p", "gmm-cli", "--target", target];
 if (profile === "release") args.push("--release");
 const build = spawnSync("cargo", args, {
   cwd: workspace,
