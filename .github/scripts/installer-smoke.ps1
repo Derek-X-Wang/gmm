@@ -635,7 +635,7 @@ Write-Host "all six game codes present in gmm.db"
 Write-Section "Verify installed CLI"
 $cliProcess = [System.Diagnostics.Process]::new()
 try {
-    $cliProcess.StartInfo.FileName = $cli
+    $cliProcess.StartInfo.FileName = Join-Path $installDir "gmm-missing.exe"
     $cliProcess.StartInfo.WorkingDirectory = $installDir
     $cliProcess.StartInfo.ArgumentList.Add("status")
     $cliProcess.StartInfo.UseShellExecute = $false
