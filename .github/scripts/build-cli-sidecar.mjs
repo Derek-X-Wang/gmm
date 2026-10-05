@@ -19,9 +19,16 @@ const config = JSON.parse(process.env.TAURI_CONFIG ?? "{}");
 // gmm-cli depends on the app library. tauri-build copies externalBin even
 // for a plain Cargo build, so bootstrap it without the not-yet-built sidecar.
 config.bundle = { ...config.bundle, externalBin: [] };
+const rustc = spawnSync("rustc", ["-vV"], { encoding: "utf8" });
+if (rustc.error) throw rustc.error;
+if (rustc.status !== 0) throw new Error("Could not read Rust host target");
+const host = /^host: (.+)$/m.exec(rustc.stdout)?.[1];
+if (!host) throw new Error("rustc did not report its host target");
 // Tauri can rewrite the app package version for a bundle override (the
 // updater test does this); let Cargo reconcile that workspace lock entry.
-const args = ["build", "-p", "gmm-cli", "--target", target];
+const args = ["build", "-p", "gmm-cli"];
+// Reuse the native release dependencies already built by Tauri/CI.
+if (target !== host) args.push("--target", target);
 if (profile === "release") args.push("--release");
 const build = spawnSync("cargo", args, {
   cwd: workspace,
@@ -30,5 +37,13 @@ const build = spawnSync("cargo", args, {
 });
 if (build.error) throw build.error;
 if (build.status !== 0) process.exit(build.status ?? 1);
-copyFileSync(join(workspace, "target", target, profile, "gmm-cli.exe"), output);
+const metadata = spawnSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
+  cwd: workspace,
+  encoding: "utf8",
+});
+if (metadata.error) throw metadata.error;
+if (metadata.status !== 0) throw new Error("Could not locate Cargo target directory");
+const targetDir = JSON.parse(metadata.stdout).target_directory;
+const binaryDir = target === host ? join(targetDir, profile) : join(targetDir, target, profile);
+copyFileSync(join(binaryDir, "gmm-cli.exe"), output);
 console.log(`Prepared ${output}`);
