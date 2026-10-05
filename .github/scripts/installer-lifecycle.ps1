@@ -392,6 +392,7 @@ if (Test-Path $exe) { throw "could not remove $exe to simulate damage" }
 Invoke-Msi @("/f", "`"$($newMsi.FullName)`"") "msi-lifecycle-repair.log"
 
 if (-not (Test-Path $exe)) { throw "repair did not restore $exe" }
+$null = Get-InstalledExe
 $exeHashRepaired = (Get-FileHash $exe -Algorithm SHA256).Hash
 if ($exeHashRepaired -ne $exeHashAfter) {
     throw "repair restored a different binary than the upgrade installed"

@@ -690,8 +690,6 @@ $p = Start-Process msiexec.exe `
 if ($p.ExitCode -ne 0) {
     throw "msiexec uninstall exited $($p.ExitCode)"
 }
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-Copy-Item -LiteralPath (Join-Path $RepoRoot "src-tauri\target\release\gmm-cli.exe") -Destination $cli
 if (Test-Path $exe) {
     throw "uninstall left $exe behind"
 }
