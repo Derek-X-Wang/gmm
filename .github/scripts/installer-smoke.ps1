@@ -697,10 +697,7 @@ if (Test-Path -LiteralPath $cli) {
     throw "CLI uninstall assertion failed: gmm-cli.exe remains after uninstall"
 }
 if (Test-Path -LiteralPath $installDir) {
-    $remaining = @(Get-ChildItem -LiteralPath $installDir -Force -Recurse)
-    if ($remaining.Count -ne 0) {
-        throw "CLI uninstall assertion failed: install directory contains $($remaining.Count) leftover entries"
-    }
+    throw "CLI uninstall assertion failed: install directory remains after uninstall"
 }
 Write-Host "uninstall OK"
 

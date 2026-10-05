@@ -42,7 +42,7 @@ fn embed_app_version() {
         .set("ProductName", "GMM CLI")
         .set("OriginalFilename", "gmm-cli.exe")
         .set("FileVersion", version)
-        .set("ProductVersion", env!("CARGO_PKG_VERSION"))
+        .set("ProductVersion", version)
         .set_version_info(tauri_winres::VersionInfo::FILEVERSION, numeric_version)
         .set_version_info(tauri_winres::VersionInfo::PRODUCTVERSION, numeric_version)
         .compile()
