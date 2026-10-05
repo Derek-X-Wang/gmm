@@ -190,7 +190,7 @@ jobs:
         working-directory: src-tauri
         run: cargo test --workspace
 
-      - name: Verify standalone CLI and report Windows loader dependencies
+      - name: Assert CLI has no GUI imports and verify standalone Windows startup
         if: always() && runner.os == 'Windows' && (steps.rust-tests.outcome == 'success' || steps.rust-tests.outcome == 'failure')
         shell: pwsh
         run: .github/scripts/diagnose-cli-loader.ps1
