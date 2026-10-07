@@ -7,19 +7,18 @@
 //! failures and surface actionable exclusion guidance inline instead
 //! of the raw OS error string.
 //!
-//! The structured guidance lives in `docs/antivirus-and-smartscreen.md`
-//! and is included verbatim here via [`include_str!`] so the doc, the
-//! README, the launch-error component, and the onboarding wizard
-//! cannot drift. Tests in `tests/av.rs` lock in that single source of
-//! truth.
+//! This module owns the short rendered summary. The canonical long-form
+//! instructions live in `docs/antivirus-and-smartscreen.md`, referenced by
+//! the launch-error component and onboarding wizard. The summary deliberately
+//! omits paths and menu details; it is not parsed from the Markdown.
+//! `tests/av.rs` checks that the doc mentions each summary label, not that
+//! its instructions are semantically correct. Review both when meaning changes.
 
 use serde::Serialize;
 
-/// Single source of truth for the AV / SmartScreen guidance text.
+/// Canonical long-form AV / SmartScreen guide, embedded for coverage checks.
 ///
-/// Included at compile time so the in-app surface and the on-disk doc
-/// cannot drift (one of #13's acceptance criteria; the onboarding
-/// wizard in #24 will load its copy through the same module).
+/// The rendered payload comes from the constants below, not this Markdown.
 pub const AV_GUIDANCE_DOC: &str = include_str!("../../../docs/antivirus-and-smartscreen.md");
 
 /// Sentinel the in-app launch error component looks for. When
@@ -41,10 +40,9 @@ pub const AV_BODY: &str =
      that shape, even though the binary is doing exactly what it is supposed \
      to do.";
 
-/// The exclusion steps shown inline in the launch error component.
-/// Every entry must appear verbatim somewhere in the canonical doc — the
-/// `guidance_payload_matches_doc_single_source_of_truth` test enforces
-/// that.
+/// Short labels shown inline in the launch error component, deliberately
+/// separate from the long-form paths and menu instructions. Every label must
+/// be mentioned in the doc; `tests/av.rs` checks coverage, not semantic parity.
 pub const AV_EXCLUSION_STEPS: &[&str] = &[
     "Open Windows Security",
     "Add an exclusion",
@@ -117,11 +115,9 @@ pub fn wrap_launch_error<S: Into<String>>(message: S) -> String {
 /// the launch-error component and the onboarding wizard can render the
 /// same copy without each maintaining its own string table.
 ///
-/// The doc / Rust / React layers all read from this struct via the
-/// `av_guidance` command, which in turn pulls its values from the
-/// constants above. The constants in turn must appear verbatim in
-/// `docs/antivirus-and-smartscreen.md` — locked in by the tests in
-/// `tests/av.rs`.
+/// React reads this struct via the `av_guidance` command. Its copy comes
+/// from the Rust constants above; the doc records that summary alongside
+/// the separate long-form instructions. `tests/av.rs` checks copy coverage.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvGuidance {
@@ -132,8 +128,8 @@ pub struct AvGuidance {
     /// Distinct steps the user can take, rendered as a list. Every
     /// entry appears verbatim in the canonical doc.
     pub exclusion_steps: Vec<String>,
-    /// Repo-relative path to the canonical long-form doc; the React
-    /// layer turns this into an in-app *Read more* link.
+    /// Repo-relative path to the canonical long-form doc, displayed by
+    /// the launch guidance and onboarding wizard.
     pub doc_path: String,
     /// Sentinel the React side uses to detect AV-pattern errors. The
     /// frontend strips this prefix before showing the raw OS message,

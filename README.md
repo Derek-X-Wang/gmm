@@ -26,7 +26,8 @@ the release before adding any exclusion.
 **How to add an exclusion** in Windows Defender:
 *Settings → Privacy & security → Windows Security → Virus & threat
 protection → Manage settings → Add or remove exclusions → Folder*.
-Add the GMM install directory (default `%LocalAppData%\Programs\GMM\`)
+Add the folder containing your installed `GMM.exe` (current MSI default
+`%ProgramFiles%\GMM\`; see the canonical guide below to locate it)
 and the GMM data directory (default `%AppData%\GMM\`). Restart GMM
 afterwards — Defender does not re-evaluate running processes until they
 relaunch. Most third-party antivirus products (Norton, Bitdefender,
@@ -136,6 +137,10 @@ MSI because Windows treats them as different products. They must uninstall the
 NSIS copy before installing the MSI or risk ending up with two GMM installs;
 this one-release compatibility cost was accepted while the install base is
 effectively zero, before it could grow with every release.
+
+**Command-line use.** The MSI also installs `gmm-cli.exe` beside `GMM.exe`
+(default `%ProgramFiles%\GMM\`). It is not added to `PATH`; see the
+[CLI guide](docs/cli.md) for invocation, JSON results and confirmation rules.
 
 **Downgrading is not supported.** Running an older GMM MSI over a newer
 install is refused by Windows Installer with its standard *"A newer
