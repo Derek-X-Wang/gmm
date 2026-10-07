@@ -19,6 +19,8 @@
          actually invoked a command and the Rust side answered
       6. the process is still alive after startup (no crash loop)
       7. msiexec uninstalls cleanly
+      8. gmm-cli.exe is installed beside GMM.exe at the same version,
+         returns real status JSON with system-only PATH, and is removed
 
     Criterion 5 is the one that distinguishes a working app from one
     whose UI is entirely broken: the DB and the log both appear on a
@@ -382,6 +384,18 @@ if (-not $exe) {
 }
 Write-Host "exe: $exe"
 
+$installDir = Split-Path -Parent $exe
+$cli = Join-Path $installDir "gmm-cli.exe"
+if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
+    throw "CLI install assertion failed: gmm-cli.exe not found beside GMM.exe"
+}
+$appVersion = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion
+$cliVersion = (Get-Item -LiteralPath $cli).VersionInfo.ProductVersion
+if ([string]::IsNullOrWhiteSpace($cliVersion) -or $cliVersion -cne $appVersion) {
+    throw "CLI version assertion failed: gmm-cli.exe version '$cliVersion' does not match GMM.exe version '$appVersion'"
+}
+Write-Host "CLI installed beside GMM.exe at version $cliVersion"
+
 # ---------------------------------------------------------------------
 Write-Section "Launch and verify startup"
 
@@ -616,6 +630,57 @@ foreach ($code in @("gimi", "srmi", "zzmi", "wwmi", "himi", "efmi")) {
 }
 Write-Host "all six game codes present in gmm.db"
 
+# The app is stopped and has released the shared instance lock. Invoke the
+# installed file by full path, without Cargo or the install directory on PATH.
+Write-Section "Verify installed CLI"
+$cliProcess = [System.Diagnostics.Process]::new()
+try {
+    $cliProcess.StartInfo.FileName = $cli
+    $cliProcess.StartInfo.WorkingDirectory = $installDir
+    $cliProcess.StartInfo.ArgumentList.Add("status")
+    $cliProcess.StartInfo.UseShellExecute = $false
+    $cliProcess.StartInfo.CreateNoWindow = $true
+    $cliProcess.StartInfo.RedirectStandardOutput = $true
+    $cliProcess.StartInfo.RedirectStandardError = $true
+    $cliProcess.StartInfo.Environment["PATH"] = [Environment]::SystemDirectory + ";" + $env:SystemRoot
+    try {
+        $null = $cliProcess.Start()
+    } catch {
+        throw "CLI invocation assertion failed: installed executable could not start: $($_.Exception.Message)"
+    }
+    $stdoutTask = $cliProcess.StandardOutput.ReadToEndAsync()
+    $stderrTask = $cliProcess.StandardError.ReadToEndAsync()
+    if (-not $cliProcess.WaitForExit(30000)) {
+        $cliProcess.Kill($true)
+        $null = $cliProcess.WaitForExit(5000)
+        throw "CLI invocation assertion failed: installed executable did not exit within 30 seconds"
+    }
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    Write-Host "installed CLI exit: $($cliProcess.ExitCode); stdout: $stdout; stderr: $stderr"
+    if ($cliProcess.ExitCode -ne 0) {
+        throw "CLI invocation assertion failed: installed status exited $($cliProcess.ExitCode)"
+    }
+    $lines = @($stdout.Trim() -split '\r?\n')
+    if ($lines.Count -ne 1) {
+        throw "CLI output assertion failed: installed status must print exactly one JSON outcome"
+    }
+    try {
+        $outcome = $lines[0] | ConvertFrom-Json
+        if ($outcome.ok -ne $true -or $outcome.result.safeToProceed -ne $true -or
+            $null -ne $outcome.result.activeSession -or
+            @($outcome.result.reinstalls).Count -ne 0 -or
+            @($outcome.result.stagedLibraryOperations).Count -ne 0) {
+            throw "unexpected status result"
+        }
+    } catch {
+        throw "CLI output assertion failed: installed status did not report the expected clean attention state"
+    }
+    Write-Host "installed CLI returned the expected clean status with system-only PATH"
+} finally {
+    $cliProcess.Dispose()
+}
+
 # ---------------------------------------------------------------------
 Write-Section "Uninstall"
 
@@ -627,6 +692,12 @@ if ($p.ExitCode -ne 0) {
 }
 if (Test-Path $exe) {
     throw "uninstall left $exe behind"
+}
+if (Test-Path -LiteralPath $cli) {
+    throw "CLI uninstall assertion failed: gmm-cli.exe remains after uninstall"
+}
+if (Test-Path -LiteralPath $installDir) {
+    throw "CLI uninstall assertion failed: install directory remains after uninstall"
 }
 Write-Host "uninstall OK"
 

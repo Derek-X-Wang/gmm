@@ -122,6 +122,60 @@ fn bundle_targets_only_the_lifecycle_tested_msi() {
         Some(&serde_json::json!(["msi"])),
         "bundle.targets must remain MSI-only until another installer format has its own lifecycle coverage",
     );
+
+    // Keep this invariant owned by the base config. Tauri's merge configs
+    // replace targets rather than appending them, so checking only the base
+    // misses an override that reintroduces an untested installer. Discover
+    // every repository JSON file, not a list of today's config filenames:
+    // a third override must obey the same rule wherever it is placed.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+    let base = repo.join("src-tauri/tauri.conf.json");
+    let mut dirs = vec![repo.clone()];
+    while let Some(dir) = dirs.pop() {
+        let entries =
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.expect("read repository entry");
+            let path = entry.path();
+            let kind = entry.file_type().expect("read repository entry type");
+            if kind.is_dir() {
+                // Generated output and dependencies are not source configs.
+                if !matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | "node_modules" | "target" | "dist")
+                ) {
+                    dirs.push(path);
+                }
+                continue;
+            }
+            if !kind.is_file()
+                || path == base
+                || path.extension().and_then(|ext| ext.to_str()) != Some("json")
+            {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            // Some non-Tauri files (notably tsconfig.json) use comments.
+            // Invalid JSON cannot be a Tauri JSON merge config; the bundler
+            // rejects it before producing an installer.
+            let Ok(config) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            if let Some(bundle) = config.get("bundle") {
+                let origin = path.strip_prefix(&repo).expect("under repo root");
+                assert!(
+                    bundle.is_object() && bundle.get("targets").is_none(),
+                    "{}: merge configs must not override bundle.targets or remove bundle — \
+                     tauri.conf.json owns the lifecycle-tested MSI-only target",
+                    origin.display(),
+                );
+            }
+        }
+    }
 }
 
 #[test]

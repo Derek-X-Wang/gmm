@@ -81,7 +81,22 @@ function Get-InstalledExe {
         (Join-Path ${env:ProgramFiles} "GMM\GMM.exe"),
         (Join-Path ${env:ProgramFiles(x86)} "GMM\GMM.exe")
     )
-    $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($found) {
+        # Each installed version (including after upgrade, refused downgrade,
+        # and repair) must carry the matching CLI, not the previous sidecar.
+        $cli = Join-Path (Split-Path -Parent $found) "gmm-cli.exe"
+        if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
+            throw "CLI lifecycle version assertion failed: gmm-cli.exe missing beside GMM.exe"
+        }
+        $appVersion = (Get-Item -LiteralPath $found).VersionInfo.ProductVersion
+        $cliVersion = (Get-Item -LiteralPath $cli).VersionInfo.ProductVersion
+        if ([string]::IsNullOrWhiteSpace($cliVersion) -or $cliVersion -cne $appVersion) {
+            throw "CLI lifecycle version assertion failed: CLI '$cliVersion' does not match app '$appVersion'"
+        }
+        Write-Host "installed app and CLI versions match: $appVersion"
+    }
+    $found
 }
 
 function Invoke-Msi($arguments, $logName) {
@@ -377,6 +392,7 @@ if (Test-Path $exe) { throw "could not remove $exe to simulate damage" }
 Invoke-Msi @("/f", "`"$($newMsi.FullName)`"") "msi-lifecycle-repair.log"
 
 if (-not (Test-Path $exe)) { throw "repair did not restore $exe" }
+$null = Get-InstalledExe
 $exeHashRepaired = (Get-FileHash $exe -Algorithm SHA256).Hash
 if ($exeHashRepaired -ne $exeHashAfter) {
     throw "repair restored a different binary than the upgrade installed"

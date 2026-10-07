@@ -1,8 +1,26 @@
 # GMM CLI
 
 `gmm-cli` lets a local agent inspect GMM and apply Mods discovered elsewhere.
-Build it with `cargo build --workspace` from `src-tauri/`. It is a workspace
-binary; the installer continues to bundle only the app, whose name stays `gmm`.
+The Windows MSI installs `gmm-cli.exe` beside `GMM.exe`, by default at
+`%ProgramFiles%\GMM\gmm-cli.exe` (normally
+`C:\Program Files\GMM\gmm-cli.exe`). If you choose a different install
+directory, use `gmm-cli.exe` in that directory.
+
+Configure the agent's executable path once with this full path. The installer
+does not modify `PATH`: an agent can invoke the installed executable directly,
+without elevation to edit `PATH` or leaving a `PATH` entry after uninstall.
+For example, in PowerShell (close the GMM window first):
+
+```powershell
+& "$env:ProgramFiles\GMM\gmm-cli.exe" status
+```
+
+The CLI is built afresh with each app bundle and carries the same Windows
+product/file version as the app. For development, build it with
+`cargo build --workspace` from `src-tauri/`. To build a Windows MSI from source,
+use `pnpm tauri build --config src-tauri/tauri.bundle.conf.json`; release and
+installer CI use this same packaging config. It prepares Tauri's
+target-triple-suffixed sidecar, which the MSI installs as `gmm-cli.exe`.
 
 Every invocation prints one JSON object on one line. Success is
 `{"ok":true,"result":{...}}`; failure is

@@ -60,6 +60,7 @@ jobs:
           # configured in tauri.conf.json's plugins.updater.endpoints.
           includeUpdaterJson: true
           projectPath: src-tauri
+          args: --config tauri.bundle.conf.json
 
       # tauri-action reports the files it found after the bundler runs. Hash
       # that output instead of naming an MSI here so adding or changing bundle

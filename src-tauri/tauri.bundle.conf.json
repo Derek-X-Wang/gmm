@@ -1,0 +1,8 @@
+{
+  "build": {
+    "beforeBuildCommand": "pnpm build && node .github/scripts/build-cli-sidecar.mjs"
+  },
+  "bundle": {
+    "externalBin": ["binaries/gmm-cli"]
+  }
+}
