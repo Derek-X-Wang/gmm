@@ -108,14 +108,28 @@ Common-Controls v6 manifest. The window app still embeds its own manifest.
 
 The CLI releases its own launch reservation on an ordinary launch failure and
 clears its active Game Session when the exit watcher observes the Game ending.
-Force-killing the CLI prevents that cleanup and does not prove the Game exited:
-dropping a child-process handle does not terminate the Game. `status` deliberately
-preserves these records because inspection does not run recovery. Close the Game
-and open the window to recover an interrupted launch or stale active session.
-If a crash happened before the child PID was recorded, recovery cannot prove
-whether a Game was spawned; use the window's explicit retirement action after
-confirming the Game is closed. Adding automatic CLI recovery would change the
-reviewed inspection/write contract and is outside this launch refactor.
+Ctrl+C or force-killing the CLI can prevent that cleanup. It does not prove the
+Game exited: dropping a child-process handle does not terminate the Game. The
+CLI uses dead-PID recovery rather than a signal handler: before a real
+state-changing command, it checks the recorded Game PID and clears the session
+only if that process has exited, using the same liveness check as the window.
+This also handles an interrupted caller whose Game exits later. Close the Game,
+then retry `launch`, `enable`, or `disable`; no window is needed for a dead
+active session. A live or inaccessible process remains a blocker, and the
+refusal tells you to close the Game and retry. `--allow-attention` cannot bypass
+that guard.
+
+`status` adds `activeSessionLiveness`: `null` with no active session, or an
+object with `state` (`live` or `stale`) and `remedy`. An inaccessible PID is
+conservatively reported as live. The persisted `activeSession` and aggregate
+`safeToProceed` retain their existing meaning: a stale record still makes the
+aggregate false until a real write clears it. Status and dry runs read liveness
+without deleting records or repairing Library witnesses.
+
+Real writes also prune abandoned launch reservations when recorded process
+identities prove them finished. If a crash happened before the child PID was
+recorded, recovery cannot prove whether a Game was spawned; open the window and
+use its explicit retirement action after confirming the Game is closed.
 
 Example workflow:
 

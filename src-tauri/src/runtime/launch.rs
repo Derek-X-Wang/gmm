@@ -73,17 +73,13 @@ trait SessionEvents: Clone + Send + Sync + 'static {
     fn ended(&self);
 }
 
-impl<R: Runtime> SessionEvents for Option<AppHandle<R>> {
+impl<R: Runtime> SessionEvents for AppHandle<R> {
     fn started(&self, info: &SessionInfo) {
-        if let Some(app) = self {
-            let _ = app.emit(SESSION_STARTED_EVENT, info);
-        }
+        let _ = self.emit(SESSION_STARTED_EVENT, info);
     }
 
     fn ended(&self) {
-        if let Some(app) = self {
-            let _ = app.emit(SESSION_ENDED_EVENT, ());
-        }
+        let _ = self.emit(SESSION_ENDED_EVENT, ());
     }
 }
 
@@ -196,7 +192,7 @@ pub async fn launch<R: Runtime>(
     game: GameCode,
     opts: &LaunchOptions,
 ) -> CommandResult<LaunchOutcome> {
-    launch_inner(Some(app.clone()), core, runtime, game, opts).await
+    launch_inner(app.clone(), core, runtime, game, opts).await
 }
 
 /// Launch without a window, retaining the same claims, injection and exit watcher.
