@@ -94,6 +94,12 @@ async fn headless_success_injects_and_watcher_releases_session() {
 // detached helper owns a new console; only its CLI and game inherit it.
 #[test]
 fn ctrl_c_interrupt_leaves_cli_able_to_launch_enable_and_disable() {
+    if std::env::var_os("GMM_CLI_TEST_ISOLATED_CONSOLE").is_some() {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(ctrl_c_console_helper());
+        return;
+    }
     let temp = tempfile::TempDir::new().unwrap();
     let log = temp.path().join("console-helper.log");
     let output = std::fs::File::create(&log).unwrap();
@@ -101,10 +107,10 @@ fn ctrl_c_interrupt_leaves_cli_able_to_launch_enable_and_disable() {
         Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "windows::ctrl_c_console_helper",
-                "--ignored",
+                "windows::ctrl_c_interrupt_leaves_cli_able_to_launch_enable_and_disable",
                 "--nocapture",
             ])
+            .env("GMM_CLI_TEST_ISOLATED_CONSOLE", "1")
             .creation_flags(DETACHED_PROCESS)
             .stdout(output.try_clone().unwrap())
             .stderr(output)
@@ -139,8 +145,6 @@ unsafe extern "system" fn preserve_helper(_event: u32) -> i32 {
     1
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "runs only in a detached console via the native Ctrl+C test"]
 async fn ctrl_c_console_helper() {
     // SAFETY: this test runs in a detached helper. The handler is static and
     // affects only that helper; child processes do not inherit registered handlers.

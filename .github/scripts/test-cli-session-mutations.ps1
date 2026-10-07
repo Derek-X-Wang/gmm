@@ -9,11 +9,11 @@ $launchSource = [IO.File]::ReadAllText($launchPath)
 
 function Assert-MutationRejected {
     param([string]$TestName, [string]$Assertion)
-    $log = & cargo test -p gmm-cli --test commands $TestName -- --exact --nocapture 2>&1
+    $log = & cargo test -p gmm-cli --test commands $TestName -- --nocapture 2>&1
     $code = $LASTEXITCODE
     $text = $log -join "`n"
     Write-Output $text
-    if ($code -eq 0 -or -not $text.Contains($Assertion)) {
+    if ($code -eq 0 -or -not $text.Contains($Assertion) -or -not $text.Contains("running 1 test")) {
         throw "Mutation did not fail the named assertion: $TestName / $Assertion"
     }
     Write-Output "MUTATION PROVEN: $TestName => $Assertion"
