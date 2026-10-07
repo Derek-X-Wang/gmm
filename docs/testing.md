@@ -308,13 +308,18 @@ silently, launches the installed exe, and asserts the app reached a
 working state:
 
 1. `msiexec /i /quiet` exits 0
-2. the installed `GMM.exe` exists
+2. the installed `GMM.exe` and adjacent `gmm-cli.exe` exist (current MSI
+   default `%ProgramFiles%\GMM\`), and their `ProductVersion` values match
 3. launching it creates `%APPDATA%\GMM\gmm.db` (migrations ran)
 4. it creates `%APPDATA%\GMM\logs\*.log` (tracing up)
 5. that log carries the **IPC readiness marker**
 6. the process survives startup (no crash loop)
 7. the seeded DB contains all six game codes
-8. `msiexec /x` uninstalls cleanly
+8. after stopping the app, the installed CLI runs `status` by full path
+   with a system-only `PATH`, exits 0 and emits exactly one JSON outcome
+   with `ok: true`, `safeToProceed: true`, no active session, and empty
+   reinstall and staged-operation lists
+9. `msiexec /x` uninstalls cleanly, removing the CLI and install directory
 
 ### The IPC readiness marker
 
@@ -452,6 +457,21 @@ The target is Windows-specific, so release bundles must be built on Windows;
 a macOS development host should not treat bare `pnpm tauri build` as installer
 verification.
 
+**Bare local builds are deliberately development-only.** On Windows,
+`pnpm tauri build` uses the base config and produces a CLI-less MSI. We
+accept this for app development: keeping the packaging config opt-in
+lets plain Cargo and GUI iteration avoid sidecar staging and the CLI's
+bootstrap build. That MSI is not a release-equivalent installer. To
+build the app + CLI installer on Windows, use:
+
+```bash
+pnpm tauri build --config src-tauri/tauri.bundle.conf.json
+```
+
+Release, smoke and updater builds pass this merge config and verify the
+CLI. A successful bare local build does not establish release packaging
+parity; use the config above and the Windows installer jobs for that.
+
 **The updater artifact is found via its `.sig`, not by extension.** What
 the bundler signs has changed shape across Tauri versions — v1 and early
 v2 signed a zipped installer, the 2.11 line this repo pins signs the raw
@@ -470,29 +490,45 @@ unaffected by how the bytes arrived.
 
 ## 7. Installer lifecycle (`.github/scripts/installer-lifecycle.ps1`)
 
-`installer-smoke.ps1` covers a clean machine. This covers the path every
-*existing* user takes: upgrade, downgrade refusal, repair, uninstall (#57,
-#141).
+`installer-smoke.ps1` covers a clean machine. This covers upgrade,
+downgrade refusal, repair and uninstall between two current-code,
+CLI-carrying installs (#57, #141). The pre-CLI upgrade gap is noted below.
 
 Runs as a second step in the same `updater` job and **reuses the two MSIs
 `updater-e2e.ps1` already built**. A sibling job would have to run
 `tauri build --release` twice more for coverage that overlaps, which
 roughly doubles the Windows CI bill.
 
-1. install 9.9.0, launch it, seed realistic state
+1. install 9.9.0, require `gmm-cli.exe` beside `GMM.exe` with matching
+   `ProductVersion`, launch the app and seed realistic state
 2. assert exactly one Add/Remove Programs entry and **zero** startup
    registrations
 3. upgrade to 9.9.1; assert one entry, one install directory, and that
-   `GMM.exe`'s bytes actually changed
+   `GMM.exe`'s bytes actually changed, and the installed CLI's
+   `ProductVersion` matches the upgraded app
 4. assert every seeded invariant survived
 5. run the 9.9.0 MSI over 9.9.1; require Windows Installer exit code 1603
    and the `A newer version of GMM is already installed.` launch-condition
    message, then recheck version 9.9.1, the one Add/Remove Programs entry,
-   the executable bytes, a working launch, and every seeded invariant
+   the executable bytes, matching app/CLI `ProductVersion`, a working
+   launch, and every seeded invariant
 6. delete `GMM.exe`, run `msiexec /f`, assert it comes back
-   byte-identical and user data is untouched
+   byte-identical, the CLI remains present at the matching app version,
+   and user data is untouched
 7. uninstall; assert the documented policy — install directory gone,
    `%APPDATA%\GMM` and Junctions kept
+
+**Conscious coverage gap: pre-CLI → CLI upgrade.** Both synthetic MSIs
+are built from current code with the CLI. This does not verify the first
+upgrade for users on `v0.2.1-alpha.1` or earlier, whose MSI carried no
+CLI. We retain the two-build job to keep Windows CI cost bounded; testing
+that transition requires an additional pre-CLI baseline artifact and a
+separate assertion that an initially absent CLI appears after upgrade.
+The unchanged MSI upgrade identity and proven CLI-to-CLI replacement
+make this a coverage gap, not a known fault, but they do not prove the
+pre-CLI transition. It remains unverified until a Windows run installs
+that baseline, seeds state, upgrades, and checks the new CLI and preserved
+state. The existing lifecycle job must not be cited as that evidence.
 
 The refused-downgrade verbose log is retained in `ci-diagnostics/`. The exit
 code is deliberately pinned rather than checked only for non-zero: a missing
@@ -521,10 +557,11 @@ upgrade could introduce.
 `verify` reports every failure rather than stopping at the first, because
 a Windows-less maintainer reads that CI log once.
 
-It is test-only and never shipped — `tauri build` bundles only the `gmm`
-binary, and `updater_config.rs` asserts the app package declares exactly
-one. Helper binaries live in their own crate under `crates/` for that
-reason.
+It is test-only and never shipped. The release MSI carries `GMM.exe`
+and the production `gmm-cli.exe` sidecar, not the lifecycle fixture or
+concurrency probe. `updater_config.rs` asserts that the app package
+declares exactly one binary; that does not exclude a sidecar from another
+crate. Test helpers live in their own crates under `crates/`.
 
 ## Running the suite
 

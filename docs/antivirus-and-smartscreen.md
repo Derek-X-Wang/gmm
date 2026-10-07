@@ -3,9 +3,10 @@
 GMM is a Windows desktop app that injects a `3dmigoto`-derived Model Importer DLL
 into a running gacha-game process. Windows Defender, third-party antivirus
 products, and SmartScreen all flag that pattern as suspicious even though it
-is exactly what the app is supposed to do. This page is the single source of
-truth for that warning — the in-app guidance (see slice NEW-AV / #13) and the
-first-run onboarding wizard (slice 16-b / #24) load their copy from this file.
+is exactly what the app is supposed to do. This page is the canonical
+long-form guide referenced by the in-app launch guidance and first-run
+onboarding wizard. Their short labels are maintained separately in
+`src-tauri/src/core/av.rs`; see *In-app surface* below.
 
 ## Why GMM looks suspicious
 
@@ -48,10 +49,16 @@ ship loose binaries outside its installer packages.
    Security`) → **Virus & threat protection** → **Manage settings** →
    **Add or remove exclusions**.
 2. Click **Add an exclusion** → **Folder**, and pick the GMM install
-   directory (default `%LocalAppData%\Programs\GMM\`).
+   directory (the current MSI default is `%ProgramFiles%\GMM\`, verified
+   by the Windows installer smoke job). Select the folder that actually
+   contains your installed `GMM.exe`: right-click the GMM Start menu
+   shortcut → **Open file location**, then right-click the shortcut there
+   → **Properties** and read **Target**. Use that executable's parent
+   folder if your installation differs from the default.
 3. Repeat for the GMM data directory (default `%AppData%\GMM\`) so the
    vendored `3dmloader.dll` and the per-game backups are not re-scanned on
-   every launch.
+   every launch. This is your Windows roaming app-data folder, independent
+   of where the MSI installed GMM.
 4. Optionally exclude the `Mods/` directories inside each affected game's
    install so Defender does not scan every mod toggle.
 
@@ -135,12 +142,17 @@ When a Launch action inside GMM fails with an OS-level error string
 that matches a known AV / SmartScreen pattern (for example, "Operation
 did not complete successfully because the file contains a virus", OS
 error code 225 / `0x800700E1`, or a SmartScreen-related access denial),
-the in-app error surfaces these exclusion instructions inline rather
-than the raw error string.
+the in-app error surfaces a short guidance summary and this document's
+path, with the OS error available under **Underlying error**.
 
-The component renders the following copy (kept verbatim here so the
-Rust `gmm_lib::core::av::guidance()` payload and the doc cannot drift —
-tests in `src-tauri/tests/av.rs` enforce that):
+The launch-error component renders the following Rust-owned summary.
+The onboarding wizard reuses the same summary and document path. These
+short labels deliberately omit paths and menu details; those live in
+the long-form instructions above. `src-tauri/tests/av.rs` checks that
+the headline, body and each label are mentioned in this document. That
+substring check establishes copy coverage, not semantic agreement: it does
+not prove a path or menu instruction correct. Review changes to the
+summary and long-form guide together when their meaning changes.
 
 - **Headline:** Antivirus or SmartScreen may have blocked the launch.
 - **Body:** GMM loads a 3dmigoto-derived Model Importer DLL into your
@@ -148,20 +160,11 @@ tests in `src-tauri/tests/av.rs` enforce that):
   heuristics flag that shape, even though the binary is doing exactly
   what it is supposed to do.
 - **Steps:**
-  - Open Windows Security and add the GMM install + data folders to the
-    Defender exclusion list (see *How to add an exclusion in Windows
-    Defender* above).
-  - Add an exclusion in your third-party AV (Norton / Bitdefender /
-    Avast / AVG / ESET / Kaspersky) under its *Exceptions* or
-    *Trusted folders* menu.
-  - Restart GMM after adding the exclusion so Defender re-evaluates the
-    process.
-  - Restore from quarantine before re-adding the exclusion if your AV
-    already removed the binary.
+  - Open Windows Security
+  - Add an exclusion
+  - Restart GMM after adding the exclusion
+  - Restore from quarantine before re-adding the exclusion
 
-The same canonical text in this file is consumed by:
-
-- The README's *Antivirus and SmartScreen* section.
-- The in-app launch error component (slice NEW-AV / #13).
-- The first-run onboarding wizard's AV disclosure step (slice 16-b /
-  #24), which reuses this file's headline and read-more link.
+`AV_GUIDANCE_DOC` embeds this document for coverage checks; `guidance()`
+constructs the rendered payload from Rust constants, not by parsing the
+Markdown. The README maintains a separate brief guide and links here.

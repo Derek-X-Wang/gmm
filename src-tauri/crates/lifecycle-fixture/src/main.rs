@@ -1,7 +1,7 @@
 //! Test-only GMM stand-in that writes, and later re-checks, the user
-//! state an MSI upgrade must not disturb. Not shipped: `tauri build`
-//! bundles only the `gmm` binary, and nothing in the app depends on
-//! this crate.
+//! state an MSI upgrade must not disturb. Not shipped: the release MSI
+//! carries the app and production `gmm-cli.exe` sidecar, not this fixture.
+//! Nothing in the app depends on this crate.
 //!
 //! `installer-smoke.ps1` covers install → launch → uninstall on a clean
 //! machine. Upgrade is the path every *existing* user takes and was
