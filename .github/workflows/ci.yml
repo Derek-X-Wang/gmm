@@ -190,6 +190,14 @@ jobs:
         working-directory: src-tauri
         run: cargo test --workspace
 
+      # Re-run this named suite even if an earlier Cargo target failed. It
+      # executes a real CTRL_C_EVENT and mutation-proves write-path recovery
+      # plus the no-event headless success watcher on native Windows.
+      - name: Prove CLI session recovery and headless success on Windows
+        if: always() && runner.os == 'Windows' && (steps.rust-tests.outcome == 'success' || steps.rust-tests.outcome == 'failure')
+        shell: pwsh
+        run: .github/scripts/test-cli-session-mutations.ps1
+
       - name: Assert CLI has no GUI imports and verify standalone Windows startup
         if: always() && runner.os == 'Windows' && (steps.rust-tests.outcome == 'success' || steps.rust-tests.outcome == 'failure')
         shell: pwsh

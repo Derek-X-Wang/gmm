@@ -716,3 +716,169 @@ async fn active_variant_failure_keeps_its_shared_classification() {
         "invalidActiveVariant"
     );
 }
+
+async fn seed_session(env: &Fixture, pid: u32) {
+    let core = env.core().await;
+    core.start_session(&gmm_lib::core::SessionInfo {
+        game: GameCode::Gimi,
+        pid,
+        started_at: "2026-08-24T00:00:00Z".parse().unwrap(),
+    })
+    .await
+    .unwrap();
+    core.close().await;
+}
+
+// Use a real reaped process rather than a guessed unused PID.
+fn dead_pid() -> u32 {
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/C", "exit", "0"])
+        .spawn()
+        .unwrap();
+    #[cfg(not(windows))]
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    assert!(!gmm_lib::core::session::is_pid_alive(pid));
+    pid
+}
+
+async fn assert_dead_session_allows_toggle(command: &str, enabled: bool) {
+    let env = Fixture::new();
+    let item = env.deployed_mod().await;
+    if command == "disable" {
+        result(
+            env.invoke(&["enable", "--mod-id", &item.id, "--confirm"])
+                .await,
+        );
+    }
+    seed_session(&env, dead_pid()).await;
+    let outcome = env
+        .invoke(&[command, "--mod-id", &item.id, "--confirm"])
+        .await;
+    assert!(
+        outcome.ok,
+        "dead session must not block {command}: {:?}",
+        outcome.error
+    );
+    assert_eq!(result(outcome)["mod"]["enabled"], enabled);
+    assert_eq!(
+        result(env.invoke(&["status"]).await)["activeSession"],
+        Value::Null
+    );
+}
+
+#[tokio::test]
+async fn dead_session_does_not_block_enable() {
+    assert_dead_session_allows_toggle("enable", true).await;
+}
+
+#[tokio::test]
+async fn dead_session_does_not_block_disable() {
+    assert_dead_session_allows_toggle("disable", false).await;
+}
+
+#[tokio::test]
+async fn dead_session_does_not_block_launch_preflight() {
+    let env = Fixture::new();
+    env.deployed_mod().await;
+    for extra in [None, Some("--allow-attention")] {
+        seed_session(&env, dead_pid()).await;
+        let mut args = vec!["launch", "--game", "gimi"];
+        if let Some(extra) = extra {
+            args.push(extra);
+        }
+        let error = env.invoke(&args).await.error.unwrap();
+        assert!(
+            error.message.contains("not found"),
+            "dead session must reach launch preflight: {error}"
+        );
+        assert_eq!(
+            result(env.invoke(&["status"]).await)["activeSession"],
+            Value::Null
+        );
+    }
+}
+
+#[tokio::test]
+async fn status_reports_session_liveness_without_mutating_and_dry_run_preserves_it() {
+    for (pid, state, remedy) in [
+        (std::process::id(), "live", "Close the game"),
+        (dead_pid(), "stale", "Retry a state-changing command"),
+    ] {
+        let env = Fixture::new();
+        let item = env.deployed_mod().await;
+        seed_session(&env, pid).await;
+        let before = snapshot(&env.data);
+        let status = result(env.invoke(&["status"]).await);
+        assert!(
+            before == snapshot(&env.data),
+            "status must preserve live and stale session records byte-for-byte"
+        );
+        assert_eq!(
+            status["activeSessionLiveness"]["state"], state,
+            "status must distinguish live and stale sessions"
+        );
+        assert!(
+            status["activeSessionLiveness"]["remedy"]
+                .as_str()
+                .unwrap()
+                .contains(remedy),
+            "status must name the session remedy"
+        );
+        assert_eq!(status["activeSession"]["pid"], pid);
+        assert_eq!(
+            status["safeToProceed"], false,
+            "the aggregate contract still reports persisted attention"
+        );
+        result(
+            env.invoke(&["enable", "--mod-id", &item.id, "--dry-run"])
+                .await,
+        );
+        assert!(
+            before == snapshot(&env.data),
+            "dry runs must preserve stale session records byte-for-byte"
+        );
+    }
+}
+
+#[tokio::test]
+async fn live_session_refusals_name_the_remedy_even_with_attention_override() {
+    let env = Fixture::new();
+    let item = env.deployed_mod().await;
+    seed_session(&env, std::process::id()).await;
+    let before = snapshot(&env.data);
+    for command in ["launch", "enable", "disable"] {
+        for extra in [None, Some("--allow-attention")] {
+            let mut args = if command == "launch" {
+                vec![command, "--game", "gimi"]
+            } else {
+                vec![command, "--mod-id", &item.id, "--confirm"]
+            };
+            if let Some(extra) = extra {
+                args.push(extra);
+            }
+            let outcome = env.invoke(&args).await;
+            assert_eq!(
+                outcome.exit_code, 2,
+                "live sessions must still block {command}"
+            );
+            assert!(
+                outcome.error.unwrap().message.contains("Close the game"),
+                "live-session refusal must name the remedy for {command}"
+            );
+            assert!(
+                before == snapshot(&env.data),
+                "refusal must preserve the live session"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[path = "support/windows.rs"]
+mod windows;

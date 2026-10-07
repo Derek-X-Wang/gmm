@@ -227,6 +227,17 @@ async fn mods_dir(core: &Core, game: GameCode) -> CommandResult<PathBuf> {
 }
 
 async fn execute(core: &Core, args: &Args) -> CommandResult<Value> {
+    // The instance lock is held. Only real writes may retire dead Game
+    // Sessions and abandoned launch claims; inspection preserves every row.
+    if args.changing() && !args.dry_run {
+        core.clean_stale_session().await?;
+        if let Some(session) = core.session_info().await? {
+            return Err(CommandError::other(format!(
+                "{} is running (PID {}). Close the game before launching or changing Mods, then retry.",
+                session.game.as_str(), session.pid
+            )));
+        }
+    }
     if args.changing()
         && !args.dry_run
         && !args.allow_attention
@@ -273,7 +284,17 @@ async fn execute(core: &Core, args: &Args) -> CommandResult<Value> {
             "installedOrigin": core.installed_importer_origin(args.game()).await?,
             "pinnedVersion": core.importer_pinned(args.game()).await?})),
         "status" => {
-            Ok(serde_json::to_value(core.attention_status().await?).expect("serialize status"))
+            let attention = core.attention_status().await?;
+            let liveness = attention.active_session.as_ref().map(|session| {
+                if gmm_lib::core::session::is_pid_alive(session.pid) {
+                    json!({"state": "live", "remedy": "Close the game, then retry the command."})
+                } else {
+                    json!({"state": "stale", "remedy": "The game process has exited. Retry a state-changing command to clear this record; status and dry runs preserve it."})
+                }
+            });
+            let mut status = serde_json::to_value(attention).expect("serialize status");
+            status["activeSessionLiveness"] = json!(liveness);
+            Ok(status)
         }
         "conflicts" => Ok(
             serde_json::to_value(core.detect_conflicts(args.game()).await?)

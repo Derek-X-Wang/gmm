@@ -23,3 +23,6 @@ tempfile = "3"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ulid = "1"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
