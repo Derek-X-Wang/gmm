@@ -14,10 +14,10 @@
 //!    unchanged.
 //! 3. The structured `AvGuidance` payload returned by
 //!    `core::av::guidance()` matches the canonical doc at
-//!    `docs/antivirus-and-smartscreen.md` (single source of truth).
-//!    Tests assert the docs file contains every headline and every
-//!    `exclusion_step` summary that the in-app component renders, so
-//!    the two cannot silently drift.
+//!    `docs/antivirus-and-smartscreen.md` for copy coverage.
+//!    Tests assert the doc mentions the Rust-owned headline, body and
+//!    `exclusion_step` labels. They do not check semantic agreement with
+//!    the separate long-form paths or menu instructions.
 
 use gmm_lib::core::av;
 
@@ -109,7 +109,7 @@ fn squish(s: &str) -> String {
 }
 
 #[test]
-fn guidance_payload_matches_doc_single_source_of_truth() {
+fn guidance_payload_has_doc_copy_coverage() {
     // Reads the canonical file at runtime via Cargo's manifest dir so
     // the assertion runs against the same bytes that `include_str!`
     // pulls into the module.
@@ -123,7 +123,7 @@ fn guidance_payload_matches_doc_single_source_of_truth() {
 
     let g = av::guidance();
 
-    // Headline + body + read-more link all live in the doc.
+    // The Rust-owned headline and body must be mentioned in the doc.
     assert!(
         doc_squished.contains(&squish(&g.headline)),
         "doc must contain headline: {:?}",
@@ -131,7 +131,7 @@ fn guidance_payload_matches_doc_single_source_of_truth() {
     );
     assert!(
         doc_squished.contains(&squish(&g.body)),
-        "doc must contain body paragraph (single source of truth)",
+        "doc must contain body paragraph (copy coverage)",
     );
     for step in &g.exclusion_steps {
         assert!(

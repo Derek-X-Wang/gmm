@@ -1,5 +1,6 @@
-//! Test-only GMM stand-in. Not shipped: `tauri build` bundles only the
-//! `gmm` binary, and nothing in the app depends on this crate.
+//! Test-only GMM stand-in. Not shipped: the release MSI carries the app
+//! and production `gmm-cli.exe` sidecar, not this concurrency probe.
+//! Nothing in the app depends on this crate.
 //!
 //! One invocation performs exactly one `Core` operation against a given
 //! `gmm.db` and Library, then prints a single JSON line and exits. That
