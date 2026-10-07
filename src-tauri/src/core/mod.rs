@@ -3964,10 +3964,20 @@ impl Core {
         Ok(())
     }
 
+    /// Clear only the PID whose liveness was evaluated. Another writer can
+    /// replace the singleton row when the instance lock is unavailable.
+    async fn end_session_if_pid(&self, pid: u32) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM active_session WHERE id = 1 AND pid = ?")
+            .bind(pid as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// If a session row points at a process that's no longer alive,
     /// delete the row and return the evicted info so the UI can surface
     /// "Genshin ended unexpectedly last time". Idempotent — returns
-    /// `Ok(None)` when no stale row exists.
+    /// `Ok(None)` when no stale row exists or another writer replaced it.
     pub async fn clean_stale_session(&self) -> Result<Option<SessionInfo>> {
         self.clean_stale_session_launch_claims().await?;
         let Some(info) = self.session_info().await? else {
@@ -3976,8 +3986,11 @@ impl Core {
         if session::is_pid_alive(info.pid) {
             return Ok(None);
         }
-        self.end_session().await?;
-        Ok(Some(info))
+        if self.end_session_if_pid(info.pid).await? {
+            Ok(Some(info))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn ensure_no_active_session(&self) -> Result<()> {
@@ -4744,4 +4757,65 @@ fn copy_dir_recursive(src: &Path, dst: &Path, after_file: Option<&dyn Fn()>) -> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod session_cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delayed_stale_clear_preserves_replacement_session() {
+        let tmp = tempfile::TempDir::new().expect("temp directory");
+        let library = tmp.path().join("library");
+        let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+        let first = Core::new_without_recovery(library.clone(), &db_url)
+            .await
+            .expect("first writer");
+        let second = Core::new_without_recovery(library, &db_url)
+            .await
+            .expect("second writer");
+        let stale = SessionInfo {
+            game: GameCode::Gimi,
+            pid: u32::MAX - 1,
+            started_at: Utc::now(),
+        };
+        first.start_session(&stale).await.expect("stale session");
+        let evaluated = second
+            .session_info()
+            .await
+            .expect("read session")
+            .expect("stale row");
+        assert!(
+            !session::is_pid_alive(evaluated.pid),
+            "the evaluated PID is dead"
+        );
+
+        assert_eq!(
+            first.clean_stale_session().await.expect("first clear"),
+            Some(stale)
+        );
+        let replacement = SessionInfo {
+            game: GameCode::Srmi,
+            pid: std::process::id(),
+            started_at: Utc::now(),
+        };
+        first
+            .start_session(&replacement)
+            .await
+            .expect("replacement session");
+
+        // Resume the second cleaner after its liveness decision, using the
+        // same conditional delete as clean_stale_session. No timing race is
+        // needed: another writer has already replaced the evaluated row.
+        let cleared = second
+            .end_session_if_pid(evaluated.pid)
+            .await
+            .expect("delayed clear");
+        assert_eq!(
+            second.session_info().await.expect("read replacement"),
+            Some(replacement),
+            "a delayed stale clear must preserve the replacement session"
+        );
+        assert!(!cleared, "a replaced row must not be reported as evicted");
+    }
 }
