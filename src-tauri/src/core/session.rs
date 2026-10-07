@@ -86,7 +86,8 @@ pub(super) fn process_identity_state(
 /// On Unix: `kill(pid, 0)` returns 0 if a signal would be deliverable;
 /// `EPERM` also means the process exists (we just lack permission).
 /// On Windows: open the process with the lightest possible right and
-/// query its exit code — `STILL_ACTIVE` (259) means it's running.
+/// query its exit code — `STILL_ACTIVE` (259) means it's running. A
+/// failed exit-code query is unknown, so it also preserves the session.
 pub fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -104,7 +105,6 @@ pub fn is_pid_alive(pid: u32) -> bool {
         use windows_sys::Win32::System::Threading::{
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
-        const STILL_ACTIVE: u32 = 259;
         // SAFETY: OpenProcess returns a valid handle or null; we
         // CloseHandle whatever it gives us. GetExitCodeProcess writes
         // through a pointer to a local u32. GetLastError is thread-local
@@ -120,12 +120,44 @@ pub fn is_pid_alive(pid: u32) -> bool {
             let mut exit_code: u32 = 0;
             let ok = GetExitCodeProcess(handle, &mut exit_code) != 0;
             CloseHandle(handle);
-            ok && exit_code == STILL_ACTIVE
+            exit_code_query_is_alive(ok, exit_code)
         }
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
+    }
+}
+
+/// Interpret the Windows query result separately from the FFI so failure can
+/// be tested without depending on a driver revoking process query rights.
+#[cfg(any(windows, test))]
+fn exit_code_query_is_alive(ok: bool, exit_code: u32) -> bool {
+    const STILL_ACTIVE: u32 = 259;
+    !ok || exit_code == STILL_ACTIVE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_exit_code_query_preserves_session() {
+        assert!(
+            exit_code_query_is_alive(false, 0),
+            "a failed GetExitCodeProcess query must preserve the session"
+        );
+        assert!(
+            exit_code_query_is_alive(false, 259),
+            "a failed query must ignore the output buffer"
+        );
+    }
+
+    #[test]
+    fn successful_exit_code_query_requires_still_active() {
+        assert!(exit_code_query_is_alive(true, 259));
+        assert!(!exit_code_query_is_alive(true, 0));
+        assert!(!exit_code_query_is_alive(true, 1));
     }
 }
