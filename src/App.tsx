@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 
+import { AttentionView } from "./AttentionView";
 import { ImporterOriginPanel } from "./ImporterOriginPanel";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -191,6 +192,7 @@ function MainApp({
           <button onClick={onResumeWizard}>Resume setup</button>
         </section>
       ) : null}
+      <AttentionView />
       <StartupReconcileNotice />
       <SessionBanner />
       <GameTabs games={list} active={activeGame} onChange={setActiveGame} />

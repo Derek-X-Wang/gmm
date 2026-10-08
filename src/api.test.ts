@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 const {
   adoptFolder,
+  attentionStatus,
   detectConflicts,
   importGamebanana,
   importZip,
@@ -154,3 +155,27 @@ it.each([
     expect(invoke).toHaveBeenCalledWith(command, envelope);
   },
 );
+
+it("calls attention_status and normalizes its nested session wire fields", async () => {
+  invoke.mockResolvedValueOnce({
+    safeToProceed: false,
+    reinstalls: [], enabledTransitions: [], importerEvacuations: [],
+    stagedLibraryOperations: [{
+      id: "01STAGED", game: "gimi", operation: "import_zip",
+      stagedPath: "C:\\GMM\\library\\gimi\\01STAGED", recoveryError: "Retirement failed",
+    }],
+    sessionLaunches: [{ id: "01LAUNCH", game: "srmi", child_pid: 42, started_at: "2026-10-07T12:00:00Z" }],
+    activeSession: { game: "gimi", pid: 123, started_at: "2026-10-07T12:01:00Z" },
+    libraryAudits: [], libraryRootOverlaps: [], modPathOverlaps: [],
+  });
+  const report = await attentionStatus();
+  expect(invoke).toHaveBeenCalledWith("attention_status", undefined);
+  expect(report.activeSession).toEqual({ game: "gimi", pid: 123, startedAt: "2026-10-07T12:01:00Z" });
+  expect(report.sessionLaunches).toEqual([{ id: "01LAUNCH", game: "srmi", childPid: 42, startedAt: "2026-10-07T12:00:00Z" }]);
+  expect(report.stagedLibraryOperations[0]).toMatchObject({ recoveryError: "Retirement failed" });
+});
+
+it("propagates unavailable attention sub-reports instead of returning a healthy default", async () => {
+  invoke.mockRejectedValueOnce({ kind: "other", message: "Cannot audit SRMI Library" });
+  await expect(attentionStatus()).rejects.toMatchObject({ kind: "other", message: "Cannot audit SRMI Library" });
+});

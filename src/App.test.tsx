@@ -82,9 +82,31 @@ let relocationFailures: Array<{
   error: string;
 }> = [];
 let overlapRepair = false;
+let stagedAttention = false;
+const cleanAttentionReport = {
+  safeToProceed: true,
+  reinstalls: [],
+  enabledTransitions: [],
+  importerEvacuations: [],
+  stagedLibraryOperations: [],
+  sessionLaunches: [],
+  activeSession: null,
+  libraryAudits: [],
+  libraryRootOverlaps: [],
+  modPathOverlaps: [],
+};
 
 function ipcResult(command: string) {
   switch (command) {
+    case "attention_status":
+      return stagedAttention ? {
+        ...cleanAttentionReport,
+        safeToProceed: false,
+        stagedLibraryOperations: [{
+          id: "01STAGED", game: "srmi", operation: "import_zip",
+          stagedPath: "C:\\GMM\\library\\srmi\\01STAGED", recoveryError: null,
+        }],
+      } : cleanAttentionReport;
     case "is_onboarding_complete":
       return { complete: true, skipped: false };
     case "list_supported_games":
@@ -173,6 +195,7 @@ beforeEach(() => {
   };
   relocationFailures = [];
   overlapRepair = false;
+  stagedAttention = false;
   openDialog.mockResolvedValue("C:\\Moved");
   invoke.mockImplementation((command: string) => Promise.resolve(ipcResult(command)));
 });
@@ -398,4 +421,22 @@ it("reports a setting-only overlap repair instead of presenting it as a successf
   ).not.toBeNull();
   expect(alert).toHaveTextContent(/did not read the overlapping path/i);
   expect(alert).toHaveTextContent(/warning remains while any Mod is still recorded there/i);
+});
+
+it("shows the clean attention aggregate in the main app", async () => {
+  renderWithQuery(<App />);
+
+  await waitFor(() => expect(
+    screen.queryByText("Nothing needs attention in this report."),
+    "the app must show the clean aggregate instead of hiding it",
+  ).toBeInTheDocument());
+  expect(invoke).toHaveBeenCalledWith("attention_status", undefined);
+});
+
+it("keeps unrelated Game controls available when the aggregate needs attention", async () => {
+  stagedAttention = true;
+  renderWithQuery(<App />);
+  await screen.findByText("Staged Library operations (1)");
+  expect(screen.getByRole("button", { name: "Launch Genshin Impact" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Import ZIP…" })).toBeEnabled();
 });
