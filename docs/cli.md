@@ -1,6 +1,10 @@
 # GMM CLI
 
 `gmm-cli` lets a local agent inspect GMM and apply Mods discovered elsewhere.
+
+GMM performs no Mod search by design. Discovery on a Source is the caller's
+job; GMM applies the discovered Mod by URL or submission ID.
+
 The Windows MSI installs `gmm-cli.exe` beside `GMM.exe`, by default at
 `%ProgramFiles%\GMM\gmm-cli.exe` (normally
 `C:\Program Files\GMM\gmm-cli.exe`). If you choose a different install
