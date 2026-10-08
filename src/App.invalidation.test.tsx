@@ -67,6 +67,12 @@ let mutations: Record<string, (args: Record<string, unknown>) => unknown>;
 
 beforeEach(() => {
   responses = {
+    attention_status: {
+      safeToProceed: true,
+      reinstalls: [], enabledTransitions: [], importerEvacuations: [],
+      stagedLibraryOperations: [], sessionLaunches: [], activeSession: null,
+      libraryAudits: [], libraryRootOverlaps: [], modPathOverlaps: [],
+    },
     is_onboarding_complete: { complete: true, skipped: false },
     list_supported_games: [{ code: "gimi", displayName: "Genshin Impact" }],
     current_session: null,

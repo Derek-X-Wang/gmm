@@ -182,6 +182,7 @@ pub fn run() {
         .manage(startup_reconcile_state)
         .manage(crate::runtime::SessionRuntime::new())
         .invoke_handler(tauri::generate_handler![
+            commands::attention_status,
             commands::list_mods,
             commands::retry_reinstall_recovery,
             commands::retire_interrupted_enabled_transition,
