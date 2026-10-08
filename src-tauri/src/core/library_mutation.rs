@@ -206,6 +206,36 @@ pub(super) struct ImporterEvacuationWitness {
     recovery_action: Option<String>,
 }
 
+/// Producer identity and activity shared by the enable and importer witnesses.
+struct WitnessOwner {
+    pid: u32,
+    started_at: Option<u64>,
+    active: bool,
+}
+
+impl WitnessOwner {
+    fn owner_identity_state(&self) -> super::session::ProcessIdentityState {
+        super::session::process_identity_state(self.pid, self.started_at)
+    }
+
+    fn owner_is_live(&self) -> bool {
+        self.active
+            && matches!(
+                self.owner_identity_state(),
+                super::session::ProcessIdentityState::Matches
+                    | super::session::ProcessIdentityState::Unknown
+            )
+    }
+
+    fn owner_uncertain(&self) -> bool {
+        self.active
+            && matches!(
+                self.owner_identity_state(),
+                super::session::ProcessIdentityState::Unknown
+            )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReconciledJunctionMutation {
     Applied,
@@ -841,17 +871,12 @@ impl EnabledTransitionWitness {
         self.created_at
     }
 
-    fn owner_is_live(&self) -> bool {
-        self.owner_active
-            && matches!(
-                self.owner_identity_state(),
-                super::session::ProcessIdentityState::Matches
-                    | super::session::ProcessIdentityState::Unknown
-            )
-    }
-
-    fn owner_identity_state(&self) -> super::session::ProcessIdentityState {
-        super::session::process_identity_state(self.owner_pid, self.owner_started_at)
+    fn owner(&self) -> WitnessOwner {
+        WitnessOwner {
+            pid: self.owner_pid,
+            started_at: self.owner_started_at,
+            active: self.owner_active,
+        }
     }
 
     fn corrupt<T>(&self, reason: impl Into<String>) -> Result<T> {
@@ -862,11 +887,7 @@ impl EnabledTransitionWitness {
     }
 
     pub(super) fn recovery(&self) -> Option<EnabledTransitionRecovery> {
-        let owner_uncertain = self.owner_active
-            && matches!(
-                self.owner_identity_state(),
-                super::session::ProcessIdentityState::Unknown
-            );
+        let owner_uncertain = self.owner().owner_uncertain();
         let reason = match (&self.recovery_error, owner_uncertain) {
             (Some(reason), _) => reason.clone(),
             (None, true) => {
@@ -1045,17 +1066,12 @@ impl UnvalidatedImporterEvacuationWitness {
 }
 
 impl ImporterEvacuationWitness {
-    fn owner_identity_state(&self) -> super::session::ProcessIdentityState {
-        super::session::process_identity_state(self.owner_pid, self.owner_started_at)
-    }
-
-    fn owner_is_live(&self) -> bool {
-        self.owner_active
-            && matches!(
-                self.owner_identity_state(),
-                super::session::ProcessIdentityState::Matches
-                    | super::session::ProcessIdentityState::Unknown
-            )
+    fn owner(&self) -> WitnessOwner {
+        WitnessOwner {
+            pid: self.owner_pid,
+            started_at: self.owner_started_at,
+            active: self.owner_active,
+        }
     }
 
     fn recorded_directory_identities_match(&self) -> bool {
@@ -1074,11 +1090,7 @@ impl ImporterEvacuationWitness {
     }
 
     pub(super) fn recovery(&self) -> Option<ImporterEvacuationRecovery> {
-        let owner_uncertain = self.owner_active
-            && matches!(
-                self.owner_identity_state(),
-                super::session::ProcessIdentityState::Unknown
-            );
+        let owner_uncertain = self.owner().owner_uncertain();
         let reason = match (&self.recovery_error, owner_uncertain) {
             (Some(reason), _) => reason.clone(),
             (None, true) => {
@@ -2077,7 +2089,7 @@ impl Core {
         drop(connection);
         let mut resolved = 0;
         for witness in witnesses {
-            if witness.owner_is_live() {
+            if witness.owner().owner_is_live() {
                 continue;
             }
             match self.resolve_enabled_transition(witness.mod_id()).await {
@@ -2118,7 +2130,7 @@ impl Core {
         };
         if witness.owner_active
             && matches!(
-                witness.owner_identity_state(),
+                witness.owner().owner_identity_state(),
                 super::session::ProcessIdentityState::Matches
             )
         {
@@ -2266,7 +2278,7 @@ impl Core {
             transaction.commit().await?;
             return Ok(());
         };
-        if witness.owner_is_live() {
+        if witness.owner().owner_is_live() {
             return Err(Error::ImporterEvacuationStillOwned);
         }
         let expected_backup_root = self.data_dir().join("backups").join(game.as_str());
@@ -2352,7 +2364,7 @@ impl Core {
         drop(connection);
         let mut resolved = 0;
         for witness in witnesses {
-            if witness.owner_is_live()
+            if witness.owner().owner_is_live()
                 || (witness.recovery_action.as_deref() == Some("release")
                     && !witness.recorded_directory_identities_match())
             {
@@ -2454,7 +2466,7 @@ impl Core {
         }
         if witness.owner_active
             && matches!(
-                witness.owner_identity_state(),
+                witness.owner().owner_identity_state(),
                 super::session::ProcessIdentityState::Matches
             )
         {
