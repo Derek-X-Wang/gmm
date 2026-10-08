@@ -420,8 +420,9 @@ function LaunchGameButton({
 
   const launch = useMutation({
     mutationFn: () => launchGame(game),
-    onSuccess: () => {
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["session"] });
+      queryClient.invalidateQueries({ queryKey: ["interruptedSessionLaunches"] });
     },
     onError: () => {
       // Fetch guidance on demand so the inline exclusion steps land in
@@ -579,9 +580,11 @@ function ModUpdateBadge({
   });
   const apply = useMutation({
     mutationFn: () => applyModUpdate(modId),
-    onSuccess: () => {
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ["mods", game] });
       qc.invalidateQueries({ queryKey: ["modUpdates", game] });
+      qc.invalidateQueries({ queryKey: ["variants", modId] });
+      qc.invalidateQueries({ queryKey: ["conflicts", game] });
     },
   });
   const toggle = useMutation({
@@ -590,29 +593,32 @@ function ModUpdateBadge({
   });
 
   const row = rows.data?.find((r) => r.modId === modId);
-  if (!row) return null;
+  if (!row) return <CommandErrorNotice error={apply.error} />;
   return (
-    <span className="conflict-inline">
-      {row.upstreamAhead ? (
-        <button
-          className="update-pill"
-          onClick={() => apply.mutate()}
-          disabled={disabled || apply.isPending}
-          title={`Upstream ${row.upstreamVersion}`}
-        >
-          {apply.isPending ? "Applying…" : `Update → ${row.upstreamVersion}`}
-        </button>
-      ) : null}
-      <label className="toggle" style={{ marginLeft: "0.4rem" }}>
-        <input
-          type="checkbox"
-          checked={row.updateCheckEnabled}
-          disabled={disabled || toggle.isPending}
-          onChange={(e) => toggle.mutate(e.currentTarget.checked)}
-        />
-        <span className="muted small">check</span>
-      </label>
-    </span>
+    <>
+      <span className="conflict-inline">
+        {row.upstreamAhead ? (
+          <button
+            className="update-pill"
+            onClick={() => apply.mutate()}
+            disabled={disabled || apply.isPending}
+            title={`Upstream ${row.upstreamVersion}`}
+          >
+            {apply.isPending ? "Applying…" : `Update → ${row.upstreamVersion}`}
+          </button>
+        ) : null}
+        <label className="toggle" style={{ marginLeft: "0.4rem" }}>
+          <input
+            type="checkbox"
+            checked={row.updateCheckEnabled}
+            disabled={disabled || toggle.isPending}
+            onChange={(e) => toggle.mutate(e.currentTarget.checked)}
+          />
+          <span className="muted small">check</span>
+        </label>
+      </span>
+      <CommandErrorNotice error={apply.error} />
+    </>
   );
 }
 
@@ -743,11 +749,11 @@ function ImporterPanel({
   });
   const retireEvacuation = useMutation({
     mutationFn: () => retireInterruptedImporterEvacuation(game),
-    onSuccess: invalidate,
+    onSettled: invalidate,
   });
   const retryEvacuation = useMutation({
     mutationFn: () => retryImporterEvacuationRecovery(game),
-    onSuccess: invalidate,
+    onSettled: invalidate,
   });
 
   const importerLabel = game.toUpperCase();
@@ -1231,7 +1237,7 @@ function ModList({ game }: { game: ApiGameCode }) {
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
       setModEnabled(id, enabled, game),
-    onSuccess: () => {
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["mods", game] });
       queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
     },
@@ -1255,8 +1261,6 @@ function ModList({ game }: { game: ApiGameCode }) {
               reason: outcome.recovery.reason,
             },
       );
-      queryClient.invalidateQueries({ queryKey: ["mods", game] });
-      queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
     },
     onError: (error, mod) => {
       sectionRef.current?.focus();
@@ -1265,6 +1269,10 @@ function ModList({ game }: { game: ApiGameCode }) {
         modName: mod.name,
         reason: commandFailureMessage(error),
       });
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["mods", game] });
+      queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
     },
   });
 
@@ -1277,7 +1285,10 @@ function ModList({ game }: { game: ApiGameCode }) {
     },
   });
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["mods", game] });
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["mods", game] });
+    queryClient.invalidateQueries({ queryKey: ["libraryAudit", game] });
+  };
 
   return (
     <section ref={sectionRef} className="card" tabIndex={-1}>
@@ -1426,11 +1437,11 @@ function AdoptButton({
       return adoptFolder(game, picked, name.trim());
     },
     onSuccess: () => {
-      onAdopted();
       setPicked(null);
       setName("");
       setOpen_(false);
     },
+    onSettled: onAdopted,
   });
 
   const pickFolder = async () => {
@@ -1482,10 +1493,10 @@ function GameBananaImport({
   const ingest = useMutation({
     mutationFn: () => importGamebanana(game, input.trim()),
     onSuccess: () => {
-      onImported();
       setInput("");
       setOpen(false);
     },
+    onSettled: onImported,
   });
 
   if (!open) {
@@ -1596,7 +1607,7 @@ function VariantSelector({
               type="radio"
               name={`variant-${modId}`}
               checked={active}
-              disabled={disabled || switchVariant.isPending}
+              disabled={disabled || switchVariant.isPending || v.isFetching}
               onChange={() => switchVariant.mutate(variant.id)}
             />
             <span>{variant.name}</span>
@@ -1630,11 +1641,11 @@ function ImportZipButton({
       return importZip(game, picked, name.trim());
     },
     onSuccess: () => {
-      onImported();
       setPicked(null);
       setName("");
       setOpen_(false);
     },
+    onSettled: onImported,
   });
 
   const pickZip = async () => {
@@ -1698,10 +1709,10 @@ function ZipDropZone({
       return importZip(game, pendingPath, name.trim());
     },
     onSuccess: () => {
-      onImported();
       setPendingPath(null);
       setName("");
     },
+    onSettled: onImported,
   });
 
   // Browser-level drag events let us toggle the hover highlight; the
