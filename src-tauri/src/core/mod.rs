@@ -3611,7 +3611,10 @@ impl Core {
                 // and there is nothing to relink it to. That case stays
                 // conflicting (see
                 // `a_junction_whose_target_was_deleted_is_not_healthy`).
-                Some(actual) if path_within(&actual, &library_path) && expected_target_is_dir => {
+                Some(actual)
+                    if path_within_best_effort(&actual, &library_path)
+                        && expected_target_is_dir =>
+                {
                     match self
                         .create_reconciled_junction_in_library_mutation(
                             &id,
@@ -4583,13 +4586,13 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// Both containment directions matter: a proposed root inside the backups
 /// tree puts Library bytes under rollback selection, and the backups tree
 /// inside a proposed root puts the unfenced marker writes inside the
-/// Library. Each direction uses [`path_within`] for fully existing aliases,
+/// Library. Each direction uses [`path_within_best_effort`] for fully existing aliases,
 /// preserves lexical containment evidence even when a link resolves outside
 /// its apparent parent, and adds a case-insensitive fallback that resolves the
 /// deepest existing ancestor and lexically normalises the missing tail.
 fn ensure_library_root_disjoint_from_backups(proposed: &Path, backups_root: &Path) -> Result<()> {
     let overlaps = |path: &Path, ancestor: &Path| {
-        path_within(path, ancestor)
+        path_within_best_effort(path, ancestor)
             || path.starts_with(ancestor)
             || case_insensitive_path_within(path, ancestor)
     };
@@ -4696,7 +4699,7 @@ fn canonicalized_or_original(path: &Path) -> PathBuf {
     canonical
 }
 
-/// Is `path` inside `ancestor`?
+/// Best-effort legacy containment; not a Library writer ownership proof.
 ///
 /// Canonicalises both sides for the same reason [`same_path`] does: the
 /// Library path recorded in the DB and the target read back off a
@@ -4708,10 +4711,10 @@ fn canonicalized_or_original(path: &Path) -> PathBuf {
 ///
 /// Falls back to a literal comparison when either side cannot be
 /// canonicalised (typically because it no longer exists).
-fn path_within(path: &Path, ancestor: &Path) -> bool {
+fn path_within_best_effort(path: &Path, ancestor: &Path) -> bool {
     #[allow(
         clippy::disallowed_methods,
-        reason = "this canonicalization collapse feeds only positive containment evidence; false refuses or preserves bytes"
+        reason = "legacy best-effort comparison; Library writer ownership checks use filesystem::library_path_within instead"
     )]
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(path).starts_with(canon(ancestor))

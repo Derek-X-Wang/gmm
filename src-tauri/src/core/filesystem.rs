@@ -6,7 +6,7 @@
 
 use std::fs::{self, Metadata};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::error::{Error, Result};
 
@@ -60,6 +60,73 @@ pub(super) fn path_within(path: &Path, ancestor: &Path) -> Result<bool> {
     })
 }
 
+/// Positive namespace ownership for a Library writer, not proof of presence.
+///
+/// Resolve aliases on both sides, including existing parents of missing
+/// children. Only a proven absent, ordinary suffix may be appended to a
+/// resolved directory. Unreadable paths and dangling aliases remain errors;
+/// lexical containment alone cannot authorize a Junction mutation. Callers
+/// creating a deployment must additionally identify the existing directories.
+pub(super) fn library_path_within(path: &Path, ancestor: &Path) -> Result<bool> {
+    let resolve = |path: &Path| {
+        resolve_library_namespace(path).map_err(|source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    };
+    Ok(resolve(path)?.starts_with(resolve(ancestor)?))
+}
+
+fn resolve_library_namespace(path: &Path) -> io::Result<PathBuf> {
+    let mut candidate = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match fs::canonicalize(&candidate) {
+            Ok(mut resolved) => {
+                if !missing.is_empty() {
+                    // A missing suffix can only descend from a directory.
+                    if !fs::metadata(&resolved)?.is_dir() {
+                        return Err(io::Error::from(io::ErrorKind::NotADirectory));
+                    }
+                    for name in missing.iter().rev() {
+                        resolved.push(name);
+                    }
+                }
+                return Ok(resolved);
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                // A dangling alias exists but its destination is unresolved;
+                // do not mistake that for an ordinary absent child name.
+                if symlink_metadata_if_exists(&candidate)?.is_some()
+                    || path.components().any(is_library_traversal_component)
+                {
+                    return Err(source);
+                }
+                let Some(name) = candidate.file_name() else {
+                    return Err(source);
+                };
+                missing.push(name.to_os_string());
+                let Some(parent) = candidate.parent() else {
+                    return Err(source);
+                };
+                candidate = if parent.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    parent.to_path_buf()
+                };
+            }
+            Err(source) => return Err(source),
+        }
+    }
+}
+
+fn is_library_traversal_component(component: Component<'_>) -> bool {
+    // Compare the component spelling, not its enum variant or path prefix:
+    // neither traversal name is an ordinary absent Library child.
+    let name = component.as_os_str();
+    name == "." || name == ".."
+}
+
 fn optional_metadata(result: io::Result<Metadata>) -> io::Result<Option<Metadata>> {
     match result {
         Ok(metadata) => Ok(Some(metadata)),
@@ -79,6 +146,181 @@ fn canonicalize_if_exists(path: &Path) -> io::Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn library_traversal_rejects_parent_names_independent_of_component_kind() {
+        use std::ffi::OsStr;
+        for component in [Component::ParentDir, Component::Normal(OsStr::new(".."))] {
+            assert!(
+                is_library_traversal_component(component),
+                "parent traversal must be rejected even when represented as a normal name",
+            );
+        }
+        for name in ["Variant", "...", ".hidden", "name.."] {
+            assert!(!is_library_traversal_component(Component::Normal(
+                OsStr::new(name),
+            )));
+        }
+    }
+
+    #[test]
+    fn library_traversal_rejects_current_directory_names_independent_of_component_kind() {
+        use std::ffi::OsStr;
+        for component in [Component::CurDir, Component::Normal(OsStr::new("."))] {
+            assert!(
+                is_library_traversal_component(component),
+                "current-directory traversal must not become an ordinary missing name",
+            );
+        }
+    }
+
+    #[test]
+    fn library_containment_rejects_missing_relative_current_directory() {
+        let path = PathBuf::from(format!("./{}", ulid::Ulid::new()));
+        assert!(
+            library_path_within(&path, Path::new(".")).is_err(),
+            "an unresolved current-directory component must refuse namespace ownership",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn library_containment_rejects_raw_verbatim_traversal() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = fs::canonicalize(temp.path()).expect("canonical root");
+        assert!(
+            matches!(root.components().next(), Some(Component::Prefix(prefix))
+            if prefix.kind().is_verbatim())
+        );
+        for suffix in [r"\missing\..\other", r"\.\missing", r"\missing\.\other"] {
+            // OsString append preserves traversal; PathBuf::join would erase it
+            // when the base has a Windows verbatim prefix.
+            let mut spelling = root.as_os_str().to_os_string();
+            spelling.push(suffix);
+            let path = PathBuf::from(spelling);
+            assert!(path.components().any(is_library_traversal_component));
+            assert!(
+                library_path_within(&path, &root).is_err(),
+                "raw verbatim traversal must refuse missing namespace ownership",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn library_containment_preserves_uncertainty_on_either_side() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = fs::canonicalize(temp.path()).expect("canonical root");
+        let looped = root.join("looped");
+        symlink(&looped, &looped).expect("self-referential symlink");
+        for (path, ancestor) in [(&looped, &root), (&root, &looped)] {
+            assert!(
+                matches!(library_path_within(path, ancestor), Err(Error::Io { ref source, .. })
+                    if source.kind() != io::ErrorKind::NotFound),
+                "unreadable paths must never provide positive Library containment",
+            );
+        }
+    }
+
+    #[test]
+    fn library_containment_resolves_aliases_before_appending_missing_children() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = fs::canonicalize(temp.path()).expect("canonical root");
+        let library = root.join("library");
+        fs::create_dir(&library).expect("Library");
+        let alias = root.join("alias");
+        super::super::junction::create(&alias, &library).expect("Library alias");
+        assert!(
+            library_path_within(&alias.join("missing"), &library).expect("known missing child"),
+            "a missing target through a resolved alias remains Library-owned",
+        );
+        assert!(
+            library_path_within(&library.join("missing"), &alias).expect("aliased ancestor"),
+            "ancestor aliases must also resolve before missing-path comparison",
+        );
+    }
+
+    #[test]
+    fn library_containment_does_not_trust_missing_children_through_an_outside_alias() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = fs::canonicalize(temp.path()).expect("canonical root");
+        let library = root.join("library");
+        let outside = root.join("outside");
+        fs::create_dir(&library).expect("Library");
+        fs::create_dir(&outside).expect("outside");
+        let alias = library.join("escape");
+        super::super::junction::create(&alias, &outside).expect("outside alias");
+        assert!(
+            !library_path_within(&alias.join("missing"), &library).expect("known missing child"),
+            "a lexical child through an outside alias is not Library-owned",
+        );
+    }
+
+    #[test]
+    fn library_containment_keeps_ordinary_missing_namespace_ownership() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = fs::canonicalize(temp.path()).expect("canonical root");
+        let missing_library = root.join("missing-library");
+        assert!(library_path_within(
+            &missing_library.join("Variant").join("missing"),
+            &missing_library,
+        )
+        .expect("both paths have proven missing suffixes"));
+        assert!(!library_path_within(&root.join("other"), &missing_library)
+            .expect("disjoint missing namespaces"));
+        // Preserve the raw traversal on Windows too: joining onto a verbatim
+        // canonical root would normalize away the missing/.. pair.
+        let mut traversal = missing_library.as_os_str().to_os_string();
+        traversal.push(std::path::MAIN_SEPARATOR_STR);
+        traversal.push(format!("missing{0}..{0}other", std::path::MAIN_SEPARATOR));
+        let traversal = PathBuf::from(traversal);
+        assert!(traversal
+            .components()
+            .any(|part| part == Component::ParentDir));
+        assert!(
+            library_path_within(&traversal, &root).is_err(),
+            "a missing prefix cannot prove the resolution of parent traversal",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn library_containment_does_not_treat_dangling_aliases_as_absent_names() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = fs::canonicalize(temp.path()).expect("canonical root");
+        let dangling = root.join("dangling");
+        symlink(root.join("missing"), &dangling).expect("dangling alias");
+        for path in [&dangling, &dangling.join("child")] {
+            assert!(
+                library_path_within(path, &root).is_err(),
+                "a dangling alias does not establish a resolved Library namespace",
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn library_containment_resolves_drive_letter_case_with_missing_children() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = fs::canonicalize(temp.path()).expect("canonical root");
+        let mut spelling: Vec<u16> = root.as_os_str().encode_wide().collect();
+        let colon = spelling
+            .iter()
+            .position(|&ch| ch == b':' as u16)
+            .expect("drive path");
+        let drive = &mut spelling[colon - 1];
+        *drive = if (b'A' as u16..=b'Z' as u16).contains(drive) {
+            *drive + 32
+        } else {
+            *drive - 32
+        };
+        let alias = PathBuf::from(std::ffi::OsString::from_wide(&spelling));
+        assert!(library_path_within(&alias.join("missing"), &root).expect("drive alias"));
+        assert!(library_path_within(&root.join("missing"), &alias).expect("ancestor drive alias"));
+    }
 
     #[test]
     fn missing_path_is_proven_absent() {

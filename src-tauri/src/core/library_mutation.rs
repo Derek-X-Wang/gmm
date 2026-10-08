@@ -30,7 +30,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use sqlx::{Column, Row, Sqlite, SqliteConnection};
 use ulid::Ulid;
 
-use super::filesystem::metadata_if_exists;
+use super::filesystem::{library_path_within, metadata_if_exists};
 use super::importer::{ImporterEvacuationRecovery, ImporterEvacuationRecoveryAction};
 use super::library_audit::{load_duplicate_mod_records, DuplicateResolution, ReviewedDuplicateMod};
 use super::library_identity::{DirectoryIdentity, IdentifiedDirectory};
@@ -40,8 +40,7 @@ use super::mods::{EnabledTransitionRecovery, ReinstallRecovery, ReinstallRecover
 use super::same_path;
 use super::settings::{get as get_setting, keys};
 use super::{
-    crash_points, junction, link_exists, path_within, resolve_link, volume, Core, Error, GameCode,
-    Result,
+    crash_points, junction, link_exists, resolve_link, volume, Core, Error, GameCode, Result,
 };
 
 pub(super) const REINSTALL_STAGING_PREFIX: &str = ".gmm-reinstall-";
@@ -1534,7 +1533,11 @@ impl Core {
                     mod_id: mod_id.clone(),
                     path: link.clone(),
                 })?;
-            if !path_within(&actual, &library_path) {
+            // `true` must prove this Junction's Library namespace ownership:
+            // unreadable paths error; missing ordinary children may be owned
+            // (a disabled duplicate can retain a dangling Junction); existing
+            // aliases, including 8.3 names/drive-letter case, resolve first.
+            if !library_path_within(&actual, &library_path)? {
                 return Err(Error::DuplicateModJunctionConflict { mod_id, path: link });
             }
             junctions.push((mod_id, link));
@@ -1829,7 +1832,12 @@ impl Core {
             })?;
             (target, Some(entry))
         };
-        if enabled && !path_within(&target, &library_path) {
+        // `true` proves Library namespace ownership, never readability:
+        // unreadable paths error; a missing target may be in that namespace
+        // but the directory-identity opens below still refuse enable. Aliases
+        // (8.3 names/drive-letter case) resolve before comparison. The existing
+        // identity checks already enforce presence; keep that requirement.
+        if enabled && !library_path_within(&target, &library_path)? {
             return Err(Error::Io {
                 path: link,
                 source: io::Error::other(
@@ -1949,7 +1957,12 @@ impl Core {
             return witness.corrupt("the recorded Junction parent changed filesystem identity");
         }
         if witness.intended_enabled() {
-            if !path_within(target, &library_path) {
+            // `true` proves the witnessed target's Library namespace: an
+            // unreadable path errors, missing children still require the
+            // existing identity checks below, and aliases (8.3 names or
+            // drive-letter case) resolve first. No change to the existing
+            // requirement that enable recovery identify both directories.
+            if !library_path_within(target, &library_path)? {
                 return witness
                     .corrupt("the recorded Junction target is outside the Mod Library path");
             }
@@ -2865,7 +2878,13 @@ impl Core {
                             .to_string(),
                 });
             };
-            if !super::same_path(&actual, &target) && !super::path_within(&actual, &library_path) {
+            // Apart from exact recorded-target equality, `true` must prove
+            // Library namespace ownership before removing the Junction:
+            // unreadable paths error; ordinary missing targets may be owned
+            // so disabled dangling deployments can be withdrawn; aliases
+            // (8.3 names/drive-letter case) resolve on both sides first.
+            if !super::same_path(&actual, &target) && !library_path_within(&actual, &library_path)?
+            {
                 return Err(Error::ReinstallRecoveryDeploymentUnverified {
                     mod_id: mod_id.to_string(),
                     reason: "the disabled Mod's deployment Junction points outside its Library"
@@ -2917,7 +2936,11 @@ impl Core {
         if super::same_path(&actual, &target) {
             return Ok(ReinstallRecoveryOutcome::AlreadyRecovered);
         }
-        if !super::path_within(&actual, &library_path) {
+        // `true` must prove the stale Junction target's Library namespace:
+        // unreadable paths error; missing ordinary targets may be owned so
+        // they can be retargeted to the already-verified live target; aliases
+        // (8.3 names/drive-letter case) resolve before comparing ownership.
+        if !library_path_within(&actual, &library_path)? {
             return Err(Error::ReinstallRecoveryDeploymentUnverified {
                 mod_id: mod_id.to_string(),
                 reason: "the enabled Mod's deployment Junction points outside its Library"
