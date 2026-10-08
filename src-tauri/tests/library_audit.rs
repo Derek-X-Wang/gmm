@@ -1700,6 +1700,88 @@ async fn duplicate_resolution_refuses_a_missing_selected_variant_target() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn duplicate_resolution_preserves_a_junction_with_unreadable_containment() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    // The selected Variant remains readable; only the actual deployment
+    // target has uncertain containment, so the earlier metadata guard passes.
+    let actual = fs::canonicalize(&fixture.library_path)
+        .expect("canonical Library")
+        .join("looped");
+    symlink(&actual, &actual).expect("self-referential deployment target");
+    junction::remove(&fixture.duplicate_junction).expect("remove fixture Junction");
+    symlink(&actual, &fixture.duplicate_junction).expect("repoint to unreadable target");
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(result, Err(Error::Io { ref path, .. }) if path == &actual),
+        "uncertain containment must refuse before Junction withdrawal, got {result:?}",
+    );
+    assert_eq!(
+        fs::read_link(&fixture.duplicate_junction).expect("preserved Junction"),
+        actual,
+    );
+    assert_eq!(
+        fixture
+            .core
+            .list_mods(GameCode::Gimi)
+            .await
+            .expect("Mod rows")
+            .len(),
+        2,
+        "containment uncertainty must preserve both reviewed records",
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn absent_reinstall_recovery_preserves_unreadable_stale_junctions() {
+    use std::os::unix::fs::symlink;
+
+    for enabled in [false, true] {
+        let tmp = TempDir::new().expect("tmp");
+        let fixture = duplicate_fixture(&tmp).await;
+        if !enabled {
+            let pool = sqlx::SqlitePool::connect(&fixture.db_url)
+                .await
+                .expect("DB");
+            sqlx::query("UPDATE mods SET enabled = 0 WHERE id = ?")
+                .bind(&fixture.duplicate_id)
+                .execute(&pool)
+                .await
+                .expect("disabled intent with stale deployment");
+            pool.close().await;
+        }
+        let actual = fs::canonicalize(&fixture.library_path)
+            .expect("canonical Library")
+            .join("looped");
+        symlink(&actual, &actual).expect("self-referential deployment target");
+        junction::remove(&fixture.duplicate_junction).expect("fixture Junction");
+        symlink(&actual, &fixture.duplicate_junction).expect("unreadable stale deployment");
+
+        let result = fixture
+            .core
+            .retry_reinstall_recovery(&fixture.duplicate_id)
+            .await;
+        assert!(
+            matches!(result, Err(Error::Io { ref path, .. }) if path == &actual),
+            "absent-witness recovery must preserve uncertain containment (enabled={enabled}), got {result:?}",
+        );
+        assert_eq!(
+            fs::read_link(&fixture.duplicate_junction).expect("preserved stale Junction"),
+            actual,
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn duplicate_resolution_propagates_selected_target_metadata_uncertainty() {
     use std::os::unix::fs::symlink;
 
@@ -1722,6 +1804,65 @@ async fn duplicate_resolution_propagates_selected_target_metadata_uncertainty() 
     assert!(
         fs::symlink_metadata(&fixture.duplicate_junction).is_ok(),
         "target uncertainty must stop before Junction withdrawal",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_resolution_withdraws_a_missing_target_through_a_library_alias() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let alias = tmp.path().join("library-alias");
+    junction::create(&alias, &fixture.library_path).expect("Library alias");
+    // Create the deployment while its target exists, then remove that target
+    // so Windows can exercise this using a real Junction too.
+    let target = alias.join("old-Variant");
+    fs::create_dir(&target).expect("old Variant");
+    junction::remove(&fixture.duplicate_junction).expect("fixture Junction");
+    junction::create(&fixture.duplicate_junction, &target).expect("aliased deployment");
+    fs::remove_dir(&target).expect("missing old Variant");
+
+    fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await
+        .expect("resolved alias proves ownership of an ordinary missing target");
+    assert!(
+        fs::symlink_metadata(&fixture.duplicate_junction).is_err(),
+        "the proven-owned dangling Junction is withdrawn",
+    );
+    assert_eq!(
+        fs::read(fixture.library_path.join("sentinel.bin")).expect("keeper bytes"),
+        b"shared user bytes",
+    );
+}
+
+#[tokio::test]
+async fn duplicate_resolution_preserves_a_missing_target_through_an_outside_alias() {
+    let tmp = TempDir::new().expect("tmp");
+    let fixture = duplicate_fixture(&tmp).await;
+    let reviewed = reviewed_duplicate_mods(&fixture).await;
+    let outside = tmp.path().join("outside");
+    fs::create_dir(&outside).expect("outside directory");
+    let alias = fixture.library_path.join("escape");
+    junction::create(&alias, &outside).expect("outside alias");
+    let target = alias.join("missing");
+    fs::create_dir(&target).expect("temporary outside target");
+    junction::remove(&fixture.duplicate_junction).expect("fixture Junction");
+    junction::create(&fixture.duplicate_junction, &target).expect("outside deployment");
+    fs::remove_dir(&target).expect("missing outside target");
+
+    let result = fixture
+        .core
+        .resolve_duplicate_mods(&fixture.keeper_id, &reviewed)
+        .await;
+    assert!(
+        matches!(result, Err(Error::DuplicateModJunctionConflict { .. })),
+        "a missing target through an outside alias is not Library-owned, got {result:?}",
+    );
+    assert!(
+        fs::symlink_metadata(&fixture.duplicate_junction).is_ok(),
+        "a lexical Library prefix must not authorize Junction withdrawal",
     );
 }
 
