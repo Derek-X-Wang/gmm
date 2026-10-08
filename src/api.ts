@@ -912,3 +912,59 @@ export function toOriginInput(origin: ImporterOriginRef): ImporterOriginInput {
     assetPattern: origin.asset_pattern,
   };
 }
+
+/** The Core aggregate; advisory in the app, never a global control gate. */
+export interface AttentionReport {
+  safeToProceed: boolean;
+  reinstalls: Array<{
+    modId: string;
+    game: GameCode;
+    libraryPath: string;
+    recovery: ReinstallRecovery | null;
+  }>;
+  enabledTransitions: Array<{
+    modId: string;
+    game: GameCode;
+    intendedEnabled: boolean;
+    junctionPath: string;
+    recovery: EnabledTransitionRecovery | null;
+  }>;
+  importerEvacuations: Array<{
+    game: GameCode;
+    gamePath: string;
+    backupPath: string;
+    recovery: ImporterEvacuationRecovery | null;
+  }>;
+  stagedLibraryOperations: Array<{
+    id: string;
+    game: GameCode;
+    operation: string;
+    stagedPath: string;
+    recoveryError: string | null;
+  }>;
+  sessionLaunches: InterruptedSessionLaunch[];
+  activeSession: SessionInfo | null;
+  libraryAudits: LibraryAuditReport[];
+  libraryRootOverlaps: LibraryRootOverlap[];
+  modPathOverlaps: LibraryModPathOverlap[];
+}
+
+interface RawAttentionReport extends Omit<AttentionReport, "sessionLaunches" | "activeSession"> {
+  sessionLaunches: RawInterruptedSessionLaunch[];
+  activeSession: RawSessionInfo | null;
+}
+
+/** An unavailable sub-report rejects the whole check; do not default it to clean. */
+export async function attentionStatus(): Promise<AttentionReport> {
+  const raw = await invoke<RawAttentionReport>("attention_status");
+  return {
+    ...raw,
+    activeSession: raw.activeSession ? fromRawSession(raw.activeSession) : null,
+    sessionLaunches: raw.sessionLaunches.map((row) => ({
+      id: row.id,
+      game: row.game,
+      childPid: row.child_pid,
+      startedAt: row.started_at,
+    })),
+  };
+}

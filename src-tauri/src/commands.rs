@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
+use crate::core::attention::AttentionReport;
 use crate::core::av;
 use crate::core::conflicts::ConflictReport;
 use crate::core::diagnostics;
@@ -48,6 +49,11 @@ pub struct ImportZipArgs {
     pub game: GameCode,
     pub zip_path: PathBuf,
     pub name: String,
+}
+
+#[tauri::command]
+pub async fn attention_status(core: State<'_, Core>) -> CommandResult<AttentionReport> {
+    core.attention_status().await.map_err(CommandError::from)
 }
 
 #[tauri::command]
