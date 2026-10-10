@@ -35,6 +35,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 const { OnboardingWizard } = await import("./OnboardingWizard");
 
+const overlapRefusal = String.raw`GMM cannot use "D:\\Rejected Path" as a Library root because it overlaps the Model Importer backup tree at "C:\\GMM\\backups". Importer backups and their sidecar markers are app-owned bookkeeping that GMM writes outside the Library writer fence, so the two trees must stay disjoint: a Library root may neither sit inside the backup tree nor contain it. Choose a Library root that does not overlap "C:\\GMM\\backups". No Library bytes were moved.`;
+
 const structuredFailure = {
   kind: "invalidActiveVariant",
   message: "GMM could not read this Game's saved setup.",
@@ -284,6 +286,27 @@ describe("OnboardingWizard — detection step", () => {
   });
 });
 
+describe("OnboardingWizard — Library path refresh", () => {
+  it.each([false, true])("refreshes the picked Library path after settlement (rejects: %s)", async (rejects) => {
+    let root = "C:\\GMM\\library";
+    getLibraryPaths.mockImplementation(async () => ({
+      defaultRoot: "C:\\GMM\\library", rootOverride: root,
+      effectiveRoot: root, perGameOverrides: {}, perGameEffective: {},
+    }));
+    openDialog.mockResolvedValue("D:\\Mods\\Library");
+    setLibraryRoot.mockImplementation(async (next: string) => {
+      root = next;
+      if (rejects) throw new Error("Library move failed");
+    });
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+    await advanceToStep(3);
+    await screen.findByDisplayValue("C:\\GMM\\library");
+    await userEvent.click(screen.getByRole("button", { name: "Change…" }));
+    expect(await screen.findByDisplayValue("D:\\Mods\\Library")).toBeInTheDocument();
+    if (rejects) expect(screen.getByText("Library move failed")).toBeInTheDocument();
+  });
+});
+
 describe("OnboardingWizard — Library step failures", () => {
   it("shows a Library-path failure instead of resolving forever", async () => {
     getLibraryPaths.mockRejectedValue(structuredFailure);
@@ -363,4 +386,63 @@ describe("OnboardingWizard — importer step failures", () => {
     );
     expect(screen.getByRole("button", { name: /retry/i })).toBeEnabled();
   });
+});
+
+
+describe("OnboardingWizard — typed Library path", () => {
+  it("pastes a path without moving until Enter applies it", async () => {
+    let root = "C:\\GMM\\library";
+    getLibraryPaths.mockImplementation(async () => ({
+      defaultRoot: "C:\\GMM\\library", rootOverride: root, effectiveRoot: root,
+      perGameOverrides: {}, perGameEffective: {},
+    }));
+    setLibraryRoot.mockImplementation(async (next: string) => { root = next; });
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+    await advanceToStep(3);
+    const user = userEvent.setup();
+    const field = await screen.findByDisplayValue(root);
+    expect(field).not.toHaveAttribute("readonly");
+    await user.clear(field);
+    await user.paste("D:\\Pasted Library");
+    expect(field).toHaveValue("D:\\Pasted Library");
+    expect(setLibraryRoot).not.toHaveBeenCalled();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(setLibraryRoot).toHaveBeenCalledWith("D:\\Pasted Library"));
+    expect(await screen.findByDisplayValue("D:\\Pasted Library")).toBeInTheDocument();
+    expect(setLibraryRoot).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([overlapRefusal, "Path is not writable."])("surfaces backend validation for a typed path: %s", async (message) => {
+    setLibraryRoot.mockRejectedValue({ kind: "other", message });
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+    await advanceToStep(3);
+    const field = await screen.findByRole("textbox");
+    await userEvent.clear(field);
+    await userEvent.type(field, "D:\\Rejected Path");
+    expect(setLibraryRoot).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Apply Library root" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(setLibraryRoot).toHaveBeenCalledWith("D:\\Rejected Path");
+  });
+});
+
+
+it("disables Library edits while an explicit move is pending", async () => {
+  let finish!: () => void;
+  setLibraryRoot.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+  renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+  await advanceToStep(3);
+  const field = await screen.findByRole("textbox", { name: "Library root" });
+  await userEvent.clear(field);
+  await userEvent.type(field, "D:\\Pending Library");
+  await userEvent.click(screen.getByRole("button", { name: "Apply Library root" }));
+  try {
+    expect(field).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Apply Library root" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Moving…" })).toBeDisabled();
+  } finally {
+    finish();
+  }
+  await waitFor(() => expect(field).toBeEnabled());
+  expect(setLibraryRoot).toHaveBeenCalledTimes(1);
 });
