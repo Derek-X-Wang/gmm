@@ -90,7 +90,7 @@ export function ImporterOriginPanel({
 
   const accept = useMutation({
     mutationFn: () => acceptImporterOriginProposal(game),
-    onSuccess: invalidate,
+    onSettled: invalidate,
   });
   const decline = useMutation({
     mutationFn: (origin: ImporterOriginRef) =>
@@ -105,7 +105,10 @@ export function ImporterOriginPanel({
   const toggleRecommendations = useMutation({
     mutationFn: (enabled: boolean) => setImporterRecommendationsEnabled(enabled),
     // Every game's surface changes, not just this one.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["importerOrigin"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["importerOrigin"] });
+      qc.invalidateQueries({ queryKey: ["importer"] });
+    },
   });
 
   const data = status.data;
@@ -123,6 +126,8 @@ export function ImporterOriginPanel({
       </p>
 
       <CommandErrorNotice error={status.error} />
+      <CommandErrorNotice error={accept.error} />
+      <CommandErrorNotice error={decline.error} />
 
       {data ? (
         <>
@@ -226,8 +231,6 @@ export function ImporterOriginPanel({
                   Not now
                 </button>
               </div>
-              <CommandErrorNotice error={accept.error} />
-              <CommandErrorNotice error={decline.error} />
             </div>
           ) : null}
 
