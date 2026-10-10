@@ -707,9 +707,8 @@ export async function detectAllGames(): Promise<GameDetection[]> {
 // ---- slice 6 (#16) — per-game registry ----
 
 /**
- * Backend-supported game summary. The React tab strip uses this to
- * decide which games to render. New per-game ports (#17–#20) light
- * up additional entries as their Rust registry rows fill in.
+ * Backend-supported game summary. The UI offers all of these for setup
+ * and uses saved install paths to decide which games receive tabs.
  */
 export interface GameSummary {
   code: GameCode;
