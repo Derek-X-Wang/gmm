@@ -84,9 +84,11 @@ pub async fn load(pool: &sqlx::SqlitePool) -> Result<ProxyConfig> {
 /// Persist a proxy config. A `None` field clears the corresponding
 /// setting (the row stays with a NULL value).
 pub async fn save(pool: &sqlx::SqlitePool, cfg: &ProxyConfig) -> Result<()> {
-    put_setting(pool, keys::PROXY_URL, cfg.url.as_deref()).await?;
-    put_setting(pool, keys::PROXY_USERNAME, cfg.username.as_deref()).await?;
-    put_setting(pool, keys::PROXY_PASSWORD, cfg.password.as_deref()).await?;
+    let mut tx = pool.begin().await?;
+    put_setting(&mut *tx, keys::PROXY_URL, cfg.url.as_deref()).await?;
+    put_setting(&mut *tx, keys::PROXY_USERNAME, cfg.username.as_deref()).await?;
+    put_setting(&mut *tx, keys::PROXY_PASSWORD, cfg.password.as_deref()).await?;
+    tx.commit().await?;
     Ok(())
 }
 
