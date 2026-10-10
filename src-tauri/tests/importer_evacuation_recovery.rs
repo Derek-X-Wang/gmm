@@ -1,5 +1,7 @@
 //! Issue #227 — a partial Model Importer evacuation stays durably recoverable.
 
+mod support;
+
 use gmm_lib::core::importer;
 use gmm_lib::core::importer_origin::{ImporterOrigin, StoredOverride};
 use gmm_lib::core::{Core, GameCode};
@@ -108,9 +110,12 @@ async fn partial_importer_evacuation_keeps_its_witness_and_explains_the_recovery
         .await
         .expect("initialize Core")
         .with_crash_hook(hook);
-    core.set_game_install_path(GameCode::Gimi, &game)
-        .await
-        .expect("set game path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game),
+    )
+    .await
+    .expect("set game path");
     core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
         .await
         .expect("set importer origin");
@@ -145,6 +150,22 @@ async fn partial_importer_evacuation_keeps_its_witness_and_explains_the_recovery
         .await
         .expect("load user-visible recovery state")
         .expect("the failed evacuation must be user-visible");
+    let path_error = core
+        .set_game_install_path(GameCode::Gimi, &tmp.path().join("invalid\0candidate"))
+        .await
+        .expect_err("pending evacuation must refuse a game path change");
+    assert!(
+        matches!(
+            path_error,
+            gmm_lib::core::Error::ImporterEvacuationPending { .. }
+        ),
+        "the evacuation guard must run before even an uncertain path lookup: {path_error}",
+    );
+    assert_eq!(
+        core.game_install_path(GameCode::Gimi).await.unwrap(),
+        Some(game.clone()),
+        "pending evacuation must preserve its game path",
+    );
     assert!(
         recovery.reason.contains("install task join error")
             && recovery.game_path == game
@@ -202,9 +223,12 @@ async fn rollback_ignores_a_partial_backup_retained_by_recovery() {
         .await
         .expect("initialize Core")
         .with_crash_hook(hook);
-    core.set_game_install_path(GameCode::Gimi, &game)
-        .await
-        .expect("set game path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game),
+    )
+    .await
+    .expect("set game path");
     core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
         .await
         .expect("set importer origin");
@@ -285,9 +309,12 @@ async fn recovery_preserves_a_user_repaired_importer_entry_and_its_backup() {
         .await
         .expect("initialize Core")
         .with_crash_hook(hook);
-    core.set_game_install_path(GameCode::Gimi, &game)
-        .await
-        .expect("set game path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game),
+    )
+    .await
+    .expect("set game path");
     core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
         .await
         .expect("set importer origin");
@@ -378,9 +405,12 @@ async fn backup_identity_change_becomes_retryable_when_the_original_directory_re
         .await
         .expect("initialize Core")
         .with_crash_hook(hook);
-    core.set_game_install_path(GameCode::Gimi, &game)
-        .await
-        .expect("set game path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game),
+    )
+    .await
+    .expect("set game path");
     core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
         .await
         .expect("set importer origin");
@@ -506,9 +536,12 @@ async fn acknowledge_and_release_preserves_bytes_at_both_recorded_locations() {
         .await
         .expect("initialize Core")
         .with_crash_hook(hook);
-    core.set_game_install_path(GameCode::Gimi, &game)
-        .await
-        .expect("set game path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game),
+    )
+    .await
+    .expect("set game path");
     core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
         .await
         .expect("set importer origin");
@@ -605,9 +638,12 @@ async fn rollback_after_absent_acknowledge_release_ignores_the_reappeared_backup
         .await
         .expect("initialize Core")
         .with_crash_hook(hook);
-    core.set_game_install_path(GameCode::Gimi, &game)
-        .await
-        .expect("set game path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game),
+    )
+    .await
+    .expect("set game path");
     core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
         .await
         .expect("set importer origin");
@@ -722,9 +758,12 @@ async fn pending_importer_evacuation_blocks_origin_override_change() {
         .await
         .expect("initialize Core")
         .with_crash_hook(hook);
-    core.set_game_install_path(GameCode::Gimi, &game)
-        .await
-        .expect("set game path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game),
+    )
+    .await
+    .expect("set game path");
     core.set_importer_origin_override(GameCode::Gimi, Some(&origin()))
         .await
         .expect("set initial importer origin");

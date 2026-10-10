@@ -57,6 +57,11 @@ pub fn validate(path: &Path) -> bool {
     data_directory_is_present
 }
 
+/// Validate a user-supplied install path without hiding filesystem errors.
+pub fn validate_for_setting(path: &Path) -> super::Result<bool> {
+    super::validate_install(path, EXE_NAMES, Some(&path.join(DATA_DIR_NAME)))
+}
+
 /// Try each candidate path in order, returning the first one that
 /// passes [`validate`].
 pub fn detect_from_paths<I>(candidates: I) -> Option<PathBuf>

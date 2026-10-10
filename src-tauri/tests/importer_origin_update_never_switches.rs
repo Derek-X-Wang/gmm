@@ -29,6 +29,8 @@
 //! default; it never installs anything, and substituting a different
 //! origin is a different act.
 
+mod support;
+
 use gmm_lib::core::importer_origin::{
     origin_for_install, ImporterOrigin, InstallOrigin, InstalledOrigin, OriginLayer,
     OriginResolution,
@@ -274,9 +276,12 @@ impl TwoOrigins {
 /// is *not* the compiled-in default and not what the seeded install came
 /// from.
 async fn recommend_the_fork(core: &Core, tmp: &TempDir) {
-    core.set_game_install_path(GameCode::Gimi, &tmp.path().join("Genshin"))
-        .await
-        .expect("set install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &tmp.path().join("Genshin")),
+    )
+    .await
+    .expect("set install path");
 
     let mut manifest_host = mockito::Server::new_async().await;
     let _m = manifest_host

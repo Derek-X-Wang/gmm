@@ -48,6 +48,8 @@ impl Fixture {
         let core = self.core().await;
         let game = self.tmp.path().join("Game");
         std::fs::create_dir_all(&game).unwrap();
+        std::fs::create_dir(game.join("GenshinImpact_Data")).unwrap();
+        std::fs::write(game.join("GenshinImpact.exe"), b"fixture game").unwrap();
         core.set_game_install_path(GameCode::Gimi, &game)
             .await
             .unwrap();
@@ -200,6 +202,8 @@ async fn adopt_listing_importer_and_variants_return_real_state() {
     let core = env.core().await;
     let game = env.tmp.path().join("Game");
     std::fs::create_dir(&game).unwrap();
+    std::fs::create_dir(game.join("GenshinImpact_Data")).unwrap();
+    std::fs::write(game.join("GenshinImpact.exe"), b"fixture game").unwrap();
     core.set_game_install_path(GameCode::Gimi, &game)
         .await
         .unwrap();

@@ -3380,9 +3380,21 @@ impl Core {
         Ok(install_path.map(PathBuf::from))
     }
 
-    /// Persist a game's install path.
+    /// Validate and persist a game's install path.
     pub async fn set_game_install_path(&self, game: GameCode, path: &Path) -> Result<()> {
         self.ensure_no_importer_evacuation(game).await?;
+        let profile = game.profile();
+        let valid = match profile.validate {
+            Some(validate) => validate(path)?,
+            None => false,
+        };
+        if !valid {
+            return Err(Error::InvalidGameInstallPath {
+                path: path.to_path_buf(),
+                game: profile.display_name,
+                expected: profile.executable_candidates.join(" or "),
+            });
+        }
         sqlx::query("UPDATE games SET install_path = ? WHERE code = ?")
             .bind(path.to_string_lossy().as_ref())
             .bind(game.as_str())

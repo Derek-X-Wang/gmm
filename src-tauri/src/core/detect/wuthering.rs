@@ -74,6 +74,15 @@ pub fn validate(path: &Path) -> bool {
     content_directory_is_present
 }
 
+/// Validate a user-supplied install path without hiding filesystem errors.
+pub fn validate_for_setting(path: &Path) -> super::Result<bool> {
+    let data = path
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("Content"));
+    super::validate_install(path, EXE_NAMES, data.as_deref())
+}
+
 /// Try each candidate path in order, returning the first one that
 /// passes [`validate`].
 pub fn detect_from_paths<I>(candidates: I) -> Option<PathBuf>

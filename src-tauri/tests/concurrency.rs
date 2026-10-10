@@ -33,6 +33,8 @@
 //! which reports exactly the two failure modes by name, plus a direct
 //! scan of `<Game>/Mods/` for the inverse case reconcile does not cover.
 
+mod support;
+
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -869,7 +871,10 @@ async fn seed_enabled_gamebanana_mod(
 ) -> (gmm_lib::core::Mod, String) {
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -2366,7 +2371,10 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
     let imported = env.seed_mod(&core, "Stale Reinstall Recovery").await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -2604,7 +2612,10 @@ async fn junction_withdrawal_failure_quarantines_as_possibly_deployed_without_ab
     let imported = env.seed_mod(&core, "Possibly Deployed Recovery").await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -2691,7 +2702,10 @@ async fn reconcile_cannot_redeploy_mod_quarantined_after_snapshot() {
     let core = env.core().await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -2766,7 +2780,10 @@ async fn rebuild_cannot_redeploy_mod_quarantined_after_snapshot() {
     let core = env.core().await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -3159,7 +3176,10 @@ async fn retry_without_witness_does_not_report_missing_enabled_deployment_as_alr
     let core = env.core().await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -3204,7 +3224,10 @@ async fn quarantined_withdrawal_racing_retry_leaves_enabled_mod_deployed() {
     let core = env.core().await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -3291,7 +3314,10 @@ async fn direct_quarantined_withdrawal_cannot_remove_a_recovered_deployment() {
     let core = env.core().await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -4969,7 +4995,10 @@ async fn session_claim_after_relocation_commit_cannot_disable_a_relocated_mod() 
     let core = env.core().await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("set install path");
@@ -5031,7 +5060,10 @@ async fn partial_junction_restore_keeps_relocated_rows_and_bytes_in_agreement() 
     let core = env.core().await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("set install path");
@@ -5419,7 +5451,10 @@ async fn assert_set_enabled_excludes_relocation_at(
     let core = env.core().await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("game install path"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("game install path"),
+        ),
     )
     .await
     .expect("record game install path");
@@ -5970,6 +6005,7 @@ async fn importer_install_is_refused_by_another_processs_game_session() {
     let core = env.core().await;
 
     let game_dir = env.game_mods.parent().expect("game dir").to_path_buf();
+    support::seed_game_install(GameCode::Gimi, &game_dir);
     let zip = env._tmp.path().join("importer.zip");
     build_importer_zip(&zip);
     let (zip_s, game_s) = (zip.display().to_string(), game_dir.display().to_string());
@@ -6008,6 +6044,7 @@ async fn importer_install_is_refused_by_another_processs_game_session() {
 async fn probe_importer_abort_leaves_a_witness_that_startup_replays() {
     let env = TestEnv::new();
     let game_dir = env.game_mods.parent().expect("game dir").to_path_buf();
+    support::seed_game_install(GameCode::Gimi, &game_dir);
     let zip = env._tmp.path().join("importer.zip");
     build_importer_zip(&zip);
     std::fs::create_dir_all(game_dir.join("Core")).expect("create old Core");
@@ -6059,6 +6096,7 @@ async fn probe_importer_abort_leaves_a_witness_that_startup_replays() {
 async fn importer_recovery_retains_the_backup_when_the_live_entry_changes_between_snapshots() {
     let env = TestEnv::new();
     let game_dir = env.game_mods.parent().expect("game dir").to_path_buf();
+    support::seed_game_install(GameCode::Gimi, &game_dir);
     let zip = env._tmp.path().join("importer.zip");
     build_importer_zip(&zip);
     std::fs::create_dir_all(game_dir.join("Core")).expect("create old Core");

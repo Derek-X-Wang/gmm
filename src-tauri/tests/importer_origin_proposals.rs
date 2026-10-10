@@ -24,6 +24,8 @@
 //!   dismissals as fresh prompts, or toggling the switch twice becomes a
 //!   way to spam yourself.
 
+mod support;
+
 use gmm_lib::core::importer_origin::{ImporterOrigin, InstalledOrigin, OverrideView};
 use gmm_lib::core::{Core, GameCode};
 use std::fs::File;
@@ -110,9 +112,12 @@ async fn cache_manifest(core: &Core, body: &str) -> mockito::ServerGuard {
 /// A game with an install GMM performed from one origin, and a cached
 /// manifest recommending a different one.
 async fn proposed_switch(core: &Core, tmp: &TempDir, reason: Option<&str>) -> mockito::ServerGuard {
-    core.set_game_install_path(GameCode::Gimi, &tmp.path().join("Genshin"))
-        .await
-        .expect("install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &tmp.path().join("Genshin")),
+    )
+    .await
+    .expect("install path");
     core.record_importer_install(GameCode::Gimi, "v8.8.0", &installed_from())
         .await
         .expect("seed install");
@@ -550,9 +555,12 @@ async fn there_is_no_way_to_record_an_origin_without_installing() {
 async fn accepting_when_nothing_is_proposed_is_an_error_not_a_silent_install() {
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
-    core.set_game_install_path(GameCode::Gimi, &tmp.path().join("Genshin"))
-        .await
-        .expect("install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &tmp.path().join("Genshin")),
+    )
+    .await
+    .expect("install path");
     core.record_importer_install(GameCode::Gimi, "v8.8.0", &installed_from())
         .await
         .expect("seed install");

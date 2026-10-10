@@ -17,6 +17,8 @@
 
 #![cfg(windows)]
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -189,9 +191,12 @@ async fn relocating_the_library_preserves_every_mod_file() {
     let mods_dir = tmp.path().join("game/Mods");
     fs::create_dir_all(&mods_dir).expect("mods dir");
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Gimi, &tmp.path().join("game"))
-        .await
-        .expect("install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &tmp.path().join("game")),
+    )
+    .await
+    .expect("install path");
 
     let (_id, _old_path) = adopt_and_enable(&core, tmp.path(), &mods_dir, "Relocating Mod").await;
 

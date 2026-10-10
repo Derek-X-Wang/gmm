@@ -4,6 +4,8 @@
 //! The reinstall flow is exercised end-to-end with a real bytes-on-
 //! disk swap.
 
+mod support;
+
 use std::fs::File;
 use std::io::Write;
 
@@ -321,9 +323,12 @@ async fn reinstall_replaces_library_bytes_and_bumps_version() {
     std::fs::create_dir_all(&game_mods).expect("mods dir");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root, &db_url).await.expect("init");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("install");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("install");
 
     // Ingest v1 with hash=ALPHA, enable.
     let mut ingest_server = mockito::Server::new_async().await;
@@ -408,9 +413,12 @@ async fn failed_reinstall_preserves_installed_bytes_enabled_state_and_junction()
     std::fs::create_dir_all(&game_mods).expect("mods dir");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root, &db_url).await.expect("init");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("install");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("install");
 
     let mut ingest_server = mockito::Server::new_async().await;
     let id = 10_166_u64;
