@@ -24,8 +24,9 @@ impl Drop for Reap {
 
 async fn fake_endfield(env: &Fixture) -> (Core, gmm_lib::core::Mod) {
     let artifacts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug");
-    let install = env.tmp.path().join("Game");
-    std::fs::create_dir(&install).unwrap();
+    let install = env.tmp.path().join("Game/Binaries/Win64");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::create_dir(env.tmp.path().join("Game/Content")).unwrap();
     std::fs::copy(
         artifacts.join("victim.exe"),
         install.join("Endfield-Win64-Shipping.exe"),

@@ -17,6 +17,8 @@
 //! failure between them with a SQLite trigger, which is the only
 //! injection that needs no test-only hook in the shipped code.
 
+mod support;
+
 use gmm_lib::core::importer_origin::{ImporterOrigin, InstalledOrigin};
 use gmm_lib::core::{Core, GameCode};
 use std::fs::File;
@@ -142,9 +144,12 @@ impl FakeUpstream {
 /// Set `game` up so the real install command path has somewhere to
 /// install to and something to install from.
 async fn ready_to_install(core: &Core, tmp: &TempDir, origin: &ImporterOrigin) {
-    core.set_game_install_path(GameCode::Gimi, &tmp.path().join("Genshin"))
-        .await
-        .expect("set install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &tmp.path().join("Genshin")),
+    )
+    .await
+    .expect("set install path");
     core.set_importer_origin_override(GameCode::Gimi, Some(origin))
         .await
         .expect("set origin override");

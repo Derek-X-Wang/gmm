@@ -15,6 +15,8 @@
 //! The spawn / inject / watcher half of the same function lives in
 //! `tests/launch_command_windows.rs`.
 
+mod support;
+
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -159,13 +161,16 @@ async fn refuses_to_launch_when_no_game_executable_is_present() {
     let events = EventLog::attach(&app);
     let runtime = SessionRuntime::new();
 
-    // An install directory that exists but holds none of the Game's
-    // executable candidates.
+    // The executable can disappear after a valid install path was saved.
     let install = tmp.path().join("Genshin Impact Game");
     std::fs::create_dir_all(&install).expect("install dir");
-    core.set_game_install_path(GameCode::Gimi, &install)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &install),
+    )
+    .await
+    .expect("persist install path");
+    std::fs::remove_file(install.join("GenshinImpact.exe")).expect("remove game exe");
 
     let err = launch::launch(
         app.handle(),
@@ -200,9 +205,12 @@ async fn refuses_to_launch_before_the_model_importer_is_installed() {
     let install = tmp.path().join("Genshin Impact Game");
     std::fs::create_dir_all(&install).expect("install dir");
     std::fs::write(install.join("GenshinImpact.exe"), b"not a real PE").expect("fake exe");
-    core.set_game_install_path(GameCode::Gimi, &install)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &install),
+    )
+    .await
+    .expect("persist install path");
 
     let err = launch::launch(
         app.handle(),

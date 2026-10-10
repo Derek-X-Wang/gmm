@@ -22,6 +22,8 @@
 //! message has to be right for *any* retracted game, and for the next
 //! one.
 
+mod support;
+
 use gmm_lib::core::error::SET_AN_ORIGIN_HINT;
 use gmm_lib::core::importer_origin::{
     resolve, ImporterOrigin, OriginResolution, Recommendation, StoredOverride,
@@ -88,9 +90,12 @@ fn assert_points_at_the_real_control(context: &str, message: &str) {
 async fn the_install_failure_for_a_retracted_game_names_the_origin_control() {
     let tmp = TempDir::new().expect("tmp");
     let (core, _server) = core_with_gimi_retracted(&tmp).await;
-    core.set_game_install_path(GameCode::Gimi, &tmp.path().join("Genshin"))
-        .await
-        .expect("set install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &tmp.path().join("Genshin")),
+    )
+    .await
+    .expect("set install path");
 
     let error = core
         .install_importer(GameCode::Gimi)

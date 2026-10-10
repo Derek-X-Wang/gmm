@@ -20,6 +20,8 @@
 //! **unknown**, which is a first-class state (#99) and strictly better
 //! than a confident wrong answer.
 
+mod support;
+
 use gmm_lib::core::importer::Endpoints;
 use gmm_lib::core::importer_origin::{ImporterOrigin, InstalledOrigin};
 use gmm_lib::core::{Core, GameCode};
@@ -141,9 +143,12 @@ async fn install(core: &Core, tmp: &TempDir, origin: &ImporterOrigin, tag: &str,
 async fn rolling_back_an_origin_switch_stops_the_record_describing_the_undone_install() {
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
-    core.set_game_install_path(GameCode::Gimi, &game_dir(&tmp))
-        .await
-        .expect("set install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_dir(&tmp)),
+    )
+    .await
+    .expect("set install path");
 
     install(&core, &tmp, &origin_a(), "v8.8.9", "; package A\n").await;
     install(&core, &tmp, &origin_b(), "v1.4.4", "; package B\n").await;
@@ -209,9 +214,12 @@ async fn rolling_back_a_version_update_restores_the_exact_previous_install() {
     // pays for itself.
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
-    core.set_game_install_path(GameCode::Gimi, &game_dir(&tmp))
-        .await
-        .expect("set install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_dir(&tmp)),
+    )
+    .await
+    .expect("set install path");
 
     install(&core, &tmp, &origin_a(), "v8.8.8", "; package A, older\n").await;
     core.set_importer_pinned(GameCode::Gimi, Some("v8.8.8"))
@@ -266,9 +274,12 @@ async fn a_rollback_with_no_provenance_records_unknown_rather_than_guessing() {
     // what the pin logic and the proposal logic would then trust.
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
-    core.set_game_install_path(GameCode::Gimi, &game_dir(&tmp))
-        .await
-        .expect("set install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_dir(&tmp)),
+    )
+    .await
+    .expect("set install path");
 
     // A hand-made backup with nothing beside it.
     let backup = backups_root(&tmp).join("20250101T000000");
@@ -319,9 +330,12 @@ async fn rollback_still_restores_the_files_and_leaves_nothing_of_its_own_behind(
     // the user's `d3dx.ini`.
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
-    core.set_game_install_path(GameCode::Gimi, &game_dir(&tmp))
-        .await
-        .expect("set install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_dir(&tmp)),
+    )
+    .await
+    .expect("set install path");
 
     install(&core, &tmp, &origin_a(), "v8.8.9", "; package A\n").await;
     install(&core, &tmp, &origin_b(), "v1.4.4", "; package B\n").await;
@@ -353,9 +367,12 @@ async fn a_rollback_whose_record_cannot_be_written_is_not_reported_as_a_plain_su
     // bookkeeping did not, so the caller has to be told.
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
-    core.set_game_install_path(GameCode::Gimi, &game_dir(&tmp))
-        .await
-        .expect("set install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_dir(&tmp)),
+    )
+    .await
+    .expect("set install path");
 
     install(&core, &tmp, &origin_a(), "v8.8.9", "; package A\n").await;
     install(&core, &tmp, &origin_b(), "v1.4.4", "; package B\n").await;

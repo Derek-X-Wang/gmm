@@ -8,6 +8,8 @@
 //! Junctions are recreated on the new root for any mod that was
 //! enabled before the move.
 
+mod support;
+
 use std::fs;
 
 use gmm_lib::{
@@ -77,9 +79,12 @@ async fn changing_global_root_relocates_every_mod_and_rebuilds_junctions() {
     let core = Core::new(library_default.clone(), &db_url)
         .await
         .expect("init core");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("install path");
 
     let mod_a = make_mod(
         &core,
@@ -146,9 +151,12 @@ async fn relocation_stops_when_a_deployment_entry_survives_withdrawal() {
     let core = Core::new(library_default.clone(), &db_url)
         .await
         .expect("init core");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("install path");
     let installed = make_mod(
         &core,
         GameCode::Gimi,
@@ -663,12 +671,18 @@ async fn per_game_override_relocates_only_that_game() {
     let core = Core::new(library_default.clone(), &db_url)
         .await
         .expect("init core");
-    core.set_game_install_path(GameCode::Gimi, &gimi_install)
-        .await
-        .expect("gimi install");
-    core.set_game_install_path(GameCode::Srmi, &srmi_install)
-        .await
-        .expect("srmi install");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &gimi_install),
+    )
+    .await
+    .expect("gimi install");
+    core.set_game_install_path(
+        GameCode::Srmi,
+        support::seed_game_install(GameCode::Srmi, &srmi_install),
+    )
+    .await
+    .expect("srmi install");
 
     let gimi_mod = make_mod(&core, GameCode::Gimi, "Genshin Mod", &tmp.path().join("g")).await;
     let srmi_mod = make_mod(
