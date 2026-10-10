@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { AttentionView } from "./AttentionView";
 import { PathField } from "./PathField";
 import { ImporterOriginPanel } from "./ImporterOriginPanel";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -168,15 +168,25 @@ function MainApp({
     staleTime: Infinity,
   });
   const list = (games.data ?? FALLBACK_GAMES).length > 0 ? games.data ?? FALLBACK_GAMES : FALLBACK_GAMES;
-  const [activeGame, setActiveGame] = useState<ApiGameCode>(list[0].code);
-  // If the registry updates after first render (new port lands) and the
-  // active tab is no longer in the list, snap back to the first entry.
-  useEffect(() => {
-    if (!list.some((g) => g.code === activeGame)) {
-      setActiveGame(list[0].code);
-    }
-  }, [list, activeGame]);
-  const active = list.find((g) => g.code === activeGame) ?? list[0];
+  // Share Settings' query keys so path entry, detection, and setup refresh
+  // the tab strip through their existing invalidation paths.
+  const installPaths = useQueries({
+    queries: list.map((game) => ({
+      queryKey: ["installPath", game.code],
+      queryFn: () => getGameInstallPath(game.code),
+    })),
+  });
+  const installed = list.filter((_, index) => Boolean(installPaths[index].data?.trim()));
+  const remaining = list.filter((game) => !installed.some((entry) => entry.code === game.code));
+  const pathsPending = games.isPending || installPaths.some((path) => path.isPending);
+  const pathErrors = installPaths.flatMap((path, index) => path.isError
+    ? [`${list[index].displayName}: ${commandFailureMessage(path.error)}`]
+    : []);
+  const [selectedGame, setActiveGame] = useState<ApiGameCode | null>(null);
+  // Start on a game the user has. A deliberate selection can also open
+  // an unconfigured game's Settings, and remains selected while saving.
+  const active = list.find((game) => game.code === selectedGame) ?? installed[0] ?? list[0];
+  const activeGame = active.code;
 
   const reopenSetup = useMutation({
     mutationFn: () => resetOnboarding(),
@@ -214,7 +224,21 @@ function MainApp({
       <AttentionView />
       <StartupReconcileNotice />
       <SessionBanner />
-      <GameTabs games={list} active={activeGame} onChange={setActiveGame} />
+      {pathErrors.length > 0 ? (
+        <OperationFailureNotice
+          heading="GMM could not read some game install paths."
+          detail="Use a game tab or Add game to check the affected paths in Settings."
+          errors={pathErrors}
+        />
+      ) : null}
+      <GameTabs
+        games={installed}
+        remaining={remaining}
+        pending={pathsPending}
+        pathsUnavailable={pathErrors.length > 0}
+        active={activeGame}
+        onChange={setActiveGame}
+      />
       <LaunchGameButton game={activeGame} displayName={active.displayName} />
       <Settings game={activeGame} displayName={active.displayName} />
       <NetworkPanel />
@@ -284,36 +308,77 @@ function StartupReconcileNotice() {
 /**
  * Per-game tab strip. Rendered between the session banner and the
  * per-game cards so the user can switch contexts without leaving the
- * single-page shell. Only games whose backend wiring is complete (per
- * the Rust `GameProfile::is_ported` predicate) show up here.
+ * single-page shell. Saved install paths determine tabs; supported games
+ * without paths remain reachable through the separate Add game control.
  */
 function GameTabs({
   games,
+  remaining,
+  pending,
+  pathsUnavailable,
   active,
   onChange,
 }: {
   games: GameSummary[];
+  remaining: GameSummary[];
+  pending: boolean;
+  pathsUnavailable: boolean;
   active: ApiGameCode;
   onChange: (next: ApiGameCode) => void;
 }) {
-  if (games.length <= 1) return null;
+  const [adding, setAdding] = useState(false);
   return (
-    <nav className="game-tabs" role="tablist" aria-label="Game">
-      {games.map((g) => {
-        const isActive = g.code === active;
-        return (
+    <div className="game-navigation">
+      {pending ? <p className="muted small">Checking game install paths…</p> : null}
+      {!pending && !pathsUnavailable && games.length === 0 ? (
+        <p className="muted">No game install paths set. Add a game to get started.</p>
+      ) : null}
+      <div className="row">
+        {games.length > 0 ? (
+          <nav className="game-tabs" role="tablist" aria-label="Game">
+            {games.map((g) => {
+              const isActive = g.code === active;
+              return (
+                <button
+                  key={g.code}
+                  role="tab"
+                  aria-selected={isActive}
+                  className={`game-tabs__tab${isActive ? " game-tabs__tab--active" : ""}`}
+                  onClick={() => onChange(g.code)}
+                >
+                  {g.displayName}
+                </button>
+              );
+            })}
+          </nav>
+        ) : null}
+        {!pending && remaining.length > 0 ? (
           <button
-            key={g.code}
-            role="tab"
-            aria-selected={isActive}
-            className={`game-tabs__tab${isActive ? " game-tabs__tab--active" : ""}`}
-            onClick={() => onChange(g.code)}
+            type="button"
+            aria-expanded={adding}
+            aria-controls="add-game-picker"
+            onClick={() => setAdding((open) => !open)}
           >
-            {g.displayName}
+            Add game
           </button>
-        );
-      })}
-    </nav>
+        ) : null}
+      </div>
+      {adding && remaining.length > 0 ? (
+        <section id="add-game-picker" className="card" aria-label="Add a game">
+          <p className="muted small">Choose a supported game to set its install path.</p>
+          <div className="row game-navigation__choices">
+            {remaining.map((game) => (
+              <button key={game.code} type="button" onClick={() => {
+                onChange(game.code);
+                setAdding(false);
+              }}>
+                Set up {game.displayName}
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
+    </div>
   );
 }
 

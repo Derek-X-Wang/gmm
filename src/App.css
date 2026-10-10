@@ -448,11 +448,13 @@ code {
 }
 
 /*
- * Slice 6 (#16): per-game tab strip. Renders between the session
- * banner and the per-game cards. Each new per-game port (#17-#20)
- * appends an entry to `GAME_PROFILES` in Rust; the React side picks
- * them up via `listSupportedGames` without further changes here.
+ * Game navigation uses saved install paths for tabs and keeps the
+ * remaining supported games in a separate setup picker.
  */
+.game-navigation__choices {
+  flex-wrap: wrap;
+}
+
 .game-tabs {
   display: flex;
   gap: 0.4rem;
