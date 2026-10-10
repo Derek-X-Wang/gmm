@@ -381,21 +381,25 @@ impl Core {
     /// the wizard. `skipped == true` keeps the "Finish setup" banner
     /// alive in Settings until the user resumes.
     pub async fn mark_onboarding_complete(&self, skipped: bool) -> Result<()> {
-        put_setting(&self.pool, keys::onboarding_complete(), Some("true")).await?;
+        let mut tx = self.pool.begin().await?;
+        put_setting(&mut *tx, keys::onboarding_complete(), Some("true")).await?;
         put_setting(
-            &self.pool,
+            &mut *tx,
             keys::onboarding_skipped(),
             Some(if skipped { "true" } else { "false" }),
         )
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
     /// Slice 16-b (#24): re-open the wizard on the next launch. Used
     /// by the Help → Run setup again entry point.
     pub async fn reset_onboarding(&self) -> Result<()> {
-        put_setting(&self.pool, keys::onboarding_complete(), Some("false")).await?;
-        put_setting(&self.pool, keys::onboarding_skipped(), Some("false")).await?;
+        let mut tx = self.pool.begin().await?;
+        put_setting(&mut *tx, keys::onboarding_complete(), Some("false")).await?;
+        put_setting(&mut *tx, keys::onboarding_skipped(), Some("false")).await?;
+        tx.commit().await?;
         Ok(())
     }
 

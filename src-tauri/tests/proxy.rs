@@ -57,6 +57,50 @@ async fn proxy_config_roundtrips_through_settings() {
 }
 
 #[tokio::test]
+async fn failed_proxy_save_preserves_previous_url_and_credentials() {
+    for failing_key in ["network.proxy.username", "network.proxy.password"] {
+        let tmp = TempDir::new().expect("tmp");
+        let core = fresh_core(&tmp).await;
+        let previous = ProxyConfig {
+            url: Some("http://previous-proxy.local:8080".into()),
+            username: Some("previous-user".into()),
+            password: Some("previous-password".into()),
+        };
+        core.set_proxy_config(&previous).await.expect("seed proxy");
+
+        let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+        let pool = sqlx::SqlitePool::connect(&db_url).await.expect("open db");
+        // Reject a later write after the new host has been written. ABORT
+        // cancels only this statement, so the caller must roll back the group.
+        sqlx::query(&format!(
+            "CREATE TRIGGER reject_proxy_write BEFORE INSERT ON settings
+             WHEN NEW.key = '{failing_key}'
+             BEGIN SELECT RAISE(ABORT, 'injected proxy write failure'); END"
+        ))
+        .execute(&pool)
+        .await
+        .expect("arm failure");
+        pool.close().await;
+
+        let replacement = ProxyConfig {
+            url: Some("http://replacement-proxy.local:8080".into()),
+            username: Some("replacement-user".into()),
+            password: Some("replacement-password".into()),
+        };
+        let error = core
+            .set_proxy_config(&replacement)
+            .await
+            .expect_err("later proxy write must fail");
+        assert!(error.to_string().contains("injected proxy write failure"));
+        assert_eq!(
+            core.proxy_config().await.expect("read after failure"),
+            previous,
+            "failure at {failing_key} must preserve every proxy key, including the old host"
+        );
+    }
+}
+
+#[tokio::test]
 async fn diagnostics_snapshot_never_includes_proxy_password() {
     let tmp = TempDir::new().expect("tmp");
     let core = fresh_core(&tmp).await;
