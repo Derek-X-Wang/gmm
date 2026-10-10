@@ -143,6 +143,11 @@ async fn seed(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     )?;
 
     std::fs::create_dir_all(mods_dir(args))?;
+    std::fs::create_dir_all(args.game_dir.join("GenshinImpact_Data"))?;
+    let executable = args.game_dir.join("GenshinImpact.exe");
+    if !executable.try_exists()? {
+        std::fs::write(executable, b"lifecycle fixture game")?;
+    }
     core.set_game_install_path(GAME, &args.game_dir).await?;
 
     let adopted = core.adopt_folder(GAME, &staging, MOD_NAME).await?;
