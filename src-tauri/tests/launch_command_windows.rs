@@ -26,6 +26,8 @@
 
 #![cfg(windows)]
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -87,7 +89,7 @@ fn vendor_loader_dll() -> PathBuf {
 /// A game install directory holding `exe_name` (a copy of `source_exe`)
 /// and a Model Importer `d3d11.dll`.
 fn make_install_dir(tmp: &Path, exe_name: &str, source_exe: &Path) -> PathBuf {
-    let install = tmp.join("game");
+    let install = tmp.join("game/Binaries/Win64");
     std::fs::create_dir_all(&install).expect("install dir");
     std::fs::copy(source_exe, install.join(exe_name)).expect("copy game exe");
     std::fs::copy(build_artifact("noop_dll.dll"), install.join("d3d11.dll"))
@@ -235,9 +237,12 @@ async fn launches_a_session_then_the_watcher_tears_it_down_when_the_game_exits()
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Gimi, &install)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &install),
+    )
+    .await
+    .expect("persist install path");
 
     let app = mock_app();
     let events = EventLog::attach(&app);
@@ -301,9 +306,12 @@ async fn launches_an_efmi_session_via_direct_injection() {
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Efmi, &install)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Efmi,
+        support::seed_game_install(GameCode::Efmi, &install),
+    )
+    .await
+    .expect("persist install path");
 
     let app = mock_app();
     let events = EventLog::attach(&app);
@@ -353,9 +361,12 @@ async fn simultaneous_launches_keep_one_child_and_kill_the_loser() {
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let base = fresh_core(tmp.path()).await;
-    base.set_game_install_path(GameCode::Efmi, &install)
-        .await
-        .expect("persist install path");
+    base.set_game_install_path(
+        GameCode::Efmi,
+        support::seed_game_install(GameCode::Efmi, &install),
+    )
+    .await
+    .expect("persist install path");
 
     let rendezvous = Arc::new(std::sync::Barrier::new(2));
     let core_a = base.clone().with_crash_hook({
@@ -430,9 +441,12 @@ async fn an_injection_timeout_leaves_no_session_and_no_stray_process() {
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &instant_exit_exe());
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Srmi, &install)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Srmi,
+        support::seed_game_install(GameCode::Srmi, &install),
+    )
+    .await
+    .expect("persist install path");
 
     let app = mock_app();
     let events = EventLog::attach(&app);
@@ -508,9 +522,12 @@ async fn a_stale_live_session_whose_game_exited_is_reclaimed_by_the_next_launch(
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Zzmi, &install)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Zzmi,
+        support::seed_game_install(GameCode::Zzmi, &install),
+    )
+    .await
+    .expect("persist install path");
 
     let (stale_info, live) = stage_live_session(&install, EXE, GameCode::Zzmi);
     core.start_session(&stale_info).await.expect("stale claim");
@@ -569,9 +586,12 @@ async fn a_live_session_with_no_persisted_row_refuses_the_next_launch() {
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Himi, &install)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Himi,
+        support::seed_game_install(GameCode::Himi, &install),
+    )
+    .await
+    .expect("persist install path");
 
     // Live session installed, no persisted row — what `clean_stale_session`
     // leaves behind if it runs while the game is still up.
@@ -628,9 +648,12 @@ async fn the_watcher_finishes_when_the_live_session_is_cleared_from_under_it() {
     let tmp = TempDir::new().expect("tmp");
     let install = make_install_dir(tmp.path(), EXE, &long_lived_exe());
     let core = fresh_core(tmp.path()).await;
-    core.set_game_install_path(GameCode::Wwmi, &install)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Wwmi,
+        support::seed_game_install(GameCode::Wwmi, &install),
+    )
+    .await
+    .expect("persist install path");
 
     let app = mock_app();
     let runtime = SessionRuntime::new();

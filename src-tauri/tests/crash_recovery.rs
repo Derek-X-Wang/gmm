@@ -60,6 +60,8 @@
 //! leaves the intact Library directory visible to the orphan audit instead of
 //! exposing a referenced Mod with missing Variant state.
 
+mod support;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1813,7 +1815,10 @@ async fn every_crash_point_is_exercised_by_an_operation() {
     let relocated = seed_mod(&env, &core, "Coverage Relocation").await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("coverage game install root"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("coverage game install root"),
+        ),
     )
     .await
     .expect("coverage game install path");
@@ -1832,7 +1837,10 @@ async fn every_crash_point_is_exercised_by_an_operation() {
     let keeper = seed_mod(&env, &core, "Coverage Duplicate Keeper").await;
     core.set_game_install_path(
         GameCode::Gimi,
-        env.game_mods.parent().expect("coverage game install root"),
+        support::seed_game_install(
+            GameCode::Gimi,
+            env.game_mods.parent().expect("coverage game install root"),
+        ),
     )
     .await
     .expect("coverage duplicate game install path");

@@ -71,6 +71,15 @@ pub enum Error {
     #[error("invalid game code: {0}")]
     InvalidGameCode(String),
 
+    #[error(
+        "The path {path:?} does not contain {game}. Select the directory containing {expected} and its game data directory."
+    )]
+    InvalidGameInstallPath {
+        path: PathBuf,
+        game: &'static str,
+        expected: String,
+    },
+
     #[error("invalid mod source: {0}")]
     InvalidSource(String),
 

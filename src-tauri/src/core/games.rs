@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,9 @@ impl FromStr for GameCode {
 /// Function signature shared by every per-game detector.
 pub type DetectFn = fn() -> Option<PathBuf>;
 
+/// Manual install validation preserves I/O errors instead of hiding them.
+pub type ValidateFn = fn(&Path) -> super::error::Result<bool>;
+
 /// How `launch_game` gets the Model Importer DLL into the running
 /// game process. Defaults to `Hook` for every game where XXMI uses
 /// the CBT-hook + window-created path; switches to `Inject` for
@@ -94,7 +97,7 @@ pub enum InjectMode {
 /// #16–#20) by appending a row instead of touching match arms across
 /// `commands.rs` / `detect/` / the UI.
 ///
-/// An unported game ships with `importer_repo = None`, `detect = None`,
+/// An unported game ships with `importer_repo = None`, `detect = None`, `validate = None`,
 /// and `executable_candidates = &[]`. Callers see `is_ported() == false`
 /// and surface a "wired up soon" message instead of pretending the game
 /// works.
@@ -121,17 +124,21 @@ pub struct GameProfile {
     /// per-game port lands.
     #[serde(skip_serializing)]
     pub detect: Option<DetectFn>,
+    /// Fallible validator for install paths supplied by the user.
+    #[serde(skip_serializing)]
+    pub validate: Option<ValidateFn>,
     /// How `launch_game` injects the Model Importer DLL. See
     /// [`InjectMode`]; defaults to `Hook` everywhere except EFMI.
     pub inject_mode: InjectMode,
 }
 
 impl GameProfile {
-    /// `true` iff the per-game port has wired importer + detect + exe.
+    /// `true` iff the per-game port has wired importer + detect + validate + exe.
     /// Used by `GameCode::ported` to surface the tabs in the UI.
     pub fn is_ported(&self) -> bool {
         self.importer_repo.is_some()
             && self.detect.is_some()
+            && self.validate.is_some()
             && !self.executable_candidates.is_empty()
     }
 }
@@ -158,6 +165,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         )),
         executable_candidates: detect::genshin::EXE_NAMES,
         detect: Some(detect::genshin::detect),
+        validate: Some(detect::genshin::validate_for_setting),
         inject_mode: InjectMode::Hook,
     },
     GameProfile {
@@ -182,6 +190,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         )),
         executable_candidates: detect::star_rail::EXE_NAMES,
         detect: Some(detect::star_rail::detect),
+        validate: Some(detect::star_rail::validate_for_setting),
         inject_mode: InjectMode::Hook,
     },
     GameProfile {
@@ -193,6 +202,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         )),
         executable_candidates: detect::zenless::EXE_NAMES,
         detect: Some(detect::zenless::detect),
+        validate: Some(detect::zenless::validate_for_setting),
         inject_mode: InjectMode::Hook,
     },
     GameProfile {
@@ -204,6 +214,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         )),
         executable_candidates: detect::wuthering::EXE_NAMES,
         detect: Some(detect::wuthering::detect),
+        validate: Some(detect::wuthering::validate_for_setting),
         inject_mode: InjectMode::Hook,
     },
     GameProfile {
@@ -215,6 +226,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         )),
         executable_candidates: detect::honkai_impact::EXE_NAMES,
         detect: Some(detect::honkai_impact::detect),
+        validate: Some(detect::honkai_impact::validate_for_setting),
         inject_mode: InjectMode::Hook,
     },
     GameProfile {
@@ -226,6 +238,7 @@ pub const GAME_PROFILES: &[GameProfile] = &[
         )),
         executable_candidates: detect::endfield::EXE_NAMES,
         detect: Some(detect::endfield::detect),
+        validate: Some(detect::endfield::validate_for_setting),
         inject_mode: InjectMode::Inject,
     },
 ];

@@ -38,6 +38,8 @@
 
 #![cfg(windows)]
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -169,9 +171,12 @@ async fn full_vertical_against_a_fake_game_install() {
     let library_root = tmp.path().join("library");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root, &db_url).await.expect("core");
-    core.set_game_install_path(GameCode::Gimi, &game_dir)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_dir),
+    )
+    .await
+    .expect("persist install path");
 
     // ---- 1. detection ------------------------------------------------
     assert!(
@@ -340,9 +345,12 @@ async fn importer_rollback_restores_a_populated_game_dir() {
     let core = Core::new(tmp.path().join("library"), &db_url)
         .await
         .expect("core");
-    core.set_game_install_path(GameCode::Gimi, &game_dir)
-        .await
-        .expect("persist install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_dir),
+    )
+    .await
+    .expect("persist install path");
 
     let zip_path = tmp.path().join("GIMI-Package.zip");
     make_fake_importer_zip(&zip_path);

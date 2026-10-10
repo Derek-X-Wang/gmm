@@ -8,6 +8,8 @@
 //! 2. The Core orchestration: two enabled mods that bind the same hash
 //!    surface as a Conflict; disabling one drops the conflict.
 
+mod support;
+
 use std::fs;
 
 use gmm_lib::core::conflicts::{
@@ -169,9 +171,12 @@ async fn enabled_mods_sharing_a_hash_surface_as_conflict() {
     fs::create_dir_all(&game_mods).expect("mods dir");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root, &db_url).await.expect("init");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("install");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("install");
 
     // Adopt two mods that share hash 0xC0DE.
     let fixture_a = tmp.path().join("fixture_a");

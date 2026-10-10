@@ -3,6 +3,8 @@
 //! Covers the detection heuristic in isolation and the full
 //! import-detect-switch flow against the real Core + filesystem.
 
+mod support;
+
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -165,9 +167,12 @@ async fn switching_active_variant_retargets_the_junction() {
     fs::create_dir_all(&game_mods).expect("mods dir");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root, &db_url).await.expect("init");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("install");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("install");
 
     let zip_path = tmp.path().join("variants.zip");
     build_three_variant_zip(&zip_path);
@@ -274,9 +279,12 @@ async fn startup_reconcile_reports_a_corrupt_variant_selection_for_the_affected_
     fs::create_dir_all(game_install.join("Mods")).expect("game Mods dir");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root, &db_url).await.expect("init");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("install path");
 
     let zip_path = tmp.path().join("variants.zip");
     build_three_variant_zip(&zip_path);
@@ -344,9 +352,12 @@ async fn relocation_classifies_a_corrupt_variant_as_selection_repair_not_rebuild
     fs::create_dir_all(&game_mods).expect("game Mods dir");
     let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(library_root, &db_url).await.expect("init");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("install path");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("install path");
 
     let zip_path = tmp.path().join("variants.zip");
     build_three_variant_zip(&zip_path);

@@ -15,6 +15,8 @@
 //! a bug to be fixed here; it is the one real example of the no-origin
 //! state, so it is what the no-origin surface gets checked against.
 
+mod support;
+
 use gmm_lib::core::importer_origin::{InstallTargetView, OriginLayer, OriginResolution};
 use gmm_lib::core::recommended_importers::MANIFEST_PATH;
 use gmm_lib::core::{Core, GameCode};
@@ -92,9 +94,12 @@ async fn himi_has_no_origin_in_effect_and_the_surface_says_what_to_do() {
 async fn himis_install_failure_explains_itself_and_points_at_the_control() {
     let tmp = TempDir::new().expect("tmp");
     let (core, _server) = core_with_the_real_manifest(&tmp).await;
-    core.set_game_install_path(GameCode::Himi, &tmp.path().join("HI3"))
-        .await
-        .expect("install path");
+    core.set_game_install_path(
+        GameCode::Himi,
+        support::seed_game_install(GameCode::Himi, &tmp.path().join("HI3")),
+    )
+    .await
+    .expect("install path");
 
     let error = core
         .install_importer(GameCode::Himi)

@@ -4,6 +4,8 @@
 //! filesystem state. The audit is deliberately read-only: an unreferenced
 //! directory may hold the user's only copy of an interrupted import.
 
+mod support;
+
 use std::fs;
 use std::path::Path;
 
@@ -928,9 +930,12 @@ async fn duplicate_fixture(tmp: &TempDir) -> DuplicateFixture {
     let game_install = tmp.path().join("game");
     let game_mods = game_install.join("Mods");
     fs::create_dir_all(&game_mods).expect("game Mods directory");
-    core.set_game_install_path(GameCode::Gimi, &game_install)
-        .await
-        .expect("record game install");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game_install),
+    )
+    .await
+    .expect("record game install");
     core.set_enabled(&duplicate_id, true, &game_mods)
         .await
         .expect("enable duplicate Mod");
@@ -1306,7 +1311,10 @@ async fn duplicate_resolution_refuses_a_junction_path_claimed_by_the_keeper() {
         .to_path_buf();
     fixture
         .core
-        .set_game_install_path(GameCode::Srmi, &install)
+        .set_game_install_path(
+            GameCode::Srmi,
+            support::seed_game_install(GameCode::Srmi, &install),
+        )
         .await
         .expect("share one install path across games");
     let pool = sqlx::SqlitePool::connect(&fixture.db_url)
@@ -1368,7 +1376,10 @@ async fn duplicate_resolution_refuses_a_junction_path_claimed_outside_the_review
         .expect("game install");
     fixture
         .core
-        .set_game_install_path(GameCode::Srmi, install)
+        .set_game_install_path(
+            GameCode::Srmi,
+            support::seed_game_install(GameCode::Srmi, install),
+        )
         .await
         .expect("share one install path across games");
     let pool = sqlx::SqlitePool::connect(&fixture.db_url)
@@ -1449,7 +1460,10 @@ async fn duplicate_resolution_refuses_a_survivor_claiming_the_junction_by_its_sh
         .expect("game install");
     fixture
         .core
-        .set_game_install_path(GameCode::Srmi, install)
+        .set_game_install_path(
+            GameCode::Srmi,
+            support::seed_game_install(GameCode::Srmi, install),
+        )
         .await
         .expect("share one install path across games");
     let pool = sqlx::SqlitePool::connect(&fixture.db_url)
@@ -1538,7 +1552,10 @@ async fn duplicate_resolution_refuses_a_survivor_claiming_the_same_case_insensit
         .expect("game install");
     fixture
         .core
-        .set_game_install_path(GameCode::Srmi, install)
+        .set_game_install_path(
+            GameCode::Srmi,
+            support::seed_game_install(GameCode::Srmi, install),
+        )
         .await
         .expect("share one install path across games");
     let pool = sqlx::SqlitePool::connect(&fixture.db_url)
