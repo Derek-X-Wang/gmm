@@ -577,3 +577,26 @@ it("blocks duplicate resolution while any reviewed record has a reinstall witnes
   expect(screen.getByRole("button", { name: /^resolve/i })).toBeDisabled();
   expect(resolveDuplicateMods).not.toHaveBeenCalled();
 });
+
+
+it.each(["recover", "delete", "duplicates"] as const)("refreshes the Library audit and retains failure after rejected %s", async (action) => {
+  auditLibrary.mockResolvedValue(action === "duplicates" ? DUPLICATE_REPORT : AUDIT_REPORT);
+  const mutation = action === "recover" ? recoverUnreferencedLibraryDir
+    : action === "delete" ? deleteUnreferencedLibraryDir : resolveDuplicateMods;
+  mutation.mockImplementation(async () => {
+    auditLibrary.mockResolvedValue({ game: "gimi", unreferenced: [], duplicates: [], totalBytes: 0 });
+    throw new Error("Library action failed after state changed");
+  });
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+  if (action === "duplicates") {
+    await userEvent.click(await screen.findByRole("radio", { name: /Manual Keeper/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Resolve…" }));
+    await userEvent.click(screen.getByRole("button", { name: "Keep this record" }));
+  } else {
+    await userEvent.click((await folder(FIRST)).getByRole("button", { name: action === "recover" ? /recover/i : /delete/i }));
+    if (action === "recover") await userEvent.type((await folder(FIRST)).getByLabelText(/name/i), "Recovered Outfit");
+    await userEvent.click((await folder(FIRST)).getByRole("button", { name: action === "recover" ? /^recover$/i : /^delete$/i }));
+  }
+  await waitFor(() => expect(screen.queryByText(action === "duplicates" ? DUPLICATE_PATH : FIRST)).not.toBeInTheDocument());
+  expect(screen.getByText(/Library action failed after state changed/)).toBeInTheDocument();
+});

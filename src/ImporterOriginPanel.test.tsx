@@ -351,3 +351,18 @@ it("offers no prompt and no dismissal list while recommendations are off", async
   // The user's own origin is untouched by the switch, so the editor stays.
   expect(screen.getByRole("button", { name: /save origin/i })).toBeEnabled();
 });
+
+
+it("refreshes a rejected Origin install and keeps its error when the proposal disappears", async () => {
+  importerOriginStatus.mockResolvedValue(status({
+    proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } },
+  }));
+  acceptImporterOriginProposal.mockImplementation(async () => {
+    importerOriginStatus.mockResolvedValue(status({ proposal: null }));
+    throw new Error("Origin install failed");
+  });
+  render();
+  await userEvent.click(await screen.findByRole("button", { name: "Switch and install" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Switch and install" })).not.toBeInTheDocument());
+  expect(screen.getByText("Origin install failed")).toBeInTheDocument();
+});

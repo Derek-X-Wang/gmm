@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandErrorNotice } from "./CommandErrorNotice";
+import { PathField } from "./PathField";
 
 import {
   avGuidance,
@@ -36,13 +37,19 @@ import {
  * the right `skipped` flag so the App router doesn't re-open the
  * wizard on next launch.
  */
-export function OnboardingWizard({ onDone }: { onDone: (skipped: boolean) => void }) {
+export function OnboardingWizard({ onDone, onFailure }: {
+  onDone: (skipped: boolean) => void;
+  onFailure?: (error: unknown) => void;
+}) {
+  const qc = useQueryClient();
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [avAcknowledged, setAvAcknowledged] = useState(false);
 
   const close = useMutation({
     mutationFn: (skipped: boolean) => markOnboardingComplete(skipped),
     onSuccess: (_, skipped) => onDone(skipped),
+    onError: (error) => onFailure?.(error),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["onboarding", "status"] }),
   });
 
   const finish = () => close.mutate(false);
@@ -96,7 +103,7 @@ export function OnboardingWizard({ onDone }: { onDone: (skipped: boolean) => voi
           )}
         </div>
       </footer>
-      <CommandErrorNotice error={close.error} />
+      {!onFailure ? <CommandErrorNotice error={close.error} /> : null}
     </main>
   );
 }
@@ -177,7 +184,10 @@ function DetectStep() {
       setGameInstallPath(code, path),
     onSuccess: (_, vars) => {
       setOverrides((prev) => ({ ...prev, [vars.code]: vars.path }));
+    },
+    onSettled: (_, __, vars) => {
       qc.invalidateQueries({ queryKey: ["installPath", vars.code] });
+      qc.invalidateQueries({ queryKey: ["onboarding", "installPaths"] });
     },
   });
 
@@ -270,18 +280,20 @@ function DetectStep() {
  *  `setLibraryRoot` move flow. The wizard only sets the global root;
  *  per-game overrides remain in the main Settings panel. */
 function LibraryStep() {
+  const qc = useQueryClient();
   const paths = useQuery({
     queryKey: ["libraryPaths"],
     queryFn: getLibraryPaths,
   });
   const setRoot = useMutation({
     mutationFn: (next: string | null) => setLibraryRoot(next),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["libraryPaths"] });
+      qc.invalidateQueries({ queryKey: ["mods"] });
+      qc.invalidateQueries({ queryKey: ["libraryAudit"] });
+      qc.invalidateQueries({ queryKey: ["conflicts"] });
+    },
   });
-
-  const pickFolder = async () => {
-    const picked = await openDialog({ directory: true, multiple: false });
-    if (typeof picked === "string") setRoot.mutate(picked);
-  };
 
   return (
     <div className="card">
@@ -291,15 +303,14 @@ function LibraryStep() {
         GB depending on how many mods you collect.
       </p>
       <div className="row">
-        <input
-          className="path"
+        <PathField
+          label="Library root"
           value={paths.data?.effectiveRoot ?? ""}
           placeholder={paths.isError ? "Unavailable" : "Resolving…"}
-          readOnly
+          disabled={setRoot.isPending || !paths.data}
+          pickerLabel={setRoot.isPending ? "Moving…" : "Change…"}
+          onApply={(path) => setRoot.mutate(path)}
         />
-        <button onClick={pickFolder} disabled={setRoot.isPending}>
-          {setRoot.isPending ? "Moving…" : "Change…"}
-        </button>
       </div>
       <p className="muted small">
         Per-game overrides are available in Settings later.
@@ -315,6 +326,7 @@ function LibraryStep() {
  *  install via the existing slice-3 importer flow with per-row Retry
  *  on failure. */
 function ImporterStep() {
+  const qc = useQueryClient();
   const supported = useQuery<GameSummary[]>({
     queryKey: ["supportedGames"],
     queryFn: listSupportedGames,
@@ -392,6 +404,9 @@ function ImporterStep() {
         ...prev,
         [code]: { state: "error", error },
       }));
+    } finally {
+      qc.invalidateQueries({ queryKey: ["importer"] });
+      qc.invalidateQueries({ queryKey: ["importerOrigin", code] });
     }
   };
 

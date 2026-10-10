@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
 import type { ConflictReport, ImporterEvacuationRecovery, ModVariants } from "./api";
-import { renderWithQuery } from "./test/harness";
+import { makeQueryClient, renderWithQuery } from "./test/harness";
 
 const { invoke, openDialog } = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -18,10 +18,19 @@ vi.mock("./diagnostics", () => ({
   exportDiagnosticsBundle: vi.fn(),
 }));
 vi.mock("./updater", () => ({ checkInteractively: vi.fn() }));
-vi.mock("./ImporterOriginPanel", () => ({ ImporterOriginPanel: () => null }));
 vi.mock("./LoaderVersionNote", () => ({ LoaderVersionNote: () => null }));
 
 const { default: App } = await import("./App");
+
+function renderApp() {
+  const client = makeQueryClient();
+  // Match main.tsx: fresh cached data must not conceal missing invalidation.
+  client.setDefaultOptions({
+    queries: { retry: false, gcTime: 0, staleTime: 30_000 },
+    mutations: { retry: false },
+  });
+  return renderWithQuery(<App />, { client });
+}
 
 function modFixture(enabled = false) {
   return {
@@ -119,7 +128,7 @@ it.each([false, true])("shows deployment recovery immediately after a failed tog
     }];
     throw new Error("Toggle failed");
   };
-  renderWithQuery(<App />);
+  renderApp();
   await userEvent.click(await screen.findByRole("checkbox", { name: enabled ? "Enabled" : "Disabled" }));
   await screen.findByText("Toggle failed");
   expect(await screen.findByRole("region", { name: "Interrupted enable or disable recovery for Test Outfit" })).toHaveTextContent("Junction recovery is locked");
@@ -132,7 +141,7 @@ it("replaces obsolete Variant choices after applying a Mod update", async () => 
     responses.list_mods = [{ ...modFixture(), version: "2.0" }];
     responses.list_mod_updates = [];
   };
-  renderWithQuery(<App />);
+  renderApp();
   expect(await screen.findByRole("radio", { name: "Old Red" })).toBeChecked();
   await userEvent.click(await screen.findByRole("button", { name: "Update → 2.0" }));
   const newVariant = await screen.findByRole("radio", { name: "New Blue" });
@@ -153,7 +162,7 @@ it("refreshes displayed Conflicts after applying a Mod update", async () => {
       per_mod_count: { "mod-outfit": 1 },
     } satisfies ConflictReport;
   };
-  renderWithQuery(<App />);
+  renderApp();
   await screen.findByRole("radio", { name: "Old Red" });
   await userEvent.click(await screen.findByRole("button", { name: "Update → 2.0" }));
   expect(await screen.findByRole("button", { name: "1 conflict" })).toBeInTheDocument();
@@ -165,7 +174,7 @@ it("disables obsolete Variant choices while the replacement list is loading", as
   const replacement = new Promise<ModVariants>((resolve) => { finishRefresh = resolve; });
   mutations.list_variants = () => updating ? replacement : variantsFixture("Old");
   mutations.apply_mod_update = () => { updating = true; };
-  renderWithQuery(<App />);
+  renderApp();
   const obsolete = await screen.findByRole("radio", { name: "Old Blue" });
   await userEvent.click(await screen.findByRole("button", { name: "Update → 2.0" }));
   try {
@@ -181,7 +190,7 @@ it("shows a Mod update failure even if its update badge disappears", async () =>
     responses.list_mod_updates = [];
     throw new Error("Update rollback failed");
   };
-  renderWithQuery(<App />);
+  renderApp();
   await userEvent.click(await screen.findByRole("button", { name: "Update → 2.0" }));
   expect(await screen.findByText("Update rollback failed")).toBeInTheDocument();
 });
@@ -191,7 +200,7 @@ it("shows newly recorded reinstall recovery after a Mod update fails", async () 
     responses.list_mods = [{ ...modFixture(), reinstall_recovery: recoveryFixture }];
     throw new Error("Update rollback failed");
   };
-  renderWithQuery(<App />);
+  renderApp();
   await userEvent.click(await screen.findByRole("button", { name: "Update → 2.0" }));
   expect(await screen.findByRole("region", { name: "Interrupted reinstall recovery for Test Outfit" })).toHaveTextContent("Original deployment is locked");
   expect(screen.getByText("Update rollback failed")).toBeInTheDocument();
@@ -209,7 +218,7 @@ it.each(["retry", "retireProducer"] as const)("refreshes changed Model Importer 
     responses.get_importer_evacuation_recovery = { ...recovery, action: "retry", ownerUncertain: false, reason: "New recorded importer obstruction", attempts: 2 };
     throw new Error("Importer recovery failed");
   };
-  renderWithQuery(<App />);
+  renderApp();
   await userEvent.click(await screen.findByRole("button", {
     name: action === "retry" ? "Retry Model Importer recovery" : /I confirmed no other GMM is changing this importer/,
   }));
@@ -225,7 +234,7 @@ it.each(["adopt", "zip", "drop", "gamebanana"] as const)("refreshes the orphan L
     };
     throw new Error("Import failed; partial bytes retained");
   };
-  const { container } = renderWithQuery(<App />);
+  const { container } = renderApp();
   await screen.findByRole("radio", { name: "Old Red" });
   if (entry === "drop") {
     const file = Object.assign(new File(["zip"], "outfit.zip"), { path: "C:\\Downloads\\outfit.zip" });
@@ -251,7 +260,7 @@ it("shows a retained launch reservation immediately after launch fails", async (
     responses.interrupted_session_launches = [{ id: "launch-claim", game: "gimi", child_pid: null, started_at: "2026-10-07T12:00:00Z" }];
     throw new Error("Launch failed; reservation retained");
   };
-  renderWithQuery(<App />);
+  renderApp();
   await screen.findByRole("radio", { name: "Old Red" });
   await userEvent.click(screen.getByRole("button", { name: "Launch Genshin Impact" }));
   expect(await screen.findByRole("button", { name: "I confirmed the game is closed — retire reservation" })).toBeInTheDocument();
@@ -263,8 +272,215 @@ it("refreshes reinstall recovery even when its retry rejects", async () => {
     responses.list_mods = [{ ...modFixture(), reinstall_recovery: { ...recoveryFixture, reason: "New recorded reinstall obstruction", attempts: 2 } }];
     throw new Error("Reinstall recovery failed");
   };
-  renderWithQuery(<App />);
+  renderApp();
   const warning = await screen.findByRole("region", { name: "Interrupted reinstall recovery for Test Outfit" });
   await userEvent.click(within(warning).getByRole("button", { name: /Retry/ }));
   expect(await screen.findByText("New recorded reinstall obstruction")).toBeInTheDocument();
+});
+
+
+it.each(["root", "perGame"] as const)("refreshes persisted paths and Mod state after a failed Library %s move", async (field) => {
+  mutations[field === "root" ? "set_library_root" : "set_library_path_for_game"] = () => {
+    responses.get_library_paths = {
+      defaultRoot: "C:\\GMM\\library", rootOverride: "D:\\Library",
+      effectiveRoot: "D:\\Library", perGameOverrides: { gimi: "D:\\Library\\gimi" },
+      perGameEffective: { gimi: "D:\\Library\\gimi" },
+    };
+    responses.list_mods = [modFixture(false)];
+    throw new Error("Library move failed");
+  };
+  responses.list_mods = [modFixture(true)];
+  renderApp();
+  await screen.findByRole("checkbox", { name: "Enabled" });
+  const library = screen.getByRole("heading", { name: "Library" }).closest("section")!;
+  await userEvent.click(field === "root"
+    ? within(library).getByRole("button", { name: "Change global root…" })
+    : within(library).getAllByRole("button", { name: "Change…" })[0]);
+  expect(await screen.findByDisplayValue("D:\\Library")).toBeInTheDocument();
+  expect(await screen.findByRole("checkbox", { name: "Disabled" })).toBeEnabled();
+  expect(screen.getByText("Library move failed")).toBeInTheDocument();
+});
+
+it("shows partially recorded upstream versions after Check now fails", async () => {
+  mutations.check_mod_updates_now = () => {
+    responses.list_mod_updates = [{
+      modId: "mod-outfit", name: "Test Outfit", installedVersion: "1.0",
+      upstreamVersion: "3.0", upstreamAhead: true, updateCheckEnabled: true,
+    }];
+    throw new Error("Batch check failed");
+  };
+  renderApp();
+  await screen.findByRole("button", { name: "Update → 2.0" });
+  await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+  expect(await screen.findByRole("button", { name: "Update → 3.0" })).toBeInTheDocument();
+  expect(screen.getByText("Batch check failed")).toBeInTheDocument();
+});
+
+it("refreshes Mod recovery changed during a failed Junction rebuild", async () => {
+  mutations.rebuild_junctions = () => {
+    responses.list_mods = [{ ...modFixture(), reinstall_recovery: recoveryFixture }];
+    throw new Error("Rebuild failed");
+  };
+  renderApp();
+  await screen.findByRole("radio", { name: "Old Red" });
+  await userEvent.click(screen.getByRole("button", { name: "Rebuild junctions" }));
+  expect(await screen.findByRole("region", { name: "Interrupted reinstall recovery for Test Outfit" })).toBeInTheDocument();
+  expect(screen.getByText("Rebuild failed")).toBeInTheDocument();
+});
+
+
+it.each(["install", "rollback"] as const)("refreshes the displayed Importer Origin after %s", async (action) => {
+  mutations[action === "install" ? "install_importer" : "rollback_importer"] = () => {
+    const origin = { kind: "gitHubRelease", owner: "Example", repo: "Restored-Package", asset_pattern: "Package.zip" };
+    responses.importer_origin_status = {
+      game: "gimi", displayName: "Genshin Impact",
+      resolved: { state: "inEffect", origin, layer: "compiledInDefault" },
+      installTarget: { state: "installed", ...origin }, installed: { state: "known", ...origin },
+      userOverride: { state: "notSet" }, compiledDefault: origin, proposal: null,
+      dismissed: [], dismissalsError: null, recommendationsEnabled: true,
+      recommendationsUnusableReason: null,
+    };
+    return action === "install" ? { sha256: "abc", rewrote_files: [], backup_dir: null } : null;
+  };
+  renderApp();
+  await screen.findByRole("radio", { name: "Old Red" });
+  await userEvent.click(screen.getByRole("button", { name: action === "install" ? "Reinstall importer" : "Roll back importer" }));
+  expect(await screen.findByText("Example/Restored-Package")).toBeInTheDocument();
+});
+
+
+const overlapRefusal = String.raw`GMM cannot use "D:\\Rejected Path" as a Library root because it overlaps the Model Importer backup tree at "C:\\GMM\\backups". Importer backups and their sidecar markers are app-owned bookkeeping that GMM writes outside the Library writer fence, so the two trees must stay disjoint: a Library root may neither sit inside the backup tree nor contain it. Choose a Library root that does not overlap "C:\\GMM\\backups". No Library bytes were moved.`;
+
+const pathFields = [
+  { label: "Global Library root", command: "set_library_root", initial: "C:\\GMM\\library", picked: "Change global root…" },
+  { label: "gimi Library path", command: "set_library_path_for_game", initial: "C:\\GMM\\library\\gimi", picked: "Change…" },
+  { label: "Genshin Impact install path", command: "set_game_install_path", initial: "C:\\Games\\Genshin", picked: "Change…" },
+];
+
+it.each(pathFields)("applies typed $label only after Enter", async ({ label, command, initial }) => {
+  responses.get_game_install_path = "C:\\Games\\Genshin";
+  mutations[command] = ({ path }) => {
+    const paths = responses.get_library_paths as { effectiveRoot: string; perGameEffective: Record<string, string> };
+    if (command === "set_library_root") paths.effectiveRoot = path as string;
+    else if (command === "set_library_path_for_game") paths.perGameEffective.gimi = path as string;
+    else responses.get_game_install_path = path;
+    return {};
+  };
+  renderApp();
+  const field = await screen.findByDisplayValue(initial);
+  expect(field).not.toHaveAttribute("readonly");
+  await userEvent.clear(field);
+  await userEvent.type(field, "D:\\Typed Path");
+  expect(field).toHaveValue("D:\\Typed Path");
+  expect(invoke.mock.calls.filter(([name]) => name === command)).toHaveLength(0);
+  await userEvent.type(field, "{Enter}");
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith(command, command === "set_library_root"
+    ? { path: "D:\\Typed Path" } : { game: "gimi", path: "D:\\Typed Path" }));
+  expect(await screen.findByLabelText(label)).toHaveValue("D:\\Typed Path");
+  expect(invoke.mock.calls.filter(([name]) => name === command)).toHaveLength(1);
+});
+
+it.each(pathFields)("shows backend refusal for typed $label", async ({ label, command, initial }) => {
+  responses.get_game_install_path = "C:\\Games\\Genshin";
+  const message = command === "set_library_root"
+    ? overlapRefusal
+    : "This path does not exist or cannot be used.";
+  mutations[command] = () => { throw { kind: "other", message }; };
+  renderApp();
+  const field = await screen.findByDisplayValue(initial);
+  expect(field).not.toHaveAttribute("readonly");
+  await userEvent.clear(field);
+  await userEvent.type(field, "D:\\Rejected Path");
+  await userEvent.click(screen.getByRole("button", { name: `Apply ${label}` }));
+  expect(await screen.findByText(message)).toBeInTheDocument();
+  expect(invoke).toHaveBeenCalledWith(command, command === "set_library_root"
+    ? { path: "D:\\Rejected Path" } : { game: "gimi", path: "D:\\Rejected Path" });
+});
+
+
+it.each(pathFields)("keeps the folder picker working for $label", async ({ label, command, picked }) => {
+  responses.get_game_install_path = "C:\\Games\\Genshin";
+  openDialog.mockResolvedValue("E:\\Picked Path");
+  mutations[command] = ({ path }) => {
+    const paths = responses.get_library_paths as { effectiveRoot: string; perGameEffective: Record<string, string> };
+    if (command === "set_library_root") paths.effectiveRoot = path as string;
+    else if (command === "set_library_path_for_game") paths.perGameEffective.gimi = path as string;
+    else responses.get_game_install_path = path;
+    return {};
+  };
+  renderApp();
+  const field = await screen.findByLabelText(label);
+  await userEvent.type(field, "unfinished");
+  await userEvent.click(within(field.closest(".row") as HTMLElement).getByRole("button", { name: picked }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith(command, command === "set_library_root"
+    ? { path: "E:\\Picked Path" } : { game: "gimi", path: "E:\\Picked Path" }));
+  expect(openDialog).toHaveBeenCalledWith({ directory: true, multiple: false });
+  await waitFor(() => expect(screen.getByLabelText(label)).toHaveValue("E:\\Picked Path"));
+});
+
+it("does not apply a path when the picker is cancelled", async () => {
+  openDialog.mockResolvedValue(null);
+  renderApp();
+  const field = await screen.findByLabelText("Global Library root");
+  await userEvent.type(field, "draft");
+  await userEvent.click(screen.getByRole("button", { name: "Change global root…" }));
+  expect(invoke.mock.calls.filter(([name]) => name === "set_library_root")).toHaveLength(0);
+  expect(field).toHaveValue("C:\\GMM\\librarydraft");
+  expect(await screen.findByDisplayValue("C:\\GMM\\logs")).toHaveAttribute("readonly");
+});
+
+
+it("shows the persisted proxy configuration after a partially failed save", async () => {
+  mutations.set_proxy_config = () => {
+    responses.get_proxy_config = { url: "http://persisted-proxy:8080", username: null, passwordSet: false };
+    throw new Error("Proxy settings partly saved");
+  };
+  renderApp();
+  const url = await screen.findByPlaceholderText("proxy URL");
+  await userEvent.type(url, "http://draft-proxy:8080");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByDisplayValue("http://persisted-proxy:8080")).toBeInTheDocument();
+  expect(screen.getByText("Proxy settings partly saved")).toBeInTheDocument();
+});
+
+it("refreshes partial onboarding completion while retaining the setup error", async () => {
+  responses.is_onboarding_complete = { complete: false, skipped: false };
+  mutations.mark_onboarding_complete = () => {
+    responses.is_onboarding_complete = { complete: true, skipped: false };
+    throw new Error("Setup completion partly saved");
+  };
+  renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Skip setup" }));
+  expect(await screen.findByRole("heading", { name: "GMM — Genshin Impact" })).toBeInTheDocument();
+  expect(screen.getByText("Setup completion partly saved")).toBeInTheDocument();
+});
+
+it("refreshes partial onboarding reset while retaining the setup error", async () => {
+  mutations.reset_onboarding = () => {
+    responses.is_onboarding_complete = { complete: false, skipped: false };
+    throw new Error("Setup reset partly saved");
+  };
+  renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Run setup again" }));
+  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeInTheDocument();
+  expect(screen.getByText("Setup reset partly saved")).toBeInTheDocument();
+});
+
+
+it("shows the update-check row of a newly imported GameBanana Mod", async () => {
+  mutations.import_gamebanana = () => {
+    const imported = { ...modFixture(), id: "mod-new", name: "New Outfit" };
+    responses.list_mods = [imported];
+    responses.list_mod_updates = [{
+      modId: "mod-new", name: "New Outfit", installedVersion: "1.0",
+      upstreamVersion: "4.0", upstreamAhead: true, updateCheckEnabled: true,
+    }];
+    return imported;
+  };
+  renderApp();
+  await screen.findByRole("button", { name: "Update → 2.0" });
+  await userEvent.click(screen.getByRole("button", { name: "Paste GameBanana URL…" }));
+  await userEvent.type(screen.getByPlaceholderText("https://gamebanana.com/mods/1234567 or a bare ID"), "123");
+  await userEvent.click(screen.getByRole("button", { name: "Import" }));
+  expect(await screen.findByRole("button", { name: "Update → 4.0" })).toBeInTheDocument();
 });

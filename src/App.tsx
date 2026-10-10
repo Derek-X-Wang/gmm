@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { AttentionView } from "./AttentionView";
+import { PathField } from "./PathField";
 import { ImporterOriginPanel } from "./ImporterOriginPanel";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -104,6 +105,7 @@ function App() {
   // alone isn't enough — once `complete=true` we still need a way to
   // re-show the wizard without resetting state to "not complete".
   const [forceWizard, setForceWizard] = useState(false);
+  const [setupError, setSetupError] = useState<unknown>(null);
 
   if (onboarding.isLoading) {
     return (
@@ -118,26 +120,44 @@ function App() {
 
   if (showWizard) {
     return (
-      <OnboardingWizard
-        onDone={() => {
-          setForceWizard(false);
-          qc.invalidateQueries({ queryKey: ["onboarding", "status"] });
-          qc.invalidateQueries({ queryKey: ["installPath"] });
-          qc.invalidateQueries({ queryKey: ["libraryPaths"] });
-        }}
-      />
+      <>
+        <OnboardingWizard
+          onFailure={setSetupError}
+          onDone={() => {
+            setSetupError(null);
+            setForceWizard(false);
+            qc.invalidateQueries({ queryKey: ["installPath"] });
+            qc.invalidateQueries({ queryKey: ["libraryPaths"] });
+          }}
+        />
+        <CommandErrorNotice error={setupError} />
+      </>
     );
   }
 
-  return <MainApp skipped={status?.skipped ?? false} onResumeWizard={() => setForceWizard(true)} />;
+  return (
+    <>
+      <MainApp
+        skipped={status?.skipped ?? false}
+        onSetupFailure={setSetupError}
+        onResumeWizard={() => {
+          setSetupError(null);
+          setForceWizard(true);
+        }}
+      />
+      <CommandErrorNotice error={setupError} />
+    </>
+  );
 }
 
 function MainApp({
   skipped,
   onResumeWizard,
+  onSetupFailure,
 }: {
   skipped: boolean;
   onResumeWizard: () => void;
+  onSetupFailure: (error: unknown) => void;
 }) {
   const qc = useQueryClient();
   const games = useQuery<GameSummary[]>({
@@ -160,10 +180,9 @@ function MainApp({
 
   const reopenSetup = useMutation({
     mutationFn: () => resetOnboarding(),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["onboarding", "status"] });
-      onResumeWizard();
-    },
+    onSuccess: onResumeWizard,
+    onError: onSetupFailure,
+    onSettled: () => qc.invalidateQueries({ queryKey: ["onboarding", "status"] }),
   });
 
   return (
@@ -524,7 +543,7 @@ function ModUpdatesPanel({ game }: { game: ApiGameCode }) {
   });
   const check = useMutation({
     mutationFn: () => checkModUpdatesNow(game),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", game] }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["modUpdates", game] }),
   });
   const toggleGlobal = useMutation({
     mutationFn: (enabled: boolean) => setModUpdatesGloballyEnabled(enabled),
@@ -652,10 +671,8 @@ function NetworkPanel() {
         username: username || null,
         password: password ? password : null,
       }),
-    onSuccess: () => {
-      setPassword("");
-      qc.invalidateQueries({ queryKey: ["proxyConfig"] });
-    },
+    onSuccess: () => setPassword(""),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["proxyConfig"] }),
   });
   const test = useMutation({ mutationFn: testProxyConnection });
 
@@ -733,8 +750,8 @@ function ImporterPanel({
   });
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["importer", "update", game] });
-    qc.invalidateQueries({ queryKey: ["importer", "evacuation", game] });
+    qc.invalidateQueries({ queryKey: ["importer"] });
+    qc.invalidateQueries({ queryKey: ["importerOrigin", game] });
   };
 
   const install = useMutation({
@@ -743,7 +760,7 @@ function ImporterPanel({
   });
   const rollback = useMutation({
     mutationFn: () => rollbackImporter(game),
-    onSuccess: invalidate,
+    onSettled: invalidate,
   });
   const pin = useMutation({
     mutationFn: (version: string | null) => setImporterPinned(game, version),
@@ -869,22 +886,22 @@ function LibraryPathsPanel() {
     queryFn: getLibraryPaths,
   });
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ["libraryPaths"] });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["libraryPaths"] });
+    qc.invalidateQueries({ queryKey: ["mods"] });
+    qc.invalidateQueries({ queryKey: ["libraryAudit"] });
+    qc.invalidateQueries({ queryKey: ["conflicts"] });
+  };
 
   const setRoot = useMutation({
     mutationFn: (next: string | null) => setLibraryRoot(next),
-    onSuccess: refresh,
+    onSettled: refresh,
   });
   const setPerGame = useMutation({
     mutationFn: ({ game, path }: { game: ApiGameCode; path: string | null }) =>
       setLibraryPathForGame(game, path),
-    onSuccess: refresh,
+    onSettled: refresh,
   });
-
-  const pickAndApply = async (apply: (path: string) => void) => {
-    const picked = await open({ directory: true, multiple: false });
-    if (typeof picked === "string") apply(picked);
-  };
 
   if (paths.isError) {
     return (
@@ -927,22 +944,21 @@ function LibraryPathsPanel() {
       />
 
       <div className="row">
-        <input
-          className="path"
+        <PathField
+          label="Global Library root"
           value={p.effectiveRoot}
-          readOnly
+          disabled={setRoot.isPending || setPerGame.isPending}
+          pickerLabel={setRoot.isPending ? "Moving…" : "Change global root…"}
+          onApply={(path) => setRoot.mutate(path)}
         />
         <span className="muted small">
           {p.rootOverride ? "Override" : `Default (${p.defaultRoot})`}
         </span>
       </div>
       <div className="row">
-        <button onClick={() => pickAndApply((path) => setRoot.mutate(path))} disabled={setRoot.isPending}>
-          {setRoot.isPending ? "Moving…" : "Change global root…"}
-        </button>
         <button
           onClick={() => setRoot.mutate(null)}
-          disabled={setRoot.isPending || !p.rootOverride}
+          disabled={setRoot.isPending || setPerGame.isPending || !p.rootOverride}
         >
           Reset to default
         </button>
@@ -958,18 +974,16 @@ function LibraryPathsPanel() {
         return (
           <div className="row" key={game}>
             <code className="small">{game}</code>
-            <input className="path" value={effective ?? ""} readOnly />
-            <button
-              onClick={() =>
-                pickAndApply((path) => setPerGame.mutate({ game, path }))
-              }
-              disabled={setPerGame.isPending}
-            >
-              Change…
-            </button>
+            <PathField
+              label={`${game} Library path`}
+              value={effective ?? ""}
+              disabled={setPerGame.isPending || setRoot.isPending}
+              pickerLabel="Change…"
+              onApply={(path) => setPerGame.mutate({ game, path })}
+            />
             <button
               onClick={() => setPerGame.mutate({ game, path: null })}
-              disabled={setPerGame.isPending || !override}
+              disabled={setPerGame.isPending || setRoot.isPending || !override}
             >
               Reset
             </button>
@@ -1124,7 +1138,10 @@ function Settings({
     onSuccess: () => {
       setLastSource("manual");
       setDetectFailed(false);
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["installPath", game] });
+      queryClient.invalidateQueries({ queryKey: ["onboarding", "installPaths"] });
     },
   });
 
@@ -1134,17 +1151,15 @@ function Settings({
       if (path) {
         setLastSource("auto");
         setDetectFailed(false);
-        queryClient.invalidateQueries({ queryKey: ["installPath", game] });
       } else {
         setDetectFailed(true);
       }
     },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["installPath", game] });
+      queryClient.invalidateQueries({ queryKey: ["onboarding", "installPaths"] });
+    },
   });
-
-  const pickPath = async () => {
-    const picked = await open({ directory: true, multiple: false });
-    if (typeof picked === "string") setPath.mutate(picked);
-  };
 
   const label =
     lastSource === "auto"
@@ -1161,23 +1176,23 @@ function Settings({
       <p className="muted">
         GMM looks for the {displayName} executable plus its Unity{" "}
         <code>_Data</code> folder. Use <strong>Auto-detect</strong> to scan
-        known install locations, or pick the folder manually.
+        known install locations, or type or pick the folder manually.
       </p>
       <div className="row">
-        <input
-          className="path"
+        <PathField
+          key={game}
+          label={`${displayName} install path`}
           value={installPath ?? ""}
           placeholder="No install path set"
-          readOnly
+          disabled={setPath.isPending || detect.isPending}
+          pickerLabel={installPath ? "Change…" : "Pick folder"}
+          onApply={(path) => setPath.mutate(path)}
         />
         <span className="muted small">{label}</span>
       </div>
       <div className="row">
         <button onClick={() => detect.mutate()} disabled={detect.isPending || setPath.isPending}>
           {detect.isPending ? "Scanning…" : installPath ? "Re-detect" : "Auto-detect"}
-        </button>
-        <button onClick={pickPath} disabled={setPath.isPending}>
-          {installPath ? "Change…" : "Pick folder"}
         </button>
       </div>
       {detectFailed ? (
@@ -1200,8 +1215,10 @@ function Settings({
  * Library. The hammer to use after relocating the Library directory.
  */
 function RebuildJunctions({ game }: { game: ApiGameCode }) {
+  const qc = useQueryClient();
   const rebuild = useMutation({
     mutationFn: () => rebuildJunctions(game),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["mods", game] }),
   });
   return (
     <div className="row">
@@ -1290,6 +1307,7 @@ function ModList({ game }: { game: ApiGameCode }) {
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["mods", game] });
     queryClient.invalidateQueries({ queryKey: ["libraryAudit", game] });
+    queryClient.invalidateQueries({ queryKey: ["modUpdates", game] });
   };
 
   return (

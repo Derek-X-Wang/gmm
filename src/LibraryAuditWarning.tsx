@@ -75,16 +75,18 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   });
 
   const refresh = () => {
-    setOpen(null);
-    void qc.invalidateQueries({ queryKey: ["libraryAudit", game] });
-    void qc.invalidateQueries({ queryKey: ["mods", game] });
+    void qc.invalidateQueries({ queryKey: ["libraryAudit"] });
+    void qc.invalidateQueries({ queryKey: ["mods"] });
+    void qc.invalidateQueries({ queryKey: ["conflicts"] });
+    void qc.invalidateQueries({ queryKey: ["modUpdates"] });
+    void qc.invalidateQueries({ queryKey: ["libraryPaths"] });
   };
   const publishFeedback = (nextFeedback: ActionFeedback) => {
     // Keep focus out of the disappearing action controls, but let the
     // already-mounted live region — not focus — announce the outcome.
     reportRef.current?.focus();
     setFeedback(nextFeedback);
-    refresh();
+    setOpen(null);
   };
 
   const reveal = useMutation({
@@ -100,12 +102,14 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
         name: recovered.name,
       });
     },
+    onSettled: refresh,
   });
   const remove = useMutation({
     mutationFn: (path: string) => deleteUnreferencedLibraryDir(game, path),
     onSuccess: (deleted) => {
       publishFeedback({ kind: "deleted", deleted });
     },
+    onSettled: refresh,
   });
   const resolveDuplicates = useMutation({
     mutationFn: (args: {
@@ -120,6 +124,7 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
         removedCount: resolution.removedModIds.length,
       });
     },
+    onSettled: refresh,
   });
 
   const beginAction = (
@@ -145,7 +150,7 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   const count = report.unreferenced.length;
   const duplicates = report.duplicates ?? [];
   if (count === 0 && duplicates.length === 0) {
-    return feedback ? (
+    return feedback || failure ? (
       <section
         ref={reportRef}
         className="library-audit-warning"
@@ -153,6 +158,9 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
         tabIndex={-1}
       >
         <ActionNotice feedback={feedback} />
+        <p className="error" role="alert" aria-label="Library action failed">
+          {failure ? String(failure) : null}
+        </p>
       </section>
     ) : null;
   }
