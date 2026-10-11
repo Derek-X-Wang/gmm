@@ -38,7 +38,11 @@ it("reads independent Game and Model Importer facts without inferring installed 
     game: "gimi",
     savedPath: "C:\\Games\\Genshin",
     gamePath: { status: "readable" },
-    modelImporter: { status: "unverified", error: "Cannot read Core" },
+    modelImporter: {
+      status: "unverified",
+      path: "C:\\Games\\Genshin\\Core",
+      error: "Cannot read Core",
+    },
   };
   invoke.mockResolvedValueOnce(report);
   expect(await getGamePathStatus("gimi")).toEqual(report);

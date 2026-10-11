@@ -40,7 +40,11 @@ async fn unset_is_configuration_only_and_importer_is_unverified() {
         let status = core.game_path_status(game).await.unwrap();
         assert_eq!(status.game, game);
         assert_eq!(status.saved_path, None);
-        assert_eq!(status.game_path, GamePathState::Unset);
+        assert_eq!(status.game_path, GamePathState::NoSavedPath);
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["gamePath"]["status"],
+            "noSavedPath"
+        );
         assert!(matches!(
             status.model_importer,
             ModelImporterState::Unverified { .. }
@@ -60,8 +64,12 @@ async fn missing_saved_path_is_named_and_retained() {
     let status = core.game_path_status(GameCode::Gimi).await.unwrap();
     assert_eq!(status.saved_path, Some(missing.clone()));
     assert_eq!(
+        serde_json::to_value(&status).unwrap()["gamePath"]["status"],
+        "savedPathNotFound"
+    );
+    assert_eq!(
         status.game_path,
-        GamePathState::Missing {
+        GamePathState::SavedPathNotFound {
             paths: vec![missing.clone()]
         }
     );
@@ -85,7 +93,7 @@ async fn missing_game_files_are_named_without_claiming_an_absent_importer() {
     let status = core.game_path_status(GameCode::Gimi).await.unwrap();
     assert_eq!(
         status.game_path,
-        GamePathState::Missing {
+        GamePathState::SavedPathNotFound {
             paths: vec![game.join("GenshinImpact.exe"), game.join("YuanShen.exe")],
         }
     );
@@ -98,7 +106,7 @@ async fn missing_game_files_are_named_without_claiming_an_absent_importer() {
     let status = core.game_path_status(GameCode::Gimi).await.unwrap();
     assert_eq!(
         status.game_path,
-        GamePathState::Missing {
+        GamePathState::SavedPathNotFound {
             paths: vec![game.join("GenshinImpact_Data")]
         }
     );
@@ -143,7 +151,7 @@ async fn every_game_uses_its_existing_validator_and_importer_layout() {
         assert_eq!(status.game_path, GamePathState::Readable);
         assert_eq!(
             status.model_importer,
-            ModelImporterState::Absent {
+            ModelImporterState::RequiredEntriesNotFound {
                 paths: vec![
                     game.join("d3dx.ini"),
                     game.join("Core"),
@@ -188,7 +196,7 @@ async fn importer_bookkeeping_is_never_filesystem_evidence() {
     assert_eq!(status.game_path, GamePathState::Readable);
     assert!(matches!(
         status.model_importer,
-        ModelImporterState::Absent { .. }
+        ModelImporterState::RequiredEntriesNotFound { .. }
     ));
     assert!(!serde_json::to_string(&status).unwrap().contains("v9.9.9"));
 }
@@ -281,8 +289,8 @@ async fn importer_read_failure_keeps_the_readable_game_fact() {
         let status = result.unwrap();
         assert_eq!(status.game_path, GamePathState::Readable);
         assert!(
-            matches!(status.model_importer, ModelImporterState::Unverified { ref error }
-            if error.contains(&entry.display().to_string())),
+            matches!(status.model_importer, ModelImporterState::Unverified { path: Some(ref failed), ref error }
+            if failed == &entry && error.contains(&entry.display().to_string())),
             "{status:?}"
         );
         assert_eq!(status.saved_path, Some(game.clone()));
@@ -337,8 +345,139 @@ async fn wrong_importer_types_are_unverified_not_absent() {
     assert_eq!(status.game_path, GamePathState::Readable);
     assert!(matches!(
         status.model_importer,
-        ModelImporterState::Unverified { .. }
+        ModelImporterState::Unverified { path: Some(ref failed), .. } if failed == &game.join("d3dx.ini")
     ));
+}
+
+#[tokio::test]
+async fn missing_executable_alternative_and_unreadable_other_remain_uncertain() {
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    let alternative = game.join("YuanShen.exe");
+    fs::rename(game.join("GenshinImpact.exe"), &alternative).unwrap();
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&alternative, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    #[cfg(windows)]
+    let lock = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&alternative)
+            .unwrap()
+    };
+    assert_eq!(
+        fs::metadata(game.join("GenshinImpact.exe"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_ne!(
+        fs::File::open(&alternative).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    let result = core.game_path_status(GameCode::Gimi).await;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&alternative, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(windows)]
+    drop(lock);
+    let status = result.unwrap();
+    assert!(
+        matches!(status.game_path, GamePathState::Unreadable { path: ref failed, .. }
+        if failed == &alternative),
+        "not every executable alternative is confirmed missing: {status:?}"
+    );
+    assert_eq!(status.saved_path, Some(game));
+    assert!(matches!(
+        status.model_importer,
+        ModelImporterState::Unverified { path: None, .. }
+    ));
+}
+
+#[tokio::test]
+async fn dangling_game_directory_link_is_unreadable_and_the_entry_is_retained() {
+    let (tmp, core, db) = fixture().await;
+    let target = tmp.path().join("target");
+    support::seed_game_install(GameCode::Gimi, &target);
+    let link = tmp.path().join("game-link");
+    gmm_lib::core::junction::create(&link, &target).unwrap();
+    save_fixture_path(&db, GameCode::Gimi, &link).await;
+    fs::remove_dir_all(&target).unwrap();
+    fs::symlink_metadata(&link).expect("the link entry still exists");
+    fs::metadata(&link).expect_err("the target is unresolved");
+    let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert!(
+        matches!(status.game_path, GamePathState::Unreadable { path: ref failed, .. } if failed == &link)
+    );
+    assert_eq!(status.saved_path, Some(link.clone()));
+    assert!(matches!(
+        status.model_importer,
+        ModelImporterState::Unverified { path: None, .. }
+    ));
+    fs::symlink_metadata(&link).expect("inspection must retain the existing entry");
+    gmm_lib::core::junction::remove(&link).unwrap();
+}
+
+#[tokio::test]
+async fn dangling_importer_directory_link_is_unverified_with_its_path() {
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    importer(&game);
+    let core_path = game.join("Core");
+    fs::remove_dir(&core_path).unwrap();
+    let target = tmp.path().join("importer-target");
+    fs::create_dir(&target).unwrap();
+    gmm_lib::core::junction::create(&core_path, &target).unwrap();
+    fs::remove_dir(&target).unwrap();
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    fs::symlink_metadata(&core_path).expect("the link entry still exists");
+    fs::metadata(&core_path).expect_err("the target is unresolved");
+    let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert_eq!(status.game_path, GamePathState::Readable);
+    assert!(
+        matches!(status.model_importer, ModelImporterState::Unverified { path: Some(ref failed), .. }
+        if failed == &core_path)
+    );
+    let json = serde_json::to_value(status).unwrap();
+    assert_eq!(json["modelImporter"]["status"], "unverified");
+    assert_eq!(json["modelImporter"]["path"], core_path.to_str().unwrap());
+    fs::symlink_metadata(&core_path).expect("inspection must retain the existing entry");
+    gmm_lib::core::junction::remove(&core_path).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dangling_importer_file_link_is_unverified_not_confirmed_uninstalled() {
+    use std::os::unix::fs::symlink;
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    importer(&game);
+    let ini = game.join("d3dx.ini");
+    fs::remove_file(&ini).unwrap();
+    symlink("missing-config.ini", &ini).unwrap();
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    assert!(fs::symlink_metadata(&ini).unwrap().file_type().is_symlink());
+    assert_eq!(
+        fs::metadata(&ini).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert_eq!(status.game_path, GamePathState::Readable);
+    assert!(
+        matches!(status.model_importer, ModelImporterState::Unverified { path: Some(ref failed), .. }
+        if failed == &ini)
+    );
+    assert!(fs::symlink_metadata(&ini).unwrap().file_type().is_symlink());
 }
 
 #[tokio::test]
@@ -359,7 +498,7 @@ async fn each_missing_importer_requirement_is_identified() {
         assert_eq!(status.game_path, GamePathState::Readable);
         assert_eq!(
             status.model_importer,
-            ModelImporterState::Absent {
+            ModelImporterState::RequiredEntriesNotFound {
                 paths: vec![path.clone()]
             }
         );
@@ -387,7 +526,7 @@ async fn importer_uncertainty_overrides_an_earlier_missing_requirement() {
     let status = core.game_path_status(GameCode::Gimi).await.unwrap();
     assert_eq!(status.game_path, GamePathState::Readable);
     assert!(
-        matches!(status.model_importer, ModelImporterState::Unverified { ref error }
+        matches!(status.model_importer, ModelImporterState::Unverified { ref error, .. }
         if error.contains(&game.join("Core").display().to_string()))
     );
 }
@@ -422,7 +561,7 @@ async fn tauri_read_command_serializes_the_separate_facts() {
     assert_eq!(json["game"], "gimi");
     assert_eq!(json["savedPath"], game.to_str().unwrap());
     assert_eq!(json["gamePath"]["status"], "readable");
-    assert_eq!(json["modelImporter"]["status"], "absent");
+    assert_eq!(json["modelImporter"]["status"], "requiredEntriesNotFound");
     assert_eq!(
         json["modelImporter"]["paths"][0],
         game.join("d3dx.ini").to_str().unwrap()
@@ -484,7 +623,7 @@ async fn check_never_persists_settings_or_recovery_records() {
             .await
             .unwrap()
             .model_importer,
-        ModelImporterState::Absent { .. }
+        ModelImporterState::RequiredEntriesNotFound { .. }
     ));
     fs::remove_dir_all(&game).unwrap();
     assert!(matches!(
@@ -492,7 +631,7 @@ async fn check_never_persists_settings_or_recovery_records() {
             .await
             .unwrap()
             .game_path,
-        GamePathState::Missing { .. }
+        GamePathState::SavedPathNotFound { .. }
     ));
     assert_eq!(
         database_snapshot(&db).await,

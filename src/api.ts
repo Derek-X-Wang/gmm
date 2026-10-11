@@ -132,17 +132,29 @@ export async function getGameInstallPath(game: GameCode): Promise<string | null>
   return (await invoke<string | null>("get_game_install_path", { game })) ?? null;
 }
 
+/**
+ * Prototype mapping (docs/design/main-screen.md):
+ * noSavedPath -> `absent` (configuration only, never a disk absence claim).
+ * unreadable -> `unreadable`; retain the saved path and configured tab.
+ * savedPathNotFound -> saved installation cannot be found; this is NOT the
+ * prototype `missing` row, and the saved path/configured tab must be retained.
+ * readable + installed Model Importer -> `healthy`.
+ * readable + requiredEntriesNotFound Model Importer -> prototype `missing`.
+ * readable + unverified Model Importer keeps the verified Game fact; it must
+ * not render as prototype `missing`. invalid has no named prototype row.
+ */
 export type GamePathState =
-  | { status: "unset" }
+  | { status: "noSavedPath" }
   | { status: "readable" }
-  | { status: "missing"; paths: string[] }
+  | { status: "savedPathNotFound"; paths: string[] }
   | { status: "invalid"; error: string }
   | { status: "unreadable"; path: string; error: string };
 
 export type ModelImporterState =
   | { status: "installed" }
-  | { status: "absent"; paths: string[] }
-  | { status: "unverified"; error: string };
+  /** With a readable Game, this maps to the prototype `missing` row. */
+  | { status: "requiredEntriesNotFound"; paths: string[] }
+  | { status: "unverified"; path: string | null; error: string };
 
 export interface GamePathStatus {
   game: GameCode;

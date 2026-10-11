@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use super::detect;
 use super::error::{Error, Result};
-use super::filesystem::metadata_if_exists;
-use super::games::GameCode;
+use super::filesystem::symlink_metadata_if_exists;
+use super::games::{GameCode, ValidateFn};
 use super::importer::{IMPORTER_REQUIRED_DIRS, IMPORTER_REQUIRED_FILE};
 
 #[derive(Debug, Serialize)]
@@ -26,12 +26,12 @@ pub struct GamePathStatus {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum GamePathState {
-    Unset,
+    NoSavedPath,
     /// The existing fallible GameProfile validator verified the Game layout.
     Readable,
     /// Each named path returned NotFound. Executable alternatives are listed
     /// together only when all alternatives are confirmed missing.
-    Missing {
+    SavedPathNotFound {
         paths: Vec<PathBuf>,
     },
     /// A known wrong type or rejected layout. This is not proven absence.
@@ -52,20 +52,21 @@ pub enum ModelImporterState {
     /// This asserts layout presence, not authenticity, version, or launchability.
     Installed,
     /// Required entries returned NotFound. No version is inferred.
-    Absent { paths: Vec<PathBuf> },
+    RequiredEntriesNotFound { paths: Vec<PathBuf> },
     /// Inspection failed, the layout has a wrong type, or no readable Game
     /// installation is available. The Game fact remains independent.
-    Unverified { error: String },
+    Unverified {
+        /// Failed inspection path; None when inspection was not attempted.
+        path: Option<PathBuf>,
+        error: String,
+    },
 }
 
 pub(super) fn inspect(game: GameCode, saved_path: Option<PathBuf>) -> GamePathStatus {
     let game_path = match saved_path.as_deref() {
-        None => GamePathState::Unset,
-        Some(path) => match inspect_game(game, path) {
+        None => GamePathState::NoSavedPath,
+        Some(path) => match inspect_game(game, path, game.profile().validate) {
             Ok(state) => state,
-            Err(Error::Io { path, source }) if source.kind() == io::ErrorKind::NotFound => {
-                GamePathState::Missing { paths: vec![path] }
-            }
             Err(error) => {
                 let path = match &error {
                     Error::Io { path, .. } => path.clone(),
@@ -82,10 +83,15 @@ pub(super) fn inspect(game: GameCode, saved_path: Option<PathBuf>) -> GamePathSt
         (GamePathState::Readable, Some(path)) => match inspect_importer(path) {
             Ok(state) => state,
             Err(error) => ModelImporterState::Unverified {
+                path: match &error {
+                    Error::Io { path, .. } => Some(path.clone()),
+                    _ => None,
+                },
                 error: error.to_string(),
             },
         },
         _ => ModelImporterState::Unverified {
+            path: None,
             error: "Model Importer inspection requires a verified readable Game installation."
                 .into(),
         },
@@ -98,11 +104,24 @@ pub(super) fn inspect(game: GameCode, saved_path: Option<PathBuf>) -> GamePathSt
     }
 }
 
-fn inspect_game(game: GameCode, path: &Path) -> Result<GamePathState> {
+fn inspect_game(
+    game: GameCode,
+    path: &Path,
+    validate: Option<ValidateFn>,
+) -> Result<GamePathState> {
     let profile = game.profile();
-    if let Some(validate) = profile.validate {
-        if validate(path)? {
-            return Ok(GamePathState::Readable);
+    let mut validation_failure = None;
+    if let Some(validate) = validate {
+        match validate(path) {
+            Ok(true) => return Ok(GamePathState::Readable),
+            Ok(false) => {}
+            Err(Error::Io { path, source }) if source.kind() == io::ErrorKind::NotFound => {
+                // NotFound for one executable alternative does not prove the
+                // Game is missing. Diagnose every alternative and required
+                // directory before making an absence claim.
+                validation_failure = Some(Error::Io { path, source });
+            }
+            Err(error) => return Err(error),
         }
     }
     // Ok(false) says nothing about why validation failed. Diagnose absence
@@ -116,7 +135,7 @@ fn inspect_game(game: GameCode, path: &Path) -> Result<GamePathState> {
         .to_string(),
     };
     let Some(metadata) = metadata_at(path)? else {
-        return Ok(GamePathState::Missing {
+        return Ok(GamePathState::SavedPathNotFound {
             paths: vec![path.to_path_buf()],
         });
     };
@@ -157,18 +176,44 @@ fn inspect_game(game: GameCode, path: &Path) -> Result<GamePathState> {
         Some(_) => return Ok(invalid()),
     }
     // A recheck can race validation. Never upgrade Ok(false) to Readable.
+    if missing.is_empty() {
+        if let Some(error) = validation_failure {
+            return Err(error);
+        }
+    }
     Ok(if missing.is_empty() {
         invalid()
     } else {
-        GamePathState::Missing { paths: missing }
+        GamePathState::SavedPathNotFound { paths: missing }
     })
 }
 
 fn metadata_at(path: &Path) -> Result<Option<fs::Metadata>> {
-    metadata_if_exists(path).map_err(|source| Error::Io {
+    let entry = symlink_metadata_if_exists(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if entry.is_none() {
+        return Ok(None);
+    }
+    // The entry exists. A missing or unavailable link target must remain an
+    // error, rather than becoming permission to replace the existing entry.
+    fs::metadata(path).map(Some).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn missing_after_failure(error: Error) -> Result<PathBuf> {
+    if let Error::Io { path, source } = &error {
+        // A validator or directory iterator can report NotFound for a child
+        // while naming its parent as the failed inspection scope. Only a
+        // direct lookup proves that the named required path is itself absent.
+        if source.kind() == io::ErrorKind::NotFound && metadata_at(path)?.is_none() {
+            return Ok(path.clone());
+        }
+    }
+    Err(error)
 }
 
 fn directory_entries(path: &Path) -> Result<Vec<PathBuf>> {
@@ -214,16 +259,21 @@ fn inspect_importer(path: &Path) -> Result<ModelImporterState> {
         match inspect_importer_entry(&entry, directory) {
             Ok(true) => {}
             Ok(false) => missing.push(entry),
-            Err(Error::Io { path, source }) if source.kind() == io::ErrorKind::NotFound => {
-                missing.push(path);
-            }
-            Err(error) => return Err(error),
+            Err(error) => match missing_after_failure(error) {
+                Ok(path) => missing.push(path),
+                Err(error) => {
+                    return Ok(ModelImporterState::Unverified {
+                        path: Some(entry),
+                        error: error.to_string(),
+                    })
+                }
+            },
         }
     }
     Ok(if missing.is_empty() {
         ModelImporterState::Installed
     } else {
-        ModelImporterState::Absent { paths: missing }
+        ModelImporterState::RequiredEntriesNotFound { paths: missing }
     })
 }
 
@@ -255,13 +305,42 @@ mod tests {
 
     #[test]
     fn enumeration_failure_after_a_successful_entry_remains_uncertainty() {
-        let path = Path::new("Game/Core");
-        let entries = [
-            Ok(path.join("library.ini")),
-            Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-        ];
-        let error = consume_entries(path, entries).expect_err("late enumeration failure");
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path();
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::NotFound] {
+            let entries = [Ok(path.join("library.ini")), Err(io::Error::from(kind))];
+            let error = consume_entries(path, entries).expect_err("late enumeration failure");
+            let error = missing_after_failure(error)
+                .expect_err("an enumeration error cannot prove the inspected parent is missing");
+            assert!(matches!(error, Error::Io { path: ref failed, ref source }
+                if failed == path && source.kind() == kind));
+        }
+    }
+
+    #[test]
+    fn validator_not_found_diagnoses_every_executable_alternative() {
+        fn vanished_alternative(path: &Path) -> Result<bool> {
+            Err(Error::Io {
+                path: path.join("YuanShen.exe"),
+                source: io::Error::from(io::ErrorKind::NotFound),
+            })
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path();
+        fs::write(path.join("GenshinImpact.exe"), b"valid alternative").unwrap();
+        fs::create_dir(path.join(detect::genshin::DATA_DIR_NAME)).unwrap();
+        let error = inspect_game(GameCode::Gimi, path, Some(vanished_alternative))
+            .expect_err("a vanished optional alternative cannot prove a missing Game");
         assert!(matches!(error, Error::Io { path: ref failed, ref source }
-            if failed == path && source.kind() == io::ErrorKind::PermissionDenied));
+            if failed == &path.join("YuanShen.exe") && source.kind() == io::ErrorKind::NotFound));
+        fs::remove_file(path.join("GenshinImpact.exe")).unwrap();
+        let state = inspect_game(GameCode::Gimi, path, Some(vanished_alternative)).unwrap();
+        assert_eq!(
+            state,
+            GamePathState::SavedPathNotFound {
+                paths: vec![path.join("GenshinImpact.exe"), path.join("YuanShen.exe")],
+            },
+            "all alternatives must be directly confirmed missing, not just the failed one"
+        );
     }
 }
