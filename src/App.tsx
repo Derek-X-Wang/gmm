@@ -1,5 +1,11 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { WindowBar } from "./WindowBar";
+import { GameHeader } from "./GameHeader";
+import { GlobalHeaderLine } from "./GlobalHeaderLine";
+import { GameTabs } from "./GameTabs";
+import { GameStatusStrip } from "./GameStatusStrip";
+import { GameRecoveryNotice } from "./GameRecoveryNotice";
 import { AttentionView } from "./AttentionView";
 import { SettingsDestination, type SettingsPage } from "./SettingsDestination";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -151,16 +157,20 @@ function MainApp({
       queryFn: () => getGameInstallPath(game.code),
     })),
   });
+  // Query data retains the last successful saved path when a refresh rejects.
+  // Filesystem health and Model Importer presence do not determine tab membership.
   const installed = list.filter((_, index) => Boolean(installPaths[index].data?.trim()));
   const remaining = list.filter((game) => !installed.some((entry) => entry.code === game.code));
-  const pathsPending = games.isPending || installPaths.some((path) => path.isPending);
+  const pathsPending = games.isPending || installPaths.some((path) => path.isPending || path.isFetching);
   const pathErrors = installPaths.flatMap((path, index) => path.isError
     ? [`${list[index].displayName}: ${commandFailureMessage(path.error)}`]
     : []);
   const [selectedGame, setActiveGame] = useState<ApiGameCode | null>(null);
   // Settings never writes this selection. Freeze the first installed Game
   // once paths load so adding an earlier registry entry cannot steal it.
-  const active = list.find((game) => game.code === selectedGame) ?? installed[0] ?? list[0];
+  const active = installed.find((game) => game.code === selectedGame) ?? installed[0] ?? list[0];
+  const hasActiveGame = installed.some((game) => game.code === active.code);
+  const activePath = installPaths[list.findIndex((game) => game.code === active.code)];
   const activeGame = active.code;
   useEffect(() => {
     if (!pathsPending && selectedGame === null && installed.length > 0) setActiveGame(installed[0].code);
@@ -174,6 +184,8 @@ function MainApp({
   // visit must not evict it and clamp the return scroll to an empty screen.
   useQuery({ queryKey: ["mods", activeGame], queryFn: () => listMods(activeGame) });
   const { staleSession, dismissStaleSession } = useSessionLifecycle();
+  const sessionSurface = useSessionPresentation({ staleSession, onDismiss: dismissStaleSession });
+  const launchSurface = useLaunchGame({ game: activeGame, displayName: active.displayName });
   const openSettings = (page: SettingsPage, control = "game") => {
     returnControl.current = control;
     returnPosition.current = window.scrollY;
@@ -209,47 +221,22 @@ function MainApp({
       <SettingsDestination
         games={list}
         page={settingsPage}
-        returnGame={installed.length > 0 || selectedGame ? active.displayName : null}
+        returnGame={hasActiveGame ? active.displayName : null}
         onPageChange={setSettingsPage}
         onBack={() => setSettingsPage(null)}
       />
       {settingsPage === null ? (
         <main className="app">
-          <header className="app__header">
-            <h1>GMM — {active.displayName}</h1>
-            <div className="row">
-              <button data-settings-arrival="global" onClick={() => openSettings("gmm", "global")}>Settings</button>
-              <button
-                className="app__help"
-                onClick={() => reopenSetup.mutate()}
-                disabled={reopenSetup.isPending}
-                title="Help → Run setup again"
-              >
-                Run setup again
-              </button>
-            </div>
-          </header>
-          {skipped ? (
-            <section className="card finish-setup-banner" role="status">
-              <div>
-                <strong>Setup isn't finished yet.</strong>
-                <span className="muted small">
-                  {" "}You skipped one or more steps. Resume any time.
-                </span>
-              </div>
-              <button onClick={onResumeWizard}>Resume setup</button>
-            </section>
-          ) : null}
-          <AttentionView />
-          <StartupReconcileNotice />
-          <SessionBanner staleSession={staleSession} onDismiss={dismissStaleSession} />
-          {pathErrors.length > 0 ? (
-            <OperationFailureNotice
-              heading="GMM could not read some game install paths."
-              detail="Use a game tab or Add game to check the affected paths in Settings."
-              errors={pathErrors}
-            />
-          ) : null}
+          <WindowBar
+            onSettings={() => openSettings("gmm", "global")}
+            onSetup={() => reopenSetup.mutate()}
+            setupPending={reopenSetup.isPending}
+          />
+          {hasActiveGame ? <GameHeader displayName={active.displayName} action={launchSurface.action} /> : null}
+          <GlobalHeaderLine>
+            <AttentionView />
+            {sessionSurface.context}
+          </GlobalHeaderLine>
           <GameTabs
             games={installed}
             remaining={remaining}
@@ -259,10 +246,43 @@ function MainApp({
             onChange={setActiveGame}
             onAddGame={(game) => openSettings(game, "add")}
           />
-          <LaunchGameButton game={activeGame} displayName={active.displayName} />
-          <button data-settings-arrival="game" onClick={() => openSettings(activeGame)}>Settings for {active.displayName}</button>
-          <ModUpdatesPanel game={activeGame} />
-          <ModList game={activeGame} />
+          {hasActiveGame ? <GameStatusStrip
+            game={activeGame}
+            displayName={active.displayName}
+            savedPath={activePath.data ?? null}
+            pathReadError={activePath.error}
+            pathReadPending={activePath.isFetching}
+            onSettings={() => openSettings(activeGame)}
+          /> : null}
+          <div className="main-screen__notices" role="region" aria-label="Game and operation notices">
+            {skipped ? (
+              <section className="card finish-setup-banner" role="status">
+                <div>
+                  <strong>Setup isn't finished yet.</strong>
+                  <span className="muted small">
+                    {" "}You skipped one or more steps. Resume any time.
+                  </span>
+                </div>
+                <button onClick={onResumeWizard}>Resume setup</button>
+              </section>
+            ) : null}
+            <StartupReconcileNotice games={list} />
+            {sessionSurface.notices}
+            {hasActiveGame ? launchSurface.notice : null}
+            {hasActiveGame ? <GameRecoveryNotice game={activeGame} displayName={active.displayName}
+              onSettings={() => openSettings(activeGame)} /> : null}
+            {pathErrors.length > 0 ? (
+              <OperationFailureNotice
+                heading="GMM could not read some game install paths."
+                detail="Use a game tab or Add game to check the affected paths in Settings."
+                errors={pathErrors}
+              />
+            ) : null}
+          </div>
+          {hasActiveGame ? <>
+            <ModList game={activeGame} />
+            <ModUpdatesPanel game={activeGame} />
+          </> : null}
         </main>
       ) : null}
     </>
@@ -299,7 +319,7 @@ function OperationFailureNotice({
   );
 }
 
-function StartupReconcileNotice() {
+function StartupReconcileNotice({ games }: { games: GameSummary[] }) {
   const status = useQuery({
     queryKey: ["startupReconcileStatus"],
     queryFn: getStartupReconcileStatus,
@@ -309,95 +329,15 @@ function StartupReconcileNotice() {
   if (failures.length === 0) return null;
 
   return (
-    <section className="card">
+    <section className="card" aria-label="Startup game link check">
       <OperationFailureNotice
         heading="GMM could not finish checking your game links at startup."
         detail="The affected game was left unchanged; other games were checked independently."
         errors={failures.map(
-          (failure) => `${failure.game.toUpperCase()}: ${failure.error}`,
+          (failure) => `${games.find((game) => game.code === failure.game)?.displayName ?? failure.game.toUpperCase()} (${failure.game.toUpperCase()}): ${failure.error}`,
         )}
       />
     </section>
-  );
-}
-
-/**
- * Per-game tab strip. Rendered between the session banner and the
- * per-game cards so the user can switch contexts without leaving the
- * single-page shell. Saved install paths determine tabs; supported games
- * without paths remain reachable through the separate Add game control.
- */
-function GameTabs({
-  games,
-  remaining,
-  pending,
-  pathsUnavailable,
-  active,
-  onChange,
-  onAddGame,
-}: {
-  games: GameSummary[];
-  remaining: GameSummary[];
-  pending: boolean;
-  pathsUnavailable: boolean;
-  active: ApiGameCode;
-  onChange: (next: ApiGameCode) => void;
-  onAddGame: (next: ApiGameCode) => void;
-}) {
-  const [adding, setAdding] = useState(false);
-  return (
-    <div className="game-navigation">
-      {pending ? <p className="muted small">Checking game install paths…</p> : null}
-      {!pending && !pathsUnavailable && games.length === 0 ? (
-        <p className="muted">No game install paths set. Add a game to get started.</p>
-      ) : null}
-      <div className="row">
-        {games.length > 0 ? (
-          <nav className="game-tabs" role="tablist" aria-label="Game">
-            {games.map((g) => {
-              const isActive = g.code === active;
-              return (
-                <button
-                  key={g.code}
-                  role="tab"
-                  aria-selected={isActive}
-                  className={`game-tabs__tab${isActive ? " game-tabs__tab--active" : ""}`}
-                  onClick={() => onChange(g.code)}
-                >
-                  {g.displayName}
-                </button>
-              );
-            })}
-          </nav>
-        ) : null}
-        {!pending && remaining.length > 0 ? (
-          <button
-            type="button"
-            aria-expanded={adding}
-            aria-controls="add-game-picker"
-            data-settings-arrival="add"
-            onClick={() => setAdding((open) => !open)}
-          >
-            Add game
-          </button>
-        ) : null}
-      </div>
-      {adding && remaining.length > 0 ? (
-        <section id="add-game-picker" className="card" aria-label="Add a game">
-          <p className="muted small">Choose a supported game to set its install path.</p>
-          <div className="row game-navigation__choices">
-            {remaining.map((game) => (
-              <button key={game.code} type="button" onClick={() => {
-                onAddGame(game.code);
-                setAdding(false);
-              }}>
-                Set up {game.displayName}
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
-    </div>
   );
 }
 
@@ -443,7 +383,7 @@ function useSessionLifecycle() {
   return { staleSession, dismissStaleSession: () => setStaleSession(null) };
 }
 
-function SessionBanner({ staleSession, onDismiss }: {
+function useSessionPresentation({ staleSession, onDismiss }: {
   staleSession: SessionInfo | null;
   onDismiss: () => void;
 }) {
@@ -466,8 +406,8 @@ function SessionBanner({ staleSession, onDismiss }: {
     },
   });
 
-  return (
-    <>
+  return {
+    notices: <>
       {(interruptedLaunches.data ?? []).map((launch) => (
         <InterruptedSessionLaunchWarning
           key={launch.id}
@@ -481,6 +421,8 @@ function SessionBanner({ staleSession, onDismiss }: {
           onRetire={() => retireLaunch.mutate(launch.id)}
         />
       ))}
+    </>,
+    context: <>
       {staleSession && !session.data ? (
         <section className="card session-banner session-banner--stale">
           <strong>{staleSession.game.toUpperCase()} ended unexpectedly last time.</strong>
@@ -498,8 +440,8 @@ function SessionBanner({ staleSession, onDismiss }: {
           </span>
         </section>
       ) : null}
-    </>
-  );
+    </>,
+  };
 }
 
 /** Hook surfaces whether a session is currently active. */
@@ -512,7 +454,7 @@ function useSessionActive(): boolean {
 }
 
 /** Per-game Launch button. Disabled while a session is already active. */
-function LaunchGameButton({
+function useLaunchGame({
   game,
   displayName,
 }: {
@@ -550,21 +492,15 @@ function LaunchGameButton({
     ? partitionLaunchError(launch.error, guidance.data?.sentinel ?? "AV-PATTERN: ")
     : null;
 
-  return (
-    <section className="card">
-      <div className="row row--between">
-        <h2>Launch</h2>
-        <button
-          onClick={() => launch.mutate()}
-          disabled={sessionActive || launch.isPending}
-        >
-          {sessionActive
-            ? "Game running…"
-            : launch.isPending
-              ? "Launching…"
-              : `Launch ${displayName}`}
-        </button>
-      </div>
+  return {
+    action: <button
+      className="game-header__launch"
+      onClick={() => launch.mutate()}
+      disabled={sessionActive || launch.isPending}
+    >
+      {sessionActive ? "Game running…" : launch.isPending ? "Launching…" : `Launch ${displayName}`}
+    </button>,
+    notice: <>
       {partitioned && partitioned.isAvPattern && guidance.data ? (
         <AvGuidanceCallout
           guidance={guidance.data}
@@ -573,8 +509,8 @@ function LaunchGameButton({
       ) : partitioned ? (
         <CommandErrorNotice error={partitioned.failure} />
       ) : null}
-    </section>
-  );
+    </>,
+  };
 }
 
 /**

@@ -87,7 +87,7 @@ beforeEach(() => {
     current_session: null,
     clean_stale_session: null,
     interrupted_session_launches: [],
-    get_game_install_path: null,
+    get_game_install_path: "C:/Game",
     get_game_path_status: { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } },
     get_startup_reconcile_status: { finished: true, failures: [] },
     check_importer_update: { available: false, installedVersion: null, pinned: false },
@@ -276,14 +276,18 @@ it("shows a retained launch reservation immediately after launch fails", async (
 
 it("refreshes reinstall recovery even when its retry rejects", async () => {
   responses.list_mods = [{ ...modFixture(), reinstall_recovery: recoveryFixture }];
+  responses.detect_conflicts = { conflicts: [{ hash: "recover-hash", mod_ids: ["mod-outfit", "other"] }], per_mod_count: { "mod-outfit": 1 } };
   mutations.retry_reinstall_recovery = () => {
+    responses.detect_conflicts = { conflicts: [], per_mod_count: {} };
     responses.list_mods = [{ ...modFixture(), reinstall_recovery: { ...recoveryFixture, reason: "New recorded reinstall obstruction", attempts: 2 } }];
     throw new Error("Reinstall recovery failed");
   };
   renderApp();
   const warning = await screen.findByRole("region", { name: "Interrupted reinstall recovery for Test Outfit" });
+  expect(screen.getByRole("button", { name: "1 conflict" })).toBeEnabled();
   await userEvent.click(within(warning).getByRole("button", { name: /Retry/ }));
   expect(await screen.findByText("New recorded reinstall obstruction")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "1 conflict" })).not.toBeInTheDocument());
 });
 
 
@@ -470,7 +474,7 @@ it("refreshes partial onboarding completion while retaining the setup error", as
   };
   renderApp();
   await userEvent.click(await screen.findByRole("button", { name: "Skip setup" }));
-  expect(await screen.findByRole("heading", { name: "GMM — Genshin Impact" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Genshin Impact" })).toBeInTheDocument();
   expect(screen.getByText("Setup completion partly saved")).toBeInTheDocument();
 });
 
@@ -502,4 +506,80 @@ it("shows the update-check row of a newly imported GameBanana Mod", async () => 
   await userEvent.type(screen.getByPlaceholderText("https://gamebanana.com/mods/1234567 or a bare ID"), "123");
   await userEvent.click(screen.getByRole("button", { name: "Import" }));
   expect(await screen.findByRole("button", { name: "Update → 4.0" })).toBeInTheDocument();
+});
+
+it("keeps row recovery, Variants, Conflict disclosures and Mod updates under separate gates", async () => {
+  responses.list_mods = [modFixture(), {
+    ...modFixture(), id: "broken-mod", name: "Broken Outfit", source: "manual",
+    gamebanana_id: null, source_url: null, reinstall_recovery: recoveryFixture,
+  }];
+  responses.detect_conflicts = {
+    conflicts: [{ hash: "shared-hash", mod_ids: ["mod-outfit", "broken-mod"] }],
+    per_mod_count: { "mod-outfit": 1, "broken-mod": 1 },
+  };
+  mutations.set_active_variant = () => { throw new Error("Variant change denied"); };
+  mutations.apply_mod_update = () => { throw new Error("Update refused"); };
+  mutations.retry_reinstall_recovery = () => { throw new Error("Recovery still locked"); };
+  const { container } = renderApp();
+  await screen.findByRole("region", { name: "Interrupted reinstall recovery for Broken Outfit" });
+  const healthy = container.querySelector('[data-mod-id="mod-outfit"]')! as HTMLElement;
+  const broken = container.querySelector('[data-mod-id="broken-mod"]')! as HTMLElement;
+  const recovery = within(broken).getByRole("region", { name: "Interrupted reinstall recovery for Broken Outfit" });
+  const noticeSlot = screen.getByRole("region", { name: "Game and operation notices" });
+  expect(noticeSlot).not.toContainElement(recovery);
+  expect(within(broken).getByRole("checkbox", { name: "Unavailable" })).toBeDisabled();
+  expect(within(broken).getByRole("radio", { name: "Old Blue" })).toBeDisabled();
+  expect(within(healthy).getByRole("checkbox", { name: "Disabled" })).toBeEnabled();
+  await userEvent.click(within(healthy).getByRole("button", { name: "1 conflict" }));
+  expect(healthy).toHaveTextContent("shared-hash shared with 1 other mod.");
+  await userEvent.click(within(healthy).getByRole("radio", { name: "Old Blue" }));
+  expect(await within(healthy).findByText("Variant change denied")).toBeVisible();
+  expect(within(healthy).getByRole("button", { name: "Update → 2.0" })).toBeEnabled();
+  await userEvent.click(within(healthy).getByRole("button", { name: "Update → 2.0" }));
+  expect(await within(healthy).findByText("Update refused")).toBeVisible();
+  expect(within(healthy).getByRole("radio", { name: "Old Blue" })).toBeEnabled();
+  expect(within(healthy).getByRole("checkbox", { name: "Disabled" })).toBeEnabled();
+  expect(healthy).toHaveTextContent("shared-hash shared with 1 other mod.");
+  expect(within(recovery).getByRole("button", { name: /Retry/ })).toBeEnabled();
+  await userEvent.click(within(recovery).getByRole("button", { name: /Retry/ }));
+  expect(await screen.findByText("Recovery still needs intervention for Broken Outfit: Recovery still locked")).toBeVisible();
+  expect(within(healthy).getByRole("button", { name: "Update → 2.0" })).toBeEnabled();
+  expect(within(healthy).getByRole("radio", { name: "Old Blue" })).toBeEnabled();
+  expect(invoke).toHaveBeenCalledWith("set_active_variant", { modId: "mod-outfit", variantId: "Old-Blue", game: "gimi" });
+  expect(invoke).toHaveBeenCalledWith("apply_mod_update", { modId: "mod-outfit" });
+  expect(invoke).toHaveBeenCalledWith("retry_reinstall_recovery", { modId: "broken-mod" });
+});
+
+
+it("refreshes Game Session context after Launch succeeds", async () => {
+  mutations.launch_game = () => {
+    const session = { game: "gimi", pid: 321, started_at: "2026-10-11" };
+    responses.current_session = session;
+    return session;
+  };
+  renderApp();
+  await screen.findByRole("radio", { name: "Old Red" });
+  await userEvent.click(screen.getByRole("button", { name: "Launch Genshin Impact" }));
+  expect(await screen.findByText("GIMI is running")).toBeVisible();
+  expect(screen.getByRole("region", { name: "Global status" })).toHaveTextContent("GIMI is running");
+  expect(screen.getByRole("button", { name: "Game running…" })).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: "Disabled" })).toBeDisabled();
+});
+
+it.each([false, true])("refreshes this Game's Mods and Conflicts after changing enabled state from %s", async (enabled) => {
+  responses.list_mods = [modFixture(enabled)];
+  responses.detect_conflicts = { conflicts: [{ hash: "toggle-hash", mod_ids: ["mod-outfit", "other"] }], per_mod_count: { "mod-outfit": 1 } };
+  mutations.set_mod_enabled = () => {
+    responses.list_mods = [modFixture(!enabled)];
+    responses.detect_conflicts = { conflicts: [], per_mod_count: {} };
+    throw new Error("Toggle partly persisted");
+  };
+  renderApp();
+  await screen.findByRole("radio", { name: "Old Red" });
+  expect(screen.getByRole("button", { name: "1 conflict" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("checkbox", { name: enabled ? "Enabled" : "Disabled" }));
+  expect(await screen.findByText("Toggle partly persisted")).toBeVisible();
+  await waitFor(() => expect(screen.getByRole("checkbox", { name: enabled ? "Disabled" : "Enabled" })).toBeEnabled());
+  await waitFor(() => expect(screen.queryByRole("button", { name: "1 conflict" })).not.toBeInTheDocument());
+  expect(invoke).toHaveBeenCalledWith("set_mod_enabled", { id: "mod-outfit", enabled: !enabled, game: "gimi" });
 });

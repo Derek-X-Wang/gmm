@@ -555,3 +555,56 @@ code {
   .settings-navigation button { background: #fff; color: #18181b; border-color: #d4d4d8; }
   .settings-navigation button span { color: #52525b; }
 }
+
+/* Main: identity, Game action, global facts, navigation, then the Library. */
+.window-bar {
+  border-bottom: 1px solid #2e2e36;
+  padding-bottom: 0.75rem;
+}
+
+.window-bar > strong {
+  font-size: 1rem;
+  letter-spacing: 0.04em;
+}
+
+.game-header h1 {
+  margin: 0;
+  font-size: 1.75rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.game-header__launch {
+  padding: 0.8rem 1.2rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.global-header-line,
+.main-screen__notices {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.main-screen__notices:empty {
+  display: none;
+}
+
+.game-status-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  border-block: 1px solid #2e2e36;
+  padding-block: 0.65rem;
+  font-size: 0.85rem;
+}
+
+.game-status-strip__summary {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1 1 260px;
+}

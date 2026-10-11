@@ -89,6 +89,9 @@ it("keeps every supported game reachable with no install paths and promotes the 
   await screen.findByRole("button", { name: "Add game" });
   expect(tabNames()).toEqual([]);
   expect(screen.getByText("No game install paths set. Add a game to get started.")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /^Launch / })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: /^Mods \(/ })).not.toBeInTheDocument();
   for (const game of games) {
     await userEvent.click(screen.getByRole("button", { name: "Add game" }));
     await userEvent.click(screen.getByRole("button", { name: `Set up ${game.displayName}` }));
@@ -172,6 +175,8 @@ it("does not call pending path reads an empty install list", async () => {
   try {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_game_install_path", { game: "efmi" }));
     await screen.findByText("Checking game install paths…");
+    expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Launch / })).not.toBeInTheDocument();
     expect(screen.queryByText("No game install paths set. Add a game to get started.")).not.toBeInTheDocument();
   } finally {
     resolvePath("C:\\Endfield");
@@ -195,4 +200,53 @@ it("chooses the first installed Game after all concurrent path reads finish", as
   await act(async () => resolveFirst(paths.gimi!));
   await waitFor(() => expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "true"));
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "false");
+});
+
+
+it("retains last known tab membership and its repair route after a saved-path read rejects", async () => {
+  paths = { srmi: "C:/StarRail" };
+  const { client } = renderWithQuery(<App />);
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_install_path" && args.game === "srmi") throw new Error("Saved path read denied");
+    return implementation(command, args);
+  });
+  await act(() => client.invalidateQueries({ queryKey: ["installPath", "srmi"] }));
+  const failure = await screen.findByText("Honkai: Star Rail: Saved path read denied");
+  expect(failure.closest('[role="alert"]')).toBeVisible();
+  expect(tabNames()).toEqual(["Honkai: Star Rail"]);
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+  const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
+  expect(strip).toHaveTextContent("Cannot tell — install path unreadable · Model Importer unverified");
+  expect(strip).toHaveTextContent("C:/StarRail");
+  expect(strip).not.toHaveTextContent(/not installed|no saved|Absent/i);
+  expect(screen.queryByText(/No game install paths set/)).not.toBeInTheDocument();
+  await userEvent.click(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toBeVisible();
+});
+
+it.each(["unreadable", "savedPathNotFound", "importerAbsent"])("keeps the configured tab and repair route when filesystem state is %s", async (state) => {
+  paths = { srmi: "C:/StarRail" };
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_path_status") return {
+      game: args.game, savedPath: paths[args.game as GameCode] ?? null,
+      gamePath: state === "unreadable" ? { status: "unreadable", path: "C:/StarRail", error: "Access denied" }
+        : state === "savedPathNotFound" ? { status: "savedPathNotFound", paths: ["C:/StarRail/StarRail.exe"] } : { status: "readable" },
+      modelImporter: state === "importerAbsent" ? { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] }
+        : { status: "unverified", path: null, error: "Cannot inspect files" },
+    };
+    return implementation(command, args);
+  });
+  renderWithQuery(<App />);
+  const line = state === "unreadable" ? "Cannot tell — install path unreadable · Model Importer unverified"
+    : state === "savedPathNotFound" ? "Saved installation cannot be found · Model Importer unverified" : "Game readable · Model Importer not installed";
+  const strip = await screen.findByRole("region", { name: "Honkai: Star Rail status" });
+  expect(await within(strip).findByText(line)).toBeVisible();
+  expect(tabNames()).toEqual(["Honkai: Star Rail"]);
+  expect(strip).toHaveTextContent("C:/StarRail");
+  expect(strip).not.toHaveTextContent(/version|no saved/i);
+  await userEvent.click(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toHaveValue("C:/StarRail");
 });

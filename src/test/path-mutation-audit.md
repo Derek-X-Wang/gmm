@@ -48,8 +48,8 @@ from the production inventory.
 | File / component | Mutation | Result and displayed state |
 | --- | --- | --- |
 | App / MainApp | reopenSetup | Changed: settled `onboarding/status`; setup error survives a route change after partial settings writes. |
-| App / SessionBanner | retireLaunch | Unchanged: transactional claim retirement already refreshes `interruptedSessionLaunches` and `session` on success. |
-| App / LaunchGameButton | launch | Unchanged: already settles `session` and `interruptedSessionLaunches`. |
+| App / useSessionPresentation | retireLaunch | Unchanged: transactional claim retirement already refreshes `interruptedSessionLaunches` and `session` on success. |
+| App / useLaunchGame | launch | Unchanged: already settles `session` and `interruptedSessionLaunches`. |
 | App / ModUpdatesPanel | check | Changed: settles `modUpdates/game`; a multi-Mod batch can persist earlier upstream versions before rejecting. |
 | App / ModUpdatesPanel | toggleGlobal | Unchanged: one setting write already refreshes `modUpdates/globalEnabled` on success. |
 | App / ModUpdateBadge | apply | Unchanged: already settles `mods/game`, `modUpdates/game`, `variants/modId`, and `conflicts/game`; error remains outside the disappearing badge. |
@@ -155,6 +155,24 @@ on the main screen. The three preference tests previously bound to the per-Game
 checkbox (write, structured failure, pending/success) now exercise the global
 module, including the saved checkbox value and other-Game refresh behavior.
 No inventory gate or per-Game action coverage was weakened.
+
+## Main-screen hierarchy — #293
+
+The inventory still contains 41 call sites in nine files. `SessionBanner.retireLaunch`
+and `LaunchGameButton.launch` now live in the same source file under
+`useSessionPresentation` and `useLaunchGame`. The hooks keep their existing
+success/settlement policies while separating the global session context and
+Game-header action from conditional operation notices. They stay observed
+across Settings navigation. No mutation moved to a new file or gained a new
+invalidation exception.
+
+The new status strip reads `gamePathStatus/<Game>` and the recovery summary
+reads `importer/evacuation/<Game>`, sharing the Settings keys and existing
+refresh boundaries. The strip contains only a Settings route; recovery actions
+remain in Settings. Rendered tests cover retained configured tabs, named
+failures, explicit checking, confirmed-empty navigation, the eight content
+slots, individual Mod gates, and both Settings arrival/return paths. Behavioral
+source mutations remove each Mod/Conflict/Launch refresh independently.
 
 ## Observed regression evidence
 
