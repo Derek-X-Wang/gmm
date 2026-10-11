@@ -3,7 +3,6 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AttentionView } from "./AttentionView";
 import { PathField } from "./PathField";
 import { SettingsDestination, type SettingsPage } from "./SettingsDestination";
-import { ImporterOriginPanel } from "./ImporterOriginPanel";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -20,9 +19,7 @@ import {
   partitionLaunchError,
   resetOnboarding,
   retryReinstallRecovery,
-  retryImporterEvacuationRecovery,
   retireInterruptedEnabledTransition,
-  retireInterruptedImporterEvacuation,
   retireInterruptedSessionLaunch,
   SESSION_ENDED_EVENT,
   SESSION_STARTED_EVENT,
@@ -32,24 +29,18 @@ import {
   type OnboardingStatus,
   type SessionInfo,
   applyModUpdate,
-  checkImporterUpdate,
   checkModUpdatesNow,
   detectConflicts,
-  fetchLatestImporterRelease,
-  getImporterEvacuationRecovery,
   getGameInstallPath,
   getLibraryPaths,
   getStartupReconcileStatus,
   importGamebanana,
   importZip,
-  installImporter,
   listMods,
   listModUpdates,
   listVariants,
   modUpdatesGloballyEnabled,
-  rollbackImporter,
   setActiveVariant,
-  setImporterPinned,
   setLibraryPathForGame,
   setLibraryRoot,
   setModEnabled,
@@ -60,7 +51,6 @@ import {
 } from "./api";
 import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarning";
 import { EnabledTransitionRecoveryWarning } from "./EnabledTransitionRecoveryWarning";
-import { ImporterEvacuationRecoveryWarning } from "./ImporterEvacuationRecoveryWarning";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
 import { LibraryRootOverlapWarning } from "./LibraryRootOverlapWarning";
@@ -69,7 +59,6 @@ import {
   ReinstallRecoveryWarning,
   type ReinstallRecoveryFeedback,
 } from "./ReinstallRecoveryWarning";
-import { LoaderVersionNote } from "./LoaderVersionNote";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { commandFailureMessage, type CommandFailure } from "./commandError";
 import { checkInteractively, type UpdateState } from "./updater";
@@ -281,8 +270,6 @@ function MainApp({
           />
           <LaunchGameButton game={activeGame} displayName={active.displayName} />
           <button data-settings-arrival="game" onClick={() => openSettings(activeGame)}>Settings for {active.displayName}</button>
-          <ImporterPanel game={activeGame} displayName={active.displayName} />
-          <ImporterOriginPanel game={activeGame} displayName={active.displayName} />
           <ModUpdatesPanel game={activeGame} />
           <LibraryPathsPanel />
           <UpdatesPanel />
@@ -758,162 +745,6 @@ function ModUpdateBadge({
       </span>
       <CommandErrorNotice error={apply.error} />
     </>
-  );
-}
-
-/**
- * Settings → Model Importer. Lets the user (re)install the latest
- * Model Importer release for the active game and roll back to the
- * previously-backed-up files. Repo + asset name come from the Rust
- * `GameProfile` registry, so per-game ports light up here for free.
- */
-function ImporterPanel({
-  game,
-  displayName,
-}: {
-  game: ApiGameCode;
-  displayName: string;
-}) {
-  const qc = useQueryClient();
-  const release = useQuery({
-    queryKey: ["importer", "latest", game],
-    queryFn: () => fetchLatestImporterRelease(game),
-    retry: false,
-  });
-  const update = useQuery({
-    queryKey: ["importer", "update", game],
-    queryFn: () => checkImporterUpdate(game),
-    retry: false,
-  });
-  const evacuation = useQuery({
-    queryKey: ["importer", "evacuation", game],
-    queryFn: () => getImporterEvacuationRecovery(game),
-    retry: false,
-  });
-
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["importer"] });
-    qc.invalidateQueries({ queryKey: ["importerOrigin", game] });
-    qc.invalidateQueries({ queryKey: ["gamePathStatus", game] });
-  };
-
-  const install = useMutation({
-    mutationFn: () => installImporter(game),
-    onSettled: invalidate,
-  });
-  const rollback = useMutation({
-    mutationFn: () => rollbackImporter(game),
-    onSettled: invalidate,
-  });
-  const pin = useMutation({
-    mutationFn: (version: string | null) => setImporterPinned(game, version),
-    onSuccess: invalidate,
-  });
-  const retireEvacuation = useMutation({
-    mutationFn: () => retireInterruptedImporterEvacuation(game),
-    onSettled: invalidate,
-  });
-  const retryEvacuation = useMutation({
-    mutationFn: () => retryImporterEvacuationRecovery(game),
-    onSettled: invalidate,
-  });
-
-  const importerLabel = game.toUpperCase();
-
-  return (
-    <section className="card">
-      <h2>
-        Model Importer ({importerLabel})
-        {update.data?.available ? <span className="update-badge"> · update</span> : null}
-      </h2>
-      <p className="muted">
-        Downloads the latest <code>{importerLabel}-Package</code> release for{" "}
-        {displayName}, verifies the SHA-256, backs up any existing importer
-        files, and rewrites <code>d3dx.ini</code>'s <code>loader</code> line
-        to <code>gmm.exe</code>. Per ADR 0004 we never update without an
-        explicit click here.
-      </p>
-      <div className="row">
-        <span className="muted small">
-          Latest release: {release.data ? <code>{release.data.tag_name}</code> : release.isLoading ? "checking…" : "—"}
-        </span>
-        {update.data?.installedVersion ? (
-          <span className="muted small">
-            · Installed <code>{update.data.installedVersion}</code>
-          </span>
-        ) : null}
-        {update.data?.pinned ? <span className="muted small"> · pinned</span> : null}
-      </div>
-      <CommandErrorNotice
-        error={release.error}
-        heading="GMM could not check the latest Model Importer release."
-      />
-      <CommandErrorNotice
-        error={update.error}
-        heading="GMM could not check for a Model Importer update."
-      />
-      <CommandErrorNotice
-        error={evacuation.error}
-        heading="GMM could not validate Model Importer recovery state."
-      />
-      {evacuation.data ? (
-        <ImporterEvacuationRecoveryWarning
-          displayName={displayName}
-          recovery={evacuation.data}
-          pending={retireEvacuation.isPending || retryEvacuation.isPending}
-          error={
-            retireEvacuation.isError
-              ? commandFailureMessage(retireEvacuation.error)
-              : retryEvacuation.isError
-                ? commandFailureMessage(retryEvacuation.error)
-              : undefined
-          }
-          onRetry={() => retryEvacuation.mutate()}
-          onRetire={() => retireEvacuation.mutate()}
-        />
-      ) : null}
-      <div className="row">
-        <button
-          onClick={() => install.mutate()}
-          disabled={install.isPending || evacuation.data !== null}
-        >
-          {install.isPending ? "Installing…" : update.data?.available ? "Apply update" : "Reinstall importer"}
-        </button>
-        <button
-          onClick={() => rollback.mutate()}
-          disabled={rollback.isPending || evacuation.data !== null}
-        >
-          {rollback.isPending ? "Rolling back…" : "Roll back importer"}
-        </button>
-        {update.data?.installedVersion ? (
-          <button
-            onClick={() =>
-              pin.mutate(update.data?.pinned ? null : update.data?.installedVersion ?? null)
-            }
-            disabled={pin.isPending}
-          >
-            {update.data?.pinned ? "Unpin" : "Pin to current"}
-          </button>
-        ) : null}
-      </div>
-      <LoaderVersionNote />
-      {install.data ? (
-        <p className="muted small">
-          Installed. SHA-256 <code>{install.data.sha256.slice(0, 12)}…</code>{install.data.backup_dir ? <> · Backed up to <code>{install.data.backup_dir}</code></> : null}.
-        </p>
-      ) : null}
-      {rollback.data ? (
-        <p className="muted small">Restored from <code>{rollback.data}</code>.</p>
-      ) : null}
-      {update.data?.checkError ? (
-        <p className="error">
-          Couldn't check for an importer update: {update.data.checkError}
-        </p>
-      ) : null}
-      <CommandErrorNotice error={install.error} />
-      <CommandErrorNotice error={rollback.error} />
-      <CommandErrorNotice error={pin.error} />
-    </section>
   );
 }
 

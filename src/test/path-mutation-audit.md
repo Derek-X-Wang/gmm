@@ -8,7 +8,7 @@ a completed folder pick. Each route invokes the same existing backend mutation;
 there is no frontend path validation, trimming, or implicit reset to default.
 The diagnostics log directory stays read-only.
 
-The inventory contains **41 `useMutation` call sites in five files** and is now
+The inventory contains **41 `useMutation` call sites in six files** and is now
 enforced by `mutation-invalidation-boundary.test.ts` under `pnpm test`. The gate
 parses production TypeScript/TSX under `src/`, including new files, and requires
 exactly one row per call site and no stale rows. The original audit traced each
@@ -56,11 +56,11 @@ from the production inventory.
 | App / ModUpdateBadge | toggle | Unchanged: one Mod setting write already refreshes `modUpdates/game` on success. |
 | SettingsDestination / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. |
 | SettingsDestination / NetworkPanel | test | Unchanged: connection probe; no persisted query state to refresh. |
-| App / ImporterPanel | install | Changed helper: already settled, now also refreshes `gamePathStatus/game`, `importerOrigin/game` and all `importer` queries, including latest release. |
-| App / ImporterPanel | rollback | Changed: same expanded helper, including `gamePathStatus/game`, runs on settlement; filesystem restoration can fail before provenance is recorded. |
-| App / ImporterPanel | pin | Atomic success policy retained; shared helper now also refreshes path-state/Origin/latest-release surfaces. No separate missing failure invalidation found for this single setting write. |
-| App / ImporterPanel | retireEvacuation | Changed helper: existing settlement now includes path-state/Origin/latest-release state restored by recovery. |
-| App / ImporterPanel | retryEvacuation | Changed helper: existing settlement now includes path-state/Origin/latest-release state restored by recovery. |
+| ImporterPanel | install | Changed helper: already settled, now also refreshes `gamePathStatus/game`, `importerOrigin/game` and all `importer` queries, including latest release; stable install feedback remains on the Game page. |
+| ImporterPanel | rollback | Changed: same expanded helper, including `gamePathStatus/game`, runs on settlement; filesystem restoration can fail before provenance is recorded; null success explicitly reports no rollback backup. |
+| ImporterPanel | pin | Atomic success policy retained; shared helper now also refreshes path-state/Origin/latest-release surfaces. No separate missing failure invalidation found for this single setting write. |
+| ImporterPanel | retireEvacuation | Changed helper: existing settlement includes path-state/Origin/latest-release state restored by recovery; outcome/error stays outside the removable warning. |
+| ImporterPanel | retryEvacuation | Changed helper: existing settlement includes path-state/Origin/latest-release state restored by recovery; outcome/error stays outside the removable warning. |
 | App / LibraryPathsPanel | setRoot | Changed: settles `libraryPaths`, `mods`, `libraryAudit`, and `conflicts`; relocation updates Mod paths and can fail to restore deployment. |
 | App / LibraryPathsPanel | setPerGame | Changed: same settlement refresh; broad keys also cover cached inactive Game views. |
 | App / Diagnostics | exportBundle | Unchanged: writes a user-selected diagnostics artifact; displayed log-directory query does not change. |
@@ -116,6 +116,24 @@ observers and feedback, across page changes and Back/Escape. Inactive pages use
 content unmounts when Settings opens; its selected Game, Mod query observer,
 session-event owner, and return anchor remain above the destination switch.
 No new mutation hook or blanket gate exception was added.
+
+## Per-Game importer relocation — #294
+
+`ImporterPanel` moved into its own module. Its five mutation policies are
+unchanged: install, rollback, retry and retirement settle all `importer` reads,
+this Game's `importerOrigin` and `gamePathStatus`; the atomic pin write refreshes
+those reads on success. The two groups now follow the Game install-path group
+inside each visited Settings page. Their live observers, drafts and operation
+feedback survive hidden pages and Back to Mods. Recovery errors and outcomes
+remain outside the warning that settlement can remove. Origin acceptance still
+settles, while override/dismissal writes retain their atomic-success boundary.
+
+Importer and Origin install actions require a successful readable Game and a
+verified installed or confirmed-absent Model Importer. Filesystem failure never
+supplies an installed version or an install invitation. Upstream check failures
+remain distinct from a current version. The frontend boundary tests exercise
+active projections and fresh inactive caches; the inventory gate alone does not
+prove these query keys or runtime policies.
 
 ## Observed regression evidence
 

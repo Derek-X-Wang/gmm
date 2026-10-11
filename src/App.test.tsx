@@ -115,6 +115,8 @@ function ipcResult(command: string) {
     case "clean_stale_session":
     case "get_game_install_path":
       return null;
+    case "get_game_path_status":
+      return { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
     case "check_importer_update":
       if (importerUpdateError) throw importerUpdateError;
       return importerUpdate;
@@ -256,6 +258,7 @@ it("renders a structured failure when changing an Importer Pin fails", async () 
     message: "Could not save the Importer Pin.",
   };
   renderWithQuery(<App />);
+  await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
 
   await userEvent.click(
     await screen.findByRole("button", { name: /Pin to current/i }),
@@ -274,6 +277,7 @@ it("renders a structured failure when the Importer update query rejects", async 
     message: "Could not read Importer update state.",
   };
   renderWithQuery(<App />);
+  await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
 
   const heading = await screen.findByText(
     /could not check for a Model Importer update/i,
@@ -311,6 +315,7 @@ it("shows a latest-importer-release failure instead of calling it unavailable", 
     message: "The importer release lookup failed.",
   };
   renderWithQuery(<App />);
+  await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
 
   const heading = await screen.findByText(
     /could not check the latest Model Importer release/i,
