@@ -739,7 +739,10 @@ function NetworkPanel() {
     onSuccess: () => setPassword(""),
     onSettled: () => qc.invalidateQueries({ queryKey: ["proxyConfig"] }),
   });
-  const test = useMutation({ mutationFn: testProxyConnection });
+  const test = useMutation({
+    mutationFn: testProxyConnection,
+    meta: { noInvalidationReason: "Connection probe; no persisted query state to refresh." },
+  });
 
   return (
     <section className="card">
@@ -1139,6 +1142,7 @@ function Diagnostics() {
   });
 
   const exportBundle = useMutation({
+    meta: { noInvalidationReason: "Writes a user-selected diagnostics artifact; displayed log directory does not change." },
     mutationFn: async () => {
       const dir = logDir.data;
       if (!dir) throw new Error("log directory not yet known");
