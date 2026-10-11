@@ -11,6 +11,7 @@
 //! validation) are public.
 
 pub mod endfield;
+pub mod epic;
 pub mod genshin;
 pub mod honkai_impact;
 pub mod star_rail;
@@ -18,10 +19,61 @@ pub mod wuthering;
 pub mod zenless;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::error::{Error, Result};
 use super::filesystem::metadata_if_exists;
+
+/// Maximum directory entries inspected below each non-validating candidate.
+/// This bounds work even when a launcher records a large drive-root directory.
+pub const MAX_CANDIDATE_CHILDREN: usize = 256;
+
+/// Return validated install directories in source order, without duplicates.
+/// A valid candidate wins over its children. Otherwise inspect immediate real
+/// directories only (never follow directory symlinks or recurse), in sorted
+/// order within the bounded set. Unreadable entries are unusable optional probes.
+pub fn validated_candidates<I>(candidates: I, validate: fn(&Path) -> bool) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut emitted = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for candidate in candidates {
+        if !seen.insert(candidate.clone()) {
+            continue;
+        }
+        if validate(&candidate) {
+            if emitted.insert(candidate.clone()) {
+                out.push(candidate);
+            }
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&candidate) else {
+            continue;
+        };
+        let mut children: Vec<_> = entries
+            .take(MAX_CANDIDATE_CHILDREN)
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                #[allow(
+                    clippy::disallowed_methods,
+                    reason = "optional-install expansion intentionally skips unreadable directory entries"
+                )]
+                let usable_directory = matches!(entry.file_type(), Ok(kind) if kind.is_dir());
+                usable_directory
+            })
+            .map(|entry| entry.path())
+            .collect();
+        children.sort();
+        for child in children {
+            if !emitted.contains(&child) && validate(&child) && emitted.insert(child.clone()) {
+                out.push(child);
+            }
+        }
+    }
+    out
+}
 
 /// Saved paths require a readable install. Optional auto-detection keeps its
 /// existing best-effort validators; a manual choice must preserve uncertainty.

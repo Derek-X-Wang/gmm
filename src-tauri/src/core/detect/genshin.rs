@@ -5,11 +5,12 @@
 //! 1. Windows uninstall registry (HKLM + HKCU under
 //!    `Software\Microsoft\Windows\CurrentVersion\Uninstall`). Hoyoverse's
 //!    installer writes `InstallLocation` here.
-//! 2. Common install paths: `Program Files\Genshin Impact`,
+//! 2. Epic Games Launcher manifests (recorded install and executable paths).
+//! 3. Common install paths: `Program Files\Genshin Impact`,
 //!    `Program Files (x86)\Genshin Impact`, `C:\Genshin`, `D:\Genshin`.
-//! 3. The user-confirmed cached path lives in the `games` table; once
+//! 4. The user-confirmed cached path lives in the `games` table; once
 //!    set, GMM just uses it without re-running detection.
-//! 4. Falls back to the manual picker in the UI.
+//! 5. Falls back to the manual picker in the UI.
 //!
 //! Validation: a candidate is accepted only if both
 //! `GenshinImpact.exe` (or `YuanShen.exe`, the CN client) and the
@@ -163,7 +164,7 @@ pub fn detect_from_registry() -> Vec<PathBuf> {
             }
         }
     }
-    out
+    super::validated_candidates(out, validate)
 }
 
 #[cfg(not(windows))]
@@ -179,10 +180,17 @@ pub fn is_genshin_display_name(s: &str) -> bool {
     lower.contains("genshin impact") || lower.contains("yuanshen") || lower.contains("原神")
 }
 
-/// Production orchestrator: registry → common paths. Returns the first
+/// Read Epic install records for this Game. Inject the manifest-store directory
+/// for fixtures; `None` uses the Windows store and returns empty on other OSes.
+pub fn detect_from_epic(manifest_root: Option<&Path>) -> Vec<PathBuf> {
+    super::epic::install_candidates(manifest_root, is_genshin_display_name, validate)
+}
+
+/// Production orchestrator: registry → Epic manifests → common paths. Returns the first
 /// candidate that passes [`validate`].
 pub fn detect() -> Option<PathBuf> {
     let mut chain = detect_from_registry();
+    chain.extend(detect_from_epic(None));
     chain.extend(common_install_candidates());
     detect_from_paths(chain)
 }

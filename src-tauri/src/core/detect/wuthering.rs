@@ -1,5 +1,8 @@
 //! Wuthering Waves (WWMI) install detection (slice 8 / #18).
 //!
+//! Detection order: Windows uninstall registry → Epic Games Launcher
+//! manifests → common install paths → manual picker if no candidate validates.
+//!
 //! Unlike the Hoyoverse trio (GIMI/SRMI/ZZMI), Wuthering Waves ships
 //! on Unreal Engine, not Unity. The game executable lives several
 //! directories deep:
@@ -183,7 +186,7 @@ pub fn detect_from_registry() -> Vec<PathBuf> {
             out.push(install);
         }
     }
-    out
+    super::validated_candidates(out, validate)
 }
 
 #[cfg(not(windows))]
@@ -199,10 +202,17 @@ pub fn is_wuthering_display_name(s: &str) -> bool {
     lower.contains("wuthering waves") || lower.contains("鸣潮")
 }
 
-/// Production orchestrator: registry → common paths. Returns the
+/// Read Epic install records for this Game. Inject the manifest-store directory
+/// for fixtures; `None` uses the Windows store and returns empty on other OSes.
+pub fn detect_from_epic(manifest_root: Option<&Path>) -> Vec<PathBuf> {
+    super::epic::install_candidates(manifest_root, is_wuthering_display_name, validate)
+}
+
+/// Production orchestrator: registry → Epic manifests → common paths. Returns the
 /// first candidate that passes [`validate`].
 pub fn detect() -> Option<PathBuf> {
     let mut chain = detect_from_registry();
+    chain.extend(detect_from_epic(None));
     chain.extend(common_install_candidates());
     detect_from_paths(chain)
 }

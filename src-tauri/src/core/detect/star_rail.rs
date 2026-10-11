@@ -10,13 +10,14 @@
 //!    `Software\Microsoft\Windows\CurrentVersion\Uninstall`). HoYoPlay
 //!    writes `InstallLocation` here with a *Honkai: Star Rail* or
 //!    CN-locale display name.
-//! 2. Common install paths: HoYoPlay's `Program Files\Star Rail\Game\`,
+//! 2. Epic Games Launcher manifests (recorded install and executable paths).
+//! 3. Common install paths: HoYoPlay's `Program Files\Star Rail\Game\`,
 //!    the legacy `Program Files\Honkai Star Rail\Game\`, and the
 //!    drive-root standalone-installer paths users frequently pick.
-//! 3. The user-confirmed cached path lives in the `games` table; once
+//! 4. The user-confirmed cached path lives in the `games` table; once
 //!    set, GMM just uses it without re-running detection (same flow as
 //!    GIMI — see `core::detect::genshin`).
-//! 4. Falls back to the manual picker in the UI.
+//! 5. Falls back to the manual picker in the UI.
 //!
 //! Validation: a candidate is accepted only if `StarRail.exe` exists
 //! AND the matching `StarRail_Data` Unity directory is present —
@@ -165,14 +166,13 @@ pub fn detect_from_registry() -> Vec<PathBuf> {
                 continue;
             }
             // HoYoPlay writes the launcher root; the playable game lives one
-            // level deeper under `Game/`. Push both so `validate` can pick
-            // whichever passes.
+            // level deeper. The shared helper probes immediate directories
+            // without depending on the launcher's child directory name.
             let install = PathBuf::from(&install_location);
-            out.push(install.join("Game"));
             out.push(install);
         }
     }
-    out
+    super::validated_candidates(out, validate)
 }
 
 #[cfg(not(windows))]
@@ -195,10 +195,17 @@ pub fn is_star_rail_display_name(s: &str) -> bool {
         || lower.contains("崩壊：スターレイル")
 }
 
-/// Production orchestrator: registry → common paths. Returns the
+/// Read Epic install records for this Game. Inject the manifest-store directory
+/// for fixtures; `None` uses the Windows store and returns empty on other OSes.
+pub fn detect_from_epic(manifest_root: Option<&Path>) -> Vec<PathBuf> {
+    super::epic::install_candidates(manifest_root, is_star_rail_display_name, validate)
+}
+
+/// Production orchestrator: registry → Epic manifests → common paths. Returns the
 /// first candidate that passes [`validate`].
 pub fn detect() -> Option<PathBuf> {
     let mut chain = detect_from_registry();
+    chain.extend(detect_from_epic(None));
     chain.extend(common_install_candidates());
     detect_from_paths(chain)
 }
