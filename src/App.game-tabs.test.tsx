@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { GameCode, GameSummary } from "./api";
@@ -178,4 +178,21 @@ it("does not call pending path reads an empty install list", async () => {
   }
   await waitFor(() => expect(tabNames()).toEqual(["Arknights: Endfield"]));
   expect(screen.queryByText("Checking game install paths…")).not.toBeInTheDocument();
+});
+
+
+it("chooses the first installed Game after all concurrent path reads finish", async () => {
+  paths = { gimi: "C:\\Genshin", srmi: "C:\\StarRail" };
+  const implementation = invoke.getMockImplementation()!;
+  let resolveFirst!: (path: string) => void;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_install_path" && args.game === "gimi") return new Promise<string>((resolve) => { resolveFirst = resolve; });
+    return implementation(command, args);
+  });
+  renderWithQuery(<App />);
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  await screen.findByText("Checking game install paths…");
+  await act(async () => resolveFirst(paths.gimi!));
+  await waitFor(() => expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "true"));
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "false");
 });

@@ -253,7 +253,9 @@ it.each(["adopt", "zip", "drop", "gamebanana"] as const)("refreshes the orphan L
   await userEvent.type(screen.getByPlaceholderText(entry === "gamebanana"
     ? "https://gamebanana.com/mods/1234567 or a bare ID"
     : entry === "drop" ? "Display name" : "Display name (e.g. Hu Tao Skin)"), entry === "gamebanana" ? "123" : "Partial Outfit");
+  const auditReads = invoke.mock.calls.filter(([command]) => command === "audit_library").length;
   await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" }));
+  await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "audit_library").length).toBeGreaterThan(auditReads));
   expect(await screen.findByText("Import failed; partial bytes retained")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
   expect(await screen.findByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent("orphan");

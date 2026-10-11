@@ -359,12 +359,113 @@ it("re-renders durable quarantine, launch reservations and audit findings after 
   renderApp();
   await screen.findByRole("region", { name: "Interrupted SRMI launch" });
   await screen.findByRole("region", { name: "Interrupted reinstall recovery for Durable Outfit" });
+  const navigationCalls = invoke.mock.calls.length;
   await openGame();
   expect(await screen.findByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent(auditPath);
   await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   expect(screen.getByRole("region", { name: "Interrupted reinstall recovery for Durable Outfit" })).toHaveTextContent("this Mod may still be loading");
   expect(screen.getByRole("region", { name: "Interrupted SRMI launch" })).toHaveTextContent("kept the launch reservation");
+  expect(invoke.mock.calls.slice(navigationCalls).filter(([command]) => /^(retire_|retry_|recover_|delete_)/.test(command))).toEqual([]);
   expect(within(screen.getByRole("region", { name: "Attention across all Games" })).getByText(auditPath)).toBeVisible();
   await openGame();
   expect(screen.getByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent(auditPath);
+});
+
+
+it.each([
+  ["install_importer", "Reinstall importer"],
+  ["rollback_importer", "Roll back importer"],
+  ["set_importer_pinned", "Pin to current"],
+  ["retire_interrupted_importer_evacuation", "I confirmed no other GMM is changing this importer"],
+  ["retry_importer_evacuation_recovery", "Retry Model Importer recovery"],
+])("refreshes cached Settings path-state after %s", async (writer, button) => {
+  const original = invoke.getMockImplementation()!;
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" },
+    modelImporter: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] } };
+  let changed = false;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "check_importer_update") return { available: false, installedVersion: "1.0", pinned: false };
+    if (command === "get_importer_evacuation_recovery" && writer.includes("evacuation") && !changed) return {
+      reason: "Interrupted importer", attemptedAt: "2026-10-11T00:00:00Z", attempts: 1,
+      gamePath: "C:\\StarRail", backupPath: "C:\\backup", ownerUncertain: writer.startsWith("retire"),
+      action: writer.startsWith("retire") ? "retireProducer" : "retry",
+    };
+    if (command === writer) {
+      changed = true;
+      states.srmi = { ...states.srmi!, modelImporter: { status: "installed" } };
+      return command === "rollback_importer" ? "C:\\backup" : command === "install_importer" ? { sha256: "abc123", backup_dir: null, rewrote_files: [] } : null;
+    }
+    return original(command, args);
+  });
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(await screen.findByRole("button", { name: new RegExp(button) }));
+  await waitFor(() => expect(changed).toBe(true));
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed · Game readable"));
+  expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent("Model Importer not installed");
+});
+
+it.each(["delete", "recover"])("Escape cancels the Library %s prompt before leaving Settings", async (action) => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "audit_library" ? {
+    unreferenced: [{ path: "C:\\GMM\\library\\srmi\\orphan", directoryName: "orphan", sizeBytes: 128 }], duplicates: [], totalBytes: 128,
+  } : original(command, args));
+  renderApp();
+  await openGame();
+  const audit = await screen.findByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" });
+  await userEvent.click(within(audit).getByRole("button", { name: action === "delete" ? "Delete…" : "Recover…" }));
+  expect(within(audit).getByRole("button", { name: "Cancel" })).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+  expect(within(audit).queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  expect(within(audit).getByRole("button", { name: action === "delete" ? "Delete…" : "Recover…" })).toHaveFocus();
+});
+
+it("keeps keyboard focus on the Game navigation button after changing pages", async () => {
+  renderApp();
+  await openGame();
+  const next = pageButton("Genshin Impact");
+  await userEvent.tab(); // Back to Mods
+  await userEvent.tab(); // First Game row
+  expect(next).toHaveFocus();
+  await userEvent.keyboard("{Enter}");
+  expect(next).toHaveFocus();
+  expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toBeVisible();
+});
+
+it("refreshes cached Settings path-state when setup finishes", async () => {
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "requiredEntriesNotFound", paths: ["d3dx.ini"] } };
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Run setup again" }));
+  await screen.findByRole("heading", { name: "GMM — first-run setup" });
+  states.srmi = { ...states.srmi, modelImporter: { status: "installed" } };
+  await userEvent.click(screen.getByRole("button", { name: "Skip setup" }));
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed · Game readable"));
+});
+
+it("refreshes cached Settings uncertainty after importer installation rejects", async () => {
+  const original = invoke.getMockImplementation()!;
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "install_importer") {
+      states.srmi = { ...states.srmi!, modelImporter: { status: "unverified", path: "C:\\StarRail\\Core", error: "Restoration incomplete" } };
+      throw new Error("Install rollback failed");
+    }
+    return original(command, args);
+  });
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Reinstall importer" }));
+  await screen.findByText("Install rollback failed");
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Game readable · Cannot verify Model Importer"));
 });

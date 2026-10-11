@@ -16,7 +16,8 @@ mutation to its IPC command,
 its displayed query state, its success/settlement callbacks, and any parent
 invalidation callback. Read-only backend inspection distinguished atomic setting
 writes from operations that can leave filesystem or recovery state after failure.
-No backend files changed. No shared invalidation module was introduced.
+The original audit changed no backend files. #292 adds a shared Core blocking
+boundary for path-state inspection. No shared frontend invalidation module was introduced.
 
 Reconciliation for #287 found the same 41 call sites, with no additional missing
 invalidation. The reported 46 text occurrences were 41 calls, four imports, and
@@ -55,11 +56,11 @@ from the production inventory.
 | App / ModUpdateBadge | toggle | Unchanged: one Mod setting write already refreshes `modUpdates/game` on success. |
 | SettingsDestination / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. |
 | SettingsDestination / NetworkPanel | test | Unchanged: connection probe; no persisted query state to refresh. |
-| App / ImporterPanel | install | Changed helper: already settled, now also refreshes `importerOrigin/game` and all `importer` queries, including latest release. |
-| App / ImporterPanel | rollback | Changed: same expanded helper runs on settlement; filesystem restoration can fail before provenance is recorded. |
-| App / ImporterPanel | pin | Atomic success policy retained; shared helper now also refreshes the Origin/latest-release surfaces. No separate missing failure invalidation found for this single setting write. |
-| App / ImporterPanel | retireEvacuation | Changed helper: existing settlement now includes Origin/latest-release state restored by recovery. |
-| App / ImporterPanel | retryEvacuation | Changed helper: existing settlement now includes Origin/latest-release state restored by recovery. |
+| App / ImporterPanel | install | Changed helper: already settled, now also refreshes `gamePathStatus/game`, `importerOrigin/game` and all `importer` queries, including latest release. |
+| App / ImporterPanel | rollback | Changed: same expanded helper, including `gamePathStatus/game`, runs on settlement; filesystem restoration can fail before provenance is recorded. |
+| App / ImporterPanel | pin | Atomic success policy retained; shared helper now also refreshes path-state/Origin/latest-release surfaces. No separate missing failure invalidation found for this single setting write. |
+| App / ImporterPanel | retireEvacuation | Changed helper: existing settlement now includes path-state/Origin/latest-release state restored by recovery. |
+| App / ImporterPanel | retryEvacuation | Changed helper: existing settlement now includes path-state/Origin/latest-release state restored by recovery. |
 | App / LibraryPathsPanel | setRoot | Changed: settles `libraryPaths`, `mods`, `libraryAudit`, and `conflicts`; relocation updates Mod paths and can fail to restore deployment. |
 | App / LibraryPathsPanel | setPerGame | Changed: same settlement refresh; broad keys also cover cached inactive Game views. |
 | App / Diagnostics | exportBundle | Unchanged: writes a user-selected diagnostics artifact; displayed log-directory query does not change. |
@@ -74,23 +75,24 @@ from the production inventory.
 | App / VariantSelector | switchVariant | Unchanged: transactional active-Variant update already refreshes `variants/modId` and `conflicts/game` on success. Existing refetch guard stays intact. |
 | App / ImportZipButton | importMutation | Existing settlement callback retained; same expanded parent callback as adoption/GameBanana import. |
 | App / ZipDropZone | importMutation | Existing settlement callback retained; same expanded parent callback. |
-| ImporterOriginPanel | accept | Changed: settles `importerOrigin/game` and `importer`; proposal installation can leave recovery state after rejection. Error is outside the conditional proposal. |
-| ImporterOriginPanel | decline | Unchanged invalidation: atomic dismissal already refreshes Origin/importer on success. Its error notice now stays outside the proposal with the install error. |
-| ImporterOriginPanel | undo | Unchanged: atomic dismissal restoration already refreshes Origin/importer on success. |
-| ImporterOriginPanel | toggleRecommendations | Changed: successful global preference write refreshes all `importer` queries as well as `importerOrigin`; toggling can change the resolved install/release target. |
-| ImporterOriginPanel / OverrideEditor | save | Unchanged: transactionally changes override/install/pin state; `onChanged` calls the parent's Origin/importer invalidation. Success still clears editor drafts. |
+| ImporterOriginPanel | accept | Changed: settles `gamePathStatus/game`, `importerOrigin/game` and `importer`; proposal installation can leave recovery state after rejection. Error is outside the conditional proposal. |
+| ImporterOriginPanel | decline | Existing success boundary retained; shared helper adds path-state to Origin/importer refresh after atomic dismissal. Its error notice now stays outside the proposal with the install error. |
+| ImporterOriginPanel | undo | Existing success boundary retained; shared helper adds path-state to Origin/importer refresh after atomic dismissal restoration. |
+| ImporterOriginPanel | toggleRecommendations | Changed: successful global preference write refreshes all `gamePathStatus` and `importer` queries as well as `importerOrigin`; toggling can change the resolved install/release target. |
+| ImporterOriginPanel / OverrideEditor | save | Existing transactional success boundary retained; `onChanged` calls the parent's expanded path-state/Origin/importer invalidation for override/install/pin changes. Success still clears editor drafts. |
 | ImporterOriginPanel / OverrideEditor | clear | Unchanged: same transactional write and parent invalidation. |
 | LibraryAuditWarning | reveal | Unchanged: reveals a folder; no persisted query state changes. |
 | LibraryAuditWarning | recover | Changed: settles audit/Mods/Conflicts/update rows/Library paths. Recovery can rename a folder before later work fails. |
 | LibraryAuditWarning | remove | Changed: same settlement refresh; delete can quarantine a directory before failure. |
 | LibraryAuditWarning | resolveDuplicates | Changed: same broad settlement refresh, including cached Games whose rejected records are removed. Error remains visible if the last audit row disappears. |
 | OnboardingWizard | close | Changed: settles `onboarding/status`; completion writes two settings. App retains errors if refreshed status changes the route. Standalone wizard retains its own error notice. |
-| OnboardingWizard / DetectStep | setPath | Changed: settles `installPath/game` and cached `onboarding/installPaths`; successful row override remains local. |
+| OnboardingWizard / DetectStep | setPath | Changed: settles `gamePathStatus/game`, `installPath/game` and cached `onboarding/installPaths`; successful row override remains local. |
 | OnboardingWizard / LibraryStep | setRoot | Changed: missing invalidation fixed with settlement refresh of Library paths, Mods, audit, and Conflicts. |
 
 The wizard's sequential `ImporterStep.installOne` is not a mutation hook, but it
-also writes persisted state. Its `finally` block now invalidates `importer` and
-`importerOrigin/game` after each attempted installation.
+also writes persisted state. Its `finally` block invalidates `gamePathStatus/game`,
+`importer` and `importerOrigin/game` after each attempted installation. App also
+refreshes all `gamePathStatus` queries when setup completes.
 
 `AttentionView` intentionally remains an explicit-refresh, time-stamped snapshot
 per its existing product contract. Its query is not automatically invalidated.
@@ -154,17 +156,23 @@ pending-move control disabling. Diagnostics remains read-only.
 
 ## Final verification and limits
 
-- VERIFIED — `pnpm test`: **157 passed, 0 failed, 14 files**.
+- VERIFIED — original #269/#271 audit: `pnpm test`, **157 passed, 0 failed, 14 files**.
+- VERIFIED — #292: full frontend suite, TypeScript check and production build;
+  all five existing Rust AST gates and the path-status runtime boundary gate.
 - VERIFIED — `pnpm build`: TypeScript and Vite production build succeeded.
 - VERIFIED — `git diff --check`: no whitespace errors.
-- NOT-RUN — native Windows/Tauri GUI and actual filesystem path validation.
-- NOT-RUN — Rust/backend tests; no backend files changed.
+- NOT-RUN — native Windows/Tauri GUI, real user-drive path validation, and
+  screen-reader/scroll geometry checks.
+- VERIFIED — #292: `cargo build --workspace` followed by all Rust workspace
+  targets, plus Clippy with warnings denied and Rust formatting. Four existing
+  live/fixture tests remain ignored; native GUI limits above still apply.
 
 The IPC boundary is mocked for component tests. These tests prove frontend
 command routing, cache refresh, error retention, and explicit input commitment;
 they do not prove a native Library move or Windows folder validation.
-Read-only inspection found that the existing `Core::set_game_install_path` stores
-the supplied string without checking filesystem existence or the executable.
-Typed and picked paths use that same unchanged command. No new client validation
+Typed and picked paths use the same backend command, including its existing
+fallible GameProfile validation. Rust path-status suites inspect temporary
+filesystem fixtures; they do not validate a real user-selected Windows drive.
+No new client validation
 was added; native rejection of a nonexistent Game path remains an existing
 backend limitation, tracked separately in #276.

@@ -22,6 +22,7 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
 }) {
   const [visited, setVisited] = useState<Set<SettingsPage>>(new Set());
   const heading = useRef<HTMLHeadingElement>(null);
+  const previousPage = useRef<SettingsPage | null>(null);
   const statuses = useQueries({ queries: games.map((game) => ({
     queryKey: ["gamePathStatus", game.code],
     queryFn: () => getGamePathStatus(game.code),
@@ -30,13 +31,14 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
   useLayoutEffect(() => {
     if (page !== null) {
       setVisited((previous) => new Set([...previous, page]));
-      heading.current?.focus();
+      if (previousPage.current === null) heading.current?.focus();
     }
+    previousPage.current = page;
   }, [page]);
   useEffect(() => {
     if (page === null) return;
     const escape = (event: KeyboardEvent) => {
-      // A child confirmation dialog can consume Escape first.
+      // Library action forms consume Escape to cancel their own prompt first.
       if (event.key === "Escape" && !event.defaultPrevented) onBack();
     };
     window.addEventListener("keydown", escape);

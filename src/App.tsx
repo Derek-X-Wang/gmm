@@ -121,6 +121,7 @@ function App() {
             setSetupError(null);
             setForceWizard(false);
             qc.invalidateQueries({ queryKey: ["installPath"] });
+            qc.invalidateQueries({ queryKey: ["gamePathStatus"] });
             qc.invalidateQueries({ queryKey: ["libraryPaths"] });
           }}
         />
@@ -182,8 +183,8 @@ function MainApp({
   const active = list.find((game) => game.code === selectedGame) ?? installed[0] ?? list[0];
   const activeGame = active.code;
   useEffect(() => {
-    if (selectedGame === null && installed.length > 0) setActiveGame(installed[0].code);
-  }, [selectedGame, installed]);
+    if (!pathsPending && selectedGame === null && installed.length > 0) setActiveGame(installed[0].code);
+  }, [selectedGame, installed, pathsPending]);
 
   const [settingsPage, setSettingsPage] = useState<SettingsPage | null>(null);
   const returnPosition = useRef(0);
@@ -793,6 +794,7 @@ function ImporterPanel({
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["importer"] });
     qc.invalidateQueries({ queryKey: ["importerOrigin", game] });
+    qc.invalidateQueries({ queryKey: ["gamePathStatus", game] });
   };
 
   const install = useMutation({

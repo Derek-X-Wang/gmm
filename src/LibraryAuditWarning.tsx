@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -385,6 +385,13 @@ function ActionNotice({ feedback }: { feedback: ActionFeedback | null }) {
   );
 }
 
+function cancelPromptOnEscape(event: KeyboardEvent, pending: boolean, onCancel: () => void) {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (!pending) onCancel();
+}
+
 /**
  * GMM asks for the name rather than guessing one. Nothing on disk records
  * what the interrupted import was called, so any name GMM produced would be
@@ -403,6 +410,7 @@ function RecoverForm({
   const trimmed = name.trim();
   return (
     <form
+      onKeyDown={(event) => cancelPromptOnEscape(event, pending, onCancel)}
       className="row"
       onSubmit={(e) => {
         e.preventDefault();
@@ -448,6 +456,7 @@ function DeleteConfirmation({
   return (
     <div
       className="row"
+      onKeyDown={(event) => cancelPromptOnEscape(event, pending, onCancel)}
       role="group"
       aria-label="Confirm delete"
       aria-describedby={descriptionId}
@@ -629,6 +638,7 @@ function DuplicateConfirmation({
   return (
     <div
       className="row"
+      onKeyDown={(event) => cancelPromptOnEscape(event, pending, onCancel)}
       role="group"
       aria-label="Confirm duplicate Mod resolution"
       aria-describedby={descriptionId}

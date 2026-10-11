@@ -62,7 +62,7 @@ pub enum ModelImporterState {
     },
 }
 
-pub(crate) fn inspect(game: GameCode, saved_path: Option<PathBuf>) -> GamePathStatus {
+pub(super) fn inspect(game: GameCode, saved_path: Option<PathBuf>) -> GamePathStatus {
     let game_path = match saved_path.as_deref() {
         None => GamePathState::NoSavedPath,
         Some(path) => match inspect_game(game, path, game.profile().validate) {

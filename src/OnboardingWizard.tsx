@@ -187,6 +187,7 @@ function DetectStep() {
     },
     onSettled: (_, __, vars) => {
       qc.invalidateQueries({ queryKey: ["installPath", vars.code] });
+      qc.invalidateQueries({ queryKey: ["gamePathStatus", vars.code] });
       qc.invalidateQueries({ queryKey: ["onboarding", "installPaths"] });
     },
   });
@@ -407,6 +408,7 @@ function ImporterStep() {
     } finally {
       qc.invalidateQueries({ queryKey: ["importer"] });
       qc.invalidateQueries({ queryKey: ["importerOrigin", code] });
+      qc.invalidateQueries({ queryKey: ["gamePathStatus", code] });
     }
   };
 

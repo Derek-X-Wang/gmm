@@ -86,6 +86,7 @@ export function ImporterOriginPanel({
     // Accepting installs, and the override moves which repository the
     // badge is computed from, so the importer panel is stale either way.
     qc.invalidateQueries({ queryKey: ["importer"] });
+    qc.invalidateQueries({ queryKey: ["gamePathStatus", game] });
   };
 
   const accept = useMutation({
@@ -108,6 +109,7 @@ export function ImporterOriginPanel({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["importerOrigin"] });
       qc.invalidateQueries({ queryKey: ["importer"] });
+      qc.invalidateQueries({ queryKey: ["gamePathStatus"] });
     },
   });
 
