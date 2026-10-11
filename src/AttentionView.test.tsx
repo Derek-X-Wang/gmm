@@ -59,6 +59,8 @@ it("checks a clean report once and refreshes only when requested", async () => {
   await screen.findByRole("button", { name: /No attention needed/ });
   await expand();
   await screen.findByText("Nothing needs attention in this report.");
+  expect(screen.getByRole("region", { name: "All-Games attention report" }))
+    .toHaveTextContent("All Games. Refresh after making changes to check again.");
   rerender(<AttentionView />);
   await act(async () => {
     window.dispatchEvent(new Event("focus"));
@@ -199,6 +201,7 @@ it.each([true, false])("labels retained safe=%s reports as previous during refre
   await userEvent.click(screen.getByRole("button", { name: "Refresh attention" }));
   const indicator = screen.getByRole("button", { expanded: true });
   expect(indicator).toHaveTextContent("Refreshing attention…");
+  expect(screen.getAllByRole("status").find((line) => line.textContent === "Refreshing attention…")).toBeInTheDocument();
   expect(indicator).not.toHaveTextContent(/No attention needed|Needs attention|findings/);
   expect(screen.queryByRole("img", { name: "Warning" })).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Refresh attention" })).toBeDisabled();
@@ -229,7 +232,7 @@ it.each([
   attentionStatus.mockResolvedValue(report);
   renderWithQuery(<AttentionView />);
   const indicator = await screen.findByRole("button", { name: label });
-  expect(indicator).toHaveTextContent(count);
+  expect(indicator.querySelector(".attention-indicator__scope")?.textContent).toBe(`All Games · ${count}`);
   expect(indicator).not.toHaveTextContent(/broken Mods/i);
   expect(indicator).toHaveAttribute("aria-expanded", "false");
   expect(screen.queryByRole("heading")).not.toBeInTheDocument();
@@ -278,7 +281,70 @@ it("counts findings across repeated Mods and non-Mod ownership, without performi
   expect(indicator).toHaveFocus();
   expect(indicator).toHaveAttribute("aria-expanded", "false");
   expect(screen.queryByRole("region", { name: "All-Games attention report" })).not.toBeInTheDocument();
+  expect(attentionStatus).toHaveBeenCalledTimes(1);
   expect(invoke).not.toHaveBeenCalled();
+});
+
+it.each(["clean", "unsafe", "pending", "failed"])("expands and collapses from the indicator without fetching while %s", async (state) => {
+  const pending = deferred<AttentionReport>();
+  if (state === "pending") attentionStatus.mockReturnValue(pending.promise);
+  else if (state === "failed") attentionStatus.mockRejectedValue(new Error("Check failed"));
+  else attentionStatus.mockResolvedValue({ ...clean, safeToProceed: state === "clean" });
+  renderWithQuery(<AttentionView />);
+  const label = state === "pending" ? /Checking attention/ : state === "failed" ? /Attention unavailable/
+    : state === "clean" ? /No attention needed/ : /Needs attention/;
+  const indicator = await screen.findByRole("button", { name: label });
+  expect(attentionStatus).toHaveBeenCalledTimes(1);
+  await userEvent.click(indicator);
+  expect(indicator).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("region", { name: "All-Games attention report" })).toBeVisible();
+  expect(attentionStatus).toHaveBeenCalledTimes(1);
+  await userEvent.click(indicator);
+  expect(indicator).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("region", { name: "All-Games attention report" })).not.toBeInTheDocument();
+  expect(indicator).toHaveFocus();
+  expect(attentionStatus).toHaveBeenCalledTimes(1);
+  await userEvent.click(indicator);
+  await userEvent.click(screen.getByRole("button", { name: "Collapse attention report" }));
+  expect(indicator).toHaveAttribute("aria-expanded", "false");
+  expect(attentionStatus).toHaveBeenCalledTimes(1);
+  if (state === "pending") await act(async () => pending.resolve(clean));
+});
+
+it.each([null, undefined, "true"])("keeps a successful report with safety flag %s unavailable", async (flag) => {
+  const report: Partial<AttentionReport> = { ...clean };
+  if (flag === undefined) delete report.safeToProceed;
+  else Object.assign(report, { safeToProceed: flag });
+  attentionStatus.mockResolvedValue(report);
+  renderWithQuery(<AttentionView />);
+  const indicator = await screen.findByRole("button", { name: /Attention unavailable/ });
+  expect(indicator).not.toHaveTextContent(/No attention needed|Needs attention|findings/);
+  expect(screen.queryByRole("img", { name: "Warning" })).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("Attention status is unavailable. Refresh to try again.");
+  const region = await expand();
+  expect(region).not.toHaveTextContent(/Nothing needs attention|previous report found nothing/);
+  expect(screen.getByRole("button", { name: "Refresh attention" })).toBeEnabled();
+});
+
+it.each(["indicator", "report"])("consumes Escape at the %s before a window destination handler", async (target) => {
+  const destinationEscape = vi.fn();
+  window.addEventListener("keydown", destinationEscape);
+  try {
+    attentionStatus.mockResolvedValue(clean);
+    renderWithQuery(<AttentionView />);
+    const indicator = await screen.findByRole("button", { name: /No attention needed/ });
+    indicator.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(indicator).toHaveFocus();
+    const region = screen.getByRole("region", { name: "All-Games attention report" });
+    if (target === "report") within(region).getByRole("button", { name: "Collapse attention report" }).focus();
+    destinationEscape.mockClear();
+    await userEvent.keyboard("{Escape}");
+    expect(indicator).toHaveAttribute("aria-expanded", "false");
+    expect(indicator).toHaveFocus();
+    expect(destinationEscape).not.toHaveBeenCalled();
+    expect(attentionStatus).toHaveBeenCalledTimes(1);
+  } finally { window.removeEventListener("keydown", destinationEscape); }
 });
 
 it("links the expansion control to its keyboard-reachable report and returns focus on Escape", async () => {
@@ -317,7 +383,7 @@ it("does not poll or automatically refresh when other query data changes", async
 });
 
 it("keeps loud and quiet controls equally compact without a heavy fill", async () => {
-  const css = readFileSync("src/App.css", "utf8");
+  const css: string = readFileSync("src/App.css", "utf8");
   const style = document.createElement("style");
   style.textContent = css;
   document.head.appendChild(style);
@@ -335,6 +401,22 @@ it("keeps loud and quiet controls equally compact without a heavy fill", async (
     expect(loud.borderColor).not.toBe(quiet.borderColor);
     expect(indicator).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("img", { name: "Warning" })).toBeInTheDocument();
+
+    // jsdom can return transparent/no image on repeated computed-style reads.
+    // Read the authored rules matching the real control;
+    // include both theme blocks because jsdom does not evaluate color-scheme.
+    const quietControl = document.createElement("button");
+    quietControl.className = "attention-indicator__toggle";
+    const authoredRules = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    const loudRules = [...authoredRules.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, selectors]) =>
+      selectors.split(",").some((selector) => indicator.matches(selector.trim()) && !quietControl.matches(selector.trim())));
+    expect(loudRules).toHaveLength(2);
+    for (const [, , declarations] of loudRules) {
+      const properties = declarations.split(";").map((declaration) => declaration.trim()).filter(Boolean)
+        .map((declaration) => declaration.split(":")[0].trim()).sort();
+      expect(properties, "Loud changes only warning tint; both themes retain the quiet footprint and no fill")
+        .toEqual(["border-color", "color"]);
+    }
   } finally { style.remove(); }
 });
 

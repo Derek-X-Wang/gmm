@@ -18,12 +18,13 @@ export function AttentionView() {
   const [expanded, setExpanded] = useState(false);
   const regionId = useId();
   const indicator = useRef<HTMLButtonElement>(null);
+  const knownSafety = report.data?.safeToProceed === true || report.data?.safeToProceed === false;
   const previous = report.isFetching || report.isError;
   const loud = report.isSuccess && !report.isFetching && report.data.safeToProceed === false;
   const findings = report.data ? findingCount(report.data) : 0;
   const checkingLabel = report.data ? "Refreshing attention…" : "Checking attention…";
   const label = report.isFetching ? checkingLabel
-    : report.isError || !report.data ? "Attention unavailable"
+    : report.isError || !knownSafety ? "Attention unavailable"
     : loud ? "Needs attention" : "No attention needed";
 
   function collapse() {
@@ -36,10 +37,13 @@ export function AttentionView() {
       <div className="attention-indicator__controls">
         <button ref={indicator} className={`attention-indicator__toggle${loud ? " attention-indicator__toggle--loud" : ""}`}
           aria-expanded={expanded} aria-controls={regionId}
-          onClick={() => expanded ? collapse() : setExpanded(true)}>
+          onClick={() => expanded ? collapse() : setExpanded(true)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && expanded) { event.stopPropagation(); collapse(); }
+          }}>
           {loud ? <span role="img" aria-label="Warning">⚠</span> : null}
           <span>{label}</span>
-          <span className="attention-indicator__scope">All Games{!previous && report.data ? ` · ${findings} ${findings === 1 ? "finding" : "findings"}` : ""}</span>
+          <span className="attention-indicator__scope">All Games{!previous && knownSafety ? ` · ${findings} ${findings === 1 ? "finding" : "findings"}` : ""}</span>
         </button>
         <button className="attention-indicator__refresh" onClick={() => void report.refetch()} disabled={report.isFetching}>
           Refresh attention
@@ -49,6 +53,9 @@ export function AttentionView() {
       {report.isError ? (
         <CommandErrorNotice error={report.error} heading="Could not check attention"
           detail="Attention status is unavailable. Refresh to try again." />
+      ) : null}
+      {report.isSuccess && !report.isFetching && !knownSafety ? (
+        <p role="status">Attention status is unavailable. Refresh to try again.</p>
       ) : null}
       <div id={regionId} role="region" aria-label="All-Games attention report" hidden={!expanded}
         className="attention-indicator__report" onKeyDown={(event) => {
@@ -63,7 +70,7 @@ export function AttentionView() {
                 {new Date(report.dataUpdatedAt).toLocaleString()}
               </time>. This is a snapshot; each action checks its own availability.
             </p>
-            {report.data.safeToProceed ? (
+            {report.data.safeToProceed === true ? (
               <p role="status">{previous ? "The previous report found nothing needing attention." : "Nothing needs attention in this report."}</p>
             ) : null}
             <OutstandingAttention report={report.data} />
