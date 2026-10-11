@@ -107,6 +107,7 @@ it("offers a proposed switch, says what accepting will do, and applies nothing o
   // The prompt has to say plainly that it rewrites the game directory.
   expect(proposal).toHaveTextContent(/replac/i);
   expect(proposal).toHaveTextContent(/back(s)? up|backup/i);
+  expect(screen.queryByText("No Origin Proposal.")).not.toBeInTheDocument();
 
   expect(acceptImporterOriginProposal).not.toHaveBeenCalled();
   expect(setImporterOriginOverride).not.toHaveBeenCalled();
@@ -188,6 +189,7 @@ it("shows dismissed origins on the game's own surface and can undo one", async (
 
   const dismissed = await screen.findByRole("group", { name: /dismissed/i });
   expect(dismissed).toHaveTextContent("Curated/GIMI-Fork");
+  expect(screen.queryByText("No dismissed recommendations.")).not.toBeInTheDocument();
 
   await userEvent.click(await screen.findByRole("button", { name: /undo/i }));
   await waitFor(() =>
@@ -302,6 +304,7 @@ it("surfaces dismissal state GMM cannot read rather than reporting none", async 
   expect(
     await screen.findByText(/expected value at line 1 column 1/i),
   ).toBeInTheDocument();
+  expect(screen.queryByText("No dismissed recommendations.")).not.toBeInTheDocument();
 });
 
 it("offers no prompt and no dismissal list while recommendations are off", async () => {
@@ -385,6 +388,7 @@ it("distinguishes empty override, proposal and dismissal states", async () => {
   expect(await screen.findByText("No override set.")).toBeVisible();
   expect(screen.getByText("No Origin Proposal.")).toBeVisible();
   expect(screen.getByText("No dismissed recommendations.")).toBeVisible();
+  expect(screen.queryByText(/Importer recommendations are off/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Clear override/ })).not.toBeInTheDocument();
 });
 it.each(["accept", "decline", "undo", "save", "clear"])("shows %s pending and outcome without losing errors to a disappearing proposal", async (action) => {
@@ -497,6 +501,33 @@ it("suppresses all confident empty Origin claims during and after a failed refre
   expect(screen.getByText("No override set.")).toBeVisible();
 });
 
+it("suppresses the recommendations-off claim while Origin is pending and after a failed refresh", async () => {
+  const initial = deferredOriginCheck();
+  importerOriginStatus.mockReturnValue(initial.promise);
+  const { client } = render();
+  expect(screen.getByText("Reading Importer Origin…")).toBeVisible();
+  expect(screen.queryByText(/Importer recommendations are off/)).not.toBeInTheDocument();
+
+  await act(async () => { initial.resolve(status({ recommendationsEnabled: false })); });
+  expect(await screen.findByText(/Importer recommendations are off/)).toBeVisible();
+
+  const pending = deferredOriginCheck();
+  importerOriginStatus.mockReturnValue(pending.promise);
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }); });
+  expect(await screen.findByText("The Origin details below are from the previous check.")).toBeVisible();
+  expect(screen.queryByText(/Importer recommendations are off/)).not.toBeInTheDocument();
+
+  await act(async () => { pending.reject(new Error("Origin refresh failed")); await refresh; });
+  expect(await screen.findByText("Origin refresh failed")).toBeVisible();
+  expect(screen.getByText("The Origin details below are from the previous check.")).toBeVisible();
+  expect(screen.queryByText(/Importer recommendations are off/)).not.toBeInTheDocument();
+
+  importerOriginStatus.mockResolvedValue(status({ recommendationsEnabled: false }));
+  await act(() => client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }));
+  expect(await screen.findByText(/Importer recommendations are off/)).toBeVisible();
+});
+
 it("keeps a retained Origin Proposal labelled as previous and disables install until a successful refresh", async () => {
   importerOriginStatus.mockResolvedValue(status({ proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } } }));
   const { client } = render();
@@ -566,6 +597,9 @@ it("explains the disabled recommendation layer without claiming proposals or dis
   expect(screen.queryByText("No Origin Proposal.")).not.toBeInTheDocument();
   expect(screen.getByText(/Importer recommendations are off/)).toHaveTextContent("Your dismissed recommendations stay saved.");
   expect(screen.getByText(/Importer recommendations are off/)).toHaveTextContent("GMM importer recommendations");
+  expect(screen.getByText(/Importer recommendations are off/).textContent).toBe(
+    "Importer recommendations are off. Proposals and dismissals are hidden. Your dismissed recommendations stay saved. Turn recommendations on in GMM importer recommendations to review them.",
+  );
   await userEvent.click(screen.getByRole("button", { name: "View GMM importer recommendations" }));
   expect(onRecommendationsPage).toHaveBeenCalledOnce();
 });
