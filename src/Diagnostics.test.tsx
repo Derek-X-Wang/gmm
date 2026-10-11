@@ -30,6 +30,24 @@ it("reports directory failure instead of an empty available path", async () => {
   expect(screen.getByText("Log directory unavailable.")).toBeVisible();
   expect(screen.getByRole("button", { name: "Export diagnostics bundle" })).toBeDisabled();
 });
+it.each(["checking", "failed"])("labels the retained log directory as previous during a %s refresh", async (state) => {
+  const { client } = renderWithQuery(<Diagnostics />);
+  await screen.findByDisplayValue("C:/GMM/logs");
+  let reject!: (error: Error) => void;
+  invoke.mockImplementation(() => new Promise((_resolve, no) => { reject = no; }));
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["diagnostics", "logDir"] }); });
+  expect(await screen.findByText("The log directory below is from the previous check.")).toBeVisible();
+  if (state === "failed") {
+    await act(async () => { reject(new Error("Log directory refresh failed")); await refresh; });
+    expect(await screen.findByText("Log directory refresh failed")).toBeVisible();
+    expect(screen.getByText("The log directory below is from the previous check.")).toBeVisible();
+  }
+  expect(screen.getByRole("textbox", { name: "Log directory" })).toHaveValue("C:/GMM/logs");
+  expect(screen.getByRole("textbox", { name: "Log directory" })).toHaveAttribute("readonly");
+  expect(screen.getByRole("button", { name: "Export diagnostics bundle" })).toBeDisabled();
+  expect(save).not.toHaveBeenCalled();
+});
 it("cancels the local dialog without exporting or reporting an artifact", async () => {
   save.mockResolvedValue(null);
   renderWithQuery(<Diagnostics />);

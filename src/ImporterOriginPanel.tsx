@@ -261,8 +261,9 @@ export function ImporterOriginPanel({
               </ul>
             </div>
           ) : null}
-          {!data.proposal && originVerified ? <p className="muted small">No Origin Proposal.</p> : null}
-          {data.dismissed.length === 0 && !data.dismissalsError && originVerified ? <p className="muted small">No dismissed recommendations.</p> : null}
+          {!data.recommendationsEnabled && originVerified ? <p className="muted small">Importer recommendations are off. Proposals and dismissals are hidden. Your dismissed recommendations stay saved. Turn recommendations on in GMM importer recommendations to review them.</p> : null}
+          {data.recommendationsEnabled && !data.proposal && originVerified ? <p className="muted small">No Origin Proposal.</p> : null}
+          {data.recommendationsEnabled && data.dismissed.length === 0 && !data.dismissalsError && originVerified ? <p className="muted small">No dismissed recommendations.</p> : null}
 
           {data.dismissalsError ? (
             <p className="error">

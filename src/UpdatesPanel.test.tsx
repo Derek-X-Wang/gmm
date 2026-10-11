@@ -32,12 +32,15 @@ it("shows available, known and unknown download progress, installed and explicit
   renderWithQuery(<UpdatesPanel />);
   await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
   expect(await screen.findByText(/is available/)).toHaveTextContent("0.5.0");
+  expect(screen.queryByRole("button", { name: "Restart to apply" })).not.toBeInTheDocument();
   await act(() => progress({ event: "Started", data: {} }));
   expect(screen.getByText("Downloading…")).toBeVisible();
   expect(screen.getByRole("button", { name: "Check for updates" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Restart to apply" })).not.toBeInTheDocument();
   await act(() => progress({ event: "Started", data: { contentLength: 200 } }));
   await act(() => progress({ event: "Progress", data: { chunkLength: 50 } }));
   expect(screen.getByText("Downloading (25%)")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Restart to apply" })).not.toBeInTheDocument();
   expect(relaunch).not.toHaveBeenCalled();
   await act(async () => { progress({ event: "Finished" }); finish(); });
   expect(screen.getByText(/Update downloaded/)).toBeVisible();

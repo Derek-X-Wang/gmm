@@ -102,7 +102,7 @@ it("links every Game to its proposals, dismissals and overrides", async () => {
   }
 });
 
-it("refreshes the other Game's Origin, importer and path surfaces and preserves dismissals", async () => {
+it("refreshes both Games' Origin, importer and path surfaces and preserves dismissals", async () => {
   const client = makeQueryClient();
   client.setDefaultOptions({ queries: { retry: false, staleTime: 30_000, gcTime: 300_000 } });
   renderWithQuery(<>
@@ -112,25 +112,94 @@ it("refreshes the other Game's Origin, importer and path surfaces and preserves 
       <ImporterOriginPanel game={game.code} displayName={game.displayName} />
     </div>)}
   </>, { client });
-  const other = within(screen.getByTestId("srmi"));
-  expect(await other.findByText(/In effect:/)).toHaveTextContent("Curated/Package");
-  expect(await other.findByText(/Latest release:/)).toHaveTextContent("curated-v2");
-  expect(await other.findByText("SRMI installed · Game readable")).toBeVisible();
-  expect(await other.findByRole("group", { name: "Dismissed recommendations" })).toHaveTextContent("Curated/DeclinedPackage");
-  expect(other.getByRole("group", { name: "GMM recommends a different Importer Origin" })).toBeVisible();
+  for (const game of games) {
+    const page = within(screen.getByTestId(game.code));
+    expect(await page.findByText(/In effect:/)).toHaveTextContent("Curated/Package");
+    expect(await page.findByText(/Latest release:/)).toHaveTextContent("curated-v2");
+    expect(await page.findByText(`${game.code.toUpperCase()} installed · Game readable`)).toBeVisible();
+    expect(await page.findByRole("group", { name: "Dismissed recommendations" })).toHaveTextContent("Curated/DeclinedPackage");
+    expect(page.getByRole("group", { name: "GMM recommends a different Importer Origin" })).toBeVisible();
+  }
   await waitFor(() => expect(client.isFetching()).toBe(0));
   // The preference is global; neither mounted Game may stay on a fresh cached layer.
   await userEvent.click(screen.getByRole("checkbox", { name: /Recommend importer origins/ }));
-  await waitFor(() => expect(other.getByText(/In effect:/)).toHaveTextContent("BuiltIn/Package"));
-  await waitFor(() => expect(other.getByText(/Latest release:/)).toHaveTextContent("built-in-v1"));
-  expect(await other.findByText("Path re-read after preference change")).toBeVisible();
-  expect(other.queryByText("SRMI installed · Game readable")).not.toBeInTheDocument();
-  expect(other.queryByRole("group", { name: "GMM recommends a different Importer Origin" })).not.toBeInTheDocument();
-  expect(other.queryByRole("group", { name: "Dismissed recommendations" })).not.toBeInTheDocument();
-  expect(other.getByRole("button", { name: "Save origin" })).toBeEnabled();
+  for (const game of games) {
+    const page = within(screen.getByTestId(game.code));
+    await waitFor(() => expect(page.getByText(/In effect:/)).toHaveTextContent("BuiltIn/Package"));
+    await waitFor(() => expect(page.getByText(/Latest release:/)).toHaveTextContent("built-in-v1"));
+    expect(await page.findByText("Path re-read after preference change")).toBeVisible();
+    expect(page.queryByText(`${game.code.toUpperCase()} installed · Game readable`)).not.toBeInTheDocument();
+    expect(page.queryByRole("group", { name: "GMM recommends a different Importer Origin" })).not.toBeInTheDocument();
+    expect(page.queryByRole("group", { name: "Dismissed recommendations" })).not.toBeInTheDocument();
+    expect(page.getByRole("button", { name: "Save origin" })).toBeEnabled();
+    for (const command of ["importer_origin_status", "fetch_latest_importer_release", "get_game_path_status"]) {
+      expect(invoke.mock.calls.filter(([name, args]) => name === command && args.game === game.code)).toHaveLength(2);
+    }
+  }
   await waitFor(() => expect(screen.getByRole("checkbox", { name: /Recommend importer origins/ })).toBeEnabled());
   await userEvent.click(screen.getByRole("checkbox", { name: /Recommend importer origins/ }));
-  expect(await other.findByRole("group", { name: "Dismissed recommendations" })).toHaveTextContent("Curated/DeclinedPackage");
-  // Only the upstream informational Loader note is present; this action installs a Model Importer.
-  expect(other.queryByRole("button", { name: /Apply.*Loader|Update.*Loader/ })).not.toBeInTheDocument();
+  for (const game of games) {
+    const page = within(screen.getByTestId(game.code));
+    expect(await page.findByRole("group", { name: "Dismissed recommendations" })).toHaveTextContent("Curated/DeclinedPackage");
+    // Only the upstream informational Loader note is present; this action installs a Model Importer.
+    expect(page.queryByRole("button", { name: /Apply.*Loader|Update.*Loader/ })).not.toBeInTheDocument();
+  }
+});
+
+it("refreshes latest release, update status and evacuation checks for both Games after one preference change", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => {
+    // Keep the filesystem readable so the update result remains visible.
+    if (command === "get_game_path_status") return Promise.resolve({
+      game: args.game, savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" },
+    });
+    if (command === "check_importer_update") return Promise.resolve({
+      available: enabled, installedVersion: "1.0", pinned: false,
+      latestVersion: enabled ? "2.0" : "1.0", upstreamAhead: enabled, checkError: null,
+    });
+    return original(command, args);
+  });
+  const client = makeQueryClient();
+  client.setDefaultOptions({ queries: { retry: false, staleTime: 30_000, gcTime: 300_000 } });
+  renderWithQuery(<>
+    <ImporterRecommendations games={games} onGamePage={vi.fn()} />
+    {games.map((game) => <div key={game.code} data-testid={game.code}>
+      <ImporterPanel game={game.code} displayName={game.displayName} />
+    </div>)}
+  </>, { client });
+  for (const game of games) {
+    const page = within(screen.getByTestId(game.code));
+    expect(await page.findByText("Update available: 2.0")).toBeVisible();
+    expect(page.getByText(/Latest release:/)).toHaveTextContent("curated-v2");
+  }
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  await userEvent.click(screen.getByRole("checkbox"));
+  await waitFor(() => expect(screen.getByRole("checkbox")).toBeEnabled());
+  for (const game of games) {
+    const page = within(screen.getByTestId(game.code));
+    expect(await page.findByText("Model Importer is current.")).toBeVisible();
+    expect(page.queryByText("Update available: 2.0")).not.toBeInTheDocument();
+    expect(page.getByText(/Latest release:/)).toHaveTextContent("built-in-v1");
+    // Recovery is unchanged by this atomic preference write, but must be checked again.
+    for (const command of ["fetch_latest_importer_release", "check_importer_update", "get_importer_evacuation_recovery"]) {
+      expect(invoke.mock.calls.filter(([name, args]) => name === command && args.game === game.code)).toHaveLength(2);
+    }
+  }
+});
+
+it.each(["checking", "failed"])("labels the retained preference as previous during a %s refresh", async (state) => {
+  const { client } = renderPreference();
+  expect(await screen.findByRole("checkbox")).toBeChecked();
+  let reject!: (error: Error) => void;
+  invoke.mockImplementation(() => new Promise((_resolve, no) => { reject = no; }));
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["importerRecommendations"] }); });
+  expect(await screen.findByText("The preference below is from the previous check.")).toBeVisible();
+  if (state === "failed") {
+    await act(async () => { reject(new Error("Preference refresh failed")); await refresh; });
+    expect(await screen.findByText("Preference refresh failed")).toBeVisible();
+    expect(screen.getByText("The preference below is from the previous check.")).toBeVisible();
+  }
+  expect(screen.getByRole("checkbox")).toBeChecked();
+  expect(screen.getByRole("checkbox")).toBeDisabled();
 });

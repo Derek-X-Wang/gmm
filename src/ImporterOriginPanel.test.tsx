@@ -555,3 +555,17 @@ it("links to the GMM preference while keeping per-Game origin actions", async ()
   await userEvent.click(screen.getByRole("button", { name: "View GMM importer recommendations" }));
   expect(onRecommendationsPage).toHaveBeenCalledOnce();
 });
+
+it("explains the disabled recommendation layer without claiming proposals or dismissals are absent", async () => {
+  // The backend hides saved dismissals and proposals while the layer is off.
+  importerOriginStatus.mockResolvedValue(status({ recommendationsEnabled: false }));
+  const onRecommendationsPage = vi.fn();
+  renderWithQuery(<ImporterOriginPanel game="gimi" displayName="Genshin Impact" onRecommendationsPage={onRecommendationsPage} />);
+  await screen.findByRole("button", { name: "Save origin" });
+  expect(screen.queryByText("No dismissed recommendations.")).not.toBeInTheDocument();
+  expect(screen.queryByText("No Origin Proposal.")).not.toBeInTheDocument();
+  expect(screen.getByText(/Importer recommendations are off/)).toHaveTextContent("Your dismissed recommendations stay saved.");
+  expect(screen.getByText(/Importer recommendations are off/)).toHaveTextContent("GMM importer recommendations");
+  await userEvent.click(screen.getByRole("button", { name: "View GMM importer recommendations" }));
+  expect(onRecommendationsPage).toHaveBeenCalledOnce();
+});

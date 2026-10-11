@@ -142,10 +142,12 @@ local artifact command and explicit no-invalidation decision. The global
 `toggleRecommendations` moved from `ImporterOriginPanel` into
 `ImporterRecommendations`. Its atomic-success boundary and all-Game
 `importerOrigin`, `importer`, and `gamePathStatus` prefixes are unchanged; it
-also refreshes the dedicated global preference query. A two-Game behavioral
-regression asserts refreshed Origin, release and path projections in the other
-Game's DOM under the production 30-second cache window. Narrowing any one of
-these three prefixes is tested independently by source mutation.
+also refreshes the dedicated global preference query. Two-Game behavioral
+regressions assert refreshed Origin, release, update and path projections in
+both Games' DOM under the production 30-second cache window, and observe both
+Games' evacuation checks re-run. Narrowing any Game prefix to either one Game,
+or the importer prefix to latest/update/evacuation alone, is tested independently
+by source mutation.
 
 The GMM page retains its Library root first and Network second, followed by
 GMM updates, importer recommendations and Diagnostics. `ModUpdatesPanel` stays
