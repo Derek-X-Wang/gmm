@@ -32,7 +32,9 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
   const status = useQuery({ queryKey: ["gamePathStatus", game], queryFn: () => getGamePathStatus(game) });
   const error = pathReadError ?? status.error;
   const pending = pathReadPending || status.isFetching;
-  const summary = error ? { line: "Cannot tell — install path unreadable · Model Importer unverified", detail: commandFailureMessage(error) }
+  const summary = error ? { line: pathReadError != null
+    ? "Cannot tell — install path unreadable · Model Importer unverified"
+    : "Cannot tell — path check unavailable · Model Importer unverified", detail: commandFailureMessage(error) }
     : pending ? { line: "Checking Game install path · Model Importer unverified" }
     : status.data ? pathSummary(status.data) : { line: "Cannot tell — path check unavailable · Model Importer unverified" };
   const path = savedPath ?? status.data?.savedPath;

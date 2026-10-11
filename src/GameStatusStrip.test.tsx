@@ -63,6 +63,35 @@ it("does not reuse a cached readable result after the filesystem check fails", a
   invoke.mockRejectedValue(new Error("Storage unavailable"));
   await act(() => client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Storage unavailable"));
-  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — install path unreadable · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — path check unavailable · Model Importer unverified");
   expect(screen.getByRole("status")).not.toHaveTextContent(/Game readable|not installed|version/i);
+});
+
+
+it("keeps checking while the saved-path read is pending despite a completed status check", async () => {
+  const { client } = renderWithQuery(<GameStatusStrip {...props} pathReadPending />);
+  await waitFor(() => expect(client.getQueryData(["gamePathStatus", "srmi"])).toEqual(readable));
+  await waitFor(() => expect(screen.getByRole("region", { name: "Honkai: Star Rail status" })).toHaveAttribute("aria-busy", "true"));
+  expect(screen.getByRole("status")).toHaveTextContent("Checking Game install path · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent(`Last saved path: ${savedPath}`);
+  expect(screen.queryByText(/Game readable/)).not.toBeInTheDocument();
+});
+
+it("keeps a saved-path read failure ahead of a pending read", async () => {
+  renderWithQuery(<GameStatusStrip {...props} pathReadPending pathReadError={new Error("Settings database locked")} />);
+  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — install path unreadable · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent("Settings database locked");
+  expect(screen.getByRole("status")).toHaveTextContent(`Last saved path: ${savedPath}`);
+  expect(screen.queryByText(/Checking Game install path/)).not.toBeInTheDocument();
+});
+
+it("keeps a rejected status check ahead of a pending saved-path read", async () => {
+  invoke.mockRejectedValue(new Error("Path check channel closed"));
+  const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
+  await screen.findByText("Path check channel closed");
+  rerender(<GameStatusStrip {...props} pathReadPending />);
+  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — path check unavailable · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent("Path check channel closed");
+  expect(screen.getByRole("status")).toHaveTextContent(`Last saved path: ${savedPath}`);
+  expect(screen.queryByText(/Checking Game install path/)).not.toBeInTheDocument();
 });

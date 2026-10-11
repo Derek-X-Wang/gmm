@@ -161,7 +161,7 @@ function MainApp({
   // Filesystem health and Model Importer presence do not determine tab membership.
   const installed = list.filter((_, index) => Boolean(installPaths[index].data?.trim()));
   const remaining = list.filter((game) => !installed.some((entry) => entry.code === game.code));
-  const pathsPending = games.isPending || installPaths.some((path) => path.isPending || path.isFetching);
+  const pathsPending = games.isPending || installPaths.some((path) => path.isPending);
   const pathErrors = installPaths.flatMap((path, index) => path.isError
     ? [`${list[index].displayName}: ${commandFailureMessage(path.error)}`]
     : []);

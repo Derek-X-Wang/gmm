@@ -250,3 +250,77 @@ it.each(["unreadable", "savedPathNotFound", "importerAbsent"])("keeps the config
   await userEvent.click(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" }));
   expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toHaveValue("C:/StarRail");
 });
+
+
+it("keeps Add game available during a background saved-path refetch", async () => {
+  paths = { srmi: "C:/StarRail" };
+  const { client } = renderWithQuery(<App />);
+  await screen.findByRole("button", { name: "Add game" });
+  const implementation = invoke.getMockImplementation()!;
+  let resolvePath!: (path: string) => void;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_install_path" && args.game === "srmi") return new Promise<string>((resolve) => { resolvePath = resolve; });
+    return implementation(command, args);
+  });
+  let refetch!: Promise<void>;
+  await act(async () => { refetch = client.invalidateQueries({ queryKey: ["installPath", "srmi"] }); });
+  try {
+    await waitFor(() => expect(client.isFetching({ queryKey: ["installPath", "srmi"] })).toBe(1));
+    expect(screen.getByRole("button", { name: "Add game" })).toBeVisible();
+    expect(screen.queryByText("Checking game install paths…")).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(screen.getByRole("button", { name: "Add game" }));
+    expect(screen.getByRole("button", { name: "Set up Genshin Impact" })).toBeVisible();
+  } finally {
+    await act(async () => { resolvePath("C:/StarRail"); await refetch; });
+  }
+});
+
+it("moves to the remaining installed Game when Settings clears the selected Game's path", async () => {
+  paths = { gimi: "C:/Genshin", srmi: "C:/StarRail" };
+  renderWithQuery(<App />);
+  await userEvent.click(await screen.findByRole("tab", { name: "Honkai: Star Rail" }));
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  await userEvent.clear(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }));
+  await userEvent.click(screen.getByRole("button", { name: "Apply Honkai: Star Rail install path" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_game_install_path", { game: "srmi", path: "" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await waitFor(() => expect(tabNames()).toEqual(["Genshin Impact"]));
+  expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("region", { name: "Genshin Impact header" })).toBeVisible();
+  expect(screen.getByRole("region", { name: "Genshin Impact status" })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: /^Mods \(/ })).toBeVisible();
+});
+
+it("does not invent a return Game when Settings opens with no configured Games", async () => {
+  renderWithQuery(<App />);
+  await screen.findByRole("button", { name: "Add game" });
+  await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Back to Mods" })).toBeVisible();
+  expect(screen.queryByText(/^Return to /)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(tabNames()).toEqual([]);
+  expect(screen.getByText("No game install paths set. Add a game to get started.")).toBeVisible();
+});
+
+it("agrees with the Settings row that a rejected path check is unavailable", async () => {
+  paths = { srmi: "C:/StarRail" };
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_path_status") throw new Error("Path check channel closed");
+    return implementation(command, args);
+  });
+  renderWithQuery(<App />);
+  const strip = await screen.findByRole("region", { name: "Honkai: Star Rail status" });
+  expect(await within(strip).findByText("Cannot tell — path check unavailable · Model Importer unverified")).toBeVisible();
+  expect(strip).toHaveTextContent("Path check channel closed");
+  expect(strip).toHaveTextContent("C:/StarRail");
+  expect(strip).not.toHaveTextContent(/unreadable|not installed|version/i);
+  await userEvent.click(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  const row = within(screen.getByRole("navigation", { name: "Settings pages" })).getByRole("button", { name: /Honkai: Star Rail/ });
+  await waitFor(() => expect(row).toHaveTextContent("Cannot tell · path check unavailable"));
+  expect(row).not.toHaveTextContent(/unreadable|not installed|version/i);
+  expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toHaveValue("C:/StarRail");
+});
