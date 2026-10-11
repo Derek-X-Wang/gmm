@@ -1,9 +1,10 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
-import type { GamePathStatus } from "./api";
+import type { GamePathStatus, UpdateStatus } from "./api";
 import { renderWithQuery } from "./test/harness";
 import { GameStatusStrip } from "./GameStatusStrip";
+import { ImporterPanel } from "./ImporterPanel";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -11,7 +12,15 @@ const savedPath = "C:/StarRail";
 const readable: GamePathStatus = { game: "srmi", savedPath, gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
 const props = { game: "srmi" as const, displayName: "Honkai: Star Rail", savedPath, pathReadError: null, pathReadPending: false, onSettings: vi.fn() };
 
-beforeEach(() => { invoke.mockResolvedValue(readable); props.onSettings.mockClear(); });
+let pathStatus: GamePathStatus;
+let updateStatus: UpdateStatus;
+
+beforeEach(() => {
+  pathStatus = readable;
+  updateStatus = { available: false, installedVersion: "1.0", latestVersion: "2.0", pinned: false, upstreamAhead: false, checkError: null };
+  invoke.mockImplementation(async (command) => command === "get_game_path_status" ? pathStatus : updateStatus);
+  props.onSettings.mockClear();
+});
 
 it.each([
   [{ ...readable, gamePath: { status: "unreadable", path: savedPath, error: "Access denied" } }, "Cannot tell — install path unreadable · Model Importer unverified", "Access denied"],
@@ -20,12 +29,14 @@ it.each([
   [{ ...readable, modelImporter: { status: "unverified", path: "C:/StarRail/Core", error: "Sharing violation" } }, "Game readable · Model Importer unverified", "Sharing violation"],
   [{ ...readable, gamePath: { status: "invalid", error: "Invalid layout" } }, "Cannot verify Game layout · Model Importer unverified", "Invalid layout"],
 ])("reports verified path evidence without inferring an installed version: %s", async (value, line, detail) => {
-  invoke.mockResolvedValue(value);
+  pathStatus = value as GamePathStatus;
   renderWithQuery(<GameStatusStrip {...props} />);
   const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
   expect(await within(strip).findByText(line as string)).toBeVisible();
   expect(strip).toHaveTextContent(detail as string);
   expect(strip).toHaveTextContent(savedPath);
+  expect(strip).toHaveTextContent("Model Importer (SRMI)");
+  if (line === "Game readable · Model Importer not installed") expect(strip).toHaveTextContent("Unhealthy");
   expect(within(strip).getByText(savedPath, { selector: "code" })).toBeVisible();
   if (line !== "Game readable · Model Importer not installed") expect(strip).not.toHaveTextContent(/not installed|no saved/i);
   expect(strip).not.toHaveTextContent(/version|v1\./i);
@@ -33,23 +44,181 @@ it.each([
   expect(settings).toHaveAttribute("data-settings-arrival", "game");
   await userEvent.click(settings);
   expect(props.onSettings).toHaveBeenCalledTimes(1);
-  expect(invoke.mock.calls.map(([command]) => command)).toEqual(["get_game_path_status"]);
+  expect(invoke.mock.calls.map(([command]) => command)).toEqual(["get_game_path_status", "check_importer_update"]);
+});
+
+it("reports the healthy importer name, recorded installed version and read-only pin", async () => {
+  updateStatus.pinned = true;
+  renderWithQuery(<GameStatusStrip {...props} />);
+  const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
+  expect(await within(strip).findByText("Game readable · Model Importer healthy")).toBeVisible();
+  expect(strip).toHaveTextContent("Model Importer (SRMI)");
+  expect(await within(strip).findByText("Installed version:")).toHaveTextContent("1.0");
+  expect(within(strip).getByLabelText("Importer Pin applies")).toHaveTextContent("Pinned");
+  expect(strip).not.toHaveTextContent(/2\.0|current|Origin|github|Package/i);
+  expect(within(strip).getAllByRole("button").map((button) => button.textContent)).toEqual(["Settings for Honkai: Star Rail"]);
+  expect(within(strip).queryByRole("textbox")).not.toBeInTheDocument();
+  const calls = invoke.mock.calls.length;
+  await userEvent.click(within(strip).getByRole("button"));
+  expect(props.onSettings).toHaveBeenCalledTimes(1);
+  expect(invoke.mock.calls).toHaveLength(calls);
+});
+
+it("shows no pin marker without an Importer Pin", async () => {
+  renderWithQuery(<GameStatusStrip {...props} />);
+  await screen.findByText("Installed version:");
+  expect(screen.queryByLabelText("Importer Pin applies")).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).not.toHaveTextContent(/Pinned|Unpinned/);
+});
+
+it("does not infer an unrecorded version from the upstream version", async () => {
+  updateStatus.installedVersion = null;
+  renderWithQuery(<GameStatusStrip {...props} />);
+  expect(await screen.findByText("Installed version unknown (not recorded).")).toBeVisible();
+  expect(screen.getByRole("status")).not.toHaveTextContent(/2\.0|current|Installed version:/);
+});
+
+it("keeps version checking distinct from verified filesystem health", async () => {
+  let resolve!: (value: UpdateStatus) => void;
+  invoke.mockImplementation(async (command) => command === "check_importer_update"
+    ? new Promise<UpdateStatus>((yes) => { resolve = yes; }) : pathStatus);
+  renderWithQuery(<GameStatusStrip {...props} />);
+  expect(await screen.findByText("Checking installed version and Importer Pin…")).toBeVisible();
+  expect(screen.getByRole("status")).toHaveTextContent("Model Importer healthy");
+  expect(screen.getByRole("status")).not.toHaveTextContent(/1\.0|2\.0|current|not recorded/);
+  await act(async () => resolve(updateStatus));
+  expect(await screen.findByText("Installed version:")).toHaveTextContent("1.0");
+});
+
+it("withdraws cached version and pin after their read rejects", async () => {
+  updateStatus.pinned = true;
+  const { client } = renderWithQuery(<GameStatusStrip {...props} />);
+  await screen.findByText("Installed version:");
+  invoke.mockImplementation(async (command) => {
+    if (command === "check_importer_update") throw new Error("Version channel closed");
+    return pathStatus;
+  });
+  await act(() => client.invalidateQueries({ queryKey: ["importer"] }));
+  expect(await screen.findByText("Installed version check unavailable: Version channel closed")).toBeVisible();
+  expect(screen.getByRole("status")).toHaveTextContent("Model Importer healthy");
+  expect(screen.getByRole("status")).not.toHaveTextContent(/1\.0|Pinned|not recorded|current/);
+});
+
+it("keeps a recorded installed version when only the upstream network check fails", async () => {
+  updateStatus.checkError = "Upstream unreachable";
+  renderWithQuery(<GameStatusStrip {...props} />);
+  expect(await screen.findByText("Installed version:")).toHaveTextContent("1.0");
+  expect(screen.getByRole("status")).not.toHaveTextContent(/current|2\.0/);
+});
+
+it("withdraws a cached version while its refresh is checking", async () => {
+  updateStatus.pinned = true;
+  const { client } = renderWithQuery(<GameStatusStrip {...props} />);
+  await screen.findByText("Installed version:");
+  let resolve!: (value: UpdateStatus) => void;
+  invoke.mockImplementation(async (command) => command === "check_importer_update"
+    ? new Promise<UpdateStatus>((yes) => { resolve = yes; }) : pathStatus);
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["importer"] }); });
+  expect(await screen.findByText("Checking installed version and Importer Pin…")).toBeVisible();
+  expect(screen.getByRole("status")).not.toHaveTextContent(/1\.0|Pinned|Installed version:/);
+  await act(async () => { resolve(updateStatus); await refresh; });
+  expect(await screen.findByText("Installed version:")).toHaveTextContent("1.0");
+});
+
+it("withdraws a cached installed fact while the path refresh is checking", async () => {
+  const { client } = renderWithQuery(<GameStatusStrip {...props} />);
+  await screen.findByText("Installed version:");
+  let resolve!: (value: GamePathStatus) => void;
+  invoke.mockImplementation(async (command) => command === "get_game_path_status"
+    ? new Promise<GamePathStatus>((yes) => { resolve = yes; }) : updateStatus);
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }); });
+  expect(await screen.findByText("Checking Game install path · Model Importer unverified")).toBeVisible();
+  expect(screen.getByRole("status")).not.toHaveTextContent(/healthy|1\.0|Installed version:/);
+  await act(async () => { resolve(readable); await refresh; });
+  expect(await screen.findByText("Installed version:")).toHaveTextContent("1.0");
+});
+
+it("refreshes path evidence and version and pin through existing query keys", async () => {
+  const { client } = renderWithQuery(<GameStatusStrip {...props} />);
+  await screen.findByText("Installed version:");
+  pathStatus = { ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } };
+  await act(() => client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }));
+  expect(await screen.findByText("Game readable · Model Importer not installed")).toBeVisible();
+  expect(screen.getByRole("status")).not.toHaveTextContent("Installed version:");
+  pathStatus = readable;
+  updateStatus = { ...updateStatus, installedVersion: "1.1", pinned: true };
+  await act(async () => { await Promise.all([
+    client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }),
+    client.invalidateQueries({ queryKey: ["importer"] }),
+  ]); });
+  expect(await screen.findByText("Installed version:")).toHaveTextContent("1.1");
+  expect(screen.getByLabelText("Importer Pin applies")).toBeVisible();
+});
+
+it("changes the importer identity and metadata with the selected Game", async () => {
+  invoke.mockImplementation(async (command, args) => command === "get_game_path_status"
+    ? { ...readable, game: args.game, savedPath: args.game === "gimi" ? "C:/Genshin" : savedPath }
+    : { ...updateStatus, installedVersion: args.game === "gimi" ? "8.0" : "1.0" });
+  const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
+  await screen.findByText("Installed version:");
+  rerender(<GameStatusStrip {...props} game="gimi" displayName="Genshin Impact" savedPath="C:/Genshin" />);
+  const strip = screen.getByRole("region", { name: "Genshin Impact status" });
+  expect(await within(strip).findByText("Installed version:")).toHaveTextContent("8.0");
+  expect(strip).toHaveTextContent("Model Importer (GIMI)");
+  expect(strip).toHaveTextContent("C:/Genshin");
+  expect(strip).not.toHaveTextContent(/SRMI|1\.0|StarRail/);
+  expect(invoke).toHaveBeenCalledWith("get_game_path_status", { game: "gimi" });
+  expect(invoke).toHaveBeenCalledWith("check_importer_update", { game: "gimi" });
+});
+
+it("refreshes the strip when the Settings importer install settles", async () => {
+  pathStatus = { ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } };
+  updateStatus.installedVersion = null;
+  invoke.mockImplementation(async (command) => {
+    if (command === "get_game_path_status") return pathStatus;
+    if (command === "check_importer_update") return updateStatus;
+    if (command === "install_importer") {
+      pathStatus = readable;
+      updateStatus = { ...updateStatus, installedVersion: "1.1" };
+      return { sha256: "abc123", backup_dir: null, rewrote_files: [] };
+    }
+    return null;
+  });
+  renderWithQuery(<><GameStatusStrip {...props} /><ImporterPanel game="srmi" displayName={props.displayName} /></>);
+  const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
+  expect(await within(strip).findByText("Game readable · Model Importer not installed")).toBeVisible();
+  await userEvent.click(await screen.findByRole("button", { name: "Install importer" }));
+  expect(await within(strip).findByText("Game readable · Model Importer healthy")).toBeVisible();
+  expect(await within(strip).findByText("Installed version:")).toHaveTextContent("1.1");
+});
+
+it("reports no saved path without claiming filesystem absence", async () => {
+  pathStatus = { ...readable, savedPath: null, gamePath: { status: "noSavedPath" },
+    modelImporter: { status: "unverified", path: null, error: "No saved path" } };
+  renderWithQuery(<GameStatusStrip {...props} savedPath={null} />);
+  expect(await screen.findByText("No saved install path · Model Importer unverified")).toBeVisible();
+  expect(screen.getByRole("status")).not.toHaveTextContent(/not installed|healthy|1\.0|current/);
+  expect(screen.queryByText(savedPath)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" })).toBeVisible();
 });
 
 it("shows checking while the status read is pending and preserves the saved path", async () => {
   let resolve!: (value: GamePathStatus) => void;
-  invoke.mockImplementation(() => new Promise<GamePathStatus>((yes) => { resolve = yes; }));
+  invoke.mockImplementation(async (command) => command === "get_game_path_status" ? new Promise<GamePathStatus>((yes) => { resolve = yes; }) : updateStatus);
   renderWithQuery(<GameStatusStrip {...props} />);
   expect(screen.getByText("Checking Game install path · Model Importer unverified")).toBeVisible();
   expect(screen.getByRole("region", { name: "Honkai: Star Rail status" })).toHaveTextContent(`Last saved path: ${savedPath}`);
   expect(screen.queryByText(/Model Importer not installed/)).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).not.toHaveTextContent(/healthy|Installed version:|1\.0|current/);
   await act(async () => resolve(readable));
-  expect(await screen.findByText("Game readable · Model Importer details in Settings")).toBeVisible();
+  expect(await screen.findByText("Game readable · Model Importer healthy")).toBeVisible();
 });
 
 it("does not reuse a cached readable result after the saved-path read fails", async () => {
   const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game readable · Model Importer details in Settings");
+  await screen.findByText("Game readable · Model Importer healthy");
   rerender(<GameStatusStrip {...props} pathReadError={new Error("Settings database locked")} />);
   expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — install path unreadable · Model Importer unverified");
   expect(screen.getByRole("status")).toHaveTextContent("Settings database locked");
@@ -59,8 +228,8 @@ it("does not reuse a cached readable result after the saved-path read fails", as
 
 it("does not reuse a cached readable result after the filesystem check fails", async () => {
   const { client } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game readable · Model Importer details in Settings");
-  invoke.mockRejectedValue(new Error("Storage unavailable"));
+  await screen.findByText("Game readable · Model Importer healthy");
+  invoke.mockImplementation(async (command) => { if (command === "get_game_path_status") throw new Error("Storage unavailable"); return updateStatus; });
   await act(() => client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Storage unavailable"));
   expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — path check unavailable · Model Importer unverified");
@@ -86,7 +255,7 @@ it("keeps a saved-path read failure ahead of a pending read", async () => {
 });
 
 it("keeps a rejected status check ahead of a pending saved-path read", async () => {
-  invoke.mockRejectedValue(new Error("Path check channel closed"));
+  invoke.mockImplementation(async (command) => { if (command === "get_game_path_status") throw new Error("Path check channel closed"); return updateStatus; });
   const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
   await screen.findByText("Path check channel closed");
   rerender(<GameStatusStrip {...props} pathReadPending />);

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { getGamePathStatus, type GameCode, type GamePathStatus } from "./api";
+import { checkImporterUpdate, getGamePathStatus, type GameCode, type GamePathStatus } from "./api";
 import { commandFailureMessage } from "./commandError";
 
 function pathSummary(value: GamePathStatus): { line: string; detail?: string } {
@@ -16,8 +16,7 @@ function pathSummary(value: GamePathStatus): { line: string; detail?: string } {
       if (value.modelImporter.status === "unverified") {
         return { line: "Game readable · Model Importer unverified", detail: value.modelImporter.error };
       }
-      // The detailed importer name, health, verified version and pin belong to #297.
-      return { line: "Game readable · Model Importer details in Settings" };
+      return { line: "Game readable · Model Importer healthy" };
   }
 }
 
@@ -30,6 +29,11 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
   onSettings: () => void;
 }) {
   const status = useQuery({ queryKey: ["gamePathStatus", game], queryFn: () => getGamePathStatus(game) });
+  const update = useQuery({
+    queryKey: ["importer", "update", game],
+    queryFn: () => checkImporterUpdate(game),
+    retry: false,
+  });
   const error = pathReadError ?? status.error;
   const pending = pathReadPending || status.isFetching;
   const summary = error ? { line: pathReadError != null
@@ -38,9 +42,26 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
     : pending ? { line: "Checking Game install path · Model Importer unverified" }
     : status.data ? pathSummary(status.data) : { line: "Cannot tell — path check unavailable · Model Importer unverified" };
   const path = savedPath ?? status.data?.savedPath;
+  const installed = !error && !pending && status.data?.gamePath.status === "readable"
+    && status.data.modelImporter.status === "installed";
+  const absent = !error && !pending && status.data?.gamePath.status === "readable"
+    && status.data.modelImporter.status === "requiredEntriesNotFound";
+  const metadataVerified = !update.isError && !update.isFetching && update.data != null;
+  const version = installed && metadataVerified ? update.data?.installedVersion : null;
   return <section className="game-status-strip" aria-label={`${displayName} status`} aria-busy={pending}>
     <div className="game-status-strip__summary" role="status">
+      <div className="row">
+      <strong>Model Importer ({game.toUpperCase()})</strong>
       <span>{summary.line}</span>
+      {absent ? <span className="muted small">Unhealthy</span> : null}
+      {version ? <span className="muted small">Installed version: <code>{version}</code></span> : null}
+      {metadataVerified && update.data?.pinned ? <span className="muted small" aria-label="Importer Pin applies">Pinned</span> : null}
+      {installed && !version ? <span className="muted small">{update.isError
+        ? `Installed version check unavailable: ${commandFailureMessage(update.error)}`
+        : update.isPending || update.isFetching ? "Checking installed version and Importer Pin…"
+        : metadataVerified ? "Installed version unknown (not recorded)."
+        : "Installed version check unavailable."}</span> : null}
+      </div>
       {path ? <span className="muted small">{pending || error ? "Last saved path: " : "Saved path: "}<code>{path}</code></span> : null}
       {summary.detail ? <span className="muted small">{summary.detail}</span> : null}
     </div>
