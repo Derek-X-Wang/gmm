@@ -526,3 +526,32 @@ code {
   word-break: break-word;
   color: #9a9aa3;
 }
+
+/* Retained Settings pages are never exposed when inactive. */
+[hidden] { display: none !important; }
+.settings-screen { min-height: 100vh; }
+.settings-destination { max-width: 1120px; }
+.settings-layout { display: grid; grid-template-columns: minmax(150px, 240px) minmax(0, 1fr); gap: 1.5rem; }
+.settings-navigation { display: flex; flex-direction: column; gap: .5rem; align-self: start; }
+.settings-navigation h2 { font-size: .9rem; margin: 1rem 0 .25rem; }
+.settings-navigation button { text-align: left; background: #23232a; color: inherit; border: 1px solid #2e2e36; }
+.settings-navigation button[aria-current="page"] { border-color: #3b82f6; }
+.settings-navigation button span { display: block; font-size: .75rem; margin-top: .3rem; color: #9a9aa3; }
+.settings-content { min-width: 0; }
+.settings-content .card { padding: 1rem; }
+.settings-content p { overflow-wrap: anywhere; }
+.settings-content input.path { min-width: 0; width: 100%; }
+@media (max-width: 600px) {
+  .settings-layout { grid-template-columns: minmax(115px, 35%) minmax(0, 1fr); gap: .6rem; }
+  .settings-destination { padding: 1rem .6rem; }
+  .settings-content .row { align-items: stretch; }
+  .settings-content input { min-width: 0; width: 100%; }
+}
+@media (prefers-color-scheme: light) {
+  .settings-screen { background: #f4f4f5; color: #18181b; }
+  .settings-screen .card { background: #fff; border-color: #d4d4d8; }
+  .settings-screen .muted { color: #52525b; }
+  .settings-screen input { background: #fafafa; color: #18181b; border-color: #d4d4d8; }
+  .settings-navigation button { background: #fff; color: #18181b; border-color: #d4d4d8; }
+  .settings-navigation button span { color: #52525b; }
+}

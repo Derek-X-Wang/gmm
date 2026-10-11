@@ -236,6 +236,9 @@ it.each(["adopt", "zip", "drop", "gamebanana"] as const)("refreshes the orphan L
   };
   const { container } = renderApp();
   await screen.findByRole("radio", { name: "Old Red" });
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("audit_library", { game: "gimi" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   if (entry === "drop") {
     const file = Object.assign(new File(["zip"], "outfit.zip"), { path: "C:\\Downloads\\outfit.zip" });
     fireEvent.drop(container.querySelector(".dropzone")!, { dataTransfer: { files: [file] } });
@@ -251,8 +254,9 @@ it.each(["adopt", "zip", "drop", "gamebanana"] as const)("refreshes the orphan L
     ? "https://gamebanana.com/mods/1234567 or a bare ID"
     : entry === "drop" ? "Display name" : "Display name (e.g. Hu Tao Skin)"), entry === "gamebanana" ? "123" : "Partial Outfit");
   await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" }));
+  expect(await screen.findByText("Import failed; partial bytes retained")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
   expect(await screen.findByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent("orphan");
-  expect(screen.getByText("Import failed; partial bytes retained")).toBeInTheDocument();
 });
 
 it("shows a retained launch reservation immediately after launch fails", async () => {
@@ -323,9 +327,11 @@ it("refreshes Mod recovery changed during a failed Junction rebuild", async () =
   };
   renderApp();
   await screen.findByRole("radio", { name: "Old Red" });
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
   await userEvent.click(screen.getByRole("button", { name: "Rebuild junctions" }));
+  expect(await screen.findByText("Rebuild failed")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   expect(await screen.findByRole("region", { name: "Interrupted reinstall recovery for Test Outfit" })).toBeInTheDocument();
-  expect(screen.getByText("Rebuild failed")).toBeInTheDocument();
 });
 
 
@@ -367,6 +373,7 @@ it.each(pathFields)("applies typed $label only after Enter", async ({ label, com
     return {};
   };
   renderApp();
+  if (command === "set_game_install_path") await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
   const field = await screen.findByDisplayValue(initial);
   expect(field).not.toHaveAttribute("readonly");
   await userEvent.clear(field);
@@ -387,6 +394,7 @@ it.each(pathFields)("shows backend refusal for typed $label", async ({ label, co
     : "This path does not exist or cannot be used.";
   mutations[command] = () => { throw { kind: "other", message }; };
   renderApp();
+  if (command === "set_game_install_path") await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
   const field = await screen.findByDisplayValue(initial);
   expect(field).not.toHaveAttribute("readonly");
   await userEvent.clear(field);
@@ -409,6 +417,7 @@ it.each(pathFields)("keeps the folder picker working for $label", async ({ label
     return {};
   };
   renderApp();
+  if (command === "set_game_install_path") await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
   const field = await screen.findByLabelText(label);
   await userEvent.type(field, "unfinished");
   await userEvent.click(within(field.closest(".row") as HTMLElement).getByRole("button", { name: picked }));
@@ -436,6 +445,7 @@ it("shows the persisted proxy configuration after a partially failed save", asyn
     throw new Error("Proxy settings partly saved");
   };
   renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   const url = await screen.findByPlaceholderText("proxy URL");
   await userEvent.type(url, "http://draft-proxy:8080");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));

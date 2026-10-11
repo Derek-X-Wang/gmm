@@ -8,7 +8,7 @@ a completed folder pick. Each route invokes the same existing backend mutation;
 there is no frontend path validation, trimming, or implicit reset to default.
 The diagnostics log directory stays read-only.
 
-The inventory contains **41 `useMutation` call sites in four files** and is now
+The inventory contains **41 `useMutation` call sites in five files** and is now
 enforced by `mutation-invalidation-boundary.test.ts` under `pnpm test`. The gate
 parses production TypeScript/TSX under `src/`, including new files, and requires
 exactly one row per call site and no stale rows. The original audit traced each
@@ -53,8 +53,8 @@ from the production inventory.
 | App / ModUpdatesPanel | toggleGlobal | Unchanged: one setting write already refreshes `modUpdates/globalEnabled` on success. |
 | App / ModUpdateBadge | apply | Unchanged: already settles `mods/game`, `modUpdates/game`, `variants/modId`, and `conflicts/game`; error remains outside the disappearing badge. |
 | App / ModUpdateBadge | toggle | Unchanged: one Mod setting write already refreshes `modUpdates/game` on success. |
-| App / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. |
-| App / NetworkPanel | test | Unchanged: connection probe; no persisted query state to refresh. |
+| SettingsDestination / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. |
+| SettingsDestination / NetworkPanel | test | Unchanged: connection probe; no persisted query state to refresh. |
 | App / ImporterPanel | install | Changed helper: already settled, now also refreshes `importerOrigin/game` and all `importer` queries, including latest release. |
 | App / ImporterPanel | rollback | Changed: same expanded helper runs on settlement; filesystem restoration can fail before provenance is recorded. |
 | App / ImporterPanel | pin | Atomic success policy retained; shared helper now also refreshes the Origin/latest-release surfaces. No separate missing failure invalidation found for this single setting write. |
@@ -63,9 +63,9 @@ from the production inventory.
 | App / LibraryPathsPanel | setRoot | Changed: settles `libraryPaths`, `mods`, `libraryAudit`, and `conflicts`; relocation updates Mod paths and can fail to restore deployment. |
 | App / LibraryPathsPanel | setPerGame | Changed: same settlement refresh; broad keys also cover cached inactive Game views. |
 | App / Diagnostics | exportBundle | Unchanged: writes a user-selected diagnostics artifact; displayed log-directory query does not change. |
-| App / Settings | setPath | Changed: settles `installPath/game` and the wizard's cached `onboarding/installPaths` aggregate. Success still updates the manual-path badge. |
-| App / Settings | detect | Changed: same settlement refresh; successful automatic detection persists a Game path. |
-| App / RebuildJunctions | rebuild | Changed: settles `mods/game`; quarantine Junction withdrawal can record changed recovery state. The rebuild summary still uses mutation data. |
+| SettingsDestination / GamePathPage | setPath | Changed: settles `gamePathStatus/game`, `installPath/game` and the wizard's cached `onboarding/installPaths` aggregate. Success still updates the manual-path badge. |
+| SettingsDestination / GamePathPage | detect | Changed: same path-state/install-path settlement refresh; successful automatic detection persists a Game path. |
+| SettingsDestination / RebuildJunctions | rebuild | Changed: settles `mods/game`; quarantine Junction withdrawal can record changed recovery state. The rebuild summary still uses mutation data. |
 | App / ModList | toggle | Unchanged: already settles `mods/game` and `conflicts/game`. |
 | App / ModList | retryRecovery | Unchanged: already settles `mods/game` and `conflicts/game`; persistent feedback survives disappearing recovery controls. |
 | App / ModList | retireEnabledTransition | Unchanged: already settles `mods/game` and `conflicts/game`. |
@@ -96,6 +96,24 @@ also writes persisted state. Its `finally` block now invalidates `importer` and
 per its existing product contract. Its query is not automatically invalidated.
 Static registry, AV guidance, loader version, startup reconcile report, and
 informational diagnostics queries have no missing writer among these hooks.
+
+## Settings destination relocation — #292
+
+`GamePathPage.setPath`, `GamePathPage.detect`, `RebuildJunctions.rebuild`,
+`NetworkPanel.save`, and `NetworkPanel.test` moved from `App` to
+`SettingsDestination`. Their settlement/success policies and existing query keys
+are preserved. Path save/detection additionally settle `gamePathStatus/<Game>`.
+`LibraryAuditWarning` stays in its own file with the same four inventory rows
+and broad settlement refresh. Its attachment moved with the path editor; initial
+loading and unavailable checks are explicit, and retained findings on query
+failure are identified as previous.
+
+The destination retains visited Settings pages, including their child mutation
+observers and feedback, across page changes and Back/Escape. Inactive pages use
+`hidden` and are not exposed to keyboard or accessibility navigation. Main
+content unmounts when Settings opens; its selected Game, Mod query observer,
+session-event owner, and return anchor remain above the destination switch.
+No new mutation hook or blanket gate exception was added.
 
 ## Observed regression evidence
 

@@ -171,9 +171,15 @@ pub async fn get_game_path_status(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<crate::core::game_path::GamePathStatus> {
-    core.game_path_status(game)
+    let saved_path = core
+        .game_install_path(game)
         .await
-        .map_err(CommandError::from)
+        .map_err(CommandError::from)?;
+    // Filesystem inspection can wait on unavailable drives. Keep it off the
+    // async workers when Settings checks every supported Game concurrently.
+    tokio::task::spawn_blocking(move || crate::core::game_path::inspect(game, saved_path))
+        .await
+        .map_err(|error| CommandError::other(format!("path inspection task join error: {error}")))
 }
 
 #[tauri::command]

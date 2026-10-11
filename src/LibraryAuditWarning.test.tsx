@@ -128,7 +128,7 @@ it("renders no empty-state noise when the Library is fully referenced", async ()
 
   const { container } = renderWithQuery(<LibraryAuditWarning game="gimi" />);
   await waitFor(() => expect(auditLibrary).toHaveBeenCalledWith("gimi"));
-  expect(container).toBeEmptyDOMElement();
+  await waitFor(() => expect(container).toBeEmptyDOMElement());
 });
 
 it("inspects one folder by revealing it", async () => {

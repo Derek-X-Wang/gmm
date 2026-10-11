@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { CommandErrorNotice } from "./CommandErrorNotice";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -143,21 +144,27 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
   };
 
   const report = audit.data;
-  if (!report) return null;
-
   const failure = reveal.error ?? recover.error ?? remove.error ?? resolveDuplicates.error;
+  if (!report) return audit.isPending ? <p className="muted small">Checking Library folders…</p> : (
+    <div>
+      <CommandErrorNotice error={audit.error} heading="Library audit unavailable." />
+      <button onClick={() => audit.refetch()} disabled={audit.isFetching}>Refresh Library audit</button>
+    </div>
+  );
   const busy =
     reveal.isPending || recover.isPending || remove.isPending || resolveDuplicates.isPending;
   const count = report.unreferenced.length;
   const duplicates = report.duplicates ?? [];
   if (count === 0 && duplicates.length === 0) {
-    return feedback || failure ? (
+    return feedback || failure || audit.isError ? (
       <section
         ref={reportRef}
         className="library-audit-warning"
         aria-label="Unreferenced Library folders and duplicate Mod records"
         tabIndex={-1}
       >
+        {audit.isError ? <p className="muted small">The findings below are from the previous Library check.</p> : null}
+        <CommandErrorNotice error={audit.error} heading="Library audit unavailable." />
         <ActionNotice feedback={feedback} />
         <p className="error" role="alert" aria-label="Library action failed">
           {failure ? String(failure) : null}
@@ -177,6 +184,8 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
       aria-label="Unreferenced Library folders and duplicate Mod records"
       tabIndex={-1}
     >
+      {audit.isError ? <p className="muted small">The findings below are from the previous Library check.</p> : null}
+      <CommandErrorNotice error={audit.error} heading="Library audit unavailable." />
       <ActionNotice feedback={feedback} />
       <p className="error" role="alert" aria-label="Library action failed">
         {failure ? String(failure) : null}
