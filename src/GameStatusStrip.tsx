@@ -32,7 +32,10 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
   const update = useQuery({
     queryKey: ["importer", "update", game],
     queryFn: () => checkImporterUpdate(game),
+    // Each upstream attempt can take ten seconds; retries would delay the unavailable state.
     retry: false,
+    // Avoid a network refetch on ordinary tab/Settings returns; invalidation still refreshes.
+    staleTime: 5 * 60_000,
   });
   const error = pathReadError ?? status.error;
   const pending = pathReadPending || status.isFetching;
@@ -46,7 +49,9 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
     && status.data.modelImporter.status === "installed";
   const absent = !error && !pending && status.data?.gamePath.status === "readable"
     && status.data.modelImporter.status === "requiredEntriesNotFound";
-  const metadataVerified = !update.isError && !update.isFetching && update.data != null;
+  const metadataVerified = !update.isError && update.data != null;
+  const previousMetadata = metadataVerified && update.isFetching;
+  const metadataPending = update.isPending || update.isFetching;
   const version = installed && metadataVerified ? update.data?.installedVersion : null;
   return <section className="game-status-strip" aria-label={`${displayName} status`} aria-busy={pending}>
     <div className="game-status-strip__summary" role="status">
@@ -54,12 +59,12 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
       <strong>Model Importer ({game.toUpperCase()})</strong>
       <span>{summary.line}</span>
       {absent ? <span className="muted small">Unhealthy</span> : null}
-      {version ? <span className="muted small">Installed version: <code>{version}</code></span> : null}
-      {metadataVerified && update.data?.pinned ? <span className="muted small" aria-label="Importer Pin applies">Pinned</span> : null}
+      {version ? <span className="muted small">{previousMetadata ? "Previous: Installed version: " : "Installed version: "}<code>{version}</code></span> : null}
+      {installed && metadataVerified && update.data?.pinned ? <span className="muted small" aria-label="Importer Pin applies">{previousMetadata ? "Previous: Pinned" : "Pinned"}</span> : null}
       {installed && !version ? <span className="muted small">{update.isError
         ? `Installed version check unavailable: ${commandFailureMessage(update.error)}`
-        : update.isPending || update.isFetching ? "Checking installed version and Importer Pin…"
-        : metadataVerified ? "Installed version unknown (not recorded)."
+        : metadataVerified ? `${previousMetadata ? "Previous: " : ""}Installed version unknown (not recorded).`
+        : metadataPending ? "Checking installed version and Importer Pin…"
         : "Installed version check unavailable."}</span> : null}
       </div>
       {path ? <span className="muted small">{pending || error ? "Last saved path: " : "Saved path: "}<code>{path}</code></span> : null}
