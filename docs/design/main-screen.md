@@ -2,10 +2,10 @@
 
 ## Status and authority
 
-This draft covers the specification half of #285. It records the accepted
-information architecture. The two presentation choices in **Open questions**
-require human review; their recommendations are not decisions. Implementation
-ticket granularity and slicing follow that review and are not part of this draft.
+This specification covers the specification half of #285. It records the
+accepted information architecture and both human decisions on the attention
+indicator and status strip. Implementation ticket granularity and slicing need
+a separate human decision and are outside this specification.
 
 The binding sources are:
 
@@ -21,8 +21,10 @@ The binding sources are:
   map's two sections become separate pages; its sidebar prohibition applies
   only to the main screen. These are explicit refinements, not contradictions.
 - [#285 — final brief](https://github.com/Derek-X-Wang/gmm/issues/285#issuecomment-6104678223):
-  the remaining questions, Add game destination, Settings row state, and Library
-  split. The earlier strip brief also requires a read-only report.
+  the attention and status-strip requirements, Add game destination, Settings
+  row state, and Library split. Human review on #285 accepted both presentation
+  recommendations; those decisions are recorded under their surfaces below.
+  The earlier strip brief also requires a read-only report.
 
 [CONTEXT.md](../../CONTEXT.md) defines the domain terms used here. ADRs
 [0001](../adr/0001-gplv3-and-embed-3dmloader.md),
@@ -44,7 +46,8 @@ These are static references for hierarchy, spacing, grouping, and navigation
 (#283, #284). Their controls do not validate paths, launch, install, move files,
 or persist settings. Do not merge the HTML or use its sample versions, origins,
 paths, preview notices, control header, or timestamps as application data. Its
-warning styling does not settle the attention indicator's loud shape (#285).
+warning styling is a reference only; the human decision on #285 governs the
+attention indicator's loud shape below.
 
 ## Main-screen information architecture
 
@@ -75,11 +78,28 @@ resume controls remain available (#282). A healthy completed startup needs no
 recovery card. A reconcile failure names the affected Game and the error and
 must not claim its Junctions were repaired.
 
-The status strip reports Model Importer state and the install path and links to
-that Game's Settings page (#283). It contains no path editor, Install/Update,
-rollback, Importer Pin, Origin editor, or Library mutation control. Its exact
-facts, wording, and no-Model-Importer visibility await Open question 2 (#285).
-The uncertainty contract below applies to every eventual strip variant.
+### Per-Game status strip
+
+The thin read-only status strip links to that Game's Settings page (#283).
+The human decision on #285 sets its payload: Model Importer name, its
+healthy / unhealthy / unverified state, the saved path, the verified installed
+version, and a compact pin marker when an Importer Pin applies. Importer Origin
+detail stays in Settings and does not appear in the strip. The strip contains
+no path editor, Install/Update, rollback, Importer Pin control, Origin editor,
+or Library mutation control.
+
+When the path is unreadable, the line leads with **Cannot tell — install path
+unreadable**. Keep the saved path, report Model Importer state as unverified,
+never say “not installed,” and never infer a version. When the Game is readable
+but its Model Importer is confirmed absent, keep the strip visible with
+**Model Importer not installed** and its Settings link. That link is the route
+to fixing this state (#285 human decision).
+
+A saved path confirmed missing has its own wording: **Saved installation cannot
+be found**, identifying the missing path/file and retaining the saved path and
+Settings link. Do not reuse “no saved path” or “Model Importer not installed.”
+All strip states follow the filesystem and path-state contract below; only
+verified installed facts may supply an installed version (#285 human decision).
 
 ### Surface ownership
 
@@ -105,7 +125,7 @@ an update-check error, and an active Game Session at the same time.
 | Surface | States and required result |
 | --- | --- |
 | Selected Game/inventory | Registry/path reads pending, available, or failed; zero configured paths; one or more configured paths; selected Game changes. Show read failures as unavailable, with Settings reachable. Never render an absent Game as an installed tab. |
-| Status strip | Checking, verified Game/Model Importer facts, or unavailable check, plus the four path cases below. Keep read-only; final payload and visibility in the no-Model-Importer case await Open question 2. |
+| Status strip | Checking, verified Game/Model Importer facts, or unavailable check, plus the four path cases below and the distinct saved-path-missing report. Keep read-only and preserve the decided payload and wording above; the strip stays visible when a readable Game has no Model Importer (#285 human decision). |
 | Launch | Ready action, launching, active Game Session, returned session, or rejected launch. Preserve `launch_game` and its existing AV-pattern guidance via `av_guidance`; keep other command failures visible near Launch. Pending/session locks do not remove the primary action's identity. |
 | Game Session context | Reading/unavailable, no active session, active session, cleaned stale session, or interrupted launch reservation. Continue existing session-event refresh across destination changes so return does not fabricate an ended session. |
 | Mods/Variants | Mod query pending/error, confirmed empty, or populated; existing enabled/disabled choices; Variants absent, loading/error, or available; Variant change pending/success/failure; recovery quarantine. Retain existing controls and their individual gates. |
@@ -271,11 +291,19 @@ time and the notice that each action checks its own availability. Preserve this
 contract from `AttentionView` and the mutation audit. Its header placement,
 compact collapsed form, and ability to expand are settled (#282, #283).
 
+The human decision on #285 keeps the same compact footprint when loud: a
+warning icon, warning border/tint, explicit **Needs attention** text, and a
+short finding count/summary. Do not auto-expand or use larger or filled heavy
+styling. The full report stays behind user expansion. The count describes
+**findings**, never a count of broken Mods: an active Game Session also makes
+the report unsafe, so wording that implies every finding is a broken Mod would
+be false in that state.
+
 | State | Presentation and behavior |
 | --- | --- |
 | Initial check pending | Compact checking/unavailable state; no “nothing needs attention” claim. Disable duplicate refresh while checking. |
 | Successful report, `safe_to_proceed` true | Quiet compact indicator; expansion can show the clean report and check time. |
-| Successful report, `safe_to_proceed` false | Loud state, only in this case (#282 constraint 5). Exact loud shape awaits Open question 1. Expansion exposes the existing findings and their scope. |
+| Successful report, `safe_to_proceed` false | Loud state, only in this case (#282 constraint 5); use the compact warning presentation decided above (#285 human decision). User expansion exposes the existing findings and their scope. |
 | Check failed | Explicit unavailable/error result with Refresh attention. Do not synthesize either boolean result. A retained previous snapshot is labelled as previous. |
 | Refresh pending | State that a refresh is underway; any retained report stays a dated snapshot. Do not claim recovery completed until the check succeeds. |
 | Expanded | Preserve all non-empty report groups, path/recovery evidence, guidance, check time, and refresh; collapse returns to the header indicator. Expansion itself performs no recovery. |
@@ -285,6 +313,8 @@ the selected Game, a count, a Conflict, or an unreadable install path. Conflicts
 available updates, and an ordinary path check failure do not independently
 trigger loud attention. In particular, the static prototype's degraded warning
 does not override the boolean contract (#282, #285).
+Pending and error states remain explicit; they do not borrow a loud trigger
+of their own and must not manufacture a false report (#285 human decision).
 
 ### Recovery placement and states
 
@@ -427,59 +457,3 @@ These are future implementation checks, not claims that this draft ran the app
 | One quarantined Mod or active session | Existing scoped locks apply; unrelated navigation/settings are usable; `safe_to_proceed` is not a global gate. |
 | Recovery action removes its own row | Stable focus and outcome/error survive disappearance; every affected cached query refreshes on the proper success/settlement boundary. |
 | Narrow window and light/dark appearance | Accepted hierarchy and Settings list remain usable; paths/forms wrap without horizontal overflow, as the reference assets demonstrate. |
-
-## Open questions
-
-Only these two decisions remain. They were carried by #285; no recommendation
-below changes a binding layout or uncertainty rule.
-
-### 1. What is the attention indicator's loud shape?
-
-Placement and trigger are fixed: compact expandable indicator in the global
-header line, loud **only** for a successful report whose `safe_to_proceed` is
-false (#282, #283). Options visible in the prototype and existing surface are:
-
-- Keep the same compact footprint, with a warning icon, warning border/tint,
-  explicit **Needs attention** text, and a short finding count/summary. The user
-  expands it to read the report.
-- Use stronger filled warning styling and a larger summary within that header
-  line, while leaving the full report behind expansion.
-- Automatically expand the report when it becomes loud. The collapsed entry
-  still belongs to the header, but findings consume more main-screen space.
-
-**Recommendation:** the first option. It signals the report without pushing
-Mods down or suggesting the whole app is locked. Its count must describe
-findings, not claim every finding is a broken Mod: an active Game Session also
-makes the report false. Human review must choose the visual emphasis and whether
-to auto-expand. Pending/error states remain explicit without manufacturing a
-false report; they cannot borrow a loud trigger of their own.
-
-### 2. What exactly does the per-Game status strip report?
-
-The thin read-only strip, install-path readout, and Game-specific Settings link
-are fixed (#283). #285 leaves its one-line payload and no-Model-Importer
-visibility open. Options are:
-
-- Model Importer name plus healthy/unhealthy/unverified state and the saved
-  path; leave version, Importer Pin, and Importer Origin to Settings.
-- Add the verified installed version to those facts; add a short pin marker
-  when applicable, but keep Importer Origin detail in Settings.
-- Include installed version, pinned version, and Importer Origin in the line.
-  This makes more setup visible but competes with path readability.
-
-For unreadable paths, the line could lead with **Cannot tell — install path
-unreadable** or retain the Model Importer label and say **unverified** next to
-the path. Either must preserve the saved path and cannot say “not installed” or
-infer a version. For a readable Game with no Model Importer, the strip could
-remain with **Model Importer not installed** and its Settings link, or be
-omitted; the latter removes the contextual setup route in that state. A saved
-path confirmed missing needs a distinct missing-path report, not the
-no-saved-path or missing-Model-Importer wording.
-
-**Recommendation:** verified installed version plus Model Importer state and
-saved path, with a compact pin marker; keep Origin detail in Settings. Keep the
-strip visible when the Game is readable but its Model Importer is absent, and
-lead with **Cannot tell** when its path cannot be read. This preserves a useful
-route to configuration while keeping the one-line summary small. Human review
-must choose the payload, exact uncertainty wording, and absence visibility;
-these remain recommendations, not an implementation default.
