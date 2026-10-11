@@ -1,0 +1,179 @@
+<!doctype html>
+<!-- Throwaway comparison for #283: three main-screen layouts, two Library states.
+     Fixed sample data. No backend, filesystem operations, or persistent state.
+     Open this file directly; no dependencies or build step. GPL-3.0-only. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GMM · Main screen candidates · #283</title>
+  <style>
+    :root { color-scheme:light dark; --canvas:#f1f2f5; --surface:#fff; --subtle:#f7f8fa; --text:#222633; --muted:#616876; --line:#dfe2e9; --accent:#315fce; --accent-soft:#eaf0ff; --warning:#895013; --warning-bg:#fff6e7; --warning-line:#e4c48f; --shadow:0 10px 40px #1d274012; }
+    @media(prefers-color-scheme:dark) { :root { --canvas:#15161b; --surface:#202228; --subtle:#191b21; --text:#ecedf3; --muted:#a1a7b4; --line:#373b47; --accent:#9cb9ff; --accent-soft:#263451; --warning:#ffd18a; --warning-bg:#342a1e; --warning-line:#755a33; --shadow:0 10px 40px #0003; } }
+    :root[data-theme="light"] { color-scheme:light; --canvas:#f1f2f5; --surface:#fff; --subtle:#f7f8fa; --text:#222633; --muted:#616876; --line:#dfe2e9; --accent:#315fce; --accent-soft:#eaf0ff; --warning:#895013; --warning-bg:#fff6e7; --warning-line:#e4c48f; --shadow:0 10px 40px #1d274012; }
+    :root[data-theme="dark"] { color-scheme:dark; --canvas:#15161b; --surface:#202228; --subtle:#191b21; --text:#ecedf3; --muted:#a1a7b4; --line:#373b47; --accent:#9cb9ff; --accent-soft:#263451; --warning:#ffd18a; --warning-bg:#342a1e; --warning-line:#755a33; --shadow:0 10px 40px #0003; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--canvas); color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,select,input { font:inherit; } button,select { color:inherit; }
+    button { cursor:pointer; border:1px solid var(--line); border-radius:7px; padding:7px 12px; background:var(--surface); }
+    button:hover { border-color:var(--accent); } button:focus-visible,summary:focus-visible,select:focus-visible,input:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+    button:disabled { cursor:not-allowed; opacity:.55; } input { accent-color:var(--accent); }
+    h1,h2,h3,p { margin:0; } h1 { font-size:25px; font-weight:650; letter-spacing:-.6px; } h2 { font-size:19px; font-weight:650; } h3 { font-size:15px; }
+    small,.small { font-size:12px; } .muted { color:var(--muted); } .row { display:flex; align-items:center; flex-wrap:wrap; gap:10px; } .between { justify-content:space-between; }
+    .prototype { padding:16px 24px; background:#17243b; color:#f2f5ff; border-bottom:3px solid #7da4ff; }
+    .prototype .eyebrow { color:#bccde8; font-size:10px; letter-spacing:1.8px; font-weight:700; }
+    .prototype .controls { margin:10px 0; display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
+    .segmented { display:flex; flex-wrap:wrap; gap:4px; } .prototype button,.prototype select { border-color:#526079; background:#24344e; color:#f2f5ff; }
+    .prototype button[aria-pressed="true"] { background:#e6edff; color:#17243b; border-color:#e6edff; }
+    .prototype select { border-radius:6px; padding:6px; } .prototype label { font-size:12px; }
+    #bet { color:#c7d5ef; font-size:13px; } #axes { color:#aebfdb; margin-top:3px; font-size:11px; }
+    .window { max-width:1060px; margin:28px auto 36px; border:1px solid var(--line); border-radius:12px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden; }
+    .window-bar { padding:11px 22px; border-bottom:1px solid var(--line); font-size:11px; color:var(--muted); display:flex; justify-content:space-between; }
+    .brand { display:flex; align-items:center; gap:9px; font-size:15px; font-weight:700; color:var(--text); } .brand-mark { background:var(--accent-soft); color:var(--accent); width:24px; height:24px; display:grid; place-items:center; border-radius:5px; font-size:13px; }
+    .content { padding:26px 30px 30px; } .app-head { margin-bottom:22px; } .app-head .muted { margin-top:4px; }
+    .quiet { background:transparent; border-color:transparent; color:var(--accent); } .primary { background:#315fce; color:#fff; border-color:#315fce; padding:11px 20px; font-weight:600; }
+    .tabs { display:flex; align-items:center; gap:4px; flex-wrap:wrap; border-bottom:1px solid var(--line); padding-bottom:10px; margin-bottom:18px; }
+    .tab { background:transparent; border-color:transparent; color:var(--muted); } .tab[aria-selected="true"] { color:var(--accent); background:var(--accent-soft); font-weight:600; }
+    .tabs .add { margin-left:auto; font-size:12px; }
+    .status-strip { border:1px solid var(--line); background:var(--subtle); border-radius:7px; padding:9px 12px; margin-bottom:18px; font-size:12px; }
+    .dot { width:6px; height:6px; border-radius:50%; background:var(--accent); display:inline-block; margin-right:5px; }
+    code { font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; }
+    .attention { font-size:12px; border:1px solid var(--line); border-radius:7px; padding:8px 12px; background:var(--subtle); }
+    .attention.warning { border-color:var(--warning-line); color:var(--warning); background:var(--warning-bg); }
+    .attention summary { cursor:pointer; font-weight:600; } .attention p { margin-top:8px; max-width:650px; } .attention button { margin-top:8px; }
+    .attention-inline { margin:0 0 16px; } .attention-header { max-width:360px; }
+    .session { font-size:12px; color:var(--muted); } .session strong { color:var(--text); font-weight:500; } .session p { font-size:11px; margin-top:2px; }
+    .section-head { margin:24px 0 12px; } .section-head h2 span { color:var(--muted); font-size:13px; font-weight:400; margin-left:5px; }
+    .conflict-total { color:var(--warning); font-size:12px; margin-top:2px; }
+    .imports { gap:6px; } .imports button { font-size:12px; padding:6px 9px; }
+    .dropzone { border:1px dashed var(--line); border-radius:7px; text-align:center; padding:10px; color:var(--muted); font-size:12px; margin-bottom:12px; }
+    .mods { list-style:none; padding:0; margin:0; display:grid; gap:8px; }
+    .mod { border:1px solid var(--line); background:var(--subtle); padding:12px 14px; border-radius:8px; }
+    .mod-top { display:flex; align-items:start; justify-content:space-between; gap:20px; } .mod-info { flex:1; min-width:0; } .mod strong { font-size:14px; font-weight:600; }
+    .metadata { font-size:11px; color:var(--muted); margin-top:3px; } .metadata button { padding:0; font-size:11px; border:0; color:var(--accent); background:transparent; }
+    .enabled { display:flex; align-items:center; gap:6px; font-size:12px; white-space:nowrap; color:var(--muted); margin-top:2px; }
+    .variants { display:flex; align-items:center; gap:13px; flex-wrap:wrap; font-size:12px; margin-top:8px; color:var(--muted); } .variants label { display:flex; gap:4px; align-items:center; }
+    .pill { display:inline-block; background:var(--warning-bg); color:var(--warning); border:1px solid var(--warning-line); padding:1px 7px; font-size:10px; border-radius:10px; margin-left:7px; }
+    .update { color:var(--accent); background:var(--accent-soft); border-color:transparent; }
+    .conflict-detail { margin-top:8px; color:var(--warning); font-size:12px; } .conflict-detail summary { cursor:pointer; } .conflict-detail p { margin-top:5px; }
+    .recovery { margin-top:10px; padding:11px 13px; border:1px solid var(--warning-line); background:var(--warning-bg); color:var(--warning); border-radius:6px; font-size:12px; }
+    .recovery strong { font-size:12px; } .recovery p { margin-top:5px; } .recovery summary { cursor:pointer; margin-top:7px; } .recovery button { margin-top:8px; font-size:12px; }
+    .updates { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); font-size:12px; } .updates button { font-size:12px; } .updates label { color:var(--muted); }
+    .empty { padding:28px 0 12px; } .empty .intro { margin-bottom:24px; } .empty .intro h2 { font-size:27px; letter-spacing:-.5px; } .empty .intro p { margin-top:8px; color:var(--muted); max-width:540px; }
+    .import-cards { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; } .import-card { padding:21px 18px; border:1px solid var(--line); border-radius:8px; background:var(--subtle); display:flex; flex-direction:column; align-items:start; }
+    .import-card .symbol { color:var(--accent); font-size:22px; margin-bottom:16px; } .import-card p { color:var(--muted); font-size:12px; margin:8px 0 20px; flex:1; } .import-card button { font-size:12px; }
+    .empty .dropzone { padding:28px; margin-top:14px; } .empty .dropzone strong { display:block; font-size:14px; color:var(--text); margin-bottom:4px; }
+    .dock { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:15px; padding:16px 30px; background:var(--subtle); border-top:1px solid var(--line); }
+    .dock .launch { background:var(--accent-soft); color:var(--accent); border:1px solid var(--accent); padding:10px 18px; font-weight:600; }
+    .glance { font-size:12px; margin-left:auto; } .glance summary { cursor:pointer; color:var(--muted); } .glance p { margin-top:6px; }
+    .layout-b .content { padding:23px 34px 30px; } .layout-b .app-head { margin-bottom:18px; } .layout-b .section-head { margin-top:18px; }
+    .layout-b .empty { padding:36px 0 18px; } .layout-b .import-cards { grid-template-columns:1fr; gap:0; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    .layout-b .import-card { display:grid; grid-template-columns:34px 150px 1fr auto; align-items:center; gap:14px; padding:16px 18px; border:0; border-bottom:1px solid var(--line); border-radius:0; }
+    .layout-b .import-card:last-child { border-bottom:0; } .layout-b .import-card p,.layout-b .import-card .symbol { margin:0; }
+    .layout-c .app-head { margin-bottom:16px; } .layout-c .section-head { margin-top:20px; } .layout-c .empty .intro { text-align:center; } .layout-c .empty .intro p { margin:8px auto 0; }
+    .layout-c .empty .dropzone { padding:32px; background:var(--accent-soft); border-color:var(--accent); }
+    .footer-note { max-width:1060px; padding:0 20px; margin:0 auto 24px; font-size:11px; color:var(--muted); }
+    #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); padding:12px 18px; border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); background:var(--surface); z-index:4; max-width:90vw; font-size:12px; }
+    #toast:empty { display:none; }
+    @media(max-width:750px) { .window { margin:16px 10px; } .content,.layout-b .content { padding:20px 16px; } .app-head { gap:14px; } h1 { font-size:21px; } .import-cards { grid-template-columns:1fr; } .layout-b .import-card { grid-template-columns:24px 1fr; } .layout-b .import-card p,.layout-b .import-card button { grid-column:2; } .tabs .add { margin-left:0; } .mod-top { gap:8px; flex-wrap:wrap; } .attention-header { max-width:none; width:100%; } .dock { padding:16px; } .prototype { padding:14px 16px; } }
+  </style>
+</head>
+<body>
+  <header class="prototype" aria-label="Prototype controls">
+    <div class="eyebrow">THROWAWAY PROTOTYPE · ISSUE #283 · MAIN SCREEN COMPARISON</div>
+    <div class="controls">
+      <div class="segmented" role="group" aria-label="Candidate layout">
+        <button data-layout="a" aria-pressed="true">A · Status at a glance</button>
+        <button data-layout="b" aria-pressed="false">B · Library first</button>
+        <button data-layout="c" aria-pressed="false">C · Session dock</button>
+      </div>
+      <div class="segmented" role="group" aria-label="Library state">
+        <button data-state="populated" aria-pressed="true">Populated</button>
+        <button data-state="empty" aria-pressed="false">Empty</button>
+      </div>
+      <label>Colour <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+    </div>
+    <p id="bet"></p>
+    <p id="axes"></p>
+  </header>
+  <main id="screen" class="window" aria-label="GMM candidate"></main>
+  <p class="footer-note">Static sample · Game tabs and disclosures can be explored. Import, launch, update, Settings and recovery buttons only show a preview notice. No files are read or changed.</p>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script>
+    'use strict';
+    const candidates = {
+      a: { name:'Status at a glance', bet:'A thin setup strip and a primary launch action make readiness easy to read without burying Mods.', axes:'Setup: persistent per-Game strip · Attention: global header line · Launch: prominent primary action' },
+      b: { name:'Library first', bet:'Removing setup and quieting launch gives the Library the first and largest claim on the screen.', axes:'Setup: no status or paths · Attention: inline above the Mod list · Launch: quiet text action' },
+      c: { name:'Session dock', bet:'Keeping launch with Game Session context at the bottom gives managing Mods a clear stopping point.', axes:'Setup: optional disclosure · Attention: beside the Mods heading · Launch: outlined action in a bottom session dock' }
+    };
+    const games = [
+      { name:'Honkai: Star Rail', importer:'SRMI', path:'D:\\Games\\Star Rail', collection:['Astral Coat Palette','Astral Coat Trim','Soft Menu Accents','Evening Outfit','Neutral Hair Tones','Clear Item Icons'] },
+      { name:'Wuthering Waves', importer:'WWMI', path:'D:\\Games\\Wuthering Waves', collection:['Harbour Coat Palette','Harbour Coat Trim','Soft Menu Accents','Rainy Day Outfit','Neutral Hair Tones','Clear Item Icons'] },
+      { name:'Zenless Zone Zero', importer:'ZZMI', path:'D:\\Games\\Zenless Zone Zero', collection:['Metro Coat Palette','Metro Coat Trim','Soft Menu Accents','Weekend Outfit','Neutral Hair Tones','Clear Item Icons'] }
+    ];
+    let layout='a', state='populated', game=0, toastTimer;
+    const sampleId='01J8N6Y1S6G4B0R2Z1XK5T7Q9A';
+    function preview(action) {
+      clearTimeout(toastTimer);
+      document.getElementById('toast').textContent=action+' — preview only. No action was performed.';
+      toastTimer=setTimeout(()=>document.getElementById('toast').textContent='',4200);
+    }
+    function action(label,cls='') { return `<button class="${cls}" data-preview="${label}">${label}</button>`; }
+    function attention(cls='') {
+      const populated=state==='populated';
+      return `<details class="attention ${populated?'warning':''} ${cls}"><summary>${populated?'! Needs attention · 1 unavailable Mod':'All Games · nothing needs attention'}</summary><p>${populated?`${games[game].name}: ${games[game].collection[3]} needs interrupted reinstall recovery. Review the warning on its row. Other Mods and Games remain available.`:'No recovery items or active Game Session in this sample.'}</p><p class="small">All Games · snapshot checked at 10:42. Each action checks its own availability.</p>${action('Refresh attention')}</details>`;
+    }
+    function session() { return '<div class="session"><strong>No active Game Session</strong><p>GMM holds the Loader during a Game Session. Keep GMM open; Mod changes are locked while the Game runs.</p></div>'; }
+    function tabs() {
+      return `<nav class="tabs" aria-label="Game"><div class="row" role="tablist">${games.map((g,i)=>`<button class="tab" role="tab" aria-selected="${i===game}" data-game="${i}">${g.name}</button>`).join('')}</div>${action('Add game','quiet add')}</nav>`;
+    }
+    function setupStrip() { return `<div class="status-strip row between"><span><span class="dot"></span>Model Importer · ${games[game].importer} installed</span><code>${games[game].path}</code>${action('Settings','quiet')}</div>`; }
+    function setupDisclosure() { return `<details class="glance"><summary>This Game · setup details</summary><p>Model Importer · ${games[game].importer} installed</p><code>${games[game].path}</code><p>Importer Origin and Importer Pin are in Settings.</p></details>`; }
+    function imports() { return `<div class="row imports">${action('Adopt folder…')}${action('Import ZIP…')}${action('Paste GameBanana URL…')}</div>`; }
+    function dropzone(empty=false) { return `<div class="dropzone" data-dropzone>${empty?'<strong>Drop a .zip here</strong>':''}Add a Mod to ${games[game].name}${empty?' · or choose an import route.':' · drop a .zip or use Import ZIP.'}</div>`; }
+    function updates() { return `<section class="updates row between" aria-label="Mod updates"><div><strong>Mod updates${state==='populated'?' · 1 available':''}</strong><div class="muted small">GameBanana Mods · updates apply only when you choose.</div></div><div class="row">${action('Check now')}<label><input type="checkbox" checked data-stub-input> Weekly check enabled</label></div></section>`; }
+    function modRows() {
+      return `<ul class="mods">${games[game].collection.map((name,i)=>{
+        const source=['gamebanana','local','manual','gamebanana','local','gamebanana'][i];
+        const recovery=i===3, enabled=[0,1,2,5].includes(i);
+        return `<li class="mod" data-mod="${i}"><div class="mod-top"><div class="mod-info"><strong>${name}</strong>${i<2?'<span class="pill">Shared hash</span>':''}${i===0?'<button class="pill update" data-preview="Update to v1.3">Update → v1.3</button>':''}<div class="metadata">Source · ${source}${source==='gamebanana'?` · v${i===0?'1.2':'1.0'} · <button data-preview="View on GameBanana">View on GameBanana</button> · <label><input type="checkbox" checked ${recovery?'disabled':''} data-stub-input> check</label>`:''}</div>${i===0?'<div class="variants" role="group" aria-label="Variants for '+name+'"><span>Variants</span><label><input type="radio" name="palette" checked data-stub-input> Slate</label><label><input type="radio" name="palette" data-stub-input> Sand</label><label><input type="radio" name="palette" data-stub-input> Cloud</label></div>':''}${i<2?`<details class="conflict-detail"><summary>1 Conflict · shared with ${games[game].collection[i===0?1:0]}</summary><p>Both enabled Mods bind <code>7a92d10f</code>. Disable one to clear this Conflict. GMM does not choose a winner.</p></details>`:''}</div><label class="enabled"><input type="checkbox" ${enabled?'checked':''} ${recovery?'disabled':''} data-stub-input>${recovery?'Unavailable':enabled?'Enabled':'Disabled'}</label></div>${recovery?`<section class="recovery" aria-label="Interrupted reinstall recovery for ${name}"><strong>Unavailable — interrupted reinstall needs recovery</strong><p>GMM could not restore or verify the old tree. Its Junction was withdrawn; this Mod will not load until recovery succeeds. The saved disabled choice is unchanged.</p><p>Close software using the files or reconnect the Library device, then retry. If a path was moved or deleted, restore it; if access is denied, fix its permissions.</p><details><summary>Recorded paths and recovery error</summary><p>Mod path: <code>D:\\ModLibrary\\${games[game].importer.toLowerCase()}\\${sampleId}</code></p><p>Interrupted update: <code>D:\\ModLibrary\\${games[game].importer.toLowerCase()}\\.gmm-reinstall-sample</code></p><p>Rollback: <code>D:\\ModLibrary\\${games[game].importer.toLowerCase()}\\.gmm-delete-sample</code></p><p>Last recovery error: access denied while restoring the old tree. These are recovery evidence, not instructions to delete anything.</p></details>${action('Retry recovery')}</section>`:''}</li>`;
+      }).join('')}</ul>`;
+    }
+    function populated() {
+      return `<section aria-label="Mods"><div class="section-head row between"><div><h2>Mods <span>6 in Library · 4 enabled</span></h2><p class="conflict-total">1 Conflict · two enabled Mods share one resource hash</p></div>${layout==='c'?attention('attention-header'):imports()}</div>${layout==='b'?attention('attention-inline'):''}${layout==='c'?`<div class="row between" style="margin-bottom:12px">${imports()}</div>`:''}${dropzone()}${modRows()}</section>${updates()}`;
+    }
+    function empty() {
+      const routes=[['↳','Adopt','Bring an existing Mod folder into the Library.','Adopt folder…'],['⊞','Import ZIP','Choose a local .zip archive and give the Mod a name.','Import ZIP…'],['↗','GameBanana','Paste a Mod URL or submission ID to import it.','Paste GameBanana URL…']];
+      const cards=`<div class="import-cards">${routes.map(r=>`<article class="import-card"><span class="symbol" aria-hidden="true">${r[0]}</span><h3>${r[1]}</h3><p>${r[2]}</p>${action(r[3])}</article>`).join('')}</div>`;
+      return `<section class="empty" aria-label="Empty Library"><div class="intro"><div class="muted small">SETUP COMPLETE · ${games[game].name}</div><h2>Your first Mod starts here.</h2><p>The ${games[game].name} Library is empty. Adopt a folder, import a ZIP, or bring a Mod from GameBanana.</p></div>${layout==='b'?attention('attention-inline'):''}${layout==='c'?dropzone(true):''}${cards}${layout!=='c'?dropzone(true):''}</section>${updates()}`;
+    }
+    function render() {
+      const g=games[game], c=candidates[layout];
+      document.querySelectorAll('[data-layout]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.layout===layout));
+      document.querySelectorAll('[data-state]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.state===state));
+      document.getElementById('bet').textContent=c.name+' — '+c.bet;
+      document.getElementById('axes').textContent=c.axes;
+      const screen=document.getElementById('screen');
+      screen.className='window layout-'+layout;
+      screen.setAttribute('aria-label',c.name+' · '+state);
+      const bar=`<div class="window-bar"><span class="brand"><span class="brand-mark">G</span>GMM</span><div class="row">${action('Settings','quiet')}<span>Gacha Mod Manager</span></div></div>`;
+      if(layout==='a') screen.innerHTML=bar+`<div class="content"><header class="app-head row between"><div><h1>${g.name}</h1><p class="muted">Manage Mods for this Game.</p></div>${action('Launch '+g.name,'primary')}</header><div class="row between" style="margin-bottom:18px">${attention('attention-header')}${session()}</div>${tabs()}${setupStrip()}${state==='populated'?populated():empty()}</div>`;
+      if(layout==='b') screen.innerHTML=bar+`<div class="content">${tabs()}<header class="app-head row between"><h1>${g.name} · Library</h1>${action('Launch '+g.name,'quiet')}</header>${session()}${state==='populated'?populated():empty()}</div>`;
+      if(layout==='c') screen.innerHTML=bar+`<div class="content">${tabs()}<header class="app-head row between"><div><h1>${g.name}</h1><p class="muted">${state==='populated'?'Your Library, ready to manage.':'Setup is complete. Add your first Mod.'}</p></div>${setupDisclosure()}</header>${state==='populated'?populated():attention('attention-inline')+empty()}</div><footer class="dock">${session()}${action('Launch '+g.name,'launch')}</footer>`;
+    }
+    document.addEventListener('click',e=>{
+      const button=e.target.closest('button');
+      if(!button)return;
+      if(button.dataset.layout){layout=button.dataset.layout;render();}
+      else if(button.dataset.state){state=button.dataset.state;render();}
+      else if(button.dataset.game!==undefined){game=Number(button.dataset.game);render();}
+      else if(button.dataset.preview){preview(button.dataset.preview);}
+    });
+    document.addEventListener('click',e=>{if(e.target.matches('[data-stub-input]')){e.preventDefault();preview('Mod or update setting');}});
+    document.getElementById('theme').addEventListener('change',e=>document.documentElement.dataset.theme=e.target.value);
+    document.addEventListener('dragover',e=>{e.preventDefault();});
+    document.addEventListener('drop',e=>{e.preventDefault();preview('ZIP drop');});
+    render();
+  </script>
+</body>
+</html>
