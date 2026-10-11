@@ -132,6 +132,31 @@ export async function getGameInstallPath(game: GameCode): Promise<string | null>
   return (await invoke<string | null>("get_game_install_path", { game })) ?? null;
 }
 
+export type GamePathState =
+  | { status: "unset" }
+  | { status: "readable" }
+  | { status: "missing"; paths: string[] }
+  | { status: "invalid"; error: string }
+  | { status: "unreadable"; path: string; error: string };
+
+export type ModelImporterState =
+  | { status: "installed" }
+  | { status: "absent"; paths: string[] }
+  | { status: "unverified"; error: string };
+
+export interface GamePathStatus {
+  game: GameCode;
+  /** Saved configuration, retained under absence or uncertainty. */
+  savedPath: string | null;
+  gamePath: GamePathState;
+  /** Filesystem layout evidence; never proof of a version or launchability. */
+  modelImporter: ModelImporterState;
+}
+
+export async function getGamePathStatus(game: GameCode): Promise<GamePathStatus> {
+  return invoke<GamePathStatus>("get_game_path_status", { game });
+}
+
 export async function setGameInstallPath(
   game: GameCode,
   path: string,

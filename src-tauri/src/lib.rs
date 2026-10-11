@@ -193,6 +193,7 @@ pub fn run() {
             commands::import_zip,
             commands::set_mod_enabled,
             commands::get_game_install_path,
+            commands::get_game_path_status,
             commands::set_game_install_path,
             commands::log_frontend_error,
             commands::export_diagnostics_bundle,

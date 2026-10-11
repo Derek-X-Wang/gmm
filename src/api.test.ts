@@ -8,6 +8,7 @@ const {
   adoptFolder,
   attentionStatus,
   detectConflicts,
+  getGamePathStatus,
   importGamebanana,
   importZip,
   partitionLaunchError,
@@ -30,6 +31,20 @@ const RAW_MOD = {
 beforeEach(() => {
   vi.clearAllMocks();
   invoke.mockResolvedValue(RAW_MOD);
+});
+
+it("reads independent Game and Model Importer facts without inferring installed state", async () => {
+  const report = {
+    game: "gimi",
+    savedPath: "C:\\Games\\Genshin",
+    gamePath: { status: "readable" },
+    modelImporter: { status: "unverified", error: "Cannot read Core" },
+  };
+  invoke.mockResolvedValueOnce(report);
+  expect(await getGamePathStatus("gimi")).toEqual(report);
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("get_game_path_status", {
+    game: "gimi",
+  });
 });
 
 it("preserves a command failure's classification and user-facing message", async () => {

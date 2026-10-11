@@ -12,6 +12,7 @@ pub mod detect;
 pub mod diagnostics;
 pub mod error;
 mod filesystem;
+pub mod game_path;
 pub mod gamebanana;
 pub mod games;
 pub mod importer;
@@ -3378,6 +3379,13 @@ impl Core {
             .await?;
         let install_path: Option<String> = row.try_get("install_path")?;
         Ok(install_path.map(PathBuf::from))
+    }
+
+    /// Inspect saved Game and Model Importer paths without changing settings,
+    /// recovery witnesses, or filesystem entries.
+    pub async fn game_path_status(&self, game: GameCode) -> Result<game_path::GamePathStatus> {
+        let saved_path = self.game_install_path(game).await?;
+        Ok(game_path::inspect(game, saved_path))
     }
 
     /// Validate and persist a game's install path.
