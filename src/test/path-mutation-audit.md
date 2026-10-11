@@ -8,7 +8,7 @@ a completed folder pick. Each route invokes the same existing backend mutation;
 there is no frontend path validation, trimming, or implicit reset to default.
 The diagnostics log directory stays read-only.
 
-The inventory contains **41 `useMutation` call sites in seven files** and is now
+The inventory contains **41 `useMutation` call sites in nine files** and is now
 enforced by `mutation-invalidation-boundary.test.ts` under `pnpm test`. The gate
 parses production TypeScript/TSX under `src/`, including new files, and requires
 exactly one row per call site and no stale rows. The original audit traced each
@@ -63,7 +63,7 @@ from the production inventory.
 | ImporterPanel | retryEvacuation | Changed helper: existing settlement includes path-state/Origin/latest-release state restored by recovery; outcome/error stays outside the removable warning. |
 | LibraryPathEditors / GlobalLibraryRootEditor | setRoot | Relocated: move/reset settles broad `libraryPaths`, `mods`, `libraryAudit`, and `conflicts`, including cached inactive Games, on success or rejection; relocation can persist paths or recovery state before failing. |
 | LibraryPathEditors / GameLibraryOverrideEditor | setPerGame | Relocated: move/reset retains the same broad settlement keys, including cached inactive Games, on success or rejection; the displayed Game does not narrow refresh. |
-| App / Diagnostics | exportBundle | Unchanged: writes a user-selected diagnostics artifact; displayed log-directory query does not change. |
+| Diagnostics | exportBundle | Unchanged: writes a user-selected diagnostics artifact; displayed log-directory query does not change. |
 | SettingsDestination / GamePathPage | setPath | Changed: settles `gamePathStatus/game`, `installPath/game` and the wizard's cached `onboarding/installPaths` aggregate. Success still updates the manual-path badge. |
 | SettingsDestination / GamePathPage | detect | Changed: same path-state/install-path settlement refresh; successful automatic detection persists a Game path. |
 | SettingsDestination / RebuildJunctions | rebuild | Changed: settles `mods/game`; quarantine Junction withdrawal can record changed recovery state. The rebuild summary still uses mutation data. |
@@ -78,7 +78,7 @@ from the production inventory.
 | ImporterOriginPanel | accept | Changed: settles `gamePathStatus/game`, `importerOrigin/game` and `importer`; proposal installation can leave recovery state after rejection. Error is outside the conditional proposal. |
 | ImporterOriginPanel | decline | Existing success boundary retained; shared helper adds path-state to Origin/importer refresh after atomic dismissal. Its error notice now stays outside the proposal with the install error. |
 | ImporterOriginPanel | undo | Existing success boundary retained; shared helper adds path-state to Origin/importer refresh after atomic dismissal restoration. |
-| ImporterOriginPanel | toggleRecommendations | Changed: successful global preference write refreshes all `gamePathStatus` and `importer` queries as well as `importerOrigin`; toggling can change the resolved install/release target. |
+| ImporterRecommendations | toggleRecommendations | Changed: successful global preference write refreshes all `gamePathStatus` and `importer` queries as well as `importerOrigin`; toggling can change the resolved install/release target. |
 | ImporterOriginPanel / OverrideEditor | save | Existing transactional success boundary retained; `onChanged` calls the parent's expanded path-state/Origin/importer invalidation for override/install/pin changes. Success still clears editor drafts. |
 | ImporterOriginPanel / OverrideEditor | clear | Unchanged: same transactional write and parent invalidation. |
 | LibraryAuditWarning | reveal | Unchanged: reveals a folder; no persisted query state changes. |
@@ -134,6 +134,27 @@ supplies an installed version or an install invitation. Upstream check failures
 remain distinct from a current version. The frontend boundary tests exercise
 active projections and fresh inactive caches; the inventory gate alone does not
 prove these query keys or runtime policies.
+
+## GMM settings groups relocation — #296
+
+`Diagnostics.exportBundle` moved from `App` into its own module, retaining the
+local artifact command and explicit no-invalidation decision. The global
+`toggleRecommendations` moved from `ImporterOriginPanel` into
+`ImporterRecommendations`. Its atomic-success boundary and all-Game
+`importerOrigin`, `importer`, and `gamePathStatus` prefixes are unchanged; it
+also refreshes the dedicated global preference query. Two-Game behavioral
+regressions assert refreshed Origin, release, update and path projections in
+both Games' DOM under the production 30-second cache window, and observe both
+Games' evacuation checks re-run. Narrowing any Game prefix to either one Game,
+or the importer prefix to latest/update/evacuation alone, is tested independently
+by source mutation.
+
+The GMM page retains its Library root first and Network second, followed by
+GMM updates, importer recommendations and Diagnostics. `ModUpdatesPanel` stays
+on the main screen. The three preference tests previously bound to the per-Game
+checkbox (write, structured failure, pending/success) now exercise the global
+module, including the saved checkbox value and other-Game refresh behavior.
+No inventory gate or per-Game action coverage was weakened.
 
 ## Observed regression evidence
 

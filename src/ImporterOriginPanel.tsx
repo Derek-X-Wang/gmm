@@ -10,7 +10,6 @@ import {
   originSlug,
   restoreImporterOrigin,
   setImporterOriginOverride,
-  setImporterRecommendationsEnabled,
   toOriginInput,
   type GameCode,
   type ImporterOriginRef,
@@ -65,9 +64,11 @@ function describeInstalled(installed: InstalledOrigin): string {
 export function ImporterOriginPanel({
   game,
   displayName,
+  onRecommendationsPage,
 }: {
   game: GameCode;
   displayName: string;
+  onRecommendationsPage?: () => void;
 }) {
   const qc = useQueryClient();
   const path = useQuery({
@@ -109,16 +110,6 @@ export function ImporterOriginPanel({
       restoreImporterOrigin(game, toOriginInput(origin)),
     onSuccess: invalidate,
   });
-  const toggleRecommendations = useMutation({
-    mutationFn: (enabled: boolean) => setImporterRecommendationsEnabled(enabled),
-    // Every game's surface changes, not just this one.
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["importerOrigin"] });
-      qc.invalidateQueries({ queryKey: ["importer"] });
-      qc.invalidateQueries({ queryKey: ["gamePathStatus"] });
-    },
-  });
-
   const data = status.data;
   const originVerified = status.isSuccess && !status.isFetching;
   // Bound once so the decline handler closes over a value rather than
@@ -134,6 +125,8 @@ export function ImporterOriginPanel({
         and you can point it somewhere else.
       </p>
 
+      {onRecommendationsPage ? <button onClick={onRecommendationsPage}>View GMM importer recommendations</button> : null}
+
       {status.isPending ? <p role="status">Reading Importer Origin…</p> : null}
       {status.isError ? <p role="status">Importer Origin unavailable.</p> : null}
       {data && (status.isFetching || status.isError) ? <p className="muted small">The Origin details below are from the previous check.</p> : null}
@@ -141,11 +134,9 @@ export function ImporterOriginPanel({
       <CommandErrorNotice error={accept.error} />
       <CommandErrorNotice error={decline.error} />
       <CommandErrorNotice error={undo.error} />
-      <CommandErrorNotice error={toggleRecommendations.error} />
       {accept.isSuccess ? <p role="status">Origin installation completed.</p> : null}
       {decline.isSuccess ? <p role="status">Recommendation declined.</p> : null}
       {undo.isSuccess ? <p role="status">Recommendation restored.</p> : null}
-      {toggleRecommendations.isSuccess ? <p role="status">Recommendations preference saved.</p> : null}
 
       {data ? (
         <>
@@ -160,15 +151,6 @@ export function ImporterOriginPanel({
                 <>No Importer Origin is in effect.</>
               )}
             </span>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={data.recommendationsEnabled}
-                disabled={toggleRecommendations.isPending}
-                onChange={(e) => toggleRecommendations.mutate(e.currentTarget.checked)}
-              />
-              <span>Recommend importer origins (all games)</span>
-            </label>
           </div>
           <p className="muted small">
             {!filesInstalled ? <>Recorded origin: {data.installed.state === "known" ? <code>{originSlug(data.installed)}</code>
@@ -279,8 +261,9 @@ export function ImporterOriginPanel({
               </ul>
             </div>
           ) : null}
-          {!data.proposal && originVerified ? <p className="muted small">No Origin Proposal.</p> : null}
-          {data.dismissed.length === 0 && !data.dismissalsError && originVerified ? <p className="muted small">No dismissed recommendations.</p> : null}
+          {!data.recommendationsEnabled && originVerified ? <p className="muted small">Importer recommendations are off. Proposals and dismissals are hidden. Your dismissed recommendations stay saved. Turn recommendations on in GMM importer recommendations to review them.</p> : null}
+          {data.recommendationsEnabled && !data.proposal && originVerified ? <p className="muted small">No Origin Proposal.</p> : null}
+          {data.recommendationsEnabled && data.dismissed.length === 0 && !data.dismissalsError && originVerified ? <p className="muted small">No dismissed recommendations.</p> : null}
 
           {data.dismissalsError ? (
             <p className="error">
