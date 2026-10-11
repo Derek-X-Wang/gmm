@@ -548,3 +548,89 @@ it.each(["retry_importer_evacuation_recovery", "accept_importer_origin_proposal"
   expect(screen.queryByRole("button", { name: "Retry Model Importer recovery" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Switch and install" })).not.toBeInTheDocument();
 });
+
+it("keeps application groups only on GMM in the approved order and links back to each Game", async () => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  expect(screen.getByRole("heading", { name: "Mod updates" })).toBeVisible();
+  for (const name of ["Network", "GMM updates", "Importer recommendations", "Diagnostics"]) {
+    expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
+  }
+  await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+  const content = screen.getByRole("heading", { name: "Global Library root" }).parentElement!.parentElement!;
+  expect(within(content).getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual([
+    "GMM settings", "Global Library root", "Network", "GMM updates", "Importer recommendations", "Diagnostics",
+  ]);
+  await userEvent.click(screen.getByRole("button", { name: "View Honkai: Star Rail importer proposals, dismissals and overrides" }));
+  expect(pageButton("Honkai: Star Rail")).toHaveAttribute("aria-current", "page");
+  expect(screen.queryByRole("checkbox", { name: /Recommend importer origins/ })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "View GMM importer recommendations" }));
+  expect(pageButton("GMM settings")).toHaveAttribute("aria-current", "page");
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(screen.getByRole("heading", { name: "Mod updates" })).toBeVisible();
+  for (const name of ["Network", "GMM updates", "Importer recommendations", "Diagnostics"]) {
+    expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
+  }
+});
+
+it("preserves Network saved credentials, edits, pending actions and successful password clearing", async () => {
+  const original = invoke.getMockImplementation()!;
+  let config = { url: "socks5://saved:1080", username: "saved-user", passwordSet: true };
+  let completeSave!: () => void;
+  let completeTest!: () => void;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_proxy_config") return config;
+    if (command === "set_proxy_config") return new Promise<void>((yes) => { completeSave = () => { config = { url: args.args.url, username: args.args.username, passwordSet: true }; yes(); }; });
+    if (command === "test_proxy_connection") return new Promise<void>((yes) => { completeTest = yes; });
+    return original(command, args);
+  });
+  renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  const password = await screen.findByPlaceholderText("(set — leave blank to keep)");
+  expect(password).toHaveValue("");
+  expect(password).toHaveAttribute("type", "password");
+  expect(screen.getByPlaceholderText("proxy URL")).toHaveValue("socks5://saved:1080");
+  expect(screen.getByPlaceholderText("username (optional)")).toHaveValue("saved-user");
+  await userEvent.clear(screen.getByPlaceholderText("proxy URL"));
+  await userEvent.type(screen.getByPlaceholderText("proxy URL"), "http://edited:8080");
+  await userEvent.clear(screen.getByPlaceholderText("username (optional)"));
+  await userEvent.type(screen.getByPlaceholderText("username (optional)"), "edited-user");
+  await userEvent.type(password, "new-secret");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+  expect(invoke).toHaveBeenCalledWith("set_proxy_config", { args: { url: "http://edited:8080", username: "edited-user", password: "new-secret" } });
+  await act(async () => completeSave());
+  await waitFor(() => expect(password).toHaveValue(""));
+  expect(screen.getByPlaceholderText("proxy URL")).toHaveValue("http://edited:8080");
+  await userEvent.click(screen.getByRole("button", { name: "Test connection" }));
+  expect(screen.getByRole("button", { name: "Testing…" })).toBeDisabled();
+  await act(async () => completeTest());
+  expect(await screen.findByText("Proxy reachable.")).toBeVisible();
+  expect(invoke).toHaveBeenCalledWith("test_proxy_connection", undefined);
+});
+
+it("keeps Network loading, unset and unavailable states distinct", async () => {
+  const original = invoke.getMockImplementation()!;
+  let resolve!: (value: unknown) => void;
+  invoke.mockImplementation(async (command, args) => command === "get_proxy_config" ? new Promise((yes) => { resolve = yes; }) : original(command, args));
+  const { client } = renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  expect(screen.getByText("Reading Network configuration…")).toBeVisible();
+  await act(async () => resolve({ url: null, username: null, passwordSet: false }));
+  expect(await screen.findByPlaceholderText("password")).toHaveValue("");
+  expect(screen.getByPlaceholderText("proxy URL")).toHaveValue("");
+  invoke.mockImplementation(async (command, args) => { if (command === "get_proxy_config") throw new Error("Network configuration unreadable"); return original(command, args); });
+  await act(() => client.invalidateQueries({ queryKey: ["proxyConfig"] }));
+  expect(await screen.findByText("Network configuration unreadable")).toBeVisible();
+  expect(screen.queryByText("Reading Network configuration…")).not.toBeInTheDocument();
+});
+
+it("keeps Network connection failures visible", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => { if (command === "test_proxy_connection") throw new Error("Proxy connection refused"); return original(command, args); });
+  renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await userEvent.click(screen.getByRole("button", { name: "Test connection" }));
+  expect(await screen.findByText("Proxy connection refused")).toBeVisible();
+  expect(screen.queryByText("Proxy reachable.")).not.toBeInTheDocument();
+});

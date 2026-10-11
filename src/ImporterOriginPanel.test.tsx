@@ -11,7 +11,6 @@ const setImporterOriginOverride = vi.fn();
 const acceptImporterOriginProposal = vi.fn();
 const dismissImporterOrigin = vi.fn();
 const restoreImporterOrigin = vi.fn();
-const setImporterRecommendationsEnabled = vi.fn();
 
 vi.mock("./api", async () => {
   const actual = await vi.importActual<typeof import("./api")>("./api");
@@ -24,8 +23,6 @@ vi.mock("./api", async () => {
     acceptImporterOriginProposal: (...a: unknown[]) => acceptImporterOriginProposal(...a),
     dismissImporterOrigin: (...a: unknown[]) => dismissImporterOrigin(...a),
     restoreImporterOrigin: (...a: unknown[]) => restoreImporterOrigin(...a),
-    setImporterRecommendationsEnabled: (...a: unknown[]) =>
-      setImporterRecommendationsEnabled(...a),
   };
 });
 
@@ -79,7 +76,6 @@ beforeEach(() => {
   });
   dismissImporterOrigin.mockReset().mockResolvedValue(undefined);
   restoreImporterOrigin.mockReset().mockResolvedValue(undefined);
-  setImporterRecommendationsEnabled.mockReset().mockResolvedValue(undefined);
 });
 
 it("says which origin is in effect and which layer it came from", async () => {
@@ -308,40 +304,6 @@ it("surfaces dismissal state GMM cannot read rather than reporting none", async 
   ).toBeInTheDocument();
 });
 
-it("switches recommendations off for every game from one control", async () => {
-  importerOriginStatus.mockResolvedValue(status());
-  render();
-
-  const toggle = await screen.findByRole("checkbox", { name: /recommend/i });
-  expect(toggle).toBeChecked();
-  await userEvent.click(toggle);
-
-  await waitFor(() =>
-    expect(setImporterRecommendationsEnabled).toHaveBeenCalledWith(false),
-  );
-});
-
-it("renders a structured failure when the recommendations switch fails", async () => {
-  setImporterRecommendationsEnabled.mockRejectedValue({
-    kind: "invalidActiveVariant",
-    message: "Could not change recommendation settings.",
-  });
-  importerOriginStatus.mockResolvedValue(status());
-  render();
-
-  await userEvent.click(
-    await screen.findByRole("checkbox", { name: /recommend/i }),
-  );
-
-  const failure = await screen.findByText(
-    "Could not change recommendation settings.",
-  );
-  expect(failure).toHaveAttribute(
-    "data-command-failure-kind",
-    "invalidActiveVariant",
-  );
-});
-
 it("offers no prompt and no dismissal list while recommendations are off", async () => {
   importerOriginStatus.mockResolvedValue(
     status({ recommendationsEnabled: false, proposal: null, dismissed: [] }),
@@ -425,23 +387,23 @@ it("distinguishes empty override, proposal and dismissal states", async () => {
   expect(screen.getByText("No dismissed recommendations.")).toBeVisible();
   expect(screen.queryByRole("button", { name: /Clear override/ })).not.toBeInTheDocument();
 });
-it.each(["accept", "decline", "undo", "save", "clear", "recommendations"])("shows %s pending and outcome without losing errors to a disappearing proposal", async (action) => {
+it.each(["accept", "decline", "undo", "save", "clear"])("shows %s pending and outcome without losing errors to a disappearing proposal", async (action) => {
   const config = status({
     proposal: { origin: theFork, reason: "New maintained origin", replaces: { state: "known", ...gimiPackage } },
     dismissed: [theFork], userOverride: { state: "set", ...theFork },
   });
   importerOriginStatus.mockResolvedValue(config);
-  const mock = { accept: acceptImporterOriginProposal, decline: dismissImporterOrigin, undo: restoreImporterOrigin, save: setImporterOriginOverride, clear: setImporterOriginOverride, recommendations: setImporterRecommendationsEnabled }[action]!;
+  const mock = { accept: acceptImporterOriginProposal, decline: dismissImporterOrigin, undo: restoreImporterOrigin, save: setImporterOriginOverride, clear: setImporterOriginOverride }[action]!;
   let resolve!: (value: unknown) => void;
   mock.mockImplementation(() => new Promise((yes) => { resolve = yes; }));
   render();
   const labels: Record<string, string> = { accept: "Switch and install", decline: "Not now", undo: "Undo", save: "Save origin", clear: "Clear override" };
-  await userEvent.click(action === "recommendations" ? await screen.findByRole("checkbox", { name: /recommend/i }) : await screen.findByRole("button", { name: labels[action] }));
+  await userEvent.click(await screen.findByRole("button", { name: labels[action] }));
   const pending: Record<string, string> = { accept: "Switching…", decline: "Declining…", undo: "Restoring…", save: "Saving…", clear: "Clearing…" };
-  expect(action === "recommendations" ? screen.getByRole("checkbox", { name: /recommend/i }) : screen.getByRole("button", { name: pending[action] })).toBeDisabled();
+  expect(screen.getByRole("button", { name: pending[action] })).toBeDisabled();
   importerOriginStatus.mockResolvedValue(status());
   resolve({ sha256: "abc", backup_dir: null });
-  const outcomes: Record<string, string> = { accept: "Origin installation completed.", decline: "Recommendation declined.", undo: "Recommendation restored.", save: "Origin override saved.", clear: "Origin override cleared.", recommendations: "Recommendations preference saved." };
+  const outcomes: Record<string, string> = { accept: "Origin installation completed.", decline: "Recommendation declined.", undo: "Recommendation restored.", save: "Origin override saved.", clear: "Origin override cleared." };
   expect(await screen.findByText(outcomes[action])).toBeVisible();
 });
 it.each(["decline", "undo", "save", "clear"])("preserves the atomic-success invalidation policy for rejected %s", async (action) => {
@@ -582,4 +544,14 @@ it("names the resolved origin as the ordinary install target before any origin h
   await screen.findByRole("button", { name: "Save origin" });
   expect(screen.queryByText(/Future install target after an explicit origin change:/)).not.toBeInTheDocument();
   expect(screen.getByText(/Install target:/)).toHaveTextContent("Curated/GIMI-Fork");
+});
+
+it("links to the GMM preference while keeping per-Game origin actions", async () => {
+  importerOriginStatus.mockResolvedValue(status());
+  const onRecommendationsPage = vi.fn();
+  renderWithQuery(<ImporterOriginPanel game="gimi" displayName="Genshin Impact" onRecommendationsPage={onRecommendationsPage} />);
+  await screen.findByRole("button", { name: "Save origin" });
+  expect(screen.queryByRole("checkbox", { name: /recommend/i })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "View GMM importer recommendations" }));
+  expect(onRecommendationsPage).toHaveBeenCalledOnce();
 });

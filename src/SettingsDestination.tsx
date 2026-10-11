@@ -12,6 +12,10 @@ import { LibraryAuditWarning } from "./LibraryAuditWarning";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { GlobalLibraryRootEditor, GameLibraryOverrideEditor } from "./LibraryPathEditors";
 
+import { UpdatesPanel } from "./UpdatesPanel";
+import { Diagnostics } from "./Diagnostics.tsx";
+import { ImporterRecommendations } from "./ImporterRecommendations";
+
 export type SettingsPage = GameCode | "gmm";
 
 /** Destination owner outlives visits. Visited Settings pages retain drafts,
@@ -84,7 +88,7 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
                 <h2>{game.displayName}</h2>
                 <GamePathPage game={game.code} displayName={game.displayName} />
                 <ImporterPanel game={game.code} displayName={game.displayName} />
-                <ImporterOriginPanel game={game.code} displayName={game.displayName} />
+                <ImporterOriginPanel game={game.code} displayName={game.displayName} onRecommendationsPage={() => onPageChange("gmm")} />
                 <GameLibraryOverrideEditor game={game.code} displayName={game.displayName} onGlobalPage={() => onPageChange("gmm")} />
                 <LibraryAuditWarning game={game.code} />
               </div>
@@ -93,6 +97,9 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
               <h2>GMM settings</h2>
               <GlobalLibraryRootEditor games={games} onGamePage={onPageChange} />
               <NetworkPanel />
+              <UpdatesPanel />
+              <ImporterRecommendations games={games} onGamePage={onPageChange} />
+              <Diagnostics />
             </div> : null}
           </div>
         </div>
