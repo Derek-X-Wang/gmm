@@ -8,7 +8,7 @@ a completed folder pick. Each route invokes the same existing backend mutation;
 there is no frontend path validation, trimming, or implicit reset to default.
 The diagnostics log directory stays read-only.
 
-The inventory contains **41 `useMutation` call sites in six files** and is now
+The inventory contains **41 `useMutation` call sites in seven files** and is now
 enforced by `mutation-invalidation-boundary.test.ts` under `pnpm test`. The gate
 parses production TypeScript/TSX under `src/`, including new files, and requires
 exactly one row per call site and no stale rows. The original audit traced each
