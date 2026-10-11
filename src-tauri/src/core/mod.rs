@@ -3385,7 +3385,13 @@ impl Core {
     /// recovery witnesses, or filesystem entries.
     pub async fn game_path_status(&self, game: GameCode) -> Result<game_path::GamePathStatus> {
         let saved_path = self.game_install_path(game).await?;
-        Ok(game_path::inspect(game, saved_path))
+        // Production commands and behavioural tests share this boundary. Disk
+        // checks can wait on unavailable drives; keep them off async workers.
+        tokio::task::spawn_blocking(move || game_path::inspect(game, saved_path))
+            .await
+            .map_err(|error| {
+                Error::PathInspectionTask(format!("path inspection task join error: {error}"))
+            })
     }
 
     /// Validate and persist a game's install path.

@@ -1,0 +1,479 @@
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, expect, it, vi } from "vitest";
+import { makeQueryClient, renderWithQuery } from "./test/harness";
+import type { GameCode, GamePathStatus, GameSummary, SessionInfo } from "./api";
+
+const { invoke, listen, unlisten } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn(), unlisten: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
+vi.mock("./diagnostics", () => ({ diagnosticsLogDir: vi.fn().mockResolvedValue("C:\\GMM\\logs"), exportDiagnosticsBundle: vi.fn() }));
+vi.mock("./updater", () => ({ checkInteractively: vi.fn() }));
+vi.mock("./LoaderVersionNote", () => ({ LoaderVersionNote: () => null }));
+const { default: App } = await import("./App");
+
+const games: GameSummary[] = [
+  { code: "gimi", displayName: "Genshin Impact" },
+  { code: "srmi", displayName: "Honkai: Star Rail" },
+  { code: "zzmi", displayName: "Zenless Zone Zero" },
+  { code: "wwmi", displayName: "Wuthering Waves" },
+  { code: "himi", displayName: "Honkai Impact 3rd" },
+  { code: "efmi", displayName: "Arknights: Endfield" },
+];
+let paths: Partial<Record<GameCode, string>>;
+let states: Partial<Record<GameCode, GamePathStatus>>;
+let session: SessionInfo | null;
+let events: Record<string, () => void>;
+const scrollTo = vi.fn();
+
+function renderApp() {
+  const client = makeQueryClient();
+  client.setDefaultOptions({ queries: { retry: false, gcTime: 300_000, staleTime: 30_000 } });
+  return renderWithQuery(<App />, { client });
+}
+async function openGame() {
+  await userEvent.click(await screen.findByRole("button", { name: "Settings for Honkai: Star Rail" }));
+}
+function pageButton(name: string) {
+  return within(screen.getByRole("navigation", { name: "Settings pages" })).getByRole("button", { name: new RegExp(name) });
+}
+function noMainContent() {
+  expect(screen.queryByRole("heading", { name: "Launch", hidden: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: /^Mods \(/, hidden: true })).not.toBeInTheDocument();
+  expect(document.querySelector(".dropzone")).toBeNull();
+  expect(screen.queryByRole("button", { name: /Launch Honkai/, hidden: true })).not.toBeInTheDocument();
+}
+
+beforeEach(() => {
+  paths = { srmi: "C:\\StarRail", zzmi: "C:\\ZZZ", wwmi: "C:\\Waves" };
+  states = {};
+  session = null;
+  events = {};
+  vi.stubGlobal("scrollTo", scrollTo);
+  Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
+  listen.mockImplementation(async (name: string, callback: () => void) => { events[name] = callback; return unlisten; });
+  invoke.mockImplementation(async (command: string, args?: { game: GameCode; path: string }) => {
+    switch (command) {
+      case "is_onboarding_complete": return { complete: true, skipped: false };
+      case "list_supported_games": return games;
+      case "get_game_install_path": return paths[args!.game] ?? null;
+      case "get_game_path_status": return states[args!.game] ?? {
+        game: args!.game, savedPath: paths[args!.game] ?? null,
+        gamePath: { status: paths[args!.game] ? "readable" : "noSavedPath" },
+        modelImporter: { status: "unverified", path: null, error: "Not checked" },
+      };
+      case "set_game_install_path": paths[args!.game] = args!.path; return;
+      case "get_proxy_config": return { url: null, username: null, passwordSet: false };
+      case "attention_status": return { safeToProceed: true, reinstalls: [], enabledTransitions: [], importerEvacuations: [], stagedLibraryOperations: [], sessionLaunches: [], activeSession: null, libraryAudits: [], libraryRootOverlaps: [], modPathOverlaps: [] };
+      case "get_startup_reconcile_status": return { finished: true, failures: [] };
+      case "check_importer_update": return { available: false, installedVersion: null, pinned: false };
+      case "get_library_paths": return { defaultRoot: "C:\\GMM\\library", effectiveRoot: "C:\\GMM\\library", rootOverride: null, perGameOverrides: {}, perGameEffective: {} };
+      case "current_session": return session;
+      case "clean_stale_session": return null;
+      case "detect_conflicts": return { conflicts: [], per_mod_count: {} };
+      case "audit_library": return { unreferenced: [], duplicates: [], totalBytes: 0 };
+      case "list_mods":
+      case "list_mod_updates":
+      case "interrupted_session_launches": return [];
+      default: return null;
+    }
+  });
+});
+
+it.each(["global", "game"])("replaces all main content and preserves independent selection by %s arrival", async (arrival) => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  await userEvent.click(screen.getByRole("button", { name: arrival === "global" ? "Settings" : "Settings for Honkai: Star Rail" }));
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+  expect(pageButton(arrival === "global" ? "GMM settings" : "Honkai: Star Rail")).toHaveAttribute("aria-current", "page");
+  noMainContent();
+  const navigation = screen.getByRole("navigation", { name: "Settings pages" });
+  expect(within(navigation).getAllByRole("button")).toHaveLength(7);
+  for (const game of games) {
+    await userEvent.click(pageButton(game.displayName));
+    expect(screen.getByRole("textbox", { name: `${game.displayName} install path` })).toBeInTheDocument();
+    expect(screen.getByText("Return to Honkai: Star Rail")).toBeInTheDocument();
+    noMainContent();
+  }
+  await userEvent.click(pageButton("GMM settings"));
+  expect(screen.getByPlaceholderText("proxy URL")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("button", { name: arrival === "global" ? "Settings" : "Settings for Honkai: Star Rail" })).toHaveFocus();
+  expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Honkai: Star Rail", "Zenless Zone Zero", "Wuthering Waves"]);
+});
+
+it("adds an absent Game only on accepted save and returns to the original Game", async () => {
+  const original = invoke.getMockImplementation()!;
+  let reject = true;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "set_game_install_path" && reject) throw new Error("Rejected layout");
+    return original(command, args);
+  });
+  renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Add game" }));
+  await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
+  await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:\\Genshin{Enter}");
+  expect(await screen.findByText("Rejected layout")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(screen.queryByRole("tab", { name: "Genshin Impact" })).not.toBeInTheDocument();
+  await openGame();
+  await userEvent.click(pageButton("Genshin Impact"));
+  reject = false;
+  await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:\\Genshin");
+  await userEvent.click(screen.getByRole("button", { name: "Apply Genshin Impact install path" }));
+  await waitFor(() => expect(paths.gimi).toBe("C:\\Genshin"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(await screen.findByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "false");
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+});
+
+const outcomes: { gamePath: GamePathStatus["gamePath"]; modelImporter: GamePathStatus["modelImporter"]; line: string }[] = [
+  { gamePath: { status: "noSavedPath" }, modelImporter: { status: "unverified", path: null, error: "no setting" }, line: "Absent · no saved path" },
+  { gamePath: { status: "readable" }, modelImporter: { status: "installed" }, line: "SRMI installed · Game readable" },
+  { gamePath: { status: "readable" }, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] }, line: "Game readable · Model Importer not installed" },
+  { gamePath: { status: "savedPathNotFound", paths: ["C:\\StarRail\\StarRail.exe"] }, modelImporter: { status: "unverified", path: null, error: "Missing Game" }, line: "Saved installation cannot be found · Model Importer unverified" },
+  { gamePath: { status: "unreadable", path: "C:\\StarRail", error: "Access denied" }, modelImporter: { status: "unverified", path: null, error: "Access denied" }, line: "Cannot tell · path unreadable; Model Importer unverified" },
+  { gamePath: { status: "invalid", error: "Wrong path type" }, modelImporter: { status: "unverified", path: null, error: "Wrong layout" }, line: "Cannot verify Game layout · Model Importer unverified" },
+  { gamePath: { status: "readable" }, modelImporter: { status: "unverified", path: "C:\\StarRail\\Core", error: "Sharing violation" }, line: "Game readable · Cannot verify Model Importer" },
+];
+it.each(outcomes)("renders the separate path-state row: $line", async ({ gamePath, modelImporter, line }) => {
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath, modelImporter };
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent(line));
+  for (const other of outcomes.filter((value) => value.line !== line)) {
+    expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(other.line);
+  }
+  if (gamePath.status === "invalid" || modelImporter.status === "unverified" && gamePath.status === "readable") {
+    expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(/not installed|Absent|cannot be found/);
+  }
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toBeInTheDocument();
+});
+
+it("keeps path, rebuild and Network feedback across page changes, return, and late rejection", async () => {
+  const original = invoke.getMockImplementation()!;
+  let rejectPath!: (error: Error) => void;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "set_game_install_path") return new Promise((_, reject) => { rejectPath = reject; });
+    if (command === "rebuild_junctions") throw new Error("Rebuild failure retained");
+    if (command === "set_proxy_config") throw new Error("Proxy failure retained");
+    return original(command, args);
+  });
+  renderApp();
+  await openGame();
+  await userEvent.type(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }), "draft{Enter}");
+  await userEvent.click(pageButton("GMM settings"));
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText("Proxy failure retained")).toBeVisible();
+  await act(async () => rejectPath(new Error("Path failure retained")));
+  await userEvent.click(pageButton("Honkai: Star Rail"));
+  expect(screen.getByText("Path failure retained")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Rebuild junctions" }));
+  expect(await screen.findByText("Rebuild failure retained")).toBeVisible();
+  await userEvent.click(pageButton("Genshin Impact"));
+  await userEvent.click(pageButton("GMM settings"));
+  expect(screen.getByText("Proxy failure retained")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await openGame();
+  expect(screen.getByText("Path failure retained")).toBeVisible();
+  expect(screen.getByText("Rebuild failure retained")).toBeVisible();
+});
+
+it("refreshes Game Session events while Settings is open without repeating stale cleanup", async () => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  const removed = unlisten.mock.calls.length;
+  await openGame();
+  expect(listen).toHaveBeenCalledTimes(2);
+  expect(unlisten).toHaveBeenCalledTimes(removed);
+  session = { game: "zzmi", pid: 123, startedAt: "2026-10-11T00:00:00Z" } as SessionInfo;
+  const reads = invoke.mock.calls.filter(([command]) => command === "current_session").length;
+  await act(async () => events["session-started"]());
+  await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "current_session").length).toBeGreaterThan(reads));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(await screen.findByText("ZZMI is running")).toBeInTheDocument();
+  expect(screen.queryByText(/ended unexpectedly/)).not.toBeInTheDocument();
+  expect(invoke.mock.calls.filter(([command]) => command === "clean_stale_session")).toHaveLength(1);
+  await openGame();
+  session = null;
+  await act(async () => events["session-ended"]());
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await waitFor(() => expect(screen.queryByText("ZZMI is running")).not.toBeInTheDocument());
+  expect(listen).toHaveBeenCalledTimes(2);
+});
+
+it.each(["button", "escape"])("restores the user's Mod-list scroll position on %s return", async (route) => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "list_mods" ? [{
+    id: "mod-return", game: "srmi", name: "Return Outfit", source: "manual",
+    library_path: "C:\\GMM\\library\\srmi\\mod-return", enabled: false,
+    reinstall_recovery: null, enabled_transition_recovery: null,
+  }] : command === "list_variants" ? { variants: [], activeVariantId: null } : original(command, args));
+  renderApp();
+  await screen.findByText("Return Outfit");
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  Object.defineProperty(window, "scrollY", { configurable: true, value: 860 });
+  await openGame();
+  await userEvent.click(pageButton("Wuthering Waves"));
+  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  else fireEvent.keyDown(window, { key: "Escape" });
+  expect(screen.getByText("Return Outfit")).toBeInTheDocument();
+  expect(scrollTo).toHaveBeenLastCalledWith(0, 860);
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+});
+
+it("retains audit rejection after its row disappears and after a Settings page change", async () => {
+  const original = invoke.getMockImplementation()!;
+  let orphan = true;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "audit_library") return { unreferenced: orphan ? [{ path: "C:\\GMM\\library\\srmi\\orphan", directoryName: "orphan", sizeBytes: 128 }] : [], duplicates: [], totalBytes: 128 };
+    if (command === "recover_unreferenced_library_dir") { orphan = false; throw new Error("Recovery failure retained"); }
+    return original(command, args);
+  });
+  renderApp();
+  await openGame();
+  await userEvent.click(await screen.findByRole("button", { name: "Recover…" }));
+  await userEvent.type(screen.getByPlaceholderText("What is this mod called?"), "Recovered Outfit");
+  await userEvent.click(screen.getByRole("button", { name: "Recover" }));
+  expect(await screen.findByText(/Recovery failure retained/)).toBeVisible();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Recover…" })).not.toBeInTheDocument());
+  await userEvent.click(pageButton("GMM settings"));
+  await userEvent.click(pageButton("Honkai: Star Rail"));
+  expect(screen.getByText(/Recovery failure retained/)).toBeVisible();
+});
+
+it("restores the same Mod row when content above it changes during Settings", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "list_mods" ? [{
+    id: "mod-anchor", game: "srmi", name: "Anchor Outfit", source: "manual",
+    library_path: "C:\\GMM\\library\\srmi\\anchor", enabled: false,
+    reinstall_recovery: null, enabled_transition_recovery: null,
+  }] : command === "list_variants" ? { variants: [], activeVariantId: null } : original(command, args));
+  let rowTop = -40;
+  const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    return { top: this.dataset.modId ? rowTop : 0, bottom: this.dataset.modId ? rowTop + 180 : 0 } as DOMRect;
+  });
+  try {
+    renderApp();
+    await screen.findByText("Anchor Outfit");
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 860 });
+    await openGame();
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
+    rowTop = 20;
+    await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+    expect(scrollTo).toHaveBeenLastCalledWith(0, 60);
+  } finally {
+    bounds.mockRestore();
+  }
+});
+
+it("keeps unavailable checks distinct from absence and preserves the saved-path repair route", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_path_status" && args.game === "srmi") throw new Error("Path inspection failed");
+    if (command === "audit_library") throw new Error("Audit inspection failed");
+    return original(command, args);
+  });
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Cannot tell · path check unavailable"));
+  expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(/Absent|not installed/);
+  expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toHaveValue("C:\\StarRail");
+  expect(await screen.findByText("Path inspection failed")).toBeInTheDocument();
+  expect(await screen.findByText("Audit inspection failed")).toBeInTheDocument();
+});
+
+it.each([
+  { command: "set_game_install_path", failed: false },
+  { command: "set_game_install_path", failed: true },
+  { command: "detect_game_install_path", failed: false },
+  { command: "detect_game_install_path", failed: true },
+])("refreshes path-state evidence on settlement of $command (rejected: $failed)", async ({ command, failed }) => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (name, args) => {
+    if (name === command) {
+      states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+      if (failed) throw new Error("Path operation rejected");
+      return command === "detect_game_install_path" ? "C:\\StarRail" : null;
+    }
+    return original(name, args);
+  });
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Game readable · Cannot verify Model Importer"));
+  if (command === "set_game_install_path") await userEvent.type(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }), "changed{Enter}");
+  else await userEvent.click(screen.getByRole("button", { name: "Re-detect" }));
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed · Game readable"));
+  if (failed) expect(screen.getByText("Path operation rejected")).toBeVisible();
+});
+
+it("keeps the Mod list available across Settings even when inactive cache entries expire immediately", async () => {
+  const original = invoke.getMockImplementation()!;
+  let returning = false;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "list_mods") {
+      if (returning) throw new Error("List read is now unavailable");
+      return [{ id: "mod-retained", game: "srmi", name: "Retained Outfit", source: "manual",
+        library_path: "C:\\GMM\\library\\srmi\\retained", enabled: false,
+        reinstall_recovery: null, enabled_transition_recovery: null }];
+    }
+    if (command === "list_variants") return { variants: [], activeVariantId: null };
+    return original(command, args);
+  });
+  const client = makeQueryClient();
+  client.setDefaultOptions({ queries: { retry: false, gcTime: 0, staleTime: 30_000 } });
+  renderWithQuery(<App />, { client });
+  await screen.findByText("Retained Outfit");
+  await openGame();
+  await userEvent.click(pageButton("GMM settings"));
+  returning = true;
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(await screen.findByText("Retained Outfit")).toBeVisible();
+  expect(screen.queryByText("List read is now unavailable")).not.toBeInTheDocument();
+});
+
+it("re-renders durable quarantine, launch reservations and audit findings after Back", async () => {
+  const original = invoke.getMockImplementation()!;
+  const auditPath = "C:\\GMM\\library\\srmi\\durable-orphan";
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "list_mods") return [{
+      id: "mod-durable", game: "srmi", name: "Durable Outfit", source: "manual",
+      library_path: "C:\\GMM\\library\\srmi\\durable", enabled: true,
+      enabled_transition_recovery: null,
+      reinstall_recovery: { reason: "Deployment withdrawal failed", attemptedAt: "2026-10-11T00:00:00Z", attempts: 1,
+        libraryPath: "C:\\GMM\\library\\srmi\\durable", stagedPath: "C:\\GMM\\library\\srmi\\stage",
+        quarantinePath: "C:\\GMM\\library\\srmi\\old", junctionWithdrawn: false,
+        junctionWithdrawalError: "Access denied" },
+    }];
+    if (command === "list_variants") return { variants: [], activeVariantId: null };
+    if (command === "interrupted_session_launches") return [{ id: "durable-launch", game: "srmi", child_pid: null, started_at: "2026-10-11T00:00:00Z" }];
+    if (command === "audit_library") return { unreferenced: [{ path: auditPath, directoryName: "durable-orphan", sizeBytes: 128 }], duplicates: [], totalBytes: 128 };
+    if (command === "attention_status") return { ...await original(command, args), safeToProceed: false,
+      libraryAudits: [{ game: "srmi", unreferenced: [{ path: auditPath }], duplicates: [] }] };
+    return original(command, args);
+  });
+  renderApp();
+  await screen.findByRole("region", { name: "Interrupted SRMI launch" });
+  await screen.findByRole("region", { name: "Interrupted reinstall recovery for Durable Outfit" });
+  const navigationCalls = invoke.mock.calls.length;
+  await openGame();
+  expect(await screen.findByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent(auditPath);
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(screen.getByRole("region", { name: "Interrupted reinstall recovery for Durable Outfit" })).toHaveTextContent("this Mod may still be loading");
+  expect(screen.getByRole("region", { name: "Interrupted SRMI launch" })).toHaveTextContent("kept the launch reservation");
+  const navigationReads = new Set([
+    "audit_library", "current_session", "interrupted_session_launches", "detect_conflicts",
+    "check_importer_update", "attention_status", "fetch_latest_importer_release",
+    "importer_origin_status", "mod_updates_globally_enabled", "av_guidance",
+  ]);
+  const navigationCommands = invoke.mock.calls.slice(navigationCalls).map(([command]) => command);
+  expect(navigationCommands.filter((command) =>
+    !/^(get_|list_)/.test(command) && !navigationReads.has(command),
+  )).toEqual([]);
+  expect(within(screen.getByRole("region", { name: "Attention across all Games" })).getByText(auditPath)).toBeVisible();
+  await openGame();
+  expect(screen.getByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent(auditPath);
+});
+
+
+it.each([
+  ["install_importer", "Reinstall importer"],
+  ["rollback_importer", "Roll back importer"],
+  ["set_importer_pinned", "Pin to current"],
+  ["retire_interrupted_importer_evacuation", "I confirmed no other GMM is changing this importer"],
+  ["retry_importer_evacuation_recovery", "Retry Model Importer recovery"],
+])("refreshes cached Settings path-state after %s", async (writer, button) => {
+  const original = invoke.getMockImplementation()!;
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" },
+    modelImporter: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] } };
+  let changed = false;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "check_importer_update") return { available: false, installedVersion: "1.0", pinned: false };
+    if (command === "get_importer_evacuation_recovery" && writer.includes("evacuation") && !changed) return {
+      reason: "Interrupted importer", attemptedAt: "2026-10-11T00:00:00Z", attempts: 1,
+      gamePath: "C:\\StarRail", backupPath: "C:\\backup", ownerUncertain: writer.startsWith("retire"),
+      action: writer.startsWith("retire") ? "retireProducer" : "retry",
+    };
+    if (command === writer) {
+      changed = true;
+      states.srmi = { ...states.srmi!, modelImporter: { status: "installed" } };
+      return command === "rollback_importer" ? "C:\\backup" : command === "install_importer" ? { sha256: "abc123", backup_dir: null, rewrote_files: [] } : null;
+    }
+    return original(command, args);
+  });
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(await screen.findByRole("button", { name: new RegExp(button) }));
+  await waitFor(() => expect(changed).toBe(true));
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed · Game readable"));
+  expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent("Model Importer not installed");
+});
+
+it.each(["delete", "recover"])("Escape cancels the Library %s prompt before leaving Settings", async (action) => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "audit_library" ? {
+    unreferenced: [{ path: "C:\\GMM\\library\\srmi\\orphan", directoryName: "orphan", sizeBytes: 128 }], duplicates: [], totalBytes: 128,
+  } : original(command, args));
+  renderApp();
+  await openGame();
+  const audit = await screen.findByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" });
+  await userEvent.click(within(audit).getByRole("button", { name: action === "delete" ? "Delete…" : "Recover…" }));
+  expect(within(audit).getByRole("button", { name: "Cancel" })).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+  expect(within(audit).queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  expect(within(audit).getByRole("button", { name: action === "delete" ? "Delete…" : "Recover…" })).toHaveFocus();
+});
+
+it("keeps keyboard focus on the Game navigation button after changing pages", async () => {
+  renderApp();
+  await openGame();
+  const next = pageButton("Genshin Impact");
+  await userEvent.tab(); // Back to Mods
+  await userEvent.tab(); // First Game row
+  expect(next).toHaveFocus();
+  await userEvent.keyboard("{Enter}");
+  expect(next).toHaveFocus();
+  expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toBeVisible();
+});
+
+it("refreshes cached Settings path-state when setup finishes", async () => {
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "requiredEntriesNotFound", paths: ["d3dx.ini"] } };
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Run setup again" }));
+  await screen.findByRole("heading", { name: "GMM — first-run setup" });
+  states.srmi = { ...states.srmi, modelImporter: { status: "installed" } };
+  await userEvent.click(screen.getByRole("button", { name: "Skip setup" }));
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed · Game readable"));
+});
+
+it("refreshes cached Settings uncertainty after importer installation rejects", async () => {
+  const original = invoke.getMockImplementation()!;
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "install_importer") {
+      states.srmi = { ...states.srmi!, modelImporter: { status: "unverified", path: "C:\\StarRail\\Core", error: "Restoration incomplete" } };
+      throw new Error("Install rollback failed");
+    }
+    return original(command, args);
+  });
+  renderApp();
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Reinstall importer" }));
+  await screen.findByText("Install rollback failed");
+  await openGame();
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Game readable · Cannot verify Model Importer"));
+});

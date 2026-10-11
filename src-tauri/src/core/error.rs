@@ -115,6 +115,9 @@ pub enum Error {
     #[error("zip entry {name:?} is unsafe: {reason}. Aborted before any files were written.")]
     ZipUnsafeEntry { name: String, reason: &'static str },
 
+    #[error("{0}")]
+    PathInspectionTask(String),
+
     #[error("diagnostics error: {0}")]
     Diagnostics(String),
 

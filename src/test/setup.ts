@@ -22,3 +22,6 @@ Object.defineProperty(window, "matchMedia", {
     dispatchEvent: () => false,
   }),
 });
+
+// jsdom does not implement scrolling. Individual return tests inspect this seam.
+Object.defineProperty(window, "scrollTo", { writable: true, value: vi.fn() });

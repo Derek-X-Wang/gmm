@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { GameCode, GameSummary } from "./api";
@@ -76,10 +76,11 @@ it("shows only the three installed games as tabs and opens a remaining game's se
   expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toHaveValue("");
   expect(screen.queryByRole("tab", { name: "Genshin Impact" })).not.toBeInTheDocument();
   await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:\\Genshin{Enter}");
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   await waitFor(() => expect(tabNames()).toEqual([
     "Genshin Impact", "Honkai: Star Rail", "Zenless Zone Zero", "Wuthering Waves",
   ]));
-  expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
   expect(invoke).toHaveBeenCalledWith("set_game_install_path", { game: "gimi", path: "C:\\Genshin" });
 });
 
@@ -92,8 +93,10 @@ it("keeps every supported game reachable with no install paths and promotes the 
     await userEvent.click(screen.getByRole("button", { name: "Add game" }));
     await userEvent.click(screen.getByRole("button", { name: `Set up ${game.displayName}` }));
     expect(await screen.findByRole("textbox", { name: `${game.displayName} install path` })).toHaveValue("");
+    if (game.code !== "efmi") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   }
   await userEvent.type(screen.getByRole("textbox", { name: "Arknights: Endfield install path" }), "C:\\Endfield{Enter}");
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   await waitFor(() => expect(tabNames()).toEqual(["Arknights: Endfield"]));
   expect(screen.getByRole("tab", { name: "Arknights: Endfield" })).toHaveAttribute("aria-selected", "true");
 });
@@ -105,6 +108,7 @@ it("shows all six installed games and omits the add control when none remain", a
   expect(tabNames()).toEqual(games.map((game) => game.displayName));
   expect(screen.queryByRole("button", { name: "Add game" })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("tab", { name: "Zenless Zone Zero" }));
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Zenless Zone Zero" }));
   expect(screen.getByRole("textbox", { name: "Zenless Zone Zero install path" })).toHaveValue("C:\\Games\\zzmi");
 });
 
@@ -112,9 +116,11 @@ it("removes a tab when its saved path is cleared and keeps setup reachable", asy
   paths = { srmi: "C:\\StarRail" };
   renderWithQuery(<App />);
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" }));
   const path = screen.getByRole("textbox", { name: "Honkai: Star Rail install path" });
   await userEvent.clear(path);
   await userEvent.click(screen.getByRole("button", { name: "Apply Honkai: Star Rail install path" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   await waitFor(() => expect(tabNames()).toEqual([]));
   await userEvent.click(screen.getByRole("button", { name: "Add game" }));
   expect(screen.getByRole("button", { name: "Set up Honkai: Star Rail" })).toBeInTheDocument();
@@ -133,7 +139,9 @@ it("adds a tab after auto-detect saves a previously unconfigured game's path", a
   await userEvent.click(await screen.findByRole("button", { name: "Add game" }));
   await userEvent.click(screen.getByRole("button", { name: "Set up Arknights: Endfield" }));
   await userEvent.click(screen.getByRole("button", { name: "Auto-detect" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   await waitFor(() => expect(tabNames()).toEqual(["Arknights: Endfield"]));
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Arknights: Endfield" }));
   expect(screen.getByRole("textbox", { name: "Arknights: Endfield install path" })).toHaveValue("C:\\DetectedEndfield");
 });
 
@@ -170,4 +178,21 @@ it("does not call pending path reads an empty install list", async () => {
   }
   await waitFor(() => expect(tabNames()).toEqual(["Arknights: Endfield"]));
   expect(screen.queryByText("Checking game install paths…")).not.toBeInTheDocument();
+});
+
+
+it("chooses the first installed Game after all concurrent path reads finish", async () => {
+  paths = { gimi: "C:\\Genshin", srmi: "C:\\StarRail" };
+  const implementation = invoke.getMockImplementation()!;
+  let resolveFirst!: (path: string) => void;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_install_path" && args.game === "gimi") return new Promise<string>((resolve) => { resolveFirst = resolve; });
+    return implementation(command, args);
+  });
+  renderWithQuery(<App />);
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  await screen.findByText("Checking game install paths…");
+  await act(async () => resolveFirst(paths.gimi!));
+  await waitFor(() => expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "true"));
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "false");
 });

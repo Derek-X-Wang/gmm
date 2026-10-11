@@ -446,3 +446,25 @@ it("disables Library edits while an explicit move is pending", async () => {
   await waitFor(() => expect(field).toBeEnabled());
   expect(setLibraryRoot).toHaveBeenCalledTimes(1);
 });
+
+it.each([false, true])("invalidates cached Game path-state after wizard path settlement (rejects: %s)", async (rejects) => {
+  if (rejects) setGameInstallPath.mockRejectedValue(new Error("Path save failed"));
+  openDialog.mockResolvedValue("C:\\Games\\NewPath");
+  const { client } = renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+  client.setQueryDefaults(["gamePathStatus"], { gcTime: 300_000, staleTime: 30_000 });
+  client.setQueryData(["gamePathStatus", "gimi"], { previous: true });
+  await advanceToStep(2);
+  await userEvent.click(await screen.findByRole("button", { name: "Change…" }));
+  await waitFor(() => expect(client.getQueryState(["gamePathStatus", "gimi"])?.isInvalidated).toBe(true));
+});
+
+it.each([false, true])("invalidates cached Game path-state after wizard importer settlement (rejects: %s)", async (rejects) => {
+  getGameInstallPath.mockImplementation(async (game) => game === "gimi" ? "C:\\Games\\Genshin" : null);
+  if (rejects) installImporter.mockRejectedValue(new Error("Install failed"));
+  const { client } = renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+  client.setQueryDefaults(["gamePathStatus"], { gcTime: 300_000, staleTime: 30_000 });
+  client.setQueryData(["gamePathStatus", "gimi"], { previous: true });
+  await advanceToStep(4);
+  await userEvent.click(await screen.findByRole("button", { name: /install selected/i }));
+  await waitFor(() => expect(client.getQueryState(["gamePathStatus", "gimi"])?.isInvalidated).toBe(true));
+});

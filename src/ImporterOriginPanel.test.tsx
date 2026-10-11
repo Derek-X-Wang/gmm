@@ -366,3 +366,13 @@ it("refreshes a rejected Origin install and keeps its error when the proposal di
   await waitFor(() => expect(screen.queryByRole("button", { name: "Switch and install" })).not.toBeInTheDocument());
   expect(screen.getByText("Origin install failed")).toBeInTheDocument();
 });
+
+it.each([false, true])("invalidates cached path-state after an Origin installation settles (rejects: %s)", async (rejects) => {
+  importerOriginStatus.mockResolvedValue(status({ proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } } }));
+  if (rejects) acceptImporterOriginProposal.mockRejectedValue(new Error("Origin install failed"));
+  const { client } = render();
+  client.setQueryDefaults(["gamePathStatus"], { gcTime: 300_000, staleTime: 30_000 });
+  client.setQueryData(["gamePathStatus", "gimi"], { previous: true });
+  await userEvent.click(await screen.findByRole("button", { name: /switch and install/i }));
+  await waitFor(() => expect(client.getQueryState(["gamePathStatus", "gimi"])?.isInvalidated).toBe(true));
+});

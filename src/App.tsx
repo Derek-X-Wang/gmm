@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { AttentionView } from "./AttentionView";
 import { PathField } from "./PathField";
+import { SettingsDestination, type SettingsPage } from "./SettingsDestination";
 import { ImporterOriginPanel } from "./ImporterOriginPanel";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -34,12 +35,10 @@ import {
   checkImporterUpdate,
   checkModUpdatesNow,
   detectConflicts,
-  detectGameInstallPath,
   fetchLatestImporterRelease,
   getImporterEvacuationRecovery,
   getGameInstallPath,
   getLibraryPaths,
-  getProxyConfig,
   getStartupReconcileStatus,
   importGamebanana,
   importZip,
@@ -48,18 +47,14 @@ import {
   listModUpdates,
   listVariants,
   modUpdatesGloballyEnabled,
-  rebuildJunctions,
   rollbackImporter,
   setActiveVariant,
-  setGameInstallPath,
   setImporterPinned,
   setLibraryPathForGame,
   setLibraryRoot,
   setModEnabled,
   setModUpdateCheckEnabled,
   setModUpdatesGloballyEnabled,
-  setProxyConfig,
-  testProxyConnection,
   type Conflict,
   type GameCode as ApiGameCode,
 } from "./api";
@@ -68,7 +63,6 @@ import { EnabledTransitionRecoveryWarning } from "./EnabledTransitionRecoveryWar
 import { ImporterEvacuationRecoveryWarning } from "./ImporterEvacuationRecoveryWarning";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
-import { LibraryAuditWarning } from "./LibraryAuditWarning";
 import { LibraryRootOverlapWarning } from "./LibraryRootOverlapWarning";
 import {
   ReinstallRecoveryNotices,
@@ -127,6 +121,7 @@ function App() {
             setSetupError(null);
             setForceWizard(false);
             qc.invalidateQueries({ queryKey: ["installPath"] });
+            qc.invalidateQueries({ queryKey: ["gamePathStatus"] });
             qc.invalidateQueries({ queryKey: ["libraryPaths"] });
           }}
         />
@@ -183,10 +178,44 @@ function MainApp({
     ? [`${list[index].displayName}: ${commandFailureMessage(path.error)}`]
     : []);
   const [selectedGame, setActiveGame] = useState<ApiGameCode | null>(null);
-  // Start on a game the user has. A deliberate selection can also open
-  // an unconfigured game's Settings, and remains selected while saving.
+  // Settings never writes this selection. Freeze the first installed Game
+  // once paths load so adding an earlier registry entry cannot steal it.
   const active = list.find((game) => game.code === selectedGame) ?? installed[0] ?? list[0];
   const activeGame = active.code;
+  useEffect(() => {
+    if (!pathsPending && selectedGame === null && installed.length > 0) setActiveGame(installed[0].code);
+  }, [selectedGame, installed, pathsPending]);
+
+  const [settingsPage, setSettingsPage] = useState<SettingsPage | null>(null);
+  const returnPosition = useRef(0);
+  const returnControl = useRef<string | null>(null);
+  const returnAnchor = useRef<{ id: string; top: number } | null>(null);
+  // Keep the current list's data observed across navigation. A long Settings
+  // visit must not evict it and clamp the return scroll to an empty screen.
+  useQuery({ queryKey: ["mods", activeGame], queryFn: () => listMods(activeGame) });
+  const { staleSession, dismissStaleSession } = useSessionLifecycle();
+  const openSettings = (page: SettingsPage, control = "game") => {
+    returnControl.current = control;
+    returnPosition.current = window.scrollY;
+    const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-mod-id]"));
+    const anchor = rows.find((row) => row.getBoundingClientRect().bottom > 0);
+    returnAnchor.current = anchor ? { id: anchor.dataset.modId!, top: anchor.getBoundingClientRect().top } : null;
+    setSettingsPage(page);
+  };
+  useLayoutEffect(() => {
+    if (settingsPage === null) {
+      if (returnControl.current === null) return;
+      const anchor = Array.from(document.querySelectorAll<HTMLElement>("[data-mod-id]"))
+        .find((row) => row.dataset.modId === returnAnchor.current?.id);
+      const top = anchor && returnAnchor.current
+        ? window.scrollY + anchor.getBoundingClientRect().top - returnAnchor.current.top
+        : returnPosition.current;
+      window.scrollTo(0, top);
+      const control = document.querySelector<HTMLElement>(`[data-settings-arrival="${returnControl.current}"]`)
+        ?? document.querySelector<HTMLElement>('.game-tabs__tab[aria-selected="true"]');
+      control?.focus({ preventScroll: true });
+    } else window.scrollTo(0, 0);
+  }, [settingsPage]);
 
   const reopenSetup = useMutation({
     mutationFn: () => resetOnboarding(),
@@ -196,60 +225,72 @@ function MainApp({
   });
 
   return (
-    <main className="app">
-      <header className="app__header">
-        <h1>GMM — {active.displayName}</h1>
-        <div className="row">
-          <button
-            className="app__help"
-            onClick={() => reopenSetup.mutate()}
-            disabled={reopenSetup.isPending}
-            title="Help → Run setup again"
-          >
-            Run setup again
-          </button>
-        </div>
-      </header>
-      {skipped ? (
-        <section className="card finish-setup-banner" role="status">
-          <div>
-            <strong>Setup isn't finished yet.</strong>
-            <span className="muted small">
-              {" "}You skipped one or more steps. Resume any time.
-            </span>
-          </div>
-          <button onClick={onResumeWizard}>Resume setup</button>
-        </section>
-      ) : null}
-      <AttentionView />
-      <StartupReconcileNotice />
-      <SessionBanner />
-      {pathErrors.length > 0 ? (
-        <OperationFailureNotice
-          heading="GMM could not read some game install paths."
-          detail="Use a game tab or Add game to check the affected paths in Settings."
-          errors={pathErrors}
-        />
-      ) : null}
-      <GameTabs
-        games={installed}
-        remaining={remaining}
-        pending={pathsPending}
-        pathsUnavailable={pathErrors.length > 0}
-        active={activeGame}
-        onChange={setActiveGame}
+    <>
+      <SettingsDestination
+        games={list}
+        page={settingsPage}
+        returnGame={installed.length > 0 || selectedGame ? active.displayName : null}
+        onPageChange={setSettingsPage}
+        onBack={() => setSettingsPage(null)}
       />
-      <LaunchGameButton game={activeGame} displayName={active.displayName} />
-      <Settings game={activeGame} displayName={active.displayName} />
-      <NetworkPanel />
-      <ImporterPanel game={activeGame} displayName={active.displayName} />
-      <ImporterOriginPanel game={activeGame} displayName={active.displayName} />
-      <ModUpdatesPanel game={activeGame} />
-      <LibraryPathsPanel />
-      <UpdatesPanel />
-      <Diagnostics />
-      <ModList game={activeGame} />
-    </main>
+      {settingsPage === null ? (
+        <main className="app">
+          <header className="app__header">
+            <h1>GMM — {active.displayName}</h1>
+            <div className="row">
+              <button data-settings-arrival="global" onClick={() => openSettings("gmm", "global")}>Settings</button>
+              <button
+                className="app__help"
+                onClick={() => reopenSetup.mutate()}
+                disabled={reopenSetup.isPending}
+                title="Help → Run setup again"
+              >
+                Run setup again
+              </button>
+            </div>
+          </header>
+          {skipped ? (
+            <section className="card finish-setup-banner" role="status">
+              <div>
+                <strong>Setup isn't finished yet.</strong>
+                <span className="muted small">
+                  {" "}You skipped one or more steps. Resume any time.
+                </span>
+              </div>
+              <button onClick={onResumeWizard}>Resume setup</button>
+            </section>
+          ) : null}
+          <AttentionView />
+          <StartupReconcileNotice />
+          <SessionBanner staleSession={staleSession} onDismiss={dismissStaleSession} />
+          {pathErrors.length > 0 ? (
+            <OperationFailureNotice
+              heading="GMM could not read some game install paths."
+              detail="Use a game tab or Add game to check the affected paths in Settings."
+              errors={pathErrors}
+            />
+          ) : null}
+          <GameTabs
+            games={installed}
+            remaining={remaining}
+            pending={pathsPending}
+            pathsUnavailable={pathErrors.length > 0}
+            active={activeGame}
+            onChange={setActiveGame}
+            onAddGame={(game) => openSettings(game, "add")}
+          />
+          <LaunchGameButton game={activeGame} displayName={active.displayName} />
+          <button data-settings-arrival="game" onClick={() => openSettings(activeGame)}>Settings for {active.displayName}</button>
+          <ImporterPanel game={activeGame} displayName={active.displayName} />
+          <ImporterOriginPanel game={activeGame} displayName={active.displayName} />
+          <ModUpdatesPanel game={activeGame} />
+          <LibraryPathsPanel />
+          <UpdatesPanel />
+          <Diagnostics />
+          <ModList game={activeGame} />
+        </main>
+      ) : null}
+    </>
   );
 }
 
@@ -318,6 +359,7 @@ function GameTabs({
   pathsUnavailable,
   active,
   onChange,
+  onAddGame,
 }: {
   games: GameSummary[];
   remaining: GameSummary[];
@@ -325,6 +367,7 @@ function GameTabs({
   pathsUnavailable: boolean;
   active: ApiGameCode;
   onChange: (next: ApiGameCode) => void;
+  onAddGame: (next: ApiGameCode) => void;
 }) {
   const [adding, setAdding] = useState(false);
   return (
@@ -357,6 +400,7 @@ function GameTabs({
             type="button"
             aria-expanded={adding}
             aria-controls="add-game-picker"
+            data-settings-arrival="add"
             onClick={() => setAdding((open) => !open)}
           >
             Add game
@@ -369,7 +413,7 @@ function GameTabs({
           <div className="row game-navigation__choices">
             {remaining.map((game) => (
               <button key={game.code} type="button" onClick={() => {
-                onChange(game.code);
+                onAddGame(game.code);
                 setAdding(false);
               }}>
                 Set up {game.displayName}
@@ -386,27 +430,10 @@ function GameTabs({
  * Sticky session surface. It shows active sessions, an evicted stale session,
  * and interrupted launch reservations that require user confirmation.
  */
-function SessionBanner() {
+function useSessionLifecycle() {
   const queryClient = useQueryClient();
-  const session = useQuery({
-    queryKey: ["session"],
-    queryFn: currentSession,
-    refetchOnWindowFocus: true,
-  });
+  useQuery({ queryKey: ["session"], queryFn: currentSession, refetchOnWindowFocus: true });
   const [staleSession, setStaleSession] = useState<SessionInfo | null>(null);
-  const interruptedLaunches = useQuery({
-    queryKey: ["interruptedSessionLaunches"],
-    queryFn: interruptedSessionLaunches,
-    refetchOnWindowFocus: true,
-  });
-  const retireLaunch = useMutation({
-    mutationFn: retireInterruptedSessionLaunch,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["interruptedSessionLaunches"] });
-      queryClient.invalidateQueries({ queryKey: ["session"] });
-    },
-  });
-
   // On first mount, ask the backend to clear any orphan row left by a
   // GMM crash mid-session. If we got something back, surface it.
   useEffect(() => {
@@ -438,6 +465,32 @@ function SessionBanner() {
     };
   }, [queryClient]);
 
+  return { staleSession, dismissStaleSession: () => setStaleSession(null) };
+}
+
+function SessionBanner({ staleSession, onDismiss }: {
+  staleSession: SessionInfo | null;
+  onDismiss: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const session = useQuery({
+    queryKey: ["session"],
+    queryFn: currentSession,
+    refetchOnWindowFocus: true,
+  });
+  const interruptedLaunches = useQuery({
+    queryKey: ["interruptedSessionLaunches"],
+    queryFn: interruptedSessionLaunches,
+    refetchOnWindowFocus: true,
+  });
+  const retireLaunch = useMutation({
+    mutationFn: retireInterruptedSessionLaunch,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["interruptedSessionLaunches"] });
+      queryClient.invalidateQueries({ queryKey: ["session"] });
+    },
+  });
+
   return (
     <>
       {(interruptedLaunches.data ?? []).map((launch) => (
@@ -459,7 +512,7 @@ function SessionBanner() {
           <span className="muted">
             GMM cleaned up the orphaned session record (started {staleSession.startedAt}).
           </span>
-          <button onClick={() => setStaleSession(null)}>Dismiss</button>
+          <button onClick={onDismiss}>Dismiss</button>
         </section>
       ) : null}
       {session.data ? (
@@ -709,85 +762,6 @@ function ModUpdateBadge({
 }
 
 /**
- * Settings → Network. HTTP / SOCKS5 proxy fields shared by every
- * outbound HTTP path in the backend. The password is write-only — the
- * UI never reads it back. A "Test connection" button hits api.github.com
- * through the configured proxy to validate.
- */
-function NetworkPanel() {
-  const qc = useQueryClient();
-  const cfg = useQuery({ queryKey: ["proxyConfig"], queryFn: getProxyConfig });
-  const [url, setUrl] = useState<string>("");
-  const [username, setUsername] = useState<string>("");
-  const [password, setPassword] = useState<string>("");
-
-  React.useEffect(() => {
-    if (cfg.data) {
-      setUrl(cfg.data.url ?? "");
-      setUsername(cfg.data.username ?? "");
-      setPassword(""); // never seeded
-    }
-  }, [cfg.data]);
-
-  const save = useMutation({
-    mutationFn: () =>
-      setProxyConfig({
-        url: url || null,
-        username: username || null,
-        password: password ? password : null,
-      }),
-    onSuccess: () => setPassword(""),
-    onSettled: () => qc.invalidateQueries({ queryKey: ["proxyConfig"] }),
-  });
-  const test = useMutation({
-    mutationFn: testProxyConnection,
-    meta: { noInvalidationReason: "Connection probe; no persisted query state to refresh." },
-  });
-
-  return (
-    <section className="card">
-      <h2>Network</h2>
-      <p className="muted">
-        Optional HTTP or SOCKS5 proxy for GitHub release downloads and GameBanana
-        traffic. Formats: <code>http://host:port</code> or <code>socks5://host:port</code>.
-        Sensitive fields never reach the diagnostics bundle.
-      </p>
-      <div className="row">
-        <input
-          placeholder="proxy URL"
-          value={url}
-          onChange={(e) => setUrl(e.currentTarget.value)}
-        />
-      </div>
-      <div className="row">
-        <input
-          placeholder="username (optional)"
-          value={username}
-          onChange={(e) => setUsername(e.currentTarget.value)}
-        />
-        <input
-          type="password"
-          placeholder={cfg.data?.passwordSet ? "(set — leave blank to keep)" : "password"}
-          value={password}
-          onChange={(e) => setPassword(e.currentTarget.value)}
-        />
-      </div>
-      <div className="row">
-        <button onClick={() => save.mutate()} disabled={save.isPending}>
-          {save.isPending ? "Saving…" : "Save"}
-        </button>
-        <button onClick={() => test.mutate()} disabled={test.isPending}>
-          {test.isPending ? "Testing…" : "Test connection"}
-        </button>
-        {test.isSuccess ? <span className="muted small">Proxy reachable.</span> : null}
-      </div>
-      <CommandErrorNotice error={save.error} />
-      <CommandErrorNotice error={test.error} />
-    </section>
-  );
-}
-
-/**
  * Settings → Model Importer. Lets the user (re)install the latest
  * Model Importer release for the active game and roll back to the
  * previously-backed-up files. Repo + asset name come from the Rust
@@ -820,6 +794,7 @@ function ImporterPanel({
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["importer"] });
     qc.invalidateQueries({ queryKey: ["importerOrigin", game] });
+    qc.invalidateQueries({ queryKey: ["gamePathStatus", game] });
   };
 
   const install = useMutation({
@@ -1178,134 +1153,6 @@ function Diagnostics() {
   );
 }
 
-function Settings({
-  game,
-  displayName,
-}: {
-  game: ApiGameCode;
-  displayName: string;
-}) {
-  const queryClient = useQueryClient();
-  const { data: installPath } = useQuery({
-    queryKey: ["installPath", game],
-    queryFn: () => getGameInstallPath(game),
-  });
-
-  // Tracks whether the most recent path came from auto-detect, so we
-  // can show the "Auto-detected" badge. Cleared as soon as the user
-  // overrides via the manual picker. Reset when the active game changes
-  // so a stale "Auto-detected" badge doesn't survive a tab switch.
-  const [lastSource, setLastSource] = useState<"manual" | "auto" | null>(null);
-  const [detectFailed, setDetectFailed] = useState(false);
-  useEffect(() => {
-    setLastSource(null);
-    setDetectFailed(false);
-  }, [game]);
-
-  const setPath = useMutation({
-    mutationFn: (path: string) => setGameInstallPath(game, path),
-    onSuccess: () => {
-      setLastSource("manual");
-      setDetectFailed(false);
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["installPath", game] });
-      queryClient.invalidateQueries({ queryKey: ["onboarding", "installPaths"] });
-    },
-  });
-
-  const detect = useMutation({
-    mutationFn: () => detectGameInstallPath(game),
-    onSuccess: (path) => {
-      if (path) {
-        setLastSource("auto");
-        setDetectFailed(false);
-      } else {
-        setDetectFailed(true);
-      }
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["installPath", game] });
-      queryClient.invalidateQueries({ queryKey: ["onboarding", "installPaths"] });
-    },
-  });
-
-  const label =
-    lastSource === "auto"
-      ? "Auto-detected"
-      : lastSource === "manual"
-        ? "Set manually"
-        : installPath
-          ? "Saved"
-          : "No install path set";
-
-  return (
-    <section className="card">
-      <h2>Settings</h2>
-      <p className="muted">
-        GMM looks for the {displayName} executable plus its Unity{" "}
-        <code>_Data</code> folder. Use <strong>Auto-detect</strong> to scan
-        known install locations, or type or pick the folder manually.
-      </p>
-      <div className="row">
-        <PathField
-          key={game}
-          label={`${displayName} install path`}
-          value={installPath ?? ""}
-          placeholder="No install path set"
-          disabled={setPath.isPending || detect.isPending}
-          pickerLabel={installPath ? "Change…" : "Pick folder"}
-          onApply={(path) => setPath.mutate(path)}
-        />
-        <span className="muted small">{label}</span>
-      </div>
-      <div className="row">
-        <button onClick={() => detect.mutate()} disabled={detect.isPending || setPath.isPending}>
-          {detect.isPending ? "Scanning…" : installPath ? "Re-detect" : "Auto-detect"}
-        </button>
-      </div>
-      {detectFailed ? (
-        <p className="muted small">
-          Couldn't find {displayName} automatically. Pick the install folder
-          manually.
-        </p>
-      ) : null}
-      <CommandErrorNotice error={setPath.error} />
-      <CommandErrorNotice error={detect.error} />
-      <LibraryAuditWarning game={game} />
-      <RebuildJunctions game={game} />
-    </section>
-  );
-}
-
-/**
- * Manual "Rebuild junctions" action — drops every junction for the
- * active game and recreates one per enabled Mod against the current
- * Library. The hammer to use after relocating the Library directory.
- */
-function RebuildJunctions({ game }: { game: ApiGameCode }) {
-  const qc = useQueryClient();
-  const rebuild = useMutation({
-    mutationFn: () => rebuildJunctions(game),
-    onSettled: () => qc.invalidateQueries({ queryKey: ["mods", game] }),
-  });
-  return (
-    <div className="row">
-      <button onClick={() => rebuild.mutate()} disabled={rebuild.isPending}>
-        {rebuild.isPending ? "Rebuilding…" : "Rebuild junctions"}
-      </button>
-      {rebuild.data ? (
-        <span className="muted small">
-          Recreated {rebuild.data.recreated.length}, removed {rebuild.data.removed.length} stranded,
-          skipped {rebuild.data.skipped.length} disabled, left {rebuild.data.quarantined.length}{" "}
-          quarantined untouched.
-        </span>
-      ) : null}
-      <CommandErrorNotice error={rebuild.error} />
-    </div>
-  );
-}
-
 function ModList({ game }: { game: ApiGameCode }) {
   const queryClient = useQueryClient();
   const sectionRef = useRef<HTMLElement>(null);
@@ -1413,6 +1260,7 @@ function ModList({ game }: { game: ApiGameCode }) {
         {mods.data?.map((m) => (
           <li
             key={m.id}
+            data-mod-id={m.id}
             className={`mods__row${m.reinstallRecovery || m.enabledTransitionRecovery ? " mods__row--quarantined" : ""}`}
           >
             <div className="mods__main">
