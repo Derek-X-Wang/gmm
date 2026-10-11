@@ -146,7 +146,7 @@ it.each(scopes.flatMap((scope) => [false, true].map((resetting) => ({ ...scope, 
   // The other editor shares the move guard even though its page is mounted later.
   expect(await screen.findByRole("textbox", { name: page === "gmm" ? scopes[1].label : scopes[0].label })).toBeDisabled();
   const other = await region(page === "gmm" ? scopes[1].region : scopes[0].region);
-  expect(other.getByRole("status")).toHaveTextContent(resetting ? "Resetting…" : "Moving…");
+  expect(other.getByRole("status")).toHaveTextContent(`Another Library operation is in progress for ${page === "gmm" ? "the global Library root" : "Genshin Impact"}.`);
   expect(other.getByRole("status")).toBeVisible();
   await act(async () => reject(new Error("Move refused: target is not NTFS")));
   await waitFor(() => expect(other.queryByRole("status")).toBeNull());
@@ -155,6 +155,46 @@ it.each(scopes.flatMap((scope) => [false, true].map((resetting) => ({ ...scope, 
   expect(panel.getByText("Move refused: target is not NTFS")).toBeVisible();
   expect(panel.queryByText("Library move completed.")).toBeNull();
 });
+it.each([false, true])("names a pending Star Rail operation on the other Game and GMM pages (reset: %s)", async (resetting) => {
+  paths.perGameOverrides.srmi = paths.perGameEffective.srmi;
+  let resolve!: (report: MoveReport) => void;
+  move = () => new Promise((done) => { resolve = done; });
+  setup("srmi");
+  const starRail = await region("Library for Honkai: Star Rail");
+  await starRail.findByRole("textbox");
+  if (resetting) await userEvent.click(starRail.getByRole("button", { name: "Reset override" }));
+  else await apply("Honkai: Star Rail Library path");
+  expect(starRail.getByRole("status")).toHaveTextContent(resetting ? "Resetting…" : "Moving…");
+  for (const scope of [scopes[1], scopes[0]]) {
+    await userEvent.click(nav(scope.page === "gmm" ? "GMM settings" : "Genshin Impact"));
+    const other = await region(scope.region);
+    expect(await other.findByRole("textbox", { name: scope.label })).toBeDisabled();
+    expect(other.getAllByRole("status")).toHaveLength(1);
+    expect(other.getByRole("status")).toHaveTextContent("Another Library operation is in progress for Honkai: Star Rail.");
+    expect(other.getByRole("status")).toBeVisible();
+  }
+  await act(async () => resolve(report));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: scopes[0].label })).toBeEnabled());
+});
+
+it.each(scopes)("suppresses a previous completion on $page during another Game's operation", async ({ page, label, region: name }) => {
+  setup(page);
+  await apply(label);
+  const panel = await region(name);
+  expect(await panel.findByText("Library move completed.")).toBeVisible();
+  await userEvent.click(nav("Honkai: Star Rail"));
+  let reject!: (error: Error) => void;
+  move = () => new Promise((_, fail) => { reject = fail; });
+  await apply("Honkai: Star Rail Library path");
+  await userEvent.click(nav(page === "gmm" ? "GMM settings" : "Genshin Impact"));
+  expect(panel.getByRole("textbox", { name: label })).toBeDisabled();
+  expect(panel.getAllByRole("status")).toHaveLength(1);
+  expect(panel.getByRole("status")).toHaveTextContent("Another Library operation is in progress for Honkai: Star Rail.");
+  expect(panel.queryByText("Library move completed.")).toBeNull();
+  await act(async () => reject(new Error("Star Rail move refused")));
+  await waitFor(() => expect(panel.getByRole("textbox", { name: label })).toBeEnabled());
+});
+
 it.each(scopes)("accepts a move with the existing scope command on $page", async ({ page, label, command, region: name }) => {
   setup(page);
   await apply(label);

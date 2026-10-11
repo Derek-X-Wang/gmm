@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -401,9 +401,10 @@ it("routes a relocation Variant failure to selection repair and never recommends
   expect(alert).toHaveTextContent(/Select a valid Variant/i);
   expect(alert).toHaveTextContent(/reinstall it/i);
   expect(alert).not.toHaveTextContent("01INTERNALMODID");
-  expect(
-    screen.queryByText(/Use “Rebuild junctions” on the affected Game's Settings page/i),
-  ).not.toBeInTheDocument();
+  const library = screen.getByRole("region", { name: "Global Library root settings" });
+  expect(within(library).getAllByRole("listitem")).toEqual(
+    within(within(library).getByRole("alert")).getAllByRole("listitem"),
+  );
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_library_root", { path: "C:\\Moved" }));
 });
 

@@ -21,6 +21,7 @@ export function GlobalLibraryRootEditor({ games, onGamePage }: {
   };
   const setRoot = useMutation({
     mutationKey: moveKey,
+    meta: { libraryMoveScope: "gmm", libraryMoveName: "the global Library root" },
     mutationFn: (next: string | null) => setLibraryRoot(next),
     onSettled: refresh,
   });
@@ -46,9 +47,9 @@ export function GlobalLibraryRootEditor({ games, onGamePage }: {
         </div>
         <button onClick={() => setRoot.mutate(null)} disabled={busy || !p.rootOverride}>Reset to default</button>
       </>}
-    <LibraryMovePendingStatus />
+    <LibraryMovePendingStatus scope="gmm" />
     <CommandErrorNotice error={setRoot.error} />
-    <LibraryMoveResult report={setRoot.data} />
+    <LibraryMoveResult report={busy ? undefined : setRoot.data} />
   </section>;
 }
 
@@ -68,6 +69,7 @@ export function GameLibraryOverrideEditor({ game, displayName, onGlobalPage }: {
   };
   const setPerGame = useMutation({
     mutationKey: moveKey,
+    meta: { libraryMoveScope: game, libraryMoveName: displayName },
     mutationFn: (path: string | null) => setLibraryPathForGame(game, path),
     onSettled: refresh,
   });
@@ -87,16 +89,24 @@ export function GameLibraryOverrideEditor({ game, displayName, onGlobalPage }: {
         </div>
         <button onClick={() => setPerGame.mutate(null)} disabled={busy || !p.perGameOverrides[game]}>Reset override</button>
       </>}
-    <LibraryMovePendingStatus />
+    <LibraryMovePendingStatus scope={game} />
     <CommandErrorNotice error={setPerGame.error} />
-    <LibraryMoveResult report={setPerGame.data} />
+    <LibraryMoveResult report={busy ? undefined : setPerGame.data} />
   </section>;
 }
 
-function LibraryMovePendingStatus() {
+function LibraryMovePendingStatus({ scope }: { scope: GameCode | "gmm" }) {
   const pending = useMutationState({
     filters: { mutationKey: moveKey, status: "pending" },
-    select: (mutation) => mutation.state.variables === null ? "Resetting…" : "Moving…",
+    select: (mutation) => {
+      if (mutation.meta?.libraryMoveScope === scope) {
+        return mutation.state.variables === null ? "Resetting…" : "Moving…";
+      }
+      const name = mutation.meta?.libraryMoveName;
+      return typeof name === "string"
+        ? `Another Library operation is in progress for ${name}.`
+        : "Another Library operation is in progress.";
+    },
   });
   return pending.length > 0 ? <p role="status">{pending[0]}</p> : null;
 }
