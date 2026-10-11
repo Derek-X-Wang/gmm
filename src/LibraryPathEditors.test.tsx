@@ -145,7 +145,12 @@ it.each(scopes.flatMap((scope) => [false, true].map((resetting) => ({ ...scope, 
   await userEvent.click(nav(page === "gmm" ? "Genshin Impact" : "GMM settings"));
   // The other editor shares the move guard even though its page is mounted later.
   expect(await screen.findByRole("textbox", { name: page === "gmm" ? scopes[1].label : scopes[0].label })).toBeDisabled();
+  const other = await region(page === "gmm" ? scopes[1].region : scopes[0].region);
+  expect(other.getByRole("status")).toHaveTextContent(resetting ? "Resetting…" : "Moving…");
+  expect(other.getByRole("status")).toBeVisible();
   await act(async () => reject(new Error("Move refused: target is not NTFS")));
+  await waitFor(() => expect(other.queryByRole("status")).toBeNull());
+  expect(other.getByRole("textbox")).toBeEnabled();
   await userEvent.click(nav(page === "gmm" ? "GMM settings" : "Genshin Impact"));
   expect(panel.getByText("Move refused: target is not NTFS")).toBeVisible();
   expect(panel.queryByText("Library move completed.")).toBeNull();
@@ -181,6 +186,16 @@ it.each(scopes)("reports each Junction failure and invalid Variant separately on
   expect(panel.getByText(/locked-b: Junction locked B/)).toBeVisible();
   expect(panel.getByText(/GIMI: Saved Variant invalid C/)).toBeVisible();
   expect(panel.getByText(/cannot repair a saved Variant selection/)).toBeVisible();
+  const invalid = panel.getByRole("alert");
+  expect(within(invalid).getAllByRole("listitem")).toHaveLength(1);
+  expect(invalid).toHaveTextContent("Saved Variant invalid C");
+  expect(invalid).not.toHaveTextContent(/Junction locked/);
+  const retryable = panel.getByText(/Use “Rebuild junctions”/).parentElement!;
+  expect(retryable).toHaveTextContent(/2 enabled Mods/);
+  expect(within(retryable).getAllByRole("listitem")).toHaveLength(2);
+  expect(retryable).toHaveTextContent("Junction locked A");
+  expect(retryable).toHaveTextContent("Junction locked B");
+  expect(retryable).not.toHaveTextContent("Saved Variant invalid C");
   expect(panel.queryByText("Library move completed.")).toBeNull();
 });
 it.each(scopes)("preserves picker commitment and cancellation on $page", async ({ page, label, command }) => {
@@ -239,6 +254,78 @@ it("names only inheriting Games and leaves an override unchanged by a global mov
   expect(invoke).not.toHaveBeenCalledWith("set_library_path_for_game", expect.anything());
 });
 
+it("moves and resets the Star Rail override without writing to Genshin", async () => {
+  paths.perGameOverrides.gimi = "E:\\Genshin";
+  paths.perGameEffective.gimi = "E:\\Genshin";
+  setup("srmi");
+  const panel = await region("Library for Honkai: Star Rail");
+  await apply("Honkai: Star Rail Library path");
+  await waitFor(() => expect(writes()).toEqual([
+    ["set_library_path_for_game", { game: "srmi", path: "D:\\Library" }],
+  ]));
+  expect(await panel.findByText("Override for Honkai: Star Rail")).toBeVisible();
+  expect(panel.getByRole("textbox")).toHaveValue("D:\\Library");
+  await userEvent.click(panel.getByRole("button", { name: "Reset override" }));
+  await waitFor(() => expect(writes()).toEqual([
+    ["set_library_path_for_game", { game: "srmi", path: "D:\\Library" }],
+    ["set_library_path_for_game", { game: "srmi", path: null }],
+  ]));
+  expect(await panel.findByText("Inherited from the global Library root")).toBeVisible();
+  expect(panel.getByRole("textbox")).toHaveValue("C:\\GMM\\library\\srmi");
+  expect(panel.getByRole("button", { name: "Reset override" })).toBeDisabled();
+  await userEvent.click(nav("Genshin Impact"));
+  const genshin = await region(scopes[1].region);
+  expect(await genshin.findByRole("textbox")).toHaveValue("E:\\Genshin");
+  expect(genshin.getByText("Override for Genshin Impact")).toBeVisible();
+  expect(paths.rootOverride).toBeNull();
+});
+
+it("keeps a Game inherited when the global root has an override", async () => {
+  paths.rootOverride = paths.effectiveRoot = "E:\\Global";
+  paths.perGameEffective.srmi = "E:\\Global\\srmi";
+  paths.perGameOverrides.gimi = paths.perGameEffective.gimi = "E:\\Genshin";
+  setup("srmi");
+  const panel = await region("Library for Honkai: Star Rail");
+  expect(await panel.findByRole("textbox")).toHaveValue("E:\\Global\\srmi");
+  expect(panel.getByText("Inherited from the global Library root")).toBeVisible();
+  expect(panel.queryByText("Override for Honkai: Star Rail")).toBeNull();
+  expect(panel.getByRole("button", { name: "Reset override" })).toBeDisabled();
+  await userEvent.click(nav("Genshin Impact"));
+  expect(await screen.findByText("Override for Genshin Impact")).toBeVisible();
+  expect(writes()).toHaveLength(0);
+});
+
+it.each(["gmm", "srmi"] as const)("shows the global configured-root overlap on %s", async (page) => {
+  paths.overlaps = [{ game: null, path: "C:\\Backups\\Library", backups: "C:\\Backups" }];
+  setup(page);
+  const panel = await region(page === "gmm" ? scopes[0].region : "Library for Honkai: Star Rail");
+  const warning = await panel.findByRole("region", { name: "Unsafe Library paths" });
+  expect(warning).toBeVisible();
+  expect(warning).toHaveTextContent("Global configured root");
+  expect(warning).toHaveTextContent("C:\\Backups\\Library");
+  expect(warning).toHaveTextContent(/updates the setting without reading or moving/);
+  expect(writes()).toHaveLength(0);
+});
+
+it("shows stranded Mods for inheriting Games on GMM after the configured overlap is repaired", async () => {
+  paths.perGameOverrides.gimi = "E:\\Genshin";
+  paths.modOverlaps = [
+    { game: "srmi", modId: "inherited-stranded", modName: "Stranded Star Rail outfit", path: "C:\\Backups\\srmi\\stranded", backups: "C:\\Backups" },
+    { game: "gimi", modId: "override-stranded", modName: "Stranded Genshin outfit", path: "C:\\Backups\\gimi\\stranded", backups: "C:\\Backups" },
+  ];
+  setup("gmm");
+  const panel = await region(scopes[0].region);
+  const warning = await panel.findByRole("region", { name: "Unsafe Library paths" });
+  expect(warning).toBeVisible();
+  expect(warning).toHaveTextContent("Stranded Star Rail outfit");
+  expect(warning).toHaveTextContent("C:\\Backups\\srmi\\stranded");
+  expect(warning).toHaveTextContent(/Move the named folders.*by hand/);
+  expect(warning).not.toHaveTextContent("Stranded Genshin outfit");
+  expect(warning).not.toHaveTextContent("Configured roots");
+  expect(within(warning).getAllByRole("listitem")).toHaveLength(1);
+  expect(writes()).toHaveLength(0);
+});
+
 it("keeps overlap warnings with the affected Game and names the global repair route", async () => {
   paths.perGameOverrides.srmi = "C:\\Backups\\StarRail";
   paths.overlaps = [{ game: "srmi", path: "C:\\Backups\\StarRail", backups: "C:\\Backups" }];
@@ -274,6 +361,11 @@ it.each(["page", "back"])("keeps the sibling audit after the Library group and o
   expect(within(audit).getByRole("button", { name: "Inspect" })).toBeVisible();
   if (route === "page") await userEvent.click(nav("GMM settings"));
   else await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  if (route === "back") {
+    expect(screen.queryByRole("navigation", { name: "Settings pages" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Settings" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Back to Mods" })).toBeNull();
+  }
   expect(audit).toBeInTheDocument();
   expect(audit).not.toBeVisible();
   expect(screen.queryByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toBeNull();
@@ -283,6 +375,7 @@ it.each(["page", "back"])("keeps the sibling audit after the Library group and o
     await userEvent.tab();
     const focused = document.activeElement!;
     expect(audit.contains(focused)).toBe(false);
+    if (route === "back") expect(library.closest(".settings-screen")!.contains(focused)).toBe(false);
     if (focusCycle.has(focused)) break;
     focusCycle.add(focused);
   }

@@ -1,4 +1,4 @@
-import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getLibraryPaths, setLibraryPathForGame, setLibraryRoot, type GameCode, type GameSummary, type MoveReport } from "./api";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { LibraryRootOverlapWarning } from "./LibraryRootOverlapWarning";
@@ -46,7 +46,7 @@ export function GlobalLibraryRootEditor({ games, onGamePage }: {
         </div>
         <button onClick={() => setRoot.mutate(null)} disabled={busy || !p.rootOverride}>Reset to default</button>
       </>}
-    {setRoot.isPending ? <p role="status">{setRoot.variables === null ? "Resetting…" : "Moving…"}</p> : null}
+    <LibraryMovePendingStatus />
     <CommandErrorNotice error={setRoot.error} />
     <LibraryMoveResult report={setRoot.data} />
   </section>;
@@ -87,10 +87,18 @@ export function GameLibraryOverrideEditor({ game, displayName, onGlobalPage }: {
         </div>
         <button onClick={() => setPerGame.mutate(null)} disabled={busy || !p.perGameOverrides[game]}>Reset override</button>
       </>}
-    {setPerGame.isPending ? <p role="status">{setPerGame.variables === null ? "Resetting…" : "Moving…"}</p> : null}
+    <LibraryMovePendingStatus />
     <CommandErrorNotice error={setPerGame.error} />
     <LibraryMoveResult report={setPerGame.data} />
   </section>;
+}
+
+function LibraryMovePendingStatus() {
+  const pending = useMutationState({
+    filters: { mutationKey: moveKey, status: "pending" },
+    select: (mutation) => mutation.state.variables === null ? "Resetting…" : "Moving…",
+  });
+  return pending.length > 0 ? <p role="status">{pending[0]}</p> : null;
 }
 
 function LibraryMoveExplanation() {

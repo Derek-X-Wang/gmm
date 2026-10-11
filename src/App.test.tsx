@@ -402,7 +402,7 @@ it("routes a relocation Variant failure to selection repair and never recommends
   expect(alert).toHaveTextContent(/reinstall it/i);
   expect(alert).not.toHaveTextContent("01INTERNALMODID");
   expect(
-    screen.queryByText(/Use “Rebuild junctions” on the game card below/i),
+    screen.queryByText(/Use “Rebuild junctions” on the affected Game's Settings page/i),
   ).not.toBeInTheDocument();
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_library_root", { path: "C:\\Moved" }));
 });
