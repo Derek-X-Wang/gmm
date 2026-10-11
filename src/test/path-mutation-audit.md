@@ -8,18 +8,41 @@ a completed folder pick. Each route invokes the same existing backend mutation;
 there is no frontend path validation, trimming, or implicit reset to default.
 The diagnostics log directory stays read-only.
 
-The audit walked every TypeScript/TSX file under `src/` and found **41
-`useMutation` calls in four files**. Each mutation was traced to its IPC command,
+The inventory contains **41 `useMutation` call sites in four files** and is now
+enforced by `mutation-invalidation-boundary.test.ts` under `pnpm test`. The gate
+parses production TypeScript/TSX under `src/`, including new files, and requires
+exactly one row per call site and no stale rows. The original audit traced each
+mutation to its IPC command,
 its displayed query state, its success/settlement callbacks, and any parent
 invalidation callback. Read-only backend inspection distinguished atomic setting
 writes from operations that can leave filesystem or recovery state after failure.
 No backend files changed. No shared invalidation module was introduced.
+
+Reconciliation for #287 found the same 41 call sites, with no additional missing
+invalidation. The reported 46 text occurrences were 41 calls, four imports, and
+one mention in this document. The three intentional no-refresh sites now carry
+literal `meta.noInvalidationReason` values matching their existing decisions.
 
 ## Complete mutation inventory
 
 `Settled` means invalidation runs after either success or rejection. Existing
 success-only invalidation was retained when the relevant persisted write is a
 single statement or transaction and no additional displayed query was missing.
+
+To add a mutation, use a named binding in a named component/function and inline
+options without spreads. Record either an `onSuccess`/`onSettled` invalidation
+callback or a non-empty literal `meta.noInvalidationReason`, then add its row.
+Rows use the source path relative to `src/` without the extension, followed by
+` / Component` when the function name differs, and the mutation binding name.
+This distinguishes same-named bindings in different components or files.
+
+The gate recognizes visible `invalidateQueries` calls, local callback references,
+and handoffs to `onX` component callback parameters. It rejects callbacks that
+only change local state. This is structural evidence of a recorded decision;
+review still checks parent callback behavior, query keys, and whether success or
+settlement is correct. It does not prove runtime invalidation or follow semantic
+aliases/type information. Tests and test support under `src/test/` are excluded
+from the production inventory.
 
 | File / component | Mutation | Result and displayed state |
 | --- | --- | --- |
