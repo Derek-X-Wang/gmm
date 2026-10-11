@@ -96,19 +96,31 @@ fn inspect_boundary(block: &syn::Block) -> InspectionBoundary {
 #[test]
 fn settings_path_status_inspection_runs_inside_spawn_blocking() {
     let file = syn::parse_file(include_str!("../src/core/mod.rs")).expect("parse Core");
-    let method = file
+    let methods = file
         .items
         .iter()
         .filter_map(|item| match item {
-            syn::Item::Impl(implementation) => Some(implementation),
+            syn::Item::Impl(implementation)
+                if implementation.trait_.is_none()
+                    && matches!(implementation.self_ty.as_ref(), syn::Type::Path(path)
+                        if path.qself.is_none() && path.path.is_ident("Core")) =>
+            {
+                Some(implementation)
+            }
             _ => None,
         })
         .flat_map(|implementation| &implementation.items)
-        .find_map(|item| match item {
+        .filter_map(|item| match item {
             syn::ImplItem::Fn(method) if method.sig.ident == "game_path_status" => Some(method),
             _ => None,
         })
-        .expect("production Core::game_path_status");
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods.len(),
+        1,
+        "one unambiguous inherent Core::game_path_status"
+    );
+    let method = methods[0];
     let boundary = inspect_boundary(&method.block);
     assert!(
         boundary.errors.is_empty(),
@@ -185,4 +197,107 @@ fn gate_rejects_inline_method_and_aliased_inspection_beside_a_worker() {
             "extra inline inspection must fail closed"
         );
     }
+}
+
+/// Count direct calls and calls through explicit imports of the private helper.
+/// Source aliases are collected conservatively per file, including cfg branches.
+/// This does not resolve arbitrary re-exports or generated Rust; review still
+/// owns those forms. The Core boundary itself rejects unreviewed macros/calls.
+#[derive(Default)]
+struct InspectorCalls {
+    functions: std::collections::HashSet<String>,
+    modules: std::collections::HashSet<String>,
+    calls: usize,
+}
+
+impl InspectorCalls {
+    fn import(&mut self, tree: &syn::UseTree, prefix: Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                let mut prefix = prefix;
+                prefix.push(path.ident.to_string());
+                self.import(&path.tree, prefix);
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.import(item, prefix.clone());
+                }
+            }
+            syn::UseTree::Name(name) => {
+                self.binding(prefix, name.ident.to_string(), name.ident.to_string())
+            }
+            syn::UseTree::Rename(rename) => {
+                self.binding(prefix, rename.ident.to_string(), rename.rename.to_string())
+            }
+            syn::UseTree::Glob(_) => {
+                assert!(
+                    !prefix.ends_with(&["game_path".into()]),
+                    "inspector wildcard import needs review"
+                );
+            }
+        }
+    }
+
+    fn binding(&mut self, mut prefix: Vec<String>, name: String, local: String) {
+        if name != "self" {
+            prefix.push(name);
+        }
+        if prefix.ends_with(&["game_path".into(), "inspect".into()]) {
+            self.functions.insert(local);
+        } else if prefix.last().is_some_and(|part| part == "game_path") {
+            self.modules.insert(local);
+        }
+    }
+}
+
+struct InspectorImports<'a>(&'a mut InspectorCalls);
+impl<'ast> Visit<'ast> for InspectorImports<'_> {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        self.0.import(&item.tree, Vec::new());
+    }
+}
+
+impl<'ast> Visit<'ast> for InspectorCalls {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        let path = path_name(&call.func);
+        let direct = path.ends_with(&["game_path".into(), "inspect".into()]);
+        let imported = path.len() == 1 && self.functions.contains(&path[0]);
+        let module_alias = path.len() >= 2
+            && path.last().is_some_and(|part| part == "inspect")
+            && self.modules.contains(&path[path.len() - 2]);
+        if direct || imported || module_alias {
+            self.calls += 1;
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+#[test]
+fn private_path_inspector_has_one_source_call_site_crate_wide() {
+    fn count_tree(directory: &std::path::Path) -> usize {
+        std::fs::read_dir(directory)
+            .expect("read production source directory")
+            .map(|entry| {
+                let path = entry.expect("source entry").path();
+                if path.is_dir() {
+                    return count_tree(&path);
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    return 0;
+                }
+                let source = std::fs::read_to_string(&path).expect("read Rust source");
+                let file = syn::parse_file(&source).expect("parse Rust source");
+                let mut inspector = InspectorCalls::default();
+                InspectorImports(&mut inspector).visit_file(&file);
+                inspector.visit_file(&file);
+                inspector.calls
+            })
+            .sum()
+    }
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    assert_eq!(
+        count_tree(&source),
+        1,
+        "private inspection belongs only in Core's blocking worker"
+    );
 }

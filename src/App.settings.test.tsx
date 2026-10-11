@@ -365,7 +365,15 @@ it("re-renders durable quarantine, launch reservations and audit findings after 
   await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   expect(screen.getByRole("region", { name: "Interrupted reinstall recovery for Durable Outfit" })).toHaveTextContent("this Mod may still be loading");
   expect(screen.getByRole("region", { name: "Interrupted SRMI launch" })).toHaveTextContent("kept the launch reservation");
-  expect(invoke.mock.calls.slice(navigationCalls).filter(([command]) => /^(retire_|retry_|recover_|delete_)/.test(command))).toEqual([]);
+  const navigationReads = new Set([
+    "audit_library", "current_session", "interrupted_session_launches", "detect_conflicts",
+    "check_importer_update", "attention_status", "fetch_latest_importer_release",
+    "importer_origin_status", "mod_updates_globally_enabled", "av_guidance",
+  ]);
+  const navigationCommands = invoke.mock.calls.slice(navigationCalls).map(([command]) => command);
+  expect(navigationCommands.filter((command) =>
+    !/^(get_|list_)/.test(command) && !navigationReads.has(command),
+  )).toEqual([]);
   expect(within(screen.getByRole("region", { name: "Attention across all Games" })).getByText(auditPath)).toBeVisible();
   await openGame();
   expect(screen.getByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent(auditPath);
