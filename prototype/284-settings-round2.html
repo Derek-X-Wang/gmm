@@ -1,0 +1,290 @@
+<!doctype html>
+<!-- Throwaway comparison for #284 round 2: three full-screen Settings destinations.
+     Three candidates x two arrival routes x two sample states. GPL-3.0-only.
+     Fixed sample data. Open directly, offline; no backend, file actions or persistence. -->
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GMM · Settings candidates · #284 · Round 2</title><style>
+
+    :root { color-scheme:light dark; --canvas:#f1f2f5; --surface:#fff; --subtle:#f7f8fa; --text:#222633; --muted:#616876; --line:#dfe2e9; --accent:#315fce; --accent-soft:#eaf0ff; --warning:#895013; --warning-bg:#fff6e7; --warning-line:#e4c48f; --shadow:0 10px 40px #1d274012; }
+    @media(prefers-color-scheme:dark) { :root { --canvas:#15161b; --surface:#202228; --subtle:#191b21; --text:#ecedf3; --muted:#a1a7b4; --line:#373b47; --accent:#9cb9ff; --accent-soft:#263451; --warning:#ffd18a; --warning-bg:#342a1e; --warning-line:#755a33; --shadow:0 10px 40px #0003; } }
+    :root[data-theme="light"] { color-scheme:light; --canvas:#f1f2f5; --surface:#fff; --subtle:#f7f8fa; --text:#222633; --muted:#616876; --line:#dfe2e9; --accent:#315fce; --accent-soft:#eaf0ff; --warning:#895013; --warning-bg:#fff6e7; --warning-line:#e4c48f; --shadow:0 10px 40px #1d274012; }
+    :root[data-theme="dark"] { color-scheme:dark; --canvas:#15161b; --surface:#202228; --subtle:#191b21; --text:#ecedf3; --muted:#a1a7b4; --line:#373b47; --accent:#9cb9ff; --accent-soft:#263451; --warning:#ffd18a; --warning-bg:#342a1e; --warning-line:#755a33; --shadow:0 10px 40px #0003; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--canvas); color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,select,input { font:inherit; } button,select { color:inherit; }
+    button { cursor:pointer; border:1px solid var(--line); border-radius:7px; padding:7px 12px; background:var(--surface); }
+    button:hover { border-color:var(--accent); } button:focus-visible,summary:focus-visible,select:focus-visible,input:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+    button:disabled { cursor:not-allowed; opacity:.55; } input { accent-color:var(--accent); }
+    h1,h2,h3,p { margin:0; } h1 { font-size:25px; font-weight:650; letter-spacing:-.6px; } h2 { font-size:19px; font-weight:650; } h3 { font-size:15px; }
+    small,.small { font-size:12px; } .muted { color:var(--muted); } .row { display:flex; align-items:center; flex-wrap:wrap; gap:10px; } .between { justify-content:space-between; }
+    .prototype { padding:16px 24px; background:#17243b; color:#f2f5ff; border-bottom:3px solid #7da4ff; }
+    .prototype .eyebrow { color:#bccde8; font-size:10px; letter-spacing:1.8px; font-weight:700; }
+    .prototype .controls { margin:10px 0; display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
+    .segmented { display:flex; flex-wrap:wrap; gap:4px; } .prototype button,.prototype select { border-color:#526079; background:#24344e; color:#f2f5ff; }
+    .prototype button[aria-pressed="true"] { background:#e6edff; color:#17243b; border-color:#e6edff; }
+    .prototype select { border-radius:6px; padding:6px; } .prototype label { font-size:12px; }
+    #bet { color:#c7d5ef; font-size:13px; } #axes { color:#aebfdb; margin-top:3px; font-size:11px; }
+    .window { max-width:1060px; margin:28px auto 36px; border:1px solid var(--line); border-radius:12px; background:var(--surface); box-shadow:var(--shadow); overflow:hidden; }
+    .window-bar { padding:11px 22px; border-bottom:1px solid var(--line); font-size:11px; color:var(--muted); display:flex; justify-content:space-between; }
+    .brand { display:flex; align-items:center; gap:9px; font-size:15px; font-weight:700; color:var(--text); } .brand-mark { background:var(--accent-soft); color:var(--accent); width:24px; height:24px; display:grid; place-items:center; border-radius:5px; font-size:13px; }
+    .content { padding:26px 30px 30px; } .app-head { margin-bottom:22px; } .app-head .muted { margin-top:4px; }
+    .quiet { background:transparent; border-color:transparent; color:var(--accent); } .primary { background:#315fce; color:#fff; border-color:#315fce; padding:11px 20px; font-weight:600; }
+    .tabs { display:flex; align-items:center; gap:4px; flex-wrap:wrap; border-bottom:1px solid var(--line); padding-bottom:10px; margin-bottom:18px; }
+    .tab { background:transparent; border-color:transparent; color:var(--muted); } .tab[aria-pressed="true"] { color:var(--accent); background:var(--accent-soft); font-weight:600; }
+    .tabs .add { margin-left:auto; font-size:12px; }
+    .status-strip { border:1px solid var(--line); background:var(--subtle); border-radius:7px; padding:9px 12px; margin-bottom:18px; font-size:12px; }
+    .dot { width:6px; height:6px; border-radius:50%; background:var(--accent); display:inline-block; margin-right:5px; }
+    code { font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; }
+    .attention { font-size:12px; border:1px solid var(--line); border-radius:7px; padding:8px 12px; background:var(--subtle); }
+    .attention.warning { border-color:var(--warning-line); color:var(--warning); background:var(--warning-bg); }
+    .attention summary { cursor:pointer; font-weight:600; } .attention p { margin-top:8px; max-width:650px; } .attention button { margin-top:8px; }
+    .attention-inline { margin:0 0 16px; } .attention-header { max-width:360px; }
+    .session { font-size:12px; color:var(--muted); } .session strong { color:var(--text); font-weight:500; } .session p { font-size:11px; margin-top:2px; }
+    .section-head { margin:24px 0 12px; } .section-head h2 span { color:var(--muted); font-size:13px; font-weight:400; margin-left:5px; }
+    .conflict-total { color:var(--warning); font-size:12px; margin-top:2px; }
+    .imports { gap:6px; } .imports button { font-size:12px; padding:6px 9px; }
+    .dropzone { border:1px dashed var(--line); border-radius:7px; text-align:center; padding:10px; color:var(--muted); font-size:12px; margin-bottom:12px; }
+    .mods { list-style:none; padding:0; margin:0; display:grid; gap:8px; }
+    .mod { border:1px solid var(--line); background:var(--subtle); padding:12px 14px; border-radius:8px; }
+    .mod-top { display:flex; align-items:start; justify-content:space-between; gap:20px; } .mod-info { flex:1; min-width:0; } .mod strong { font-size:14px; font-weight:600; }
+    .metadata { font-size:11px; color:var(--muted); margin-top:3px; } .metadata button { padding:0; font-size:11px; border:0; color:var(--accent); background:transparent; }
+    .enabled { display:flex; align-items:center; gap:6px; font-size:12px; white-space:nowrap; color:var(--muted); margin-top:2px; }
+    .variants { display:flex; align-items:center; gap:13px; flex-wrap:wrap; font-size:12px; margin-top:8px; color:var(--muted); } .variants label { display:flex; gap:4px; align-items:center; }
+    .pill { display:inline-block; background:var(--warning-bg); color:var(--warning); border:1px solid var(--warning-line); padding:1px 7px; font-size:10px; border-radius:10px; margin-left:7px; }
+    .update { color:var(--accent); background:var(--accent-soft); border-color:transparent; }
+    .conflict-detail { margin-top:8px; color:var(--warning); font-size:12px; } .conflict-detail summary { cursor:pointer; } .conflict-detail p { margin-top:5px; }
+    .recovery { margin-top:10px; padding:11px 13px; border:1px solid var(--warning-line); background:var(--warning-bg); color:var(--warning); border-radius:6px; font-size:12px; }
+    .recovery strong { font-size:12px; } .recovery p { margin-top:5px; } .recovery summary { cursor:pointer; margin-top:7px; } .recovery button { margin-top:8px; font-size:12px; }
+    .updates { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); font-size:12px; } .updates button { font-size:12px; } .updates label { color:var(--muted); }
+    .empty { padding:28px 0 12px; } .empty .intro { margin-bottom:24px; } .empty .intro h2 { font-size:27px; letter-spacing:-.5px; } .empty .intro p { margin-top:8px; color:var(--muted); max-width:540px; }
+    .import-cards { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; } .import-card { padding:21px 18px; border:1px solid var(--line); border-radius:8px; background:var(--subtle); display:flex; flex-direction:column; align-items:start; }
+    .import-card .symbol { color:var(--accent); font-size:22px; margin-bottom:16px; } .import-card p { color:var(--muted); font-size:12px; margin:8px 0 20px; flex:1; } .import-card button { font-size:12px; }
+    .empty .dropzone { padding:28px; margin-top:14px; } .empty .dropzone strong { display:block; font-size:14px; color:var(--text); margin-bottom:4px; }
+
+    .window-bar { align-items:center; gap:10px; flex-wrap:wrap; }
+    .window-bar .row { justify-content:flex-end; }
+    .card { border:1px solid var(--line); border-radius:8px; background:var(--subtle); padding:16px; margin-top:12px; min-width:0; }
+    .card h3 { margin-bottom:8px; } .card p + p { margin-top:6px; }
+    .card .row { margin-top:10px; } .card button { font-size:12px; }
+    .section-label { border-bottom:1px solid var(--line); padding-bottom:10px; margin-top:20px; }
+    .section-label p { margin-top:4px; }
+    .settings-grid { display:grid; grid-template-columns:1.1fr 1fr; gap:24px; }
+    .settings-grid > section { min-width:0; }
+    input:not([type="checkbox"]),select { border:1px solid var(--line); border-radius:6px; padding:8px; background:var(--surface); color:var(--text); min-width:0; max-width:100%; }
+    .path-field { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:9px; }
+    .path-field input { flex:1 1 220px; width:100%; font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .field { display:flex; flex-direction:column; gap:5px; flex:1 1 120px; font-size:12px; min-width:0; }
+    .field input { width:100%; } .small-label { display:block; margin-top:12px; color:var(--muted); font-size:12px; }
+    .warning { color:var(--warning); background:var(--warning-bg); border-color:var(--warning-line); }
+    .notice { border:1px solid var(--line); border-radius:7px; padding:11px 13px; margin-top:12px; font-size:12px; }
+    .notice.warning { border-color:var(--warning-line); }
+    .notice strong { display:block; } .notice p { margin-top:4px; }
+    .route-note { padding:12px 15px; background:var(--accent-soft); border:1px solid var(--line); border-radius:7px; font-size:12px; margin-bottom:14px; }
+    .route-note strong { display:block; margin-bottom:3px; }
+    .section-nav { margin:12px 0; } .section-nav button[aria-pressed="true"] { color:var(--accent); background:var(--accent-soft); border-color:var(--accent); }
+    .health-list { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+    .health-item { border-left:3px solid var(--line); padding:7px 10px; font-size:11px; min-width:0; }
+    .health-item strong { display:block; font-size:12px; } .health-item.warning { border-color:var(--warning-line); }
+    .absent { font-size:11px; margin-top:10px; color:var(--muted); }
+    .bridge { border-left:3px solid var(--accent); }
+    .bridge-note { color:var(--accent); font-size:11px; margin-bottom:8px; }
+    .library-row { padding:12px 0; border-top:1px solid var(--line); margin-top:12px; }
+    .library-row strong { display:block; font-size:12px; }
+    details.editor { margin-top:12px; } details.editor summary { cursor:pointer; color:var(--accent); font-size:12px; }
+    .footer-note { max-width:1060px; padding:0 20px; margin:0 auto 24px; font-size:11px; color:var(--muted); }
+    #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); padding:12px 18px; border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); background:var(--surface); z-index:4; max-width:90vw; font-size:12px; }
+    #toast:empty { display:none; }
+
+    .settings-body { min-width:0; }
+    .settings-body .card { margin-top:14px; }
+    .settings-top { margin:18px 0; }
+    .settings-top button[aria-current="page"],.settings-side button[aria-current="page"] { color:var(--accent); background:var(--accent-soft); border-color:var(--accent); }
+    .settings-side-layout { display:grid; grid-template-columns:220px minmax(0,1fr); gap:24px; margin-top:20px; }
+    .settings-side { border-right:1px solid var(--line); padding-right:16px; }
+    .settings-side button { width:100%; text-align:left; margin-top:6px; }
+    .settings-side small { display:block; color:var(--muted); font-size:10px; }
+    .settings-side .gmm-entry { border-top:1px solid var(--line); margin-top:20px; padding-top:14px; }
+    .return-note { margin:10px 0 14px; font-size:12px; }
+    .return-note strong { color:var(--accent); }
+    .context-selector { width:100%; max-width:340px; }
+    .scope-head { margin:20px 0 8px; }
+    .scope-head p { margin-top:4px; }
+    .page-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 16px; }
+    .page-cards .wide { grid-column:1 / -1; }
+    .scope-switch { margin:12px 0 18px; padding-bottom:16px; border-bottom:1px solid var(--line); }
+    .sample-note { margin-top:22px; font-size:11px; color:var(--muted); }
+    .main-sample .mod { margin-top:8px; }
+    .health-list { margin:14px 0; }
+    .tab,.settings-side button { overflow-wrap:anywhere; }
+    @media(max-width:750px) {
+      .window { margin:16px 10px; } .content { padding:20px 16px; }
+      .prototype { padding:14px 16px; } .prototype .controls { gap:12px; }
+      .health-list,.page-cards { grid-template-columns:minmax(0,1fr); gap:10px; }
+      h1 { font-size:21px; } .app-head { gap:14px; } .attention-header { max-width:none; width:100%; }
+      .settings-side-layout { grid-template-columns:108px minmax(0,1fr); gap:10px; }
+      .settings-side { padding-right:8px; } .settings-side button { padding:7px 6px; font-size:11px; }
+      .settings-side-layout .page-cards { display:block; }
+      .settings-side-layout .card { padding:12px 10px; }
+      .tabs .add { margin-left:0; } .path-field input { flex-basis:100%; }
+    }
+    @media(max-width:350px) { .settings-side-layout { grid-template-columns:88px minmax(0,1fr); gap:8px; } }
+</style></head><body>
+<header class="prototype" aria-label="Prototype controls">
+  <div class="eyebrow">THROWAWAY PROTOTYPE · ISSUE #284 · SETTINGS COMPARISON · ROUND 2</div>
+  <div class="controls">
+    <div class="segmented" role="group" aria-label="Candidate layout">
+      <button data-layout="a" aria-pressed="true">A · Shared tabs</button>
+      <button data-layout="b" aria-pressed="false">B · Independent list</button>
+      <button data-layout="c" aria-pressed="false">C · Route-aware switcher</button>
+    </div>
+    <div class="segmented" role="group" aria-label="Arrival route">
+      <button data-route="strip" aria-pressed="true">From status strip</button>
+      <button data-route="bar" aria-pressed="false">From window bar</button>
+    </div>
+    <div class="segmented" role="group" aria-label="Sample state">
+      <button data-state="healthy" aria-pressed="true">Healthy</button>
+      <button data-state="degraded" aria-pressed="false">Degraded</button>
+    </div>
+    <label>Colour <select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+  </div>
+  <p id="bet"></p><p id="axes"></p>
+</header>
+<main id="screen" class="window" aria-label="GMM candidate"></main>
+<p class="footer-note">Static sample · The header explores all twelve views. Back to Mods reveals the two actual Settings controls. Navigation, Game selection and editor disclosures can be explored; each shows a preview notice. All application controls are static. No files are read or changed.</p>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+'use strict';
+const candidates = {
+  a:{name:'Shared tabs',bet:'One Game selection follows you between the main screen and Settings; GMM is a peer tab.',axes:'Games: horizontal tabs · GMM: peer in the same navigation · Selection: shared with main screen'},
+  b:{name:'Independent list',bet:'A dedicated Settings list lets you configure any Game without moving the main screen.',axes:'Games: list on the left · GMM: separate entry below Games · Selection: fully independent'},
+  c:{name:'Route-aware switcher',bet:'A compact Game switcher follows contextual arrivals; global setup stays separate from the main Game.',axes:'Games: header switcher · GMM: separate top-level destination, no shared navigation · Selection: shared from strip, independent from window bar'}
+};
+const games = [
+  {name:'Honkai: Star Rail',code:'srmi',path:'D:\\Games\\Star Rail',owner:'SpectrumQT',version:'v1.1.0'},
+  {name:'Wuthering Waves',code:'wwmi',path:'D:\\Games\\Wuthering Waves',owner:'SpectrumQT',version:'v0.9.0'},
+  {name:'Zenless Zone Zero',code:'zzmi',path:'D:\\Games\\Zenless Zone Zero',owner:'leotorrez',version:'v1.1.0'},
+  {name:'Genshin Impact',code:'gimi'}, {name:'Honkai Impact 3rd',code:'himi'}, {name:'Arknights Endfield',code:'efmi'}
+];
+let layout='a', state='healthy', route='strip', mainGame=0, arrivalGame=0, settingsGame=0, section='game', destination=true, toastTimer;
+const root='D:\\ModLibrary';
+function esc(s) { return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function preview(action) {
+  clearTimeout(toastTimer);
+  document.getElementById('toast').textContent=action+' — preview only. No action was performed.';
+  toastTimer=setTimeout(()=>document.getElementById('toast').textContent='',4200);
+}
+function action(label,cls='') { return `<button class="${esc(cls)}" data-preview="${esc(label)}">${esc(label)}</button>`; }
+function nav(label,attrs,cls='quiet') { return `<button class="${esc(cls)}" ${attrs}>${esc(label)}</button>`; }
+// Same fallible path states as round 1. A saved unreadable path never becomes absent.
+function status(i) { return i>2?'absent':state==='degraded'&&i===1?'unreadable':state==='degraded'&&i===2?'missing':'healthy'; }
+function library(i) { return i===1?'D:\\ModLibrary\\Waves Collection':root+'\\'+games[i].code; }
+function pathField(label,value,picker='Change…',placeholder='') {
+  return `<label class="small-label">${esc(label)}</label><div class="path-field"><input aria-label="${esc(label)}" value="${esc(value)}" placeholder="${esc(placeholder)}" readonly data-stub-input>${action('Apply')}${action(picker)}</div>`;
+}
+function health(i) {
+  const s=status(i),g=games[i];
+  if(s==='unreadable')return `<strong>Cannot tell — install path unreadable</strong><p>Access denied while checking <code>${esc(g.path)}</code>. The saved path remains. GMM cannot verify the Game or Model Importer.</p><p>This does not mean “not installed”. Restore access or choose a readable folder.</p>`;
+  if(s==='missing')return `<strong>Game readable · Model Importer not installed</strong><p>The Game executable is readable at <code>${esc(g.path)}</code>. Model Importer files are absent; ${esc(g.code.toUpperCase())} can be installed.</p>`;
+  if(s==='absent')return '<strong>Game absent · no install path set</strong><p>No saved or detected install path in this sample. This is different from a saved path that cannot be read.</p>';
+  return `<strong>Game readable · ${esc(g.code.toUpperCase())} installed</strong><p><code>${esc(g.path)}</code> · installed ${esc(g.version)}</p>`;
+}
+function shortHealth(i) {
+  return status(i)==='unreadable'?'Cannot tell · path unreadable; Model Importer unverified':status(i)==='missing'?'Game readable · Model Importer not installed':status(i)==='absent'?'Absent · no saved path':games[i].code.toUpperCase()+' installed · Game readable';
+}
+function inventory() {
+  return `<div class="health-list" aria-label="All six Games status">${games.map((g,i)=>`<div class="health-item ${['unreadable','missing'].includes(status(i))?'warning':''}" data-inventory-state="${esc(status(i))}"><strong>${esc(g.name)}</strong>${esc(shortHealth(i))}</div>`).join('')}</div><p class="absent">Three Games have saved install paths. An unreadable saved path keeps its Game in that group. Select an absent Game here to set its path.</p>`;
+}
+function gamePath(i) {
+  const g=games[i],s=status(i);
+  return `<article class="card wide"><h3>Game install path · ${esc(g.name)}</h3><div class="notice ${s==='unreadable'?'warning':''}" data-path-state="${esc(s)}">${health(i)}</div>${pathField(g.name+' install path',g.path||'',g.path?'Change…':'Pick folder','No install path set')}<div class="row">${action(g.path?'Re-detect':'Auto-detect')}${action('Rebuild junctions')}</div><p class="muted small">Rebuild each enabled Mod’s Junction from its Library path and active Variant. Conflicts stay on Mod rows.</p></article>`;
+}
+function importer(i) {
+  const g=games[i],s=status(i),unknown=s==='unreadable',missing=s==='missing'||s==='absent';
+  return `<article class="card"><h3>Model Importer · ${esc(g.code.toUpperCase())}</h3><p>${unknown?'Installed state cannot be verified. No version is inferred from an unreadable folder.':s==='absent'?'Set a readable Game path before installing a Model Importer.':missing?'No Model Importer installed in this sample.':'Installed '+esc(g.version)+' · Latest '+esc(g.version)+' (sample)'}</p>${unknown?'<p class="warning small">Could not check for a Model Importer update: access denied. “Cannot tell” stays visible beside the saved path.</p>':''}<div class="row">${action('Reinstall importer')}${action('Roll back importer')}${!unknown&&!missing?action('Pin to current'):''}</div><p class="muted small">${missing?'Reinstall importer is the existing install control. ':''}Importer Pin suppresses version prompts only. Model Importer changes require an explicit click.</p><p class="muted small">Loader <code>3dmloader.dll</code> is built into GMM. A newer Loader arrives with a GMM update.</p></article>`;
+}
+function origin(i) {
+  const g=games[i],slug=(g.owner||'SpectrumQT')+'/'+g.code.toUpperCase()+'-Package';
+  return `<article class="card"><h3>Importer Origin · ${esc(g.name)}</h3><p class="small">In effect: <code>${esc(slug)}</code> · GMM’s built-in default (sample).</p><p class="muted small">${status(i)==='unreadable'?'The saved origin is separate from filesystem validation. This origin does not prove that a Model Importer is readable.':status(i)==='missing'||status(i)==='absent'?'This is the origin for a future install; it is not evidence of an installed package.':'Updates stay on the origin this install came from.'}</p><details class="editor"><summary>Your own origin</summary><p class="muted small">Your override outranks recommendations, then the built-in default. Changing origin invalidates this install and clears its Importer Pin. A proposal requires “Switch and install”; a dismissal can be undone here.</p><div class="row"><label class="field">Owner<input placeholder="${esc(g.owner||'SpectrumQT')}" readonly data-stub-input></label><label class="field">Repository<input placeholder="${esc(g.code.toUpperCase())}-Package" readonly data-stub-input></label><label class="field">Asset pattern<input placeholder="${esc(g.code.toUpperCase())}-PACKAGE" readonly data-stub-input></label></div><div class="row">${action('Save origin')}</div><p class="muted small">No override or dismissed recommendations in this sample.</p></details><p class="small-label">Recommendations for all Games are controlled on the GMM page.</p>${nav('GMM · importer recommendations','data-section="gmm"')}</article>`;
+}
+function override(i) {
+  return `<article class="card wide bridge"><p class="bridge-note">LIBRARY · PER-GAME PATH</p><h3>Library · ${esc(games[i].name)}</h3><p class="muted small">${i===1?'Per-Game override · does not follow the global root':'Uses global Library root · '+esc(root)+' + '+esc(games[i].code)}</p>${pathField(games[i].name+' Library path',library(i))}<div class="row">${i===1?action('Reset'):'<span class="muted small">No override to reset.</span>'}${nav('View global Library root','data-section="gmm"')}</div><p class="muted small">Changing this path affects only this Game. A safe move disables affected Mods, moves their bytes and restores each Junction.</p></article>`;
+}
+function libraryRoot() {
+  return `<article class="card wide bridge"><p class="bridge-note">LIBRARY · GLOBAL ROOT</p><h3>Library · global root</h3>${pathField('Global Library root',root,'Change global root…')}<div class="row">${action('Reset to default')}</div><p class="muted small">Games without an override inherit this root. A safe move disables affected Mods, moves their bytes and restores each Junction. Non-NTFS targets are refused. An overlap repair changes only the setting and leaves the old tree untouched.</p><p class="muted small">Per-Game paths are on each Game’s page. Wuthering Waves has an override in this sample.</p>${nav('View '+games[settingsGame].name+' Library path','data-section="game"')}</article>`;
+}
+function network() { return `<article class="card"><h3>Network · proxy</h3><p class="muted small">Optional HTTP or SOCKS5 proxy for GitHub releases and GameBanana traffic.</p><div class="row"><label class="field">Proxy URL<input placeholder="Not set" readonly data-stub-input></label></div><div class="row"><label class="field">Username (optional)<input placeholder="Not set" readonly data-stub-input></label><label class="field">Password<input type="password" placeholder="Not set" readonly data-stub-input></label></div><div class="row">${action('Save')}${action('Test connection')}</div><p class="muted small">Sensitive fields never reach the diagnostics bundle.</p></article>`; }
+function updates() { return `<article class="card"><h3>Updates · GMM</h3><p class="muted small">GMM checks for a signed update each time it starts. Model Importer and Mod updates still need an explicit click.</p><div class="row">${action('Check for updates')}</div><p class="muted small">${state==='healthy'?'You’re on the latest release (sample).':'Could not check for updates: network unavailable (sample). Installed version is unchanged.'}</p></article>`; }
+function diagnostics() { return `<article class="card"><h3>Diagnostics</h3><p class="muted small">Logs stay on this machine. No telemetry or background uploads. Export local logs and redacted settings for a bug report.</p><label class="small-label">Log directory<input aria-label="Log directory" value="D:\\ModLibrary\\GMM\\logs" readonly data-stub-input></label><div class="row">${action('Export diagnostics bundle')}</div></article>`; }
+function recommendations() { return `<article class="card"><h3>Importer Origin · recommendations</h3><label class="small-label"><input type="checkbox" checked data-stub-input> Recommend importer origins (all Games)</label><p class="muted small">Recommendations propose; they never replace an existing Model Importer without your choice. Importer Pins do not suppress origin proposals. Each Game’s origin and dismissals remain on its own page.</p></article>`; }
+function gameSection(i) { return gamePath(i)+importer(i)+origin(i)+override(i); }
+function globalSection() { return libraryRoot()+network()+updates()+recommendations()+diagnostics(); }
+function shared() { return layout==='a'||(layout==='c'&&route==='strip'); }
+function back() { return nav('← Back to Mods','data-back'); }
+function routeNote() {
+  const entry=route==='strip'?games[arrivalGame].name+' status strip':'global window-bar Settings';
+  const meaning=route==='strip'?'The status strip opened the page for '+games[arrivalGame].name+'. You can switch to any of the six Games here.':'The global control opened the GMM page. It does not imply a Game; enter Game settings to choose one.';
+  const policy=shared()?'Shared selection · switching Game here also changes the main screen.':'Independent selection · switching Game here leaves the main screen untouched.';
+  return `<div class="route-note"><strong>Arrived from ${esc(entry)}</strong>${esc(meaning)}</div><p class="return-note">${esc(policy)}<br><strong>Back will show ${esc(games[mainGame].name)} on the main screen.</strong>${mainGame>2?' No saved path; the main screen will show setup is needed.':''}</p>`;
+}
+function pageHeading() {
+  return `<header class="scope-head"><h2>${section==='gmm'?'GMM · all Games':esc(games[settingsGame].name)}</h2><p class="muted small">${section==='gmm'?'Library root, network, GMM updates and diagnostics.':'Game install path, Model Importer, Importer Origin and this Game’s Library path.'}</p></header>`;
+}
+function pageBody() { return `<section class="settings-body" data-scope="${esc(section)}">${pageHeading()}<div class="page-cards">${section==='gmm'?globalSection():gameSection(settingsGame)}</div></section>`; }
+function gameNav(i) {
+  return nav(games[i].name,`data-settings-game="${i}" aria-current="${section==='game'&&settingsGame===i?'page':'false'}"`,'tab');
+}
+function sharedTabs() {
+  return `<div class="content" data-view="settings"><header class="app-head row between"><h1>Settings</h1>${back()}</header>${routeNote()}<nav class="tabs settings-top" aria-label="Settings pages">${nav('GMM','data-section="gmm" aria-current="'+(section==='gmm'?'page':'false')+'"','tab')}${games.map((g,i)=>gameNav(i)).join('')}</nav>${inventory()}${pageBody()}</div>`;
+}
+function independentList() {
+  return `<div class="content" data-view="settings"><header class="app-head row between"><h1>Settings</h1>${back()}</header>${routeNote()}<div class="settings-side-layout"><nav class="settings-side" aria-label="Settings pages"><p class="small muted">GAMES · ALL SIX</p>${games.map((g,i)=>`<button data-settings-game="${i}" data-inventory-state="${esc(status(i))}" aria-current="${section==='game'&&settingsGame===i?'page':'false'}">${esc(g.name)}<small>${esc(shortHealth(i))}</small></button>`).join('')}<div class="gmm-entry"><p class="small muted">APPLICATION</p>${nav('GMM settings','data-section="gmm" aria-current="'+(section==='gmm'?'page':'false')+'"','')}</div></nav><div class="settings-body">${pageBody()}</div></div></div>`;
+}
+function compactSwitcher() {
+  const head=section==='gmm'?`<header class="app-head row between"><div><h1>GMM settings</h1><p class="muted">Application-wide destination</p></div>${back()}</header><div class="scope-switch">${nav('Open Game settings →','data-section="game"')}</div>`:
+    `<header class="app-head row between"><div><h1>Game settings</h1><label class="small-label">Configure Game<select class="context-selector" id="settings-game">${games.map((g,i)=>`<option value="${i}" ${settingsGame===i?'selected':''}>${esc(g.name)}${i>2?' · absent':''}</option>`).join('')}</select></label></div>${back()}</header><div class="scope-switch">${nav('GMM settings →','data-section="gmm"')}</div>`;
+  return `<div class="content" data-view="settings">${head}${routeNote()}${inventory()}${pageBody()}<p class="sample-note">${route==='strip'?'This contextual visit shares Game selection.':'This global visit keeps Game selection independent.'} Moving between Game settings and GMM settings keeps this visit’s policy; a new arrival starts a new visit.</p></div>`;
+}
+function bar() { return `<div class="window-bar"><span class="brand"><span class="brand-mark">G</span>GMM</span><div class="row">${destination?'<span>Settings destination</span>':nav('Settings','data-arrival="bar"')}<span>Gacha Mod Manager</span></div></div>`; }
+function mainTabs() { return `<nav class="tabs" aria-label="Main screen Game">${games.slice(0,3).map((g,i)=>nav(g.name,`data-main-game="${i}" aria-pressed="${mainGame===i}"`,'tab')).join('')}${action('Add game','quiet add')}</nav>`; }
+function strip() {
+  const g=games[mainGame];
+  return `<div class="status-strip row between"><span><span class="dot"></span>${esc(shortHealth(mainGame))}</span><code>${esc(g.path||'No saved install path')}</code>${nav('Settings for '+g.name,'data-arrival="strip"')}</div>`;
+}
+// The accepted A main-screen shape is rendered only after leaving Settings.
+function mainContent() {
+  return `<div class="content main-sample" data-view="main"><header class="app-head row between"><div><h1>${esc(games[mainGame].name)}</h1><p class="muted">Manage Mods for this Game.</p></div>${mainGame<3?action('Launch '+games[mainGame].name,'primary'):''}</header><div class="row between" style="margin-bottom:18px"><details class="attention attention-header ${state==='degraded'?'warning':''}"><summary>${state==='degraded'?'! Needs attention · setup could not be verified':'All Games · nothing needs attention'}</summary><p>Sample only. Game setup is in Settings; Mod recovery warnings stay on their own rows.</p></details><div class="session"><strong>No active Game Session</strong><p>GMM holds the Loader during the Game Session.</p></div></div>${mainTabs()}${strip()}${mainGame>2?'<div class="notice">No Game install path saved. Set the path in Settings before managing this Game.</div>':`<section><div class="section-head row between"><h2>Mods <span>6 in Library · 4 enabled</span></h2>${action('Import ZIP…')}</div><p class="conflict-total">1 Conflict · two enabled Mods share one resource hash</p>${['Coat Palette','Coat Trim','Soft Menu Accents','Evening Outfit','Neutral Hair Tones','Clear Item Icons'].map((name,i)=>`<article class="mod" data-mod="${i}"><strong>${esc(name)}</strong><p class="metadata">${i===0?'3 Variants · Slate selected':i<2?'Shared hash · 1 Conflict':i===3?'Unavailable · interrupted reinstall recovery':'Library · enabled'}</p></article>`).join('')}</section>`}<p class="sample-note">Main-screen return preview · accepted “Status at a glance” structure from #283. Use either Settings control to start a new visit.</p></div>`;
+}
+function render() {
+  for(const key of ['layout','route','state'])document.querySelectorAll('[data-'+key+']').forEach(b=>b.setAttribute('aria-pressed',b.dataset[key]===({layout,route,state})[key]));
+  document.getElementById('bet').textContent=candidates[layout].name+' — '+candidates[layout].bet;
+  document.getElementById('axes').textContent=candidates[layout].axes;
+  const screen=document.getElementById('screen');
+  screen.setAttribute('aria-label',candidates[layout].name+' · '+route+' · '+state);
+  screen.innerHTML=bar()+(destination?(layout==='a'?sharedTabs():layout==='b'?independentList():compactSwitcher()):mainContent());
+}
+function focusPage() { const target=document.querySelector('[data-view] h1'); if(target){target.tabIndex=-1;target.focus({preventScroll:true});} }
+function arrive(next) { route=next;destination=true;arrivalGame=mainGame;settingsGame=mainGame;section=next==='strip'?'game':'gmm';render(); }
+function chooseGame(i) { settingsGame=i;section='game';if(shared())mainGame=i;render(); }
+function returnMain() { destination=false;render();document.querySelector('[data-arrival="'+route+'"]').focus();preview('Back to Mods · '+games[mainGame].name); }
+document.addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  if(b.dataset.layout){layout=b.dataset.layout;mainGame=state==='healthy'?0:1;arrive(route);focusPage();preview('Candidate switch · visit reset');}
+  else if(b.dataset.route){mainGame=state==='healthy'?0:1;arrive(b.dataset.route);focusPage();preview('Arrival route · visit reset');}
+  else if(b.dataset.state){state=b.dataset.state;mainGame=state==='healthy'?0:1;arrive(route);focusPage();preview('Sample state · visit reset');}
+  else if(b.hasAttribute('data-back')){returnMain();}
+  else if(b.dataset.arrival){arrive(b.dataset.arrival);focusPage();preview('Open Settings');}
+  else if(b.dataset.mainGame!==undefined){mainGame=Number(b.dataset.mainGame);render();document.querySelector('[data-main-game="'+mainGame+'"]').focus();preview('Main Game selection');}
+  else if(b.dataset.settingsGame!==undefined){chooseGame(Number(b.dataset.settingsGame));document.querySelector('[data-settings-game="'+settingsGame+'"]').focus();preview('Settings Game selection');}
+  else if(b.dataset.section){section=b.dataset.section;render();focusPage();preview('Settings page');}
+  else if(b.dataset.preview){preview(b.dataset.preview);}
+});
+document.addEventListener('click',e=>{if(e.target.matches('[data-stub-input]')){if(e.target.type==='checkbox')e.preventDefault();preview('Setting');}});
+document.addEventListener('keydown',e=>{if(e.target.matches('[data-stub-input]')&&['Enter',' '].includes(e.key)){e.preventDefault();preview('Setting');}if(e.key==='Escape'&&destination){returnMain();}});
+document.addEventListener('toggle',e=>{if(e.target.matches('details'))preview('Disclosure');},true);
+document.addEventListener('change',e=>{
+  if(e.target.id==='theme'){document.documentElement.dataset.theme=e.target.value;preview('Colour');}
+  if(e.target.id==='settings-game'){chooseGame(Number(e.target.value));document.getElementById('settings-game').focus();preview('Settings Game selection');}
+});
+render();
+</script></body></html>
