@@ -10,6 +10,7 @@ import { ImporterOriginPanel } from "./ImporterOriginPanel";
 import { PathField } from "./PathField";
 import { LibraryAuditWarning } from "./LibraryAuditWarning";
 import { CommandErrorNotice } from "./CommandErrorNotice";
+import { GlobalLibraryRootEditor, GameLibraryOverrideEditor } from "./LibraryPathEditors";
 
 export type SettingsPage = GameCode | "gmm";
 
@@ -84,10 +85,13 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
                 <GamePathPage game={game.code} displayName={game.displayName} />
                 <ImporterPanel game={game.code} displayName={game.displayName} />
                 <ImporterOriginPanel game={game.code} displayName={game.displayName} />
+                <GameLibraryOverrideEditor game={game.code} displayName={game.displayName} onGlobalPage={() => onPageChange("gmm")} />
+                <LibraryAuditWarning game={game.code} />
               </div>
             ))}
             {pages.has("gmm") ? <div hidden={page !== "gmm"}>
               <h2>GMM settings</h2>
+              <GlobalLibraryRootEditor games={games} onGamePage={onPageChange} />
               <NetworkPanel />
             </div> : null}
           </div>
@@ -315,7 +319,6 @@ function GamePathPage({
       ) : null}
       <CommandErrorNotice error={setPath.error} />
       <CommandErrorNotice error={detect.error} />
-      <LibraryAuditWarning game={game} />
       <RebuildJunctions game={game} />
     </section>
   );

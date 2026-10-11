@@ -1,7 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { AttentionView } from "./AttentionView";
-import { PathField } from "./PathField";
 import { SettingsDestination, type SettingsPage } from "./SettingsDestination";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -25,14 +24,12 @@ import {
   SESSION_STARTED_EVENT,
   type AvGuidance,
   type GameSummary,
-  type MoveReport,
   type OnboardingStatus,
   type SessionInfo,
   applyModUpdate,
   checkModUpdatesNow,
   detectConflicts,
   getGameInstallPath,
-  getLibraryPaths,
   getStartupReconcileStatus,
   importGamebanana,
   importZip,
@@ -41,8 +38,6 @@ import {
   listVariants,
   modUpdatesGloballyEnabled,
   setActiveVariant,
-  setLibraryPathForGame,
-  setLibraryRoot,
   setModEnabled,
   setModUpdateCheckEnabled,
   setModUpdatesGloballyEnabled,
@@ -53,7 +48,6 @@ import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarni
 import { EnabledTransitionRecoveryWarning } from "./EnabledTransitionRecoveryWarning";
 import { diagnosticsLogDir, exportDiagnosticsBundle } from "./diagnostics";
 import { OnboardingWizard } from "./OnboardingWizard";
-import { LibraryRootOverlapWarning } from "./LibraryRootOverlapWarning";
 import {
   ReinstallRecoveryNotices,
   ReinstallRecoveryWarning,
@@ -271,7 +265,6 @@ function MainApp({
           <LaunchGameButton game={activeGame} displayName={active.displayName} />
           <button data-settings-arrival="game" onClick={() => openSettings(activeGame)}>Settings for {active.displayName}</button>
           <ModUpdatesPanel game={activeGame} />
-          <LibraryPathsPanel />
           <UpdatesPanel />
           <Diagnostics />
           <ModList game={activeGame} />
@@ -744,194 +737,6 @@ function ModUpdateBadge({
         </label>
       </span>
       <CommandErrorNotice error={apply.error} />
-    </>
-  );
-}
-
-/**
- * Settings → Library panel. Global root + per-game override rows with
- * Change / Reset buttons. Path moves go through the same
- * disable → move → rebuild flow as a manual Rebuild action.
- */
-function LibraryPathsPanel() {
-  const qc = useQueryClient();
-  const paths = useQuery({
-    queryKey: ["libraryPaths"],
-    queryFn: getLibraryPaths,
-  });
-
-  const refresh = () => {
-    qc.invalidateQueries({ queryKey: ["libraryPaths"] });
-    qc.invalidateQueries({ queryKey: ["mods"] });
-    qc.invalidateQueries({ queryKey: ["libraryAudit"] });
-    qc.invalidateQueries({ queryKey: ["conflicts"] });
-  };
-
-  const setRoot = useMutation({
-    mutationFn: (next: string | null) => setLibraryRoot(next),
-    onSettled: refresh,
-  });
-  const setPerGame = useMutation({
-    mutationFn: ({ game, path }: { game: ApiGameCode; path: string | null }) =>
-      setLibraryPathForGame(game, path),
-    onSettled: refresh,
-  });
-
-  if (paths.isError) {
-    return (
-      <section className="card">
-        <h2>Library</h2>
-        <CommandErrorNotice
-          error={paths.error}
-          heading="Could not resolve Library paths."
-          detail="Library settings are unavailable until GMM can read their current paths."
-        />
-      </section>
-    );
-  }
-
-  if (!paths.data) {
-    return (
-      <section className="card">
-        <h2>Library</h2>
-        <p className="muted">Resolving paths…</p>
-      </section>
-    );
-  }
-
-  const p = paths.data;
-  const games: ApiGameCode[] = ["gimi", "srmi", "zzmi", "wwmi", "himi", "efmi"];
-
-  return (
-    <section className="card">
-      <h2>Library</h2>
-      <p className="muted">
-        Where GMM keeps each game's Mod copies. Changing a safe path disables affected
-        mods, moves the bytes, then re-enables them against the new location. Repairing
-        an overlap changes only the setting and leaves the old tree untouched. Non-NTFS
-        targets are refused before any move.
-      </p>
-
-      <LibraryRootOverlapWarning
-        overlaps={p.overlaps ?? []}
-        modOverlaps={p.modOverlaps ?? []}
-      />
-
-      <div className="row">
-        <PathField
-          label="Global Library root"
-          value={p.effectiveRoot}
-          disabled={setRoot.isPending || setPerGame.isPending}
-          pickerLabel={setRoot.isPending ? "Moving…" : "Change global root…"}
-          onApply={(path) => setRoot.mutate(path)}
-        />
-        <span className="muted small">
-          {p.rootOverride ? "Override" : `Default (${p.defaultRoot})`}
-        </span>
-      </div>
-      <div className="row">
-        <button
-          onClick={() => setRoot.mutate(null)}
-          disabled={setRoot.isPending || setPerGame.isPending || !p.rootOverride}
-        >
-          Reset to default
-        </button>
-      </div>
-      <CommandErrorNotice error={setRoot.error} />
-      <LibraryOverlapRepairNotice report={setRoot.data} />
-      <JunctionRestoreFailures failures={setRoot.data?.failed_junction_restores} />
-
-      <h3 className="muted small">Per-game overrides</h3>
-      {games.map((game) => {
-        const override = p.perGameOverrides[game];
-        const effective = p.perGameEffective[game];
-        return (
-          <div className="row" key={game}>
-            <code className="small">{game}</code>
-            <PathField
-              label={`${game} Library path`}
-              value={effective ?? ""}
-              disabled={setPerGame.isPending || setRoot.isPending}
-              pickerLabel="Change…"
-              onApply={(path) => setPerGame.mutate({ game, path })}
-            />
-            <button
-              onClick={() => setPerGame.mutate({ game, path: null })}
-              disabled={setPerGame.isPending || setRoot.isPending || !override}
-            >
-              Reset
-            </button>
-          </div>
-        );
-      })}
-      <CommandErrorNotice error={setPerGame.error} />
-      <LibraryOverlapRepairNotice report={setPerGame.data} />
-      <JunctionRestoreFailures failures={setPerGame.data?.failed_junction_restores} />
-    </section>
-  );
-}
-
-function LibraryOverlapRepairNotice({ report }: { report?: MoveReport }) {
-  if (!report?.overlap_repair) return null;
-  return (
-    <div className="reinstall-action-notice error" role="alert">
-      <strong>Library setting changed, but existing Mod folders were not moved.</strong>{" "}
-      GMM did not read the overlapping path. The warning remains while any Mod is still
-      recorded there; inspect and recover those folders manually.
-    </div>
-  );
-}
-
-/**
- * Reports Mods whose links into the game folder could not be recreated after
- * a Library move. The move itself succeeded — rows, settings and bytes agree —
- * so these Mods are still enabled and their files are safe; only the link is
- * missing, which means the game will not load them until it is rebuilt.
- *
- * Rebuild is a retry, not a guaranteed repair: a permissions problem, a
- * non-NTFS target or something already sitting at the link path needs fixing
- * first. So the per-Mod reason is shown rather than hidden behind a count.
- */
-function JunctionRestoreFailures({
-  failures,
-}: {
-  failures?: MoveReport["failed_junction_restores"];
-}) {
-  if (!failures?.length) return null;
-  const invalidSelections = failures.filter(
-    (failure) => failure.kind === "invalidActiveVariant",
-  );
-  const retryableRestores = failures.filter(
-    (failure) => failure.kind !== "invalidActiveVariant",
-  );
-  return (
-    <>
-      {invalidSelections.length > 0 ? (
-        <OperationFailureNotice
-          heading="The Library moved, but some Mods have an invalid Variant selection."
-          detail="GMM left those Mods unlinked. Rebuilding junctions cannot repair a saved Variant selection."
-          errors={invalidSelections.map(
-            (failure) => `${failure.game.toUpperCase()}: ${failure.error}`,
-          )}
-        />
-      ) : null}
-      {retryableRestores.length > 0 ? (
-        <div className="error">
-          <p>
-            The Library moved, but {retryableRestores.length} enabled Mod
-            {retryableRestores.length === 1 ? "" : "s"} could not be linked back into the
-            game folder. Their files are safe. Use “Rebuild junctions” on the game
-            card below; if it keeps failing, the reason is shown here.
-          </p>
-          <ul>
-            {retryableRestores.map((failure) => (
-              <li key={`${failure.game}:${failure.mod_id}`} className="small">
-                <code>{failure.game}</code> {failure.mod_id}: {failure.error}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
     </>
   );
 }

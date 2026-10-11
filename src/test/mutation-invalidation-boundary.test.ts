@@ -190,6 +190,14 @@ const table = (...rows: string[]) => `## Complete mutation inventory
 ${rows.map((row) => `| Fixture / Widget | ${row} | Recorded fixture decision. |`).join("\n")}`;
 
 describe("frontend mutation invalidation boundary", () => {
+  it("keeps the documented inventory totals consistent with production sources", () => {
+    const sources = productionSources();
+    const count = sources.flatMap(mutationSites).length;
+    const files = sources.filter((source) => mutationSites(source).length > 0).length;
+    const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+    expect(audit).toContain(`${count} \`useMutation\` call sites in ${words[files] ?? files} files`);
+  });
+
   it("enforces declarations and the inventory against every production source file", () => {
     expect(inventoryViolations(productionSources(), audit)).toEqual([]);
   });

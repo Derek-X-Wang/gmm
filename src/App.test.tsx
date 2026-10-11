@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -298,6 +298,7 @@ it("shows a Library path failure instead of resolving forever", async () => {
   };
   renderWithQuery(<App />);
 
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   const heading = await screen.findByText(/could not resolve Library paths/i);
   const alert = heading.closest('[role="alert"]');
   expect(alert).not.toBeNull();
@@ -382,6 +383,7 @@ it("routes a relocation Variant failure to selection repair and never recommends
   ];
   renderWithQuery(<App />);
 
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   await userEvent.click(await screen.findByRole("button", { name: /change global root/i }));
 
   await waitFor(() =>
@@ -399,9 +401,10 @@ it("routes a relocation Variant failure to selection repair and never recommends
   expect(alert).toHaveTextContent(/Select a valid Variant/i);
   expect(alert).toHaveTextContent(/reinstall it/i);
   expect(alert).not.toHaveTextContent("01INTERNALMODID");
-  expect(
-    screen.queryByText(/Use “Rebuild junctions” on the game card below/i),
-  ).not.toBeInTheDocument();
+  const library = screen.getByRole("region", { name: "Global Library root settings" });
+  expect(within(library).getAllByRole("listitem")).toEqual(
+    within(within(library).getByRole("alert")).getAllByRole("listitem"),
+  );
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_library_root", { path: "C:\\Moved" }));
 });
 
@@ -409,6 +412,7 @@ it("reports a setting-only overlap repair instead of presenting it as a successf
   overlapRepair = true;
   renderWithQuery(<App />);
 
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   const changeRoot = await screen.findByRole("button", { name: /change global root/i });
   expect(
     screen.queryByText(/library setting changed, but existing mod folders were not moved/i),
