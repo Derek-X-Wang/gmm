@@ -91,6 +91,7 @@ export function LibraryAuditWarning({ game }: { game: GameCode }) {
 
   const reveal = useMutation({
     mutationFn: (path: string) => revealUnreferencedLibraryDir(game, path),
+    meta: { noInvalidationReason: "Reveals a folder; no persisted query state changes." },
   });
   const recover = useMutation({
     mutationFn: (args: { path: string; directoryName: string; name: string }) =>
