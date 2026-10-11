@@ -298,6 +298,7 @@ it("shows a Library path failure instead of resolving forever", async () => {
   };
   renderWithQuery(<App />);
 
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   const heading = await screen.findByText(/could not resolve Library paths/i);
   const alert = heading.closest('[role="alert"]');
   expect(alert).not.toBeNull();
@@ -382,6 +383,7 @@ it("routes a relocation Variant failure to selection repair and never recommends
   ];
   renderWithQuery(<App />);
 
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   await userEvent.click(await screen.findByRole("button", { name: /change global root/i }));
 
   await waitFor(() =>
@@ -409,6 +411,7 @@ it("reports a setting-only overlap repair instead of presenting it as a successf
   overlapRepair = true;
   renderWithQuery(<App />);
 
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   const changeRoot = await screen.findByRole("button", { name: /change global root/i });
   expect(
     screen.queryByText(/library setting changed, but existing mod folders were not moved/i),

@@ -300,13 +300,15 @@ it.each(["root", "perGame"] as const)("refreshes persisted paths and Mod state a
   responses.list_mods = [modFixture(true)];
   renderApp();
   await screen.findByRole("checkbox", { name: "Enabled" });
-  const library = screen.getByRole("heading", { name: "Library" }).closest("section")!;
+  await userEvent.click(screen.getByRole("button", { name: field === "root" ? "Settings" : "Settings for Genshin Impact" }));
+  const library = await screen.findByRole("region", { name: field === "root" ? "Global Library root settings" : "Library for Genshin Impact" });
   await userEvent.click(field === "root"
     ? within(library).getByRole("button", { name: "Change global root…" })
     : within(library).getAllByRole("button", { name: "Change…" })[0]);
-  expect(await screen.findByDisplayValue("D:\\Library")).toBeInTheDocument();
+  expect(await screen.findByDisplayValue(field === "root" ? "D:\\Library" : "D:\\Library\\gimi")).toBeInTheDocument();
+  expect(screen.getByText("Library move failed")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   expect(await screen.findByRole("checkbox", { name: "Disabled" })).toBeEnabled();
-  expect(screen.getByText("Library move failed")).toBeInTheDocument();
 });
 
 it("shows partially recorded upstream versions after Check now fails", async () => {
@@ -364,7 +366,7 @@ const overlapRefusal = String.raw`GMM cannot use "D:\\Rejected Path" as a Librar
 
 const pathFields = [
   { label: "Global Library root", command: "set_library_root", initial: "C:\\GMM\\library", picked: "Change global root…" },
-  { label: "gimi Library path", command: "set_library_path_for_game", initial: "C:\\GMM\\library\\gimi", picked: "Change…" },
+  { label: "Genshin Impact Library path", command: "set_library_path_for_game", initial: "C:\\GMM\\library\\gimi", picked: "Change…" },
   { label: "Genshin Impact install path", command: "set_game_install_path", initial: "C:\\Games\\Genshin", picked: "Change…" },
 ];
 
@@ -378,7 +380,7 @@ it.each(pathFields)("applies typed $label only after Enter", async ({ label, com
     return {};
   };
   renderApp();
-  if (command === "set_game_install_path") await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
+  await userEvent.click(await screen.findByRole("button", { name: command === "set_library_root" ? "Settings" : "Settings for Genshin Impact" }));
   const field = await screen.findByDisplayValue(initial);
   expect(field).not.toHaveAttribute("readonly");
   await userEvent.clear(field);
@@ -399,7 +401,7 @@ it.each(pathFields)("shows backend refusal for typed $label", async ({ label, co
     : "This path does not exist or cannot be used.";
   mutations[command] = () => { throw { kind: "other", message }; };
   renderApp();
-  if (command === "set_game_install_path") await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
+  await userEvent.click(await screen.findByRole("button", { name: command === "set_library_root" ? "Settings" : "Settings for Genshin Impact" }));
   const field = await screen.findByDisplayValue(initial);
   expect(field).not.toHaveAttribute("readonly");
   await userEvent.clear(field);
@@ -422,7 +424,7 @@ it.each(pathFields)("keeps the folder picker working for $label", async ({ label
     return {};
   };
   renderApp();
-  if (command === "set_game_install_path") await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
+  await userEvent.click(await screen.findByRole("button", { name: command === "set_library_root" ? "Settings" : "Settings for Genshin Impact" }));
   const field = await screen.findByLabelText(label);
   await userEvent.type(field, "unfinished");
   await userEvent.click(within(field.closest(".row") as HTMLElement).getByRole("button", { name: picked }));
@@ -435,11 +437,13 @@ it.each(pathFields)("keeps the folder picker working for $label", async ({ label
 it("does not apply a path when the picker is cancelled", async () => {
   openDialog.mockResolvedValue(null);
   renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
   const field = await screen.findByLabelText("Global Library root");
   await userEvent.type(field, "draft");
   await userEvent.click(screen.getByRole("button", { name: "Change global root…" }));
   expect(invoke.mock.calls.filter(([name]) => name === "set_library_root")).toHaveLength(0);
   expect(field).toHaveValue("C:\\GMM\\librarydraft");
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   expect(await screen.findByDisplayValue("C:\\GMM\\logs")).toHaveAttribute("readonly");
 });
 
