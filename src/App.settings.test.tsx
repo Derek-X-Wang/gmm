@@ -40,7 +40,7 @@ function pageButton(name: string) {
   return within(screen.getByRole("navigation", { name: "Settings pages" })).getByRole("button", { name: new RegExp(name) });
 }
 function noMainContent() {
-  expect(screen.queryByRole("heading", { name: "Launch", hidden: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Honkai: Star Rail header", hidden: true })).not.toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: /^Mods \(/, hidden: true })).not.toBeInTheDocument();
   expect(document.querySelector(".dropzone")).toBeNull();
   expect(screen.queryByRole("button", { name: /Launch Honkai/, hidden: true })).not.toBeInTheDocument();

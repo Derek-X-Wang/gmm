@@ -113,8 +113,9 @@ function ipcResult(command: string) {
       return [{ code: "gimi", displayName: "Genshin Impact" }];
     case "current_session":
     case "clean_stale_session":
-    case "get_game_install_path":
       return null;
+    case "get_game_install_path":
+      return "C:/Game";
     case "get_game_path_status":
       return { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
     case "check_importer_update":
@@ -367,6 +368,8 @@ it("shows the affected game's corrupt Variant when startup reconcile aborts", as
   const alert = heading.closest('[role="alert"]');
   expect(alert).not.toBeNull();
   expect(alert).toHaveTextContent(/GIMI/);
+  expect(alert).toHaveTextContent("Genshin Impact");
+  expect(alert).not.toHaveTextContent(/Junctions (?:were )?repaired|successfully repaired/i);
   expect(alert).toHaveTextContent("Broken Outfit");
   expect(alert).toHaveTextContent(/Select a valid Variant/i);
   expect(alert).toHaveTextContent(/reinstall it/i);
@@ -440,6 +443,7 @@ it("shows the clean attention aggregate in the main app", async () => {
     "the app must show the clean aggregate instead of hiding it",
   ).toBeInTheDocument());
   expect(invoke).toHaveBeenCalledWith("attention_status", undefined);
+  expect(screen.queryByRole("region", { name: "Startup game link check" })).not.toBeInTheDocument();
 });
 
 it("keeps unrelated Game controls available when the aggregate needs attention", async () => {
@@ -448,4 +452,53 @@ it("keeps unrelated Game controls available when the aggregate needs attention",
   await screen.findByText("Staged Library operations (1)");
   expect(screen.getByRole("button", { name: "Launch Genshin Impact" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Import ZIP…" })).toBeEnabled();
+});
+
+
+it("renders the approved eight main-screen slots in order with scoped notices and no configuration", async () => {
+  startupFailures = [{ game: "gimi", kind: "invalidActiveVariant", error: variantError }];
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "is_onboarding_complete") return { complete: true, skipped: true };
+    if (command === "current_session") return { game: "srmi", pid: 123, started_at: "2026-10-11" };
+    if (command === "interrupted_session_launches") return [{ id: "claim", game: "gimi", child_pid: null, started_at: "2026-10-11" }];
+    if (command === "get_importer_evacuation_recovery") return { reason: "Importer backup locked", gamePath: "C:/Game", backupPath: "C:/Backup", ownerUncertain: false, action: "retry", attempts: 1, attemptedAt: "2026-10-11" };
+    return implementation(command, args);
+  });
+  renderWithQuery(<App />);
+  await screen.findByText("Importer backup locked");
+  const main = screen.getByRole("main");
+  const header = screen.getByRole("region", { name: "Genshin Impact header" });
+  const global = screen.getByRole("region", { name: "Global status" });
+  const notices = screen.getByRole("region", { name: "Game and operation notices" });
+  expect(Array.from(main.children)).toEqual([
+    screen.getByRole("banner", { name: "GMM" }),
+    header,
+    global,
+    screen.getByRole("tablist", { name: "Game" }).parentElement!.parentElement,
+    screen.getByRole("region", { name: "Genshin Impact status" }),
+    notices,
+    screen.getByRole("heading", { name: "Mods (0)" }).closest("section"),
+    screen.getByRole("heading", { name: "Mod updates" }).closest("section"),
+  ]);
+  expect(within(header).getByRole("heading", { level: 1 })).toHaveTextContent("Genshin Impact");
+  expect(within(header).getByRole("button", { name: "Game running…" })).toBeDisabled();
+  expect(within(global).getByRole("region", { name: "Attention across all Games" })).toBeVisible();
+  expect(global).toHaveTextContent("SRMI is running");
+  expect(within(notices).getByRole("button", { name: "Resume setup" })).toBeEnabled();
+  expect(within(notices).getByRole("button", { name: "Resume setup" })).toBeVisible();
+  expect(within(notices).getByRole("button", { name: "Resume setup" }).closest("details")).toBeNull();
+  expect(within(notices).getByRole("region", { name: "Interrupted GIMI launch" })).toBeVisible();
+  expect(notices).toHaveTextContent("Genshin Impact (GIMI):");
+  expect(notices).toHaveTextContent(variantError);
+  expect(notices).not.toHaveTextContent(/Junctions (?:were )?repaired/i);
+  expect(within(notices).getByRole("button", { name: "Review Genshin Impact recovery in Settings" })).toBeEnabled();
+  expect(screen.getByText("No mods yet — adopt a folder to get started.")).toBeVisible();
+  expect(main.querySelector("aside")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Retry Model Importer recovery" })).not.toBeInTheDocument();
+  for (const name of ["Network", "GMM updates", "Importer recommendations", "Diagnostics", "Global Library root", "Genshin Impact install path", "Model Importer (GIMI)"]) {
+    expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
+  }
+  await userEvent.click(within(notices).getByRole("button", { name: "Review Genshin Impact recovery in Settings" }));
+  expect(await screen.findByRole("button", { name: "Retry Model Importer recovery" })).toBeVisible();
 });
