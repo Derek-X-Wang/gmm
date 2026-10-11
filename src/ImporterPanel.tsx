@@ -101,7 +101,7 @@ export function ImporterPanel({
       <CommandErrorNotice error={path.error} />
       <div className="row">
         <span className="muted small">
-          Latest release: {release.isError ? "check failed" : release.isFetching ? "checking…" : release.data ? <code>{release.data.tag_name}</code> : "No release available"}
+          Latest release: {release.isError ? "check failed" : release.isPending || release.isFetching ? "checking…" : release.data ? <code>{release.data.tag_name}</code> : "No release available"}
         </span>
         {verifiedVersion ? (
           <span className="muted small">
@@ -136,7 +136,7 @@ export function ImporterPanel({
           onClick={() => install.mutate()}
           disabled={blocked}
         >
-          {install.isPending ? "Installing…" : available ? "Apply update" : installed ? "Reinstall importer" : "Install importer"}
+          {install.isPending ? "Installing…" : installed ? available ? "Apply update" : "Reinstall importer" : absent ? "Install importer" : "Importer installation unavailable"}
         </button>
         <button
           onClick={() => rollback.mutate()}
@@ -157,7 +157,8 @@ export function ImporterPanel({
       </div>
       {update.isPending || update.isFetching ? <p role="status">Checking Model Importer update…</p>
         : !release.isError && !release.isFetching && !update.isError && !update.data?.checkError && installed ? <p role="status">
-          {update.data?.pinned ? "Version prompts are suppressed by the Importer Pin."
+          {!verifiedVersion ? "Installed version: unknown (not recorded)."
+            : update.data?.pinned ? "Version prompts are suppressed by the Importer Pin."
             : available ? `Update available: ${update.data?.latestVersion}`
             : update.data?.latestVersion ? "Model Importer is current." : "No upstream version available."}
         </p> : null}

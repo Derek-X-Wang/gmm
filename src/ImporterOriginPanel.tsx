@@ -77,6 +77,10 @@ export function ImporterOriginPanel({
   });
   const canInstall = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable"
     && (path.data.modelImporter.status === "installed" || path.data.modelImporter.status === "requiredEntriesNotFound");
+  const filesInstalled = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable"
+    && path.data.modelImporter.status === "installed";
+  const filesAbsent = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable"
+    && path.data.modelImporter.status === "requiredEntriesNotFound";
   const status = useQuery({
     queryKey: ["importerOrigin", game],
     queryFn: () => importerOriginStatus(game),
@@ -116,6 +120,7 @@ export function ImporterOriginPanel({
   });
 
   const data = status.data;
+  const originVerified = status.isSuccess && !status.isFetching;
   // Bound once so the decline handler closes over a value rather than
   // re-narrowing `data.proposal` inside a callback.
   const proposalOrigin = data?.proposal?.origin;
@@ -166,11 +171,14 @@ export function ImporterOriginPanel({
             </label>
           </div>
           <p className="muted small">
-            {data.installed.state === "known" ? <>Installed origin: <code>{originSlug(data.installed)}</code>.</>
+            {!filesInstalled ? <>Recorded origin: {data.installed.state === "known" ? <code>{originSlug(data.installed)}</code>
+              : data.installed.state === "unknown" ? "unknown (not recorded)"
+              : <>unreadable: {data.installed.error}. Recorded as <code>{data.installed.raw}</code></>}. {filesAbsent ? "Model Importer files not installed." : "Model Importer files unverified."}</>
+              : data.installed.state === "known" ? <>Installed origin: <code>{originSlug(data.installed)}</code>.</>
               : data.installed.state === "unknown" ? "Installed origin: unknown (not recorded)."
               : <>Installed origin unreadable: {data.installed.error}. Recorded as <code>{data.installed.raw}</code>.</>}
           </p>
-          {data.resolved.state === "inEffect" ? <p className="muted small">Future install target after an explicit origin change: <code>{originSlug(data.resolved.origin)}</code>.</p> : null}
+          {data.resolved.state === "inEffect" ? <p className="muted small">{data.installTarget.state === "resolved" ? "Install target:" : "Future install target after an explicit origin change:"} <code>{originSlug(data.resolved.origin)}</code>.</p> : null}
 
           {data.installTarget.state === "installed" &&
           data.resolved.state === "inEffect" &&
@@ -239,7 +247,7 @@ export function ImporterOriginPanel({
               <div className="row">
                 <button
                   onClick={() => accept.mutate()}
-                  disabled={accept.isPending || !canInstall}
+                  disabled={accept.isPending || !canInstall || !originVerified}
                 >
                   {accept.isPending ? "Switching…" : "Switch and install"}
                 </button>
@@ -271,8 +279,8 @@ export function ImporterOriginPanel({
               </ul>
             </div>
           ) : null}
-          {!data.proposal && !status.isError && !status.isFetching ? <p className="muted small">No Origin Proposal.</p> : null}
-          {data.dismissed.length === 0 && !data.dismissalsError ? <p className="muted small">No dismissed recommendations.</p> : null}
+          {!data.proposal && originVerified ? <p className="muted small">No Origin Proposal.</p> : null}
+          {data.dismissed.length === 0 && !data.dismissalsError && originVerified ? <p className="muted small">No dismissed recommendations.</p> : null}
 
           {data.dismissalsError ? (
             <p className="error">
@@ -283,7 +291,7 @@ export function ImporterOriginPanel({
             </p>
           ) : null}
 
-          {data.userOverride.state === "notSet" ? <p className="muted small">No override set.</p> : null}
+          {data.userOverride.state === "notSet" && originVerified ? <p className="muted small">No override set.</p> : null}
           {data.userOverride.state === "unreadable" ? (
             <p className="error">
               GMM could not read the Importer Origin you saved for {displayName}:{" "}

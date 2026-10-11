@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
@@ -482,4 +482,104 @@ it.each(["checking", "error", "unreadable", "noSavedPath", "unverified importer"
   expect(await screen.findByRole("button", { name: "Switch and install" })).toBeDisabled();
   expect(acceptImporterOriginProposal).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "Save origin" })).toBeEnabled();
+});
+
+it.each(["absent", "checking", "failed", "unverified"])("qualifies recorded Origin when importer files are %s", async (state) => {
+  importerOriginStatus.mockResolvedValue(status());
+  if (state === "checking") getGamePathStatus.mockImplementation(() => new Promise(() => {}));
+  else if (state === "failed") getGamePathStatus.mockRejectedValue(new Error("Path check failed"));
+  else getGamePathStatus.mockResolvedValue({
+    game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" },
+    modelImporter: state === "absent" ? { status: "requiredEntriesNotFound", paths: ["C:/Game/Core"] }
+      : { status: "unverified", path: "C:/Game/Core", error: "Access denied" },
+  });
+  const { client } = render();
+  await screen.findByRole("button", { name: "Save origin" });
+  if (state !== "checking") await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(screen.queryByText(/^Installed origin:/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Recorded origin:/)).toHaveTextContent("SilentNightSound/GIMI-Package");
+  expect(screen.getByText(/Recorded origin:/)).toHaveTextContent(state === "absent" ? "Model Importer files not installed" : "Model Importer files unverified");
+});
+
+function deferredOriginCheck() {
+  let resolve!: (value: unknown) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+it("suppresses all confident empty Origin claims during and after a failed refresh", async () => {
+  importerOriginStatus.mockResolvedValue(status());
+  const { client } = render();
+  await screen.findByText("No Origin Proposal.");
+  expect(screen.getByText("No dismissed recommendations.")).toBeVisible();
+  expect(screen.getByText("No override set.")).toBeVisible();
+  const pending = deferredOriginCheck();
+  importerOriginStatus.mockReturnValue(pending.promise);
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }); });
+  await screen.findByText("The Origin details below are from the previous check.");
+  for (const label of ["No Origin Proposal.", "No dismissed recommendations.", "No override set."]) {
+    expect(screen.queryByText(label)).not.toBeInTheDocument();
+  }
+  await act(async () => { pending.reject(new Error("Origin refresh failed")); await refresh; });
+  expect(await screen.findByText("Origin refresh failed")).toBeVisible();
+  expect(await screen.findByText("The Origin details below are from the previous check.")).toBeVisible();
+  for (const label of ["No Origin Proposal.", "No dismissed recommendations.", "No override set."]) {
+    expect(screen.queryByText(label)).not.toBeInTheDocument();
+  }
+  importerOriginStatus.mockResolvedValue(status());
+  await act(() => client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }));
+  expect(await screen.findByText("No Origin Proposal.")).toBeVisible();
+  expect(screen.getByText("No dismissed recommendations.")).toBeVisible();
+  expect(screen.getByText("No override set.")).toBeVisible();
+});
+
+it("keeps a retained Origin Proposal labelled as previous and disables install until a successful refresh", async () => {
+  importerOriginStatus.mockResolvedValue(status({ proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } } }));
+  const { client } = render();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled());
+  const pending = deferredOriginCheck();
+  importerOriginStatus.mockReturnValue(pending.promise);
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }); });
+  expect(await screen.findByText("The Origin details below are from the previous check.")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Switch and install" })).toBeDisabled();
+  await act(async () => { pending.reject(new Error("Origin refresh failed")); await refresh; });
+  expect(await screen.findByText("Origin refresh failed")).toBeVisible();
+  expect(await screen.findByText("The Origin details below are from the previous check.")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Switch and install" })).toBeDisabled();
+  importerOriginStatus.mockResolvedValue(status({ proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } } }));
+  await act(() => client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled());
+});
+
+it("holds Origin install while retained readable path data is rechecked", async () => {
+  importerOriginStatus.mockResolvedValue(status({ proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } } }));
+  const { client } = render();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled());
+  const pending = deferredOriginCheck();
+  getGamePathStatus.mockReturnValue(pending.promise);
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["gamePathStatus", "gimi"] }); });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeDisabled());
+  await userEvent.click(screen.getByRole("button", { name: "Switch and install" }));
+  expect(acceptImporterOriginProposal).not.toHaveBeenCalled();
+  await act(async () => {
+    pending.resolve({ game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } });
+    await refresh;
+  });
+  await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled());
+});
+
+it("names the resolved origin as the ordinary install target before any origin has been installed", async () => {
+  importerOriginStatus.mockResolvedValue(status({
+    installed: { state: "unknown" },
+    installTarget: { state: "resolved", origin: theFork, layer: "recommendedManifest" },
+    resolved: { state: "inEffect", origin: theFork, layer: "recommendedManifest" },
+  }));
+  render();
+  await screen.findByRole("button", { name: "Save origin" });
+  expect(screen.queryByText(/Future install target after an explicit origin change:/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Install target:/)).toHaveTextContent("Curated/GIMI-Fork");
 });

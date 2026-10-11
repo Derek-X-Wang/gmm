@@ -1,6 +1,6 @@
 import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useQuery } from "@tanstack/react-query";
+import { onlineManager, useQuery } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
 import { ImporterPanel } from "./ImporterPanel";
@@ -47,7 +47,7 @@ it("keeps checking distinct and disables writes before filesystem and recovery c
   render();
   expect(await screen.findByText("Checking Game and Model Importer…")).toBeVisible();
   expect(screen.getByText(/Latest release: checking/)).toBeVisible();
-  expect(screen.getByRole("button", { name: "Install importer" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Importer installation unavailable" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Roll back importer" })).toBeDisabled();
 });
 it("shows verified installed facts, unpinned state and the embedded Loader note", async () => {
@@ -76,7 +76,7 @@ it.each([
   path = { ...path, gamePath: { ...gamePath }, modelImporter: { ...modelImporter } } as GamePathStatus;
   render();
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_game_path_status", { game: "gimi" }));
-  expect(screen.getByRole("button", { name: "Install importer" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Importer installation unavailable" })).toBeDisabled();
   expect(screen.queryByText(/· Installed/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Pin to current" })).not.toBeInTheDocument();
   expect(screen.queryByText("Game readable · Model Importer not installed")).not.toBeInTheDocument();
@@ -86,7 +86,7 @@ it("retains the actual filesystem failure rather than declaring absence", async 
   render();
   expect(await screen.findByText("Permission denied reading Core")).toBeVisible();
   expect(screen.getByText("Cannot tell · Model Importer filesystem unverified")).toBeVisible();
-  expect(screen.getByRole("button", { name: "Install importer" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Importer installation unavailable" })).toBeDisabled();
 });
 it.each(["fetch_latest_importer_release", "check_importer_update"])("never calls a rejected %s current", async (command) => {
   commands[command] = () => { throw new Error("Upstream unavailable"); };
@@ -184,7 +184,7 @@ it("does not present stale installed facts as verified during or after a failed 
   void client.invalidateQueries({ queryKey: ["gamePathStatus", "gimi"] });
   expect(await screen.findByText("Checking Game and Model Importer…")).toBeVisible();
   expect(screen.queryByText(/· Installed/)).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Install importer" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Importer installation unavailable" })).toBeDisabled();
   pending.reject(new Error("Path refresh unavailable"));
   expect(await screen.findByText("Path refresh unavailable")).toBeVisible();
   expect(screen.queryByText(/· Installed/)).not.toBeInTheDocument();
@@ -203,4 +203,36 @@ it.each([false, true])("writes the current version for pin or null for unpin (pi
   await userEvent.click(await screen.findByRole("button", { name: pinned ? "Unpin" : "Pin to current" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_importer_pinned", { game: "gimi", version: pinned ? null : "1.0" }));
   expect(await screen.findByText("Importer Pin saved.")).toBeVisible();
+});
+
+it("reports an unrecorded installed version without claiming current", async () => {
+  update.installedVersion = null;
+  const { client } = render();
+  await screen.findByText("GIMI installed · Game readable");
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(screen.queryByText("Model Importer is current.")).not.toBeInTheDocument();
+  expect(screen.getByText("Installed version: unknown (not recorded).")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Pin to current" })).not.toBeInTheDocument();
+});
+
+it("keeps a paused latest-release query unknown rather than declaring no release", () => {
+  onlineManager.setOnline(false);
+  const view = render();
+  try {
+    expect(view.client.getQueryState(["importer", "latest", "gimi"])?.fetchStatus).toBe("paused");
+    expect(screen.queryByText(/No release available/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Latest release: checking/)).toBeVisible();
+  } finally {
+    view.unmount();
+    view.client.clear();
+    onlineManager.setOnline(true);
+  }
+});
+
+it.each(["pending", "failed"])("does not label an unknown filesystem as an install invitation (%s)", async (state) => {
+  commands.get_game_path_status = state === "pending" ? () => new Promise(() => {}) : () => { throw new Error("Path check failed"); };
+  render();
+  if (state === "failed") await screen.findByText("Path check failed");
+  expect(screen.queryByRole("button", { name: "Install importer" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Importer installation unavailable" })).toBeDisabled();
 });

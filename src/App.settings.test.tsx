@@ -400,7 +400,10 @@ it.each([
     };
     if (command === writer) {
       changed = true;
-      states.srmi = { ...states.srmi!, modelImporter: { status: "installed" } };
+      // For pin, simulate files removed externally while the cached page is open.
+      // The setting write must refresh what Settings can verify about the files.
+      states.srmi = { ...states.srmi!, modelImporter: writer === "set_importer_pinned"
+        ? { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] } : { status: "installed" } };
       return command === "rollback_importer" ? "C:\\backup" : command === "install_importer" ? { sha256: "abc123", backup_dir: null, rewrote_files: [] } : null;
     }
     return original(command, args);
@@ -410,8 +413,10 @@ it.each([
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent(writer === "set_importer_pinned" ? "SRMI installed" : "Model Importer not installed"));
   await userEvent.click(await screen.findByRole("button", { name: new RegExp(button) }));
   await waitFor(() => expect(changed).toBe(true));
-  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed · Game readable"));
-  expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent("Model Importer not installed");
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent(writer === "set_importer_pinned"
+    ? "Game readable · Model Importer not installed" : "SRMI installed · Game readable"));
+  expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(writer === "set_importer_pinned"
+    ? "SRMI installed" : "Model Importer not installed");
 });
 
 it.each(["delete", "recover"])("Escape cancels the Library %s prompt before leaving Settings", async (action) => {
