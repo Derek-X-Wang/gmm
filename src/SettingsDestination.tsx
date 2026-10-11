@@ -5,6 +5,8 @@ import {
   rebuildJunctions, setGameInstallPath, setProxyConfig, testProxyConnection,
   type GameCode, type GameCode as ApiGameCode, type GamePathStatus, type GameSummary,
 } from "./api";
+import { ImporterPanel } from "./ImporterPanel";
+import { ImporterOriginPanel } from "./ImporterOriginPanel";
 import { PathField } from "./PathField";
 import { LibraryAuditWarning } from "./LibraryAuditWarning";
 import { CommandErrorNotice } from "./CommandErrorNotice";
@@ -80,6 +82,8 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
               <div key={game.code} hidden={page !== game.code}>
                 <h2>{game.displayName}</h2>
                 <GamePathPage game={game.code} displayName={game.displayName} />
+                <ImporterPanel game={game.code} displayName={game.displayName} />
+                <ImporterOriginPanel game={game.code} displayName={game.displayName} />
               </div>
             ))}
             {pages.has("gmm") ? <div hidden={page !== "gmm"}>

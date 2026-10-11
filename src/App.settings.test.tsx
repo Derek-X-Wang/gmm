@@ -283,7 +283,7 @@ it("keeps unavailable checks distinct from absence and preserves the saved-path 
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Cannot tell · path check unavailable"));
   expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(/Absent|not installed/);
   expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toHaveValue("C:\\StarRail");
-  expect(await screen.findByText("Path inspection failed")).toBeInTheDocument();
+  expect((await screen.findAllByText("Path inspection failed"))[0]).toBeVisible();
   expect(await screen.findByText("Audit inspection failed")).toBeInTheDocument();
 });
 
@@ -381,7 +381,7 @@ it("re-renders durable quarantine, launch reservations and audit findings after 
 
 
 it.each([
-  ["install_importer", "Reinstall importer"],
+  ["install_importer", "Install importer"],
   ["rollback_importer", "Roll back importer"],
   ["set_importer_pinned", "Pin to current"],
   ["retire_interrupted_importer_evacuation", "I confirmed no other GMM is changing this importer"],
@@ -389,7 +389,7 @@ it.each([
 ])("refreshes cached Settings path-state after %s", async (writer, button) => {
   const original = invoke.getMockImplementation()!;
   states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" },
-    modelImporter: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] } };
+    modelImporter: writer === "set_importer_pinned" ? { status: "installed" } : { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] } };
   let changed = false;
   invoke.mockImplementation(async (command, args) => {
     if (command === "check_importer_update") return { available: false, installedVersion: "1.0", pinned: false };
@@ -407,11 +407,9 @@ it.each([
   });
   renderApp();
   await openGame();
-  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent(writer === "set_importer_pinned" ? "SRMI installed" : "Model Importer not installed"));
   await userEvent.click(await screen.findByRole("button", { name: new RegExp(button) }));
   await waitFor(() => expect(changed).toBe(true));
-  await openGame();
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed · Game readable"));
   expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent("Model Importer not installed");
 });
@@ -471,9 +469,77 @@ it("refreshes cached Settings uncertainty after importer installation rejects", 
   renderApp();
   await openGame();
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed"));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   await userEvent.click(await screen.findByRole("button", { name: "Reinstall importer" }));
   await screen.findByText("Install rollback failed");
-  await openGame();
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Game readable · Cannot verify Model Importer"));
+});
+
+it("keeps importer groups only on each visited Game page, in order, while preserving hidden drafts and outcomes", async () => {
+  const original = invoke.getMockImplementation()!;
+  const origin = { kind: "gitHubRelease", owner: "Example", repo: "Package", asset_pattern: "Package.zip" };
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "importer_origin_status") return {
+      game: args.game, displayName: "Honkai: Star Rail", resolved: { state: "inEffect", origin, layer: "compiledInDefault" },
+      installTarget: { state: "installed", ...origin }, installed: { state: "known", ...origin }, userOverride: { state: "notSet" },
+      compiledDefault: origin, proposal: { origin, reason: "Origin replacement", replaces: { state: "unknown" } },
+      dismissed: [], dismissalsError: null, recommendationsEnabled: true, recommendationsUnusableReason: null,
+    };
+    if (command === "check_importer_update") return { available: false, installedVersion: "1.0", pinned: true, latestVersion: "2.0", upstreamAhead: true, checkError: null };
+    return original(command, args);
+  });
+  states.srmi = { game: "srmi", savedPath: "C:/StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  expect(screen.queryByRole("heading", { name: /Model Importer \(/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Importer Origin" })).not.toBeInTheDocument();
+  await openGame();
+  const heading = await screen.findByRole("heading", { name: "Model Importer (SRMI)" });
+  const gamePage = heading.closest("section")!.parentElement!;
+  expect(within(gamePage as HTMLElement).getAllByRole("heading", { level: 2 }).map((value) => value.textContent).slice(0, 4)).toEqual([
+    "Honkai: Star Rail", "Honkai: Star Rail install path", "Model Importer (SRMI)", "Importer Origin",
+  ]);
+  expect(await screen.findByRole("button", { name: "Switch and install" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "Apply update" })).not.toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("Owner"), "draft-owner");
+  await userEvent.click(pageButton("GMM settings"));
+  expect(screen.queryByRole("region", { name: "Importer Origin" })).not.toBeInTheDocument();
+  expect(gamePage).toHaveAttribute("hidden");
+  await userEvent.click(pageButton("Honkai: Star Rail"));
+  expect(screen.getByLabelText("Owner")).toHaveValue("draft-owner");
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(screen.queryByRole("heading", { name: /Model Importer \(/ })).not.toBeInTheDocument();
+  await openGame();
+  expect(screen.getByLabelText("Owner")).toHaveValue("draft-owner");
+});
+
+it.each(["retry_importer_evacuation_recovery", "accept_importer_origin_proposal"])("keeps hidden %s observers alive and retains late failure after its recovery or proposal disappears", async (writer) => {
+  const original = invoke.getMockImplementation()!;
+  const origin = { kind: "gitHubRelease", owner: "Example", repo: "Package", asset_pattern: "Package.zip" };
+  let changed = false;
+  let reject!: (error: Error) => void;
+  states.srmi = { game: "srmi", savedPath: "C:/StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+  invoke.mockImplementation(async (command, args) => {
+    if (command === writer) return new Promise((_, no) => { reject = no; });
+    if (command === "get_importer_evacuation_recovery") return writer.includes("evacuation") && !changed ? {
+      gamePath: "C:/StarRail", backupPath: "C:/Backup", reason: "Pending recovery", action: "retry", ownerUncertain: false, attempts: 1, attemptedAt: "2026-10-11",
+    } : null;
+    if (command === "importer_origin_status") return {
+      game: args.game, displayName: "Honkai: Star Rail", resolved: { state: "inEffect", origin, layer: "compiledInDefault" },
+      installTarget: { state: "installed", ...origin }, installed: { state: "known", ...origin }, userOverride: { state: "notSet" }, compiledDefault: origin,
+      proposal: !writer.includes("evacuation") && !changed ? { origin, reason: null, replaces: { state: "unknown" } } : null,
+      dismissed: [], dismissalsError: null, recommendationsEnabled: true, recommendationsUnusableReason: null,
+    };
+    return original(command, args);
+  });
+  renderApp();
+  await openGame();
+  await userEvent.click(await screen.findByRole("button", { name: writer.includes("evacuation") ? "Retry Model Importer recovery" : "Switch and install" }));
+  await userEvent.click(pageButton("GMM settings"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  changed = true;
+  await act(async () => reject(new Error("Late importer failure retained")));
+  await openGame();
+  expect(await screen.findByText("Late importer failure retained")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Retry Model Importer recovery" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Switch and install" })).not.toBeInTheDocument();
 });

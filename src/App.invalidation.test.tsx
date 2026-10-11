@@ -88,6 +88,7 @@ beforeEach(() => {
     clean_stale_session: null,
     interrupted_session_launches: [],
     get_game_install_path: null,
+    get_game_path_status: { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } },
     get_startup_reconcile_status: { finished: true, failures: [] },
     check_importer_update: { available: false, installedVersion: null, pinned: false },
     get_importer_evacuation_recovery: null,
@@ -219,6 +220,7 @@ it.each(["retry", "retireProducer"] as const)("refreshes changed Model Importer 
     throw new Error("Importer recovery failed");
   };
   renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
   await userEvent.click(await screen.findByRole("button", {
     name: action === "retry" ? "Retry Model Importer recovery" : /I confirmed no other GMM is changing this importer/,
   }));
@@ -352,8 +354,9 @@ it.each(["install", "rollback"] as const)("refreshes the displayed Importer Orig
   };
   renderApp();
   await screen.findByRole("radio", { name: "Old Red" });
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
   await userEvent.click(screen.getByRole("button", { name: action === "install" ? "Reinstall importer" : "Roll back importer" }));
-  expect(await screen.findByText("Example/Restored-Package")).toBeInTheDocument();
+  expect((await screen.findAllByText("Example/Restored-Package"))[0]).toBeInTheDocument();
 });
 
 

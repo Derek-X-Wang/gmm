@@ -6,6 +6,7 @@ import {
   acceptImporterOriginProposal,
   dismissImporterOrigin,
   importerOriginStatus,
+  getGamePathStatus,
   originSlug,
   restoreImporterOrigin,
   setImporterOriginOverride,
@@ -60,12 +61,6 @@ function describeInstalled(installed: InstalledOrigin): string {
  *   With at most six games and a handful of declined origins there is
  *   not enough of it to justify a Settings section, and a dismissal the
  *   user can only find somewhere else is one they will never undo.
- *
- * The global recommendations switch is here too, marked as global. GMM
- * has no separate Settings page — it is one column of cards — and the
- * precedent is `ModUpdatesPanel`, which renders the global mod-update
- * switch in the panel it governs rather than in the per-game Settings
- * card.
  */
 export function ImporterOriginPanel({
   game,
@@ -75,6 +70,13 @@ export function ImporterOriginPanel({
   displayName: string;
 }) {
   const qc = useQueryClient();
+  const path = useQuery({
+    queryKey: ["gamePathStatus", game],
+    queryFn: () => getGamePathStatus(game),
+    retry: false,
+  });
+  const canInstall = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable"
+    && (path.data.modelImporter.status === "installed" || path.data.modelImporter.status === "requiredEntriesNotFound");
   const status = useQuery({
     queryKey: ["importerOrigin", game],
     queryFn: () => importerOriginStatus(game),
@@ -127,9 +129,18 @@ export function ImporterOriginPanel({
         and you can point it somewhere else.
       </p>
 
+      {status.isPending ? <p role="status">Reading Importer Origin…</p> : null}
+      {status.isError ? <p role="status">Importer Origin unavailable.</p> : null}
+      {data && (status.isFetching || status.isError) ? <p className="muted small">The Origin details below are from the previous check.</p> : null}
       <CommandErrorNotice error={status.error} />
       <CommandErrorNotice error={accept.error} />
       <CommandErrorNotice error={decline.error} />
+      <CommandErrorNotice error={undo.error} />
+      <CommandErrorNotice error={toggleRecommendations.error} />
+      {accept.isSuccess ? <p role="status">Origin installation completed.</p> : null}
+      {decline.isSuccess ? <p role="status">Recommendation declined.</p> : null}
+      {undo.isSuccess ? <p role="status">Recommendation restored.</p> : null}
+      {toggleRecommendations.isSuccess ? <p role="status">Recommendations preference saved.</p> : null}
 
       {data ? (
         <>
@@ -154,7 +165,12 @@ export function ImporterOriginPanel({
               <span>Recommend importer origins (all games)</span>
             </label>
           </div>
-          <CommandErrorNotice error={toggleRecommendations.error} />
+          <p className="muted small">
+            {data.installed.state === "known" ? <>Installed origin: <code>{originSlug(data.installed)}</code>.</>
+              : data.installed.state === "unknown" ? "Installed origin: unknown (not recorded)."
+              : <>Installed origin unreadable: {data.installed.error}. Recorded as <code>{data.installed.raw}</code>.</>}
+          </p>
+          {data.resolved.state === "inEffect" ? <p className="muted small">Future install target after an explicit origin change: <code>{originSlug(data.resolved.origin)}</code>.</p> : null}
 
           {data.installTarget.state === "installed" &&
           data.resolved.state === "inEffect" &&
@@ -219,10 +235,11 @@ export function ImporterOriginPanel({
                 {describeInstalled(data.proposal.replaces)}. GMM backs up the
                 existing files first and the install can be rolled back.
               </p>
+              {!canInstall ? <p className="muted small">A verified readable Game and Model Importer check is needed before switching and installing. See the install-path group above.</p> : null}
               <div className="row">
                 <button
                   onClick={() => accept.mutate()}
-                  disabled={accept.isPending}
+                  disabled={accept.isPending || !canInstall}
                 >
                   {accept.isPending ? "Switching…" : "Switch and install"}
                 </button>
@@ -230,7 +247,7 @@ export function ImporterOriginPanel({
                   onClick={() => decline.mutate(proposalOrigin)}
                   disabled={decline.isPending}
                 >
-                  Not now
+                  {decline.isPending ? "Declining…" : "Not now"}
                 </button>
               </div>
             </div>
@@ -247,14 +264,15 @@ export function ImporterOriginPanel({
                       onClick={() => undo.mutate(origin)}
                       disabled={undo.isPending}
                     >
-                      Undo
+                      {undo.isPending ? "Restoring…" : "Undo"}
                     </button>
                   </li>
                 ))}
               </ul>
             </div>
           ) : null}
-          <CommandErrorNotice error={undo.error} />
+          {!data.proposal && !status.isError && !status.isFetching ? <p className="muted small">No Origin Proposal.</p> : null}
+          {data.dismissed.length === 0 && !data.dismissalsError ? <p className="muted small">No dismissed recommendations.</p> : null}
 
           {data.dismissalsError ? (
             <p className="error">
@@ -265,6 +283,7 @@ export function ImporterOriginPanel({
             </p>
           ) : null}
 
+          {data.userOverride.state === "notSet" ? <p className="muted small">No override set.</p> : null}
           {data.userOverride.state === "unreadable" ? (
             <p className="error">
               GMM could not read the Importer Origin you saved for {displayName}:{" "}
@@ -378,10 +397,12 @@ function OverrideEditor({
         </button>
         {current ? (
           <button onClick={() => clear.mutate()} disabled={clear.isPending}>
-            Clear override
+            {clear.isPending ? "Clearing…" : "Clear override"}
           </button>
         ) : null}
       </div>
+      {save.isSuccess ? <p role="status">Origin override saved.</p> : null}
+      {clear.isSuccess ? <p role="status">Origin override cleared.</p> : null}
       <CommandErrorNotice error={save.error} />
       <CommandErrorNotice error={clear.error} />
     </div>
