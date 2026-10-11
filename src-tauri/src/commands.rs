@@ -167,6 +167,16 @@ pub async fn get_game_install_path(
 }
 
 #[tauri::command]
+pub async fn get_game_path_status(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> CommandResult<crate::core::game_path::GamePathStatus> {
+    core.game_path_status(game)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub async fn set_game_install_path(
     core: State<'_, Core>,
     game: GameCode,
