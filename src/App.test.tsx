@@ -437,6 +437,9 @@ it("reports a setting-only overlap repair instead of presenting it as a successf
 
 it("shows the clean attention aggregate in the main app", async () => {
   renderWithQuery(<App />);
+  const indicator = await screen.findByRole("button", { name: /No attention needed.*All Games/ });
+  expect(indicator).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(indicator);
 
   await waitFor(() => expect(
     screen.queryByText("Nothing needs attention in this report."),
@@ -449,6 +452,9 @@ it("shows the clean attention aggregate in the main app", async () => {
 it("keeps unrelated Game controls available when the aggregate needs attention", async () => {
   stagedAttention = true;
   renderWithQuery(<App />);
+  const indicator = await screen.findByRole("button", { name: /Needs attention.*All Games/ });
+  expect(indicator).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(indicator);
   await screen.findByText("Staged Library operations (1)");
   expect(screen.getByRole("button", { name: "Launch Genshin Impact" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Import ZIP…" })).toBeEnabled();
