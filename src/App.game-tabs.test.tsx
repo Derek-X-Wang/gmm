@@ -1,8 +1,9 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
-import type { GameCode, GameSummary } from "./api";
-import { renderWithQuery } from "./test/harness";
+import { getGameInstallPath, type GameCode, type GameSummary } from "./api";
+import { useQuery } from "@tanstack/react-query";
+import { makeQueryClient, renderWithQuery } from "./test/harness";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -32,6 +33,13 @@ beforeEach(() => {
       case "list_supported_games": return games;
       case "get_game_install_path": return paths[args!.game] ?? null;
       case "set_game_install_path": paths[args!.game] = args!.path; return null;
+      case "get_game_path_status": return {
+        game: args!.game, savedPath: paths[args!.game] ?? null,
+        gamePath: { status: paths[args!.game] ? "readable" : "noSavedPath" },
+        modelImporter: paths[args!.game]
+          ? { status: "requiredEntriesNotFound", paths: ["d3dx.ini"] }
+          : { status: "unverified", path: null, error: "No saved path" },
+      };
       case "attention_status": return {
         safeToProceed: true, reinstalls: [], enabledTransitions: [], importerEvacuations: [],
         stagedLibraryOperations: [], sessionLaunches: [], activeSession: null,
@@ -60,7 +68,7 @@ function tabNames() {
 
 it("shows only the three installed games as tabs and opens a remaining game's setup deliberately", async () => {
   paths = { srmi: "C:\\StarRail", zzmi: "C:\\ZZZ", wwmi: "C:\\WutheringWaves" };
-  renderWithQuery(<App />);
+  renderCachedApp();
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });
   await waitFor(() => expect(tabNames()).toEqual([
     "Honkai: Star Rail", "Zenless Zone Zero", "Wuthering Waves",
@@ -72,15 +80,27 @@ it("shows only the three installed games as tabs and opens a remaining game's se
   expect(within(picker).getAllByRole("button").map((button) => button.textContent)).toEqual([
     "Set up Genshin Impact", "Set up Honkai Impact 3rd", "Set up Arknights: Endfield",
   ]);
+  expect(screen.queryByRole("heading", { name: "Settings", level: 1 })).not.toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
   await userEvent.click(within(picker).getByRole("button", { name: "Set up Genshin Impact" }));
   expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toHaveValue("");
   expect(screen.queryByRole("tab", { name: "Genshin Impact" })).not.toBeInTheDocument();
+  expect(screen.getByText("Return to Honkai: Star Rail")).toBeVisible();
+  expect(invoke.mock.calls.filter(([command]) => command.startsWith("set_") || command.startsWith("install_"))).toEqual([]);
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(tabNames()).toEqual(["Honkai: Star Rail", "Zenless Zone Zero", "Wuthering Waves"]);
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("button", { name: "Add game" })).toHaveFocus();
+  await userEvent.click(screen.getByRole("button", { name: "Add game" }));
+  await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
   await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:\\Genshin{Enter}");
   await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   await waitFor(() => expect(tabNames()).toEqual([
     "Genshin Impact", "Honkai: Star Rail", "Zenless Zone Zero", "Wuthering Waves",
   ]));
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "false");
+  expect(screen.getByRole("button", { name: "Add game" })).toHaveFocus();
   expect(invoke).toHaveBeenCalledWith("set_game_install_path", { game: "gimi", path: "C:\\Genshin" });
 });
 
@@ -323,4 +343,156 @@ it("agrees with the Settings row that a rejected path check is unavailable", asy
   await waitFor(() => expect(row).toHaveTextContent("Cannot tell · path check unavailable"));
   expect(row).not.toHaveTextContent(/unreadable|not installed|version/i);
   expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toHaveValue("C:/StarRail");
+});
+
+// Keep reads fresh across destination changes so a mount refetch cannot mask a
+// missing mutation invalidation. The aggregate uses the wizard's production key.
+function renderCachedApp() {
+  const client = makeQueryClient();
+  client.setDefaultOptions({ queries: { retry: false, gcTime: 300_000, staleTime: Infinity } });
+  return renderWithQuery(<App />, { client });
+}
+
+function OnboardingPathRead() {
+  const paths = useQuery({
+    queryKey: ["onboarding", "installPaths", games.map((game) => game.code).join(",")],
+    queryFn: async () => Object.fromEntries(await Promise.all(games.map(async (game) =>
+      [game.code, { path: await getGameInstallPath(game.code), error: null }]))),
+  });
+  return <output aria-label="Onboarding Genshin path">{paths.data?.gimi.path ?? "No saved path"}</output>;
+}
+
+it.each([
+  { command: "set_game_install_path", rejected: false },
+  { command: "set_game_install_path", rejected: true },
+  { command: "detect_game_install_path", rejected: false },
+  { command: "detect_game_install_path", rejected: true },
+])("adds no tab from an attempted $command and settles all path reads (rejected: $rejected)", async ({ command, rejected }) => {
+  paths = { srmi: "C:/StarRail", wwmi: "C:/Waves" };
+  const original = invoke.getMockImplementation()!;
+  let settle!: () => void;
+  const pending = new Promise<void>((resolve) => { settle = resolve; });
+  invoke.mockImplementation(async (name, args) => {
+    if (name === command) {
+      await pending;
+      if (rejected) throw new Error("Install path rejected");
+      paths.gimi = "C:/Genshin";
+      return command === "detect_game_install_path" ? paths.gimi : null;
+    }
+    return original(name, args);
+  });
+  const client = makeQueryClient();
+  client.setDefaultOptions({ queries: { retry: false, gcTime: 300_000, staleTime: Infinity } });
+  renderWithQuery(<><App /><OnboardingPathRead /></>, { client });
+  await userEvent.click(await screen.findByRole("tab", { name: "Wuthering Waves" }));
+  await waitFor(() => expect(screen.getByLabelText("Onboarding Genshin path")).toHaveTextContent("No saved path"));
+  await userEvent.click(screen.getByRole("button", { name: "Add game" }));
+  await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
+  const navigation = screen.getByRole("navigation", { name: "Settings pages" });
+  const gameRow = within(navigation).getByRole("button", { name: /Genshin Impact/ });
+  await waitFor(() => expect(gameRow).toHaveTextContent("Absent · no saved path"));
+  const calls = (name: string, game: GameCode) => invoke.mock.calls.filter(([command, args]) => command === name && args?.game === game).length;
+  const before = {
+    path: calls("get_game_install_path", "gimi"),
+    aggregate: calls("get_game_install_path", "srmi"),
+    status: calls("get_game_path_status", "gimi"),
+  };
+  if (command === "set_game_install_path") await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:/Genshin{Enter}");
+  else await userEvent.click(screen.getByRole("button", { name: "Auto-detect" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith(command, command === "set_game_install_path"
+    ? { game: "gimi", path: "C:/Genshin" } : { game: "gimi" }));
+  try {
+    expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+    expect(tabNames()).toEqual(["Honkai: Star Rail", "Wuthering Waves"]);
+    expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "Add game" })).toHaveFocus();
+    expect(screen.getByLabelText("Onboarding Genshin path")).toHaveTextContent("No saved path");
+    await userEvent.click(screen.getByRole("button", { name: "Add game" }));
+    await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
+    expect(screen.getByText("Return to Wuthering Waves")).toBeVisible();
+  } finally {
+    await act(async () => settle());
+  }
+  // These are backend read calls, including another Game read by the aggregate.
+  // They must occur while Settings is still open, before any remount can help.
+  await waitFor(() => {
+    expect(calls("get_game_install_path", "gimi")).toBeGreaterThanOrEqual(before.path + 2);
+    expect(calls("get_game_install_path", "srmi")).toBeGreaterThan(before.aggregate);
+    expect(calls("get_game_path_status", "gimi")).toBeGreaterThan(before.status);
+  });
+  if (rejected) {
+    expect(await screen.findByText("Install path rejected")).toBeVisible();
+    expect(gameRow).toHaveTextContent("Absent · no saved path");
+    expect(screen.getByLabelText("Onboarding Genshin path")).toHaveTextContent("No saved path");
+  } else {
+    await waitFor(() => expect(gameRow).toHaveTextContent("Game readable · Model Importer not installed"));
+    expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toHaveValue("C:/Genshin");
+    expect(screen.getByLabelText("Onboarding Genshin path")).toHaveTextContent("C:/Genshin");
+  }
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(tabNames()).toEqual(rejected ? ["Honkai: Star Rail", "Wuthering Waves"] : ["Genshin Impact", "Honkai: Star Rail", "Wuthering Waves"]);
+  expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("button", { name: "Add game" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: "Resume setup" })).toBeVisible();
+  expect(invoke.mock.calls.filter(([name]) => /^(install_|mark_onboarding_complete$|reset_onboarding$)/.test(name))).toEqual([]);
+  await userEvent.click(screen.getByRole("button", { name: "Resume setup" }));
+  expect(screen.getByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+});
+
+it.each(["global", "game", "add"])("restores the selected Game, Mod anchor and %s arrival focus on Back and Escape", async (arrival) => {
+  paths = { srmi: "C:/StarRail", wwmi: "C:/Waves" };
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (name, args) => name === "list_mods" && args.game === "wwmi" ? [{
+    id: "add-return", game: "wwmi", name: "Return Outfit", source: "manual",
+    library_path: "C:/GMM/library/wwmi/add-return", enabled: false,
+    reinstall_recovery: null, enabled_transition_recovery: null,
+  }] : name === "list_variants" ? { variants: [], activeVariantId: null } : original(name, args));
+  let rowTop = -40;
+  const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    return { top: this.dataset.modId ? rowTop : 0, bottom: this.dataset.modId ? rowTop + 180 : 0 } as DOMRect;
+  });
+  const initialScroll = window.scrollY;
+  try {
+    renderCachedApp();
+    await userEvent.click(await screen.findByRole("tab", { name: "Wuthering Waves" }));
+    await screen.findByText("Return Outfit");
+    for (const route of ["button", "escape"]) {
+      rowTop = -40;
+      Object.defineProperty(window, "scrollY", { configurable: true, value: 860 });
+      const name = arrival === "global" ? "Settings" : arrival === "game" ? "Settings for Wuthering Waves" : "Add game";
+      await userEvent.click(screen.getByRole("button", { name }));
+      if (arrival === "add") await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
+      expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toHaveFocus();
+      expect(screen.getByText("Return to Wuthering Waves")).toBeVisible();
+      await userEvent.click(within(screen.getByRole("navigation", { name: "Settings pages" })).getByRole("button", { name: /Arknights: Endfield/ }));
+      Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
+      rowTop = 20;
+      if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+      else fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.getByText("Return Outfit")).toBeVisible();
+      expect(window.scrollTo).toHaveBeenLastCalledWith(0, 60);
+      expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByRole("button", { name })).toHaveFocus();
+      expect(tabNames()).toEqual(["Honkai: Star Rail", "Wuthering Waves"]);
+    }
+  } finally {
+    bounds.mockRestore();
+    Object.defineProperty(window, "scrollY", { configurable: true, value: initialScroll });
+  }
+});
+
+it("returns focus to the selected tab when saving the last absent Game removes Add game", async () => {
+  paths = Object.fromEntries(games.filter((game) => game.code !== "gimi").map((game) => [game.code, `C:/Games/${game.code}`]));
+  renderCachedApp();
+  await userEvent.click(await screen.findByRole("tab", { name: "Wuthering Waves" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add game" }));
+  await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
+  await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:/Genshin{Enter}");
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toHaveValue("C:/Genshin"));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  expect(tabNames()).toEqual(games.map((game) => game.displayName));
+  expect(screen.queryByRole("button", { name: "Add game" })).not.toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveFocus();
 });
