@@ -23,11 +23,11 @@ beforeEach(() => {
 });
 
 it.each([
-  [{ ...readable, gamePath: { status: "unreadable", path: savedPath, error: "Access denied" } }, "Cannot tell — install path unreadable · Model Importer unverified", "Access denied"],
-  [{ ...readable, gamePath: { status: "savedPathNotFound", paths: ["C:/StarRail/StarRail.exe"] } }, "Saved installation cannot be found · Model Importer unverified", "C:/StarRail/StarRail.exe"],
-  [{ ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } }, "Game readable · Model Importer not installed", "C:/StarRail/d3dx.ini"],
-  [{ ...readable, modelImporter: { status: "unverified", path: "C:/StarRail/Core", error: "Sharing violation" } }, "Game readable · Model Importer unverified", "Sharing violation"],
-  [{ ...readable, gamePath: { status: "invalid", error: "Invalid layout" } }, "Cannot verify Game layout · Model Importer unverified", "Invalid layout"],
+  [{ ...readable, gamePath: { status: "unreadable", path: savedPath, error: "Access denied" } }, "Game: Cannot tell — install path unreadable · Model Importer unverified", "Access denied"],
+  [{ ...readable, gamePath: { status: "savedPathNotFound", paths: [savedPath] } }, "Game: Saved installation cannot be found · Model Importer unverified", savedPath],
+  [{ ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } }, "Game: Game readable · Model Importer not installed", "C:/StarRail/d3dx.ini"],
+  [{ ...readable, modelImporter: { status: "unverified", path: "C:/StarRail/Core", error: "Sharing violation" } }, "Game: Game readable · Model Importer unverified", "Sharing violation"],
+  [{ ...readable, gamePath: { status: "invalid", error: "Invalid layout" } }, "Game: Cannot verify Game layout · Model Importer unverified", "Invalid layout"],
 ])("reports verified path evidence without inferring an installed version: %s", async (value, line, detail) => {
   pathStatus = value as GamePathStatus;
   updateStatus.pinned = true;
@@ -36,12 +36,12 @@ it.each([
   expect(await within(strip).findByText(line as string)).toBeVisible();
   expect(strip).toHaveTextContent(detail as string);
   expect(strip).toHaveTextContent(savedPath);
-  expect(strip).toHaveTextContent("Model Importer (SRMI)");
-  if (line === "Game readable · Model Importer not installed") expect(strip).toHaveTextContent("Unhealthy");
+  expect(strip).toHaveTextContent("Game and Model Importer (SRMI)");
+  if (line === "Game: Game readable · Model Importer not installed") expect(strip).toHaveTextContent("Unhealthy");
   else expect(strip).not.toHaveTextContent("Unhealthy");
   expect(strip).not.toHaveTextContent("Pinned");
   expect(within(strip).getByText(savedPath, { selector: "code" })).toBeVisible();
-  if (line !== "Game readable · Model Importer not installed") expect(strip).not.toHaveTextContent(/not installed|no saved/i);
+  if (line !== "Game: Game readable · Model Importer not installed") expect(strip).not.toHaveTextContent(/not installed|no saved/i);
   expect(strip).not.toHaveTextContent(/version|v1\./i);
   const settings = within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" });
   expect(settings).toHaveAttribute("data-settings-arrival", "game");
@@ -50,12 +50,30 @@ it.each([
   expect(invoke.mock.calls.map(([command]) => command)).toEqual(["get_game_path_status", "check_importer_update"]);
 });
 
+it.each([
+  { state: "savedPathNotFound" as const, paths: [savedPath], message: "Saved installation cannot be found", other: "Required Game files or directories not found" },
+  { state: "requiredEntriesNotFound" as const, paths: [`${savedPath}/StarRail.exe`, `${savedPath}/StarRail_Data`], message: "Required Game files or directories not found", other: "Saved installation cannot be found" },
+])("distinguishes missing saved directory from missing Game entries: $state", async ({ state, paths, message, other }) => {
+  pathStatus = { ...readable, gamePath: { status: state, paths }, modelImporter: { status: "unverified", path: null, error: "Game layout unverified" } };
+  updateStatus.pinned = true;
+  renderWithQuery(<GameStatusStrip {...props} />);
+  const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
+  expect(await within(strip).findByText(`Game: ${message} · Model Importer unverified`)).toBeVisible();
+  expect(strip).not.toHaveTextContent(other);
+  expect(strip).toHaveTextContent("Game and Model Importer (SRMI)");
+  expect(strip).toHaveTextContent(`Saved Game path: ${savedPath}`);
+  for (const missing of paths) expect(strip).toHaveTextContent(missing);
+  if (state === "requiredEntriesNotFound") expect(strip).toHaveTextContent(`Missing Game entries: ${paths.join(", ")}`);
+  expect(strip).not.toHaveTextContent(/not installed|healthy|Installed version:|Pinned|Unhealthy/);
+  expect(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" })).toBeVisible();
+});
+
 it("reports the healthy importer name, recorded installed version and read-only pin", async () => {
   updateStatus.pinned = true;
   renderWithQuery(<GameStatusStrip {...props} />);
   const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
-  expect(await within(strip).findByText("Game readable · Model Importer healthy")).toBeVisible();
-  expect(strip).toHaveTextContent("Model Importer (SRMI)");
+  expect(await within(strip).findByText("Game: Game readable · Model Importer healthy")).toBeVisible();
+  expect(strip).toHaveTextContent("Game and Model Importer (SRMI)");
   expect(await within(strip).findByText("Installed version:")).toHaveTextContent("1.0");
   expect(within(strip).getByLabelText("Importer Pin applies")).toHaveTextContent("Pinned");
   expect(strip).not.toHaveTextContent(/2\.0|current|Origin|github|Package/i);
@@ -156,10 +174,10 @@ it("reuses recent importer metadata when returning to a Game tab", async () => {
   const { rerender } = renderWithQuery(<GameStatusStrip {...props} />, { client });
   await screen.findByText("Installed version:");
   rerender(<GameStatusStrip {...props} game="gimi" displayName="Genshin Impact" />);
-  await screen.findByText("Game readable · Model Importer healthy");
+  await screen.findByText("Game: Game readable · Model Importer healthy");
   await screen.findByText("Installed version:");
   rerender(<GameStatusStrip {...props} />);
-  await screen.findByText("Game readable · Model Importer healthy");
+  await screen.findByText("Game: Game readable · Model Importer healthy");
   expect(screen.getByText("Installed version:")).toHaveTextContent("1.0");
   expect(invoke.mock.calls.filter(([command, args]) => command === "check_importer_update" && args.game === "srmi")).toHaveLength(1);
 });
@@ -173,7 +191,7 @@ it("withdraws a cached installed fact while the path refresh is checking", async
     ? new Promise<GamePathStatus>((yes) => { resolve = yes; }) : updateStatus);
   let refresh!: Promise<void>;
   act(() => { refresh = client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }); });
-  expect(await screen.findByText("Checking Game install path · Model Importer unverified")).toBeVisible();
+  expect(await screen.findByText("Game: Checking Game install path · Model Importer unverified")).toBeVisible();
   expect(screen.getByRole("status")).not.toHaveTextContent(/healthy|1\.0|Installed version:|Pinned|Unhealthy/);
   await act(async () => { resolve(readable); await refresh; });
   expect(await screen.findByText("Installed version:")).toHaveTextContent("1.0");
@@ -184,7 +202,7 @@ it("refreshes path evidence and version and pin through existing query keys", as
   await screen.findByText("Installed version:");
   pathStatus = { ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } };
   await act(() => client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }));
-  expect(await screen.findByText("Game readable · Model Importer not installed")).toBeVisible();
+  expect(await screen.findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
   expect(screen.getByRole("status")).not.toHaveTextContent("Installed version:");
   pathStatus = readable;
   updateStatus = { ...updateStatus, installedVersion: "1.1", pinned: true };
@@ -227,9 +245,9 @@ it("refreshes the strip when the Settings importer install settles", async () =>
   });
   renderWithQuery(<><GameStatusStrip {...props} /><ImporterPanel game="srmi" displayName={props.displayName} /></>);
   const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
-  expect(await within(strip).findByText("Game readable · Model Importer not installed")).toBeVisible();
+  expect(await within(strip).findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
   await userEvent.click(await screen.findByRole("button", { name: "Install importer" }));
-  expect(await within(strip).findByText("Game readable · Model Importer healthy")).toBeVisible();
+  expect(await within(strip).findByText("Game: Game readable · Model Importer healthy")).toBeVisible();
   expect(await within(strip).findByText("Installed version:")).toHaveTextContent("1.1");
 });
 
@@ -238,7 +256,7 @@ it("reports no saved path without claiming filesystem absence", async () => {
   pathStatus = { ...readable, savedPath: null, gamePath: { status: "noSavedPath" },
     modelImporter: { status: "unverified", path: null, error: "No saved path" } };
   renderWithQuery(<GameStatusStrip {...props} savedPath={null} />);
-  expect(await screen.findByText("No saved install path · Model Importer unverified")).toBeVisible();
+  expect(await screen.findByText("Game: No saved install path · Model Importer unverified")).toBeVisible();
   expect(screen.getByRole("status")).not.toHaveTextContent(/not installed|healthy|1\.0|current|Pinned|Unhealthy/);
   expect(screen.queryByText(savedPath)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" })).toBeVisible();
@@ -249,23 +267,23 @@ it("shows checking while the status read is pending and preserves the saved path
   let resolve!: (value: GamePathStatus) => void;
   invoke.mockImplementation(async (command) => command === "get_game_path_status" ? new Promise<GamePathStatus>((yes) => { resolve = yes; }) : updateStatus);
   const { client } = renderWithQuery(<GameStatusStrip {...props} />);
-  expect(screen.getByText("Checking Game install path · Model Importer unverified")).toBeVisible();
-  expect(screen.getByRole("region", { name: "Honkai: Star Rail status" })).toHaveTextContent(`Last saved path: ${savedPath}`);
+  expect(screen.getByText("Game: Checking Game install path · Model Importer unverified")).toBeVisible();
+  expect(screen.getByRole("region", { name: "Honkai: Star Rail status" })).toHaveTextContent(`Last saved Game path: ${savedPath}`);
   expect(screen.queryByText(/Model Importer not installed/)).not.toBeInTheDocument();
   await waitFor(() => expect(client.getQueryData(["importer", "update", "srmi"])).toEqual(updateStatus));
   expect(screen.getByRole("status")).not.toHaveTextContent(/healthy|Installed version:|1\.0|current|Pinned|Unhealthy/);
   await act(async () => resolve(readable));
-  expect(await screen.findByText("Game readable · Model Importer healthy")).toBeVisible();
+  expect(await screen.findByText("Game: Game readable · Model Importer healthy")).toBeVisible();
 });
 
 it("does not reuse a cached readable result after the saved-path read fails", async () => {
   updateStatus.pinned = true;
   const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game readable · Model Importer healthy");
+  await screen.findByText("Game: Game readable · Model Importer healthy");
   rerender(<GameStatusStrip {...props} pathReadError={new Error("Settings database locked")} />);
-  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — install path unreadable · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent("Game: Cannot tell — install path unreadable · Model Importer unverified");
   expect(screen.getByRole("status")).toHaveTextContent("Settings database locked");
-  expect(screen.getByRole("status")).toHaveTextContent(`Last saved path: ${savedPath}`);
+  expect(screen.getByRole("status")).toHaveTextContent(`Last saved Game path: ${savedPath}`);
   expect(screen.queryByText(/Game readable/)).not.toBeInTheDocument();
   expect(screen.getByRole("status")).not.toHaveTextContent(/Pinned|Unhealthy/);
 });
@@ -273,11 +291,11 @@ it("does not reuse a cached readable result after the saved-path read fails", as
 it("does not reuse a cached readable result after the filesystem check fails", async () => {
   updateStatus.pinned = true;
   const { client } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game readable · Model Importer healthy");
+  await screen.findByText("Game: Game readable · Model Importer healthy");
   invoke.mockImplementation(async (command) => { if (command === "get_game_path_status") throw new Error("Storage unavailable"); return updateStatus; });
   await act(() => client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Storage unavailable"));
-  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — path check unavailable · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent("Game: Cannot tell — path check unavailable · Model Importer unverified");
   expect(screen.getByRole("status")).not.toHaveTextContent(/Game readable|not installed|version|Pinned|Unhealthy/i);
 });
 
@@ -287,17 +305,17 @@ it("keeps checking while the saved-path read is pending despite a completed stat
   const { client } = renderWithQuery(<GameStatusStrip {...props} pathReadPending />);
   await waitFor(() => expect(client.getQueryData(["gamePathStatus", "srmi"])).toEqual(readable));
   await waitFor(() => expect(screen.getByRole("region", { name: "Honkai: Star Rail status" })).toHaveAttribute("aria-busy", "true"));
-  expect(screen.getByRole("status")).toHaveTextContent("Checking Game install path · Model Importer unverified");
-  expect(screen.getByRole("status")).toHaveTextContent(`Last saved path: ${savedPath}`);
+  expect(screen.getByRole("status")).toHaveTextContent("Game: Checking Game install path · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent(`Last saved Game path: ${savedPath}`);
   expect(screen.queryByText(/Game readable/)).not.toBeInTheDocument();
   expect(screen.getByRole("status")).not.toHaveTextContent(/Pinned|Unhealthy/);
 });
 
 it("keeps a saved-path read failure ahead of a pending read", async () => {
   renderWithQuery(<GameStatusStrip {...props} pathReadPending pathReadError={new Error("Settings database locked")} />);
-  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — install path unreadable · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent("Game: Cannot tell — install path unreadable · Model Importer unverified");
   expect(screen.getByRole("status")).toHaveTextContent("Settings database locked");
-  expect(screen.getByRole("status")).toHaveTextContent(`Last saved path: ${savedPath}`);
+  expect(screen.getByRole("status")).toHaveTextContent(`Last saved Game path: ${savedPath}`);
   expect(screen.queryByText(/Checking Game install path/)).not.toBeInTheDocument();
 });
 
@@ -306,9 +324,9 @@ it("keeps a rejected status check ahead of a pending saved-path read", async () 
   const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
   await screen.findByText("Path check channel closed");
   rerender(<GameStatusStrip {...props} pathReadPending />);
-  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — path check unavailable · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent("Game: Cannot tell — path check unavailable · Model Importer unverified");
   expect(screen.getByRole("status")).toHaveTextContent("Path check channel closed");
-  expect(screen.getByRole("status")).toHaveTextContent(`Last saved path: ${savedPath}`);
+  expect(screen.getByRole("status")).toHaveTextContent(`Last saved Game path: ${savedPath}`);
   expect(screen.queryByText(/Checking Game install path/)).not.toBeInTheDocument();
 });
 
@@ -319,7 +337,7 @@ it.each([
   pathStatus = { ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } };
   updateStatus.pinned = true;
   const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game readable · Model Importer not installed");
+  await screen.findByText("Game: Game readable · Model Importer not installed");
   expect(screen.getByRole("status")).toHaveTextContent("Unhealthy");
   rerender(<GameStatusStrip {...props} {...pathProps} />);
   expect(screen.getByRole("status")).toHaveTextContent("Model Importer unverified");
@@ -330,16 +348,16 @@ it("withdraws cached absence while the status refresh is checking", async () => 
   pathStatus = { ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } };
   updateStatus.pinned = true;
   const { client } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game readable · Model Importer not installed");
+  await screen.findByText("Game: Game readable · Model Importer not installed");
   let resolve!: (value: GamePathStatus) => void;
   invoke.mockImplementation(async (command) => command === "get_game_path_status"
     ? new Promise<GamePathStatus>((yes) => { resolve = yes; }) : updateStatus);
   let refresh!: Promise<void>;
   act(() => { refresh = client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }); });
-  expect(await screen.findByText("Checking Game install path · Model Importer unverified")).toBeVisible();
+  expect(await screen.findByText("Game: Checking Game install path · Model Importer unverified")).toBeVisible();
   expect(screen.getByRole("status")).not.toHaveTextContent(/Unhealthy|not installed|Pinned|Installed version:/);
   await act(async () => { resolve(pathStatus); await refresh; });
-  expect(await screen.findByText("Game readable · Model Importer not installed")).toBeVisible();
+  expect(await screen.findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
   expect(screen.getByRole("status")).toHaveTextContent("Unhealthy");
 });
 
@@ -347,7 +365,7 @@ it("keeps a failed status check ahead of a held recheck without reusing cached a
   pathStatus = { ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } };
   updateStatus.pinned = true;
   const { client } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game readable · Model Importer not installed");
+  await screen.findByText("Game: Game readable · Model Importer not installed");
   invoke.mockImplementation(async (command) => {
     if (command === "get_game_path_status") throw new Error("Storage unavailable");
     return updateStatus;
@@ -361,9 +379,9 @@ it("keeps a failed status check ahead of a held recheck without reusing cached a
   let refresh!: Promise<void>;
   act(() => { refresh = client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }); });
   await waitFor(() => expect(screen.getByRole("region", { name: "Honkai: Star Rail status" })).toHaveAttribute("aria-busy", "true"));
-  expect(screen.getByRole("status")).toHaveTextContent("Cannot tell — path check unavailable · Model Importer unverified");
+  expect(screen.getByRole("status")).toHaveTextContent("Game: Cannot tell — path check unavailable · Model Importer unverified");
   expect(screen.getByRole("status")).toHaveTextContent("Storage unavailable");
   expect(screen.getByRole("status")).not.toHaveTextContent(/Checking Game install path|Unhealthy|not installed|Pinned|Installed version:/);
   await act(async () => { resolve(readable); await refresh; });
-  expect(await screen.findByText("Game readable · Model Importer healthy")).toBeVisible();
+  expect(await screen.findByText("Game: Game readable · Model Importer healthy")).toBeVisible();
 });

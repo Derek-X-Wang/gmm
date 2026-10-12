@@ -80,6 +80,7 @@ export function ImporterPanel({
     : absent ? "Game readable · Model Importer not installed"
     : path.data?.gamePath.status === "noSavedPath" ? "Set a readable Game install path before installing a Model Importer."
     : path.data?.gamePath.status === "savedPathNotFound" ? "Saved installation cannot be found · Model Importer unverified"
+    : path.data?.gamePath.status === "requiredEntriesNotFound" ? `Required Game files or directories not found: ${path.data.gamePath.paths.join(", ")} · Model Importer unverified`
     : "Cannot tell · Model Importer filesystem unverified";
   const filesystem = path.data?.modelImporter;
 

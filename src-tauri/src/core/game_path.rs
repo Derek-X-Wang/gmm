@@ -29,9 +29,13 @@ pub enum GamePathState {
     NoSavedPath,
     /// The existing fallible GameProfile validator verified the Game layout.
     Readable,
-    /// Each named path returned NotFound. Executable alternatives are listed
-    /// together only when all alternatives are confirmed missing.
+    /// The saved Game directory itself returned NotFound.
     SavedPathNotFound {
+        paths: Vec<PathBuf>,
+    },
+    /// The saved directory exists, but required Game entries returned NotFound.
+    /// Executable alternatives are listed only when all are confirmed missing.
+    RequiredEntriesNotFound {
         paths: Vec<PathBuf>,
     },
     /// A known wrong type or rejected layout. This is not proven absence.
@@ -184,7 +188,7 @@ fn inspect_game(
     Ok(if missing.is_empty() {
         invalid()
     } else {
-        GamePathState::SavedPathNotFound { paths: missing }
+        GamePathState::RequiredEntriesNotFound { paths: missing }
     })
 }
 
@@ -337,7 +341,7 @@ mod tests {
         let state = inspect_game(GameCode::Gimi, path, Some(vanished_alternative)).unwrap();
         assert_eq!(
             state,
-            GamePathState::SavedPathNotFound {
+            GamePathState::RequiredEntriesNotFound {
                 paths: vec![path.join("GenshinImpact.exe"), path.join("YuanShen.exe")],
             },
             "all alternatives must be directly confirmed missing, not just the failed one"

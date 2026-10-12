@@ -112,6 +112,7 @@ export function gamePathLine(status: GamePathStatus): string {
   switch (status.gamePath.status) {
     case "noSavedPath": return "Absent · no saved path";
     case "savedPathNotFound": return "Saved installation cannot be found · Model Importer unverified";
+    case "requiredEntriesNotFound": return "Required Game files or directories not found · Model Importer unverified";
     case "unreadable": return "Cannot tell · path unreadable; Model Importer unverified";
     case "invalid": return "Cannot verify Game layout · Model Importer unverified";
     case "readable":
@@ -129,7 +130,7 @@ function GamePathExplanation({ game }: { game: GameCode }) {
   let details: string | undefined;
   if (value) {
     const path = value.gamePath;
-    if (path.status === "savedPathNotFound") details = path.paths.join(", ");
+    if ((path.status === "savedPathNotFound" || path.status === "requiredEntriesNotFound")) details = path.paths.join(", ");
     else if (path.status === "invalid" || path.status === "unreadable") details = path.error;
     else if (value.modelImporter.status === "unverified") details = value.modelImporter.error;
     else if (value.modelImporter.status === "requiredEntriesNotFound") details = value.modelImporter.paths.join(", ");

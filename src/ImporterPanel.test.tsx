@@ -68,7 +68,8 @@ it("allows an explicit install for a readable Game with confirmed absent importe
 });
 it.each([
   ["no saved path", { status: "noSavedPath" }, { status: "unverified", path: null, error: "No path" }],
-  ["saved path missing", { status: "savedPathNotFound", paths: ["C:/Game/Game.exe"] }, { status: "unverified", path: null, error: "Missing executable" }],
+  ["Game entries missing", { status: "requiredEntriesNotFound", paths: ["C:/Game/Game.exe"] }, { status: "unverified", path: null, error: "Missing executable" }],
+  ["saved path missing", { status: "savedPathNotFound", paths: ["C:/Game"] }, { status: "unverified", path: null, error: "Missing executable" }],
   ["unreadable Game", { status: "unreadable", path: "C:/Game", error: "Access denied" }, { status: "unverified", path: "C:/Game", error: "Access denied" }],
   ["invalid Game", { status: "invalid", error: "Wrong layout" }, { status: "unverified", path: null, error: "Wrong layout" }],
   ["unverified importer", { status: "readable" }, { status: "unverified", path: "C:/Game/Core", error: "Sharing violation" }],
