@@ -51,10 +51,12 @@ New-Item -ItemType Directory -Force -Path $Work, $LogDir | Out-Null
 # ordering is unambiguous no matter what the repo's version is.
 $OldVersion = "9.9.0"
 $NewVersion = "9.9.1"
-# The latest passing Windows rerun measured 6.5s from process launch to the
-# first accepted connection. Twice that measured cold start gives a 13s
-# ceiling without leaving the job at an unexplained round number.
-$ServerStartupTimeoutSeconds = 13
+# Allow two minutes for interpreter startup and connection acceptance on a
+# contended Windows runner; a single cold-start sample cannot bound that delay.
+# Both waits poll and return as soon as ready, so this ceiling adds no delay
+# on the healthy path. A stuck server still fails in two minutes per wait,
+# well inside the job timeout, against a job that already runs for many minutes.
+$ServerStartupTimeoutSeconds = 120
 $Canary = "updater-e2e-canary.txt"
 $CanaryText = "user data must survive the update"
 # Must match `IPC_READY_MARKER` in src-tauri/src/core/diagnostics.rs.
