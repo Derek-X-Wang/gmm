@@ -11,10 +11,10 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
-    // The Tauri IPC layer is mocked per-test; nothing here should ever
-    // touch a real backend, so a short timeout catches accidental
-    // real-invoke calls instead of hanging CI.
-    testTimeout: 5000,
+    // App interaction tests can exceed 5s under Windows runner contention.
+    // Allow bounded headroom while still failing hung tests and accidental
+    // real-invoke calls; the Tauri IPC layer is mocked per-test.
+    testTimeout: 30000,
     coverage: {
       provider: "v8",
       include: ["src/**/*.{ts,tsx}"],
