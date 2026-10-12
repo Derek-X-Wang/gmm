@@ -484,7 +484,7 @@ it("renders the approved eight main-screen slots in order with scoped notices an
     screen.getByRole("tablist", { name: "Game" }).parentElement!.parentElement,
     screen.getByRole("region", { name: "Genshin Impact status" }),
     notices,
-    screen.getByRole("heading", { name: "Mods (0)" }).closest("section"),
+    screen.getByRole("heading", { name: "Add Mods for Genshin Impact" }).closest("section"),
     screen.getByRole("heading", { name: "Mod updates" }).closest("section"),
   ]);
   expect(within(header).getByRole("heading", { level: 1 })).toHaveTextContent("Genshin Impact");
@@ -499,7 +499,11 @@ it("renders the approved eight main-screen slots in order with scoped notices an
   expect(notices).toHaveTextContent(variantError);
   expect(notices).not.toHaveTextContent(/Junctions (?:were )?repaired/i);
   expect(within(notices).getByRole("button", { name: "Review Genshin Impact recovery in Settings" })).toBeEnabled();
-  expect(screen.getByText("No mods yet — adopt a folder to get started.")).toBeVisible();
+  expect(screen.getByText("Your Library has no Mods for Genshin Impact. Choose how to add your first Mod.")).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Add Mods for Genshin Impact" }).closest("section")!.querySelector("ul.mods")).toBeNull();
+  expect(screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual([
+    "Adopt for Genshin Impact", "Import ZIP for Genshin Impact", "GameBanana for Genshin Impact",
+  ]);
   expect(main.querySelector("aside")).toBeNull();
   expect(screen.queryByRole("button", { name: "Retry Model Importer recovery" })).not.toBeInTheDocument();
   for (const name of ["Network", "GMM updates", "Importer recommendations", "Diagnostics", "Global Library root", "Genshin Impact install path", "Model Importer (GIMI)"]) {
