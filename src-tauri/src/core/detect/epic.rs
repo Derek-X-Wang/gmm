@@ -83,16 +83,9 @@ pub fn install_candidates(
         {
             continue;
         }
+        // Keep the recorded launch path compatible with linked installs.
+        // Only the additional suffix probe rejects directory links.
         let executable = install.join(launch);
-        let launch_parent = executable
-            .parent()
-            .and_then(|parent| parent.strip_prefix(&install).ok());
-        if launch_parent
-            .and_then(|parent| super::real_relative_directory(&install, parent))
-            .is_none()
-        {
-            continue;
-        }
         #[allow(
             clippy::disallowed_methods,
             reason = "optional-install Epic detection intentionally treats an unreadable launch executable as unusable"
@@ -115,6 +108,8 @@ fn expanded_candidates(
     validate: fn(&Path) -> bool,
     playable_suffix: Option<&str>,
 ) -> Vec<PathBuf> {
+    // Each manifest checks its launch executable once and yields at most
+    // two roots, with no separate launch-parent directory probes.
     // Per unique Epic root: one root + at most 256 immediate entries + one
     // fixed suffix = at most 258 validator calls. The suffix has at most four
     // components (five no-follow metadata probes including the root). Never

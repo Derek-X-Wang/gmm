@@ -54,6 +54,122 @@ fn assert_playable(fixture: Fixture, detector: Detector, validate: fn(&Path) -> 
     assert_eq!(detector(Some(&fixture.store)), vec![fixture.playable]);
 }
 
+fn set_launch_executable(fixture: &Fixture, launch: &str) {
+    let record = fixture.store.join("00000000000000000000000000000000.item");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    value["LaunchExecutable"] = json!(launch);
+    fs::write(record, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+fn link_directory(fixture: &Fixture, directory: &Path) {
+    let target = fixture._temp.path().join("relocated");
+    fs::rename(directory, &target).unwrap();
+    // Real NTFS junction on Windows; directory symlink on Unix.
+    crate::core::junction::create(directory, &target).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn epic_linked_install_root_preserves_genshin_immediate_child() {
+    let fixture = observed_fixture(
+        "Genshin Impact",
+        "Game",
+        genshin::EXE_NAMES[0],
+        Some(genshin::DATA_DIR_NAME),
+    );
+    link_directory(&fixture, &fixture.root);
+    assert_playable(fixture, genshin::detect_from_epic, genshin::validate);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn epic_linked_install_root_preserves_valid_genshin_root() {
+    let fixture = observed_fixture(
+        "Genshin Impact",
+        "",
+        genshin::EXE_NAMES[0],
+        Some(genshin::DATA_DIR_NAME),
+    );
+    link_directory(&fixture, &fixture.root);
+    assert!(genshin::validate(&fixture.root));
+    assert_eq!(
+        genshin::detect_from_epic(Some(&fixture.store)),
+        vec![fixture.root]
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn epic_linked_launch_parent_preserves_star_rail_directory() {
+    let fixture = observed_fixture(
+        "Honkai: Star Rail",
+        "Game",
+        "StarRail.exe",
+        Some(star_rail::DATA_DIR_NAME),
+    );
+    set_launch_executable(&fixture, "Game/StarRail.exe");
+    link_directory(&fixture, &fixture.playable);
+    assert_playable(fixture, star_rail::detect_from_epic, star_rail::validate);
+}
+
+#[test]
+fn epic_valid_immediate_child_precedes_valid_suffix() {
+    let fixture = observed_fixture(
+        "Honkai: Star Rail",
+        "games/Star Rail Games",
+        star_rail::EXE_NAMES[0],
+        Some(star_rail::DATA_DIR_NAME),
+    );
+    let child = fixture.root.join("Game");
+    fs::create_dir_all(child.join(star_rail::DATA_DIR_NAME)).unwrap();
+    fs::write(child.join(star_rail::EXE_NAMES[0]), b"child executable").unwrap();
+    assert!(!star_rail::validate(&fixture.root));
+    assert!(star_rail::validate(&child));
+    assert!(star_rail::validate(&fixture.playable));
+    assert_eq!(
+        star_rail::detect_from_epic(Some(&fixture.store)),
+        vec![child, fixture.playable]
+    );
+}
+
+#[test]
+fn epic_valid_root_excludes_valid_suffix() {
+    let fixture = observed_fixture(
+        "Honkai: Star Rail",
+        "games/Star Rail Games",
+        star_rail::EXE_NAMES[0],
+        Some(star_rail::DATA_DIR_NAME),
+    );
+    fs::create_dir(fixture.root.join(star_rail::DATA_DIR_NAME)).unwrap();
+    fs::write(
+        fixture.root.join(star_rail::EXE_NAMES[0]),
+        b"root executable",
+    )
+    .unwrap();
+    assert!(star_rail::validate(&fixture.root));
+    assert!(star_rail::validate(&fixture.playable));
+    assert_eq!(
+        star_rail::detect_from_epic(Some(&fixture.store)),
+        vec![fixture.root]
+    );
+}
+
+#[test]
+fn epic_wuthering_launch_parent_and_install_suffix_emit_once() {
+    let fixture = observed_fixture(
+        "Wuthering Waves",
+        "Wuthering Waves Game/Client/Binaries/Win64",
+        "Client-Win64-Shipping.exe",
+        None,
+    );
+    set_launch_executable(
+        &fixture,
+        "Wuthering Waves Game/Client/Binaries/Win64/Client-Win64-Shipping.exe",
+    );
+    assert_playable(fixture, wuthering::detect_from_epic, wuthering::validate);
+}
+
 #[test]
 fn epic_observed_star_rail_returns_exact_playable_directory() {
     let display = "《崩坏：星穹铁道》";
