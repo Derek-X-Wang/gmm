@@ -25,3 +25,22 @@ it("keeps checking, failed inventory and confirmed empty distinct with Add game 
   expect(onChange).toHaveBeenCalledWith("srmi");
   expect(screen.queryByRole("button", { name: "Add game" })).not.toBeInTheDocument();
 });
+
+it("waits for an explicit supported-Game choice without selecting a main tab", async () => {
+  const onAddGame = vi.fn();
+  const onChange = vi.fn();
+  render(<GameTabs games={[{ code: "srmi", displayName: "Honkai: Star Rail" }]}
+    remaining={[{ code: "gimi", displayName: "Genshin Impact" }, { code: "efmi", displayName: "Arknights: Endfield" }]}
+    pending={false} pathsUnavailable={false} active="srmi" onAddGame={onAddGame} onChange={onChange} />);
+  await userEvent.click(screen.getByRole("button", { name: "Add game" }));
+  expect(screen.getByRole("button", { name: "Set up Genshin Impact" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Set up Arknights: Endfield" })).toBeVisible();
+  expect(onAddGame).not.toHaveBeenCalled();
+  expect(onChange).not.toHaveBeenCalled();
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+  await userEvent.click(screen.getByRole("button", { name: "Set up Arknights: Endfield" }));
+  expect(onAddGame).toHaveBeenCalledExactlyOnceWith("efmi");
+  expect(onChange).not.toHaveBeenCalled();
+  expect(screen.queryByRole("region", { name: "Add a game" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Arknights: Endfield" })).not.toBeInTheDocument();
+});
