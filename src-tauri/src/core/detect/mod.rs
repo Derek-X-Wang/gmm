@@ -75,6 +75,30 @@ where
     out
 }
 
+/// Resolve only real directories from an optional-install root through a fixed
+/// relative path. Check every component before probing below it, so a symlink
+/// at an intermediate level cannot redirect expansion outside the root.
+pub(super) fn real_relative_directory(root: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut directory = root.to_path_buf();
+    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+        if let Some(component) = component {
+            let std::path::Component::Normal(name) = component else {
+                return None;
+            };
+            directory.push(name);
+        }
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "optional-install expansion skips unreadable paths and rejects directory symlinks"
+        )]
+        let real_directory = matches!(fs::symlink_metadata(&directory), Ok(metadata) if metadata.file_type().is_dir());
+        if !real_directory {
+            return None;
+        }
+    }
+    Some(directory)
+}
+
 /// Saved paths require a readable install. Optional auto-detection keeps its
 /// existing best-effort validators; a manual choice must preserve uncertainty.
 fn validate_install(path: &Path, exe_names: &[&str], data: Option<&Path>) -> Result<bool> {

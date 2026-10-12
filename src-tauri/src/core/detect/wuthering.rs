@@ -202,10 +202,19 @@ pub fn is_wuthering_display_name(s: &str) -> bool {
     lower.contains("wuthering waves") || lower.contains("鸣潮")
 }
 
+// Observed on one Windows machine on 2026-10-10 (#270), not a published
+// launcher contract. Recheck this layout first when another Epic install fails.
+const EPIC_PLAYABLE_SUFFIX: &str = "Wuthering Waves Game/Client/Binaries/Win64";
+
 /// Read Epic install records for this Game. Inject the manifest-store directory
 /// for fixtures; `None` uses the Windows store and returns empty on other OSes.
 pub fn detect_from_epic(manifest_root: Option<&Path>) -> Vec<PathBuf> {
-    super::epic::install_candidates(manifest_root, is_wuthering_display_name, validate)
+    super::epic::install_candidates(
+        manifest_root,
+        is_wuthering_display_name,
+        validate,
+        Some(EPIC_PLAYABLE_SUFFIX),
+    )
 }
 
 /// Production orchestrator: registry → Epic manifests → common paths. Returns the
