@@ -629,3 +629,21 @@ code {
   .attention-indicator__scope { color: #52525b; }
   .attention-indicator__toggle--loud { border-color: #92400e; color: #92400e; }
 }
+
+/* The first Mod routes occupy the content area; existing collections use the toolbar. */
+.mod-import-landing > h2 { margin-bottom: 0.5rem; }
+.mod-import-routes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 1rem;
+  margin: 1.25rem 0;
+}
+.mod-import-routes .mod-import-route {
+  border: 1px solid #2e2e36;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  min-width: 0;
+}
+.mod-import-route h3 { margin: 0 0 0.5rem; }
+.mod-import-route input { max-width: 100%; box-sizing: border-box; }
+.mod-import-route code { overflow-wrap: anywhere; }

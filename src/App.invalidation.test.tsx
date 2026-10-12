@@ -583,3 +583,120 @@ it.each([false, true])("refreshes this Game's Mods and Conflicts after changing 
   await waitFor(() => expect(screen.queryByRole("button", { name: "1 conflict" })).not.toBeInTheDocument());
   expect(invoke).toHaveBeenCalledWith("set_mod_enabled", { id: "mod-outfit", enabled: !enabled, game: "gimi" });
 });
+
+it.each(["empty", "populated"] as const)("keeps Mod updates after the %s content", async (layout) => {
+  responses.list_mods = layout === "empty" ? [] : [modFixture()];
+  responses.list_mod_updates = [];
+  renderApp();
+  const content = (await screen.findByRole("heading", { name: layout === "empty" ? "Add Mods for Genshin Impact" : "Mods (1)" })).closest("section")!;
+  const updates = screen.getByRole("heading", { name: "Mod updates" }).closest("section")!;
+  expect(content.compareDocumentPosition(updates) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+const importCases = (["empty", "populated"] as const).flatMap((layout) =>
+  (["adopt", "zip", "drop", "gamebanana"] as const).flatMap((entry) =>
+    (["success", "failure"] as const).map((outcome) => ({ layout, entry, outcome }))),
+);
+it.each(importCases)("settles Mods, Library audit and Mod updates for $entry in $layout on $outcome", async ({ layout, entry, outcome }) => {
+  responses.list_supported_games = [
+    { code: "gimi", displayName: "Genshin Impact" },
+    { code: "srmi", displayName: "Honkai: Star Rail" },
+  ];
+  const initial = layout === "empty" ? [] : [{ ...modFixture(), game: "srmi" }];
+  responses.list_mod_updates = [];
+  let changed = false;
+  mutations.list_mods = (args) => args.game === "srmi" ? changed ? [{ ...modFixture(), id: "mod-new", name: "Imported Star Rail Outfit", game: "srmi" }] : initial : [];
+  const command = entry === "adopt" ? "adopt_folder" : entry === "gamebanana" ? "import_gamebanana" : "import_zip";
+  mutations[command] = () => {
+    changed = true;
+    responses.list_mod_updates = [{ modId: "mod-new", name: "Imported Star Rail Outfit", installedVersion: "1.0", upstreamVersion: "4.0", upstreamAhead: true, updateCheckEnabled: true }];
+    responses.audit_library = { unreferenced: [{ path: "C:/Library/srmi/partial", directoryName: "partial", sizeBytes: 128 }], duplicates: [], totalBytes: 128 };
+    if (outcome === "failure") throw new Error("Import partially persisted");
+    return { ...modFixture(), id: "mod-new", game: "srmi", name: "Imported Star Rail Outfit" };
+  };
+  const { container } = renderApp();
+  await userEvent.click(await screen.findByRole("tab", { name: "Honkai: Star Rail" }));
+  const heading = await screen.findByRole("heading", { name: layout === "empty" ? "Add Mods for Honkai: Star Rail" : "Mods (1)" });
+  if (layout === "empty") expect(within(heading.closest("section")!).getAllByRole("heading", { level: 3 }).map((item) => item.textContent)).toEqual([
+    "Adopt for Honkai: Star Rail", "Import ZIP for Honkai: Star Rail", "GameBanana for Honkai: Star Rail",
+  ]);
+  // Visit Settings once so its production audit observer has a fresh cached result.
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("audit_library", { game: "srmi" }));
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  if (entry === "drop") {
+    fireEvent.drop(container.querySelector(".dropzone")!, { dataTransfer: { files: [Object.assign(new File(["zip"], "outfit.zip"), { path: "C:/Downloads/outfit.zip" })] } });
+  } else {
+    await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt folder…" : entry === "zip" ? "Import ZIP…" : "Paste GameBanana URL…" }));
+    if (entry !== "gamebanana") await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Pick mod folder" : "Pick .zip file" }));
+  }
+  const field = screen.getByPlaceholderText(entry === "gamebanana" ? "https://gamebanana.com/mods/1234567 or a bare ID" : entry === "drop" ? "Display name" : "Display name (e.g. Hu Tao Skin)");
+  await userEvent.clear(field);
+  await userEvent.type(field, entry === "gamebanana" ? "123" : "Imported Star Rail Outfit");
+  const auditReads = invoke.mock.calls.filter(([name, args]) => name === "audit_library" && args.game === "srmi").length;
+  await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" }));
+  expect(invoke).toHaveBeenCalledWith(command, { args: entry === "gamebanana" ? { game: "srmi", urlOrId: "123" } : {
+    game: "srmi", [entry === "adopt" ? "sourcePath" : "zipPath"]: entry === "drop" ? "C:/Downloads/outfit.zip" : "C:\\Downloads\\outfit.zip", name: "Imported Star Rail Outfit",
+  } });
+  expect(await screen.findByText("Imported Star Rail Outfit")).toBeVisible();
+  expect(await screen.findByRole("button", { name: "Update → 4.0" })).toBeVisible();
+  await waitFor(() => expect(invoke.mock.calls.filter(([name, args]) => name === "audit_library" && args.game === "srmi").length).toBeGreaterThan(auditReads));
+  if (outcome === "failure") expect(await screen.findByText("Import partially persisted")).toBeVisible();
+  else expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  expect(await screen.findByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent("partial");
+});
+
+it("lands on the installed Game after finishing the real setup wizard", async () => {
+  responses.is_onboarding_complete = { complete: false, skipped: false };
+  responses.list_supported_games = [
+    { code: "gimi", displayName: "Genshin Impact" },
+    { code: "srmi", displayName: "Honkai: Star Rail" },
+  ];
+  responses.detect_all_games = [{ code: "srmi", displayName: "Honkai: Star Rail", detectedPath: "C:/StarRail" }];
+  mutations.get_game_install_path = (args) => args.game === "srmi" ? "C:/StarRail" : null;
+  responses.list_mods = [];
+  responses.list_mod_updates = [];
+  mutations.mark_onboarding_complete = () => { responses.is_onboarding_complete = { complete: true, skipped: false }; };
+  renderApp();
+  await userEvent.click(await screen.findByRole("checkbox", { name: "I've read the AV note" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue →" }));
+  await screen.findByRole("heading", { name: "Find your games" });
+  await userEvent.click(screen.getByRole("button", { name: "Continue →" }));
+  await screen.findByRole("heading", { name: "Where should GMM keep your Library?" });
+  await userEvent.click(screen.getByRole("button", { name: "Continue →" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Install selected" }));
+  await screen.findByText("✓ Done");
+  await userEvent.click(screen.getByRole("button", { name: "Finish →" }));
+  expect(await screen.findByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.queryByRole("tab", { name: "Genshin Impact" })).not.toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Add Mods for Honkai: Star Rail" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Launch Honkai: Star Rail" })).toBeEnabled();
+  expect(invoke).toHaveBeenCalledWith("mark_onboarding_complete", { skipped: false });
+});
+
+it("leads with Add game and setup access when completion has no saved install path", async () => {
+  responses.get_game_install_path = null;
+  renderApp();
+  expect(await screen.findByText("No game install paths set. Add a game to get started.")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Add game" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Run setup again" })).toBeEnabled();
+  expect(screen.queryByRole("heading", { name: "Genshin Impact" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Add Mods for Genshin Impact" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/setup complete/i)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Launch/ })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Add game" }));
+  await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
+  expect(await screen.findByRole("heading", { name: "Genshin Impact install path" })).toBeVisible();
+});
+
+it("keeps Resume setup available after skipping and returns through the same wizard", async () => {
+  responses.is_onboarding_complete = { complete: true, skipped: true };
+  renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Resume setup" }));
+  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+  expect(invoke.mock.calls.some(([command]) => command === "reset_onboarding")).toBe(false);
+  mutations.mark_onboarding_complete = () => { responses.is_onboarding_complete = { complete: true, skipped: true }; };
+  await userEvent.click(screen.getByRole("button", { name: "Skip setup" }));
+  expect(await screen.findByRole("button", { name: "Resume setup" })).toBeEnabled();
+});

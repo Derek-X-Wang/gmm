@@ -8,7 +8,7 @@ a completed folder pick. Each route invokes the same existing backend mutation;
 there is no frontend path validation, trimming, or implicit reset to default.
 The diagnostics log directory stays read-only.
 
-The inventory contains **41 `useMutation` call sites in nine files** and is now
+The inventory contains **41 `useMutation` call sites in 10 files** and is now
 enforced by `mutation-invalidation-boundary.test.ts` under `pnpm test`. The gate
 parses production TypeScript/TSX under `src/`, including new files, and requires
 exactly one row per call site and no stale rows. The original audit traced each
@@ -52,8 +52,8 @@ from the production inventory.
 | App / useLaunchGame | launch | Unchanged: already settles `session` and `interruptedSessionLaunches`. |
 | App / ModUpdatesPanel | check | Changed: settles `modUpdates/game`; a multi-Mod batch can persist earlier upstream versions before rejecting. |
 | App / ModUpdatesPanel | toggleGlobal | Unchanged: one setting write already refreshes `modUpdates/globalEnabled` on success. |
-| App / ModUpdateBadge | apply | Unchanged: already settles `mods/game`, `modUpdates/game`, `variants/modId`, and `conflicts/game`; error remains outside the disappearing badge. |
-| App / ModUpdateBadge | toggle | Unchanged: one Mod setting write already refreshes `modUpdates/game` on success. |
+| ModList / ModUpdateBadge | apply | Unchanged: already settles `mods/game`, `modUpdates/game`, `variants/modId`, and `conflicts/game`; error remains outside the disappearing badge. |
+| ModList / ModUpdateBadge | toggle | Unchanged: one Mod setting write already refreshes `modUpdates/game` on success. |
 | SettingsDestination / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. |
 | SettingsDestination / NetworkPanel | test | Unchanged: connection probe; no persisted query state to refresh. |
 | ImporterPanel | install | Changed helper: already settled, now also refreshes `gamePathStatus/game`, `importerOrigin/game` and all `importer` queries, including latest release; stable install feedback remains on the Game page. |
@@ -67,14 +67,14 @@ from the production inventory.
 | SettingsDestination / GamePathPage | setPath | Changed: settles `gamePathStatus/game`, `installPath/game` and the wizard's cached `onboarding/installPaths` aggregate. Success still updates the manual-path badge. |
 | SettingsDestination / GamePathPage | detect | Changed: same path-state/install-path settlement refresh; successful automatic detection persists a Game path. |
 | SettingsDestination / RebuildJunctions | rebuild | Changed: settles `mods/game`; quarantine Junction withdrawal can record changed recovery state. The rebuild summary still uses mutation data. |
-| App / ModList | toggle | Unchanged: already settles `mods/game` and `conflicts/game`. |
-| App / ModList | retryRecovery | Unchanged: already settles `mods/game` and `conflicts/game`; persistent feedback survives disappearing recovery controls. |
-| App / ModList | retireEnabledTransition | Unchanged: already settles `mods/game` and `conflicts/game`. |
-| App / AdoptButton | adopt | Existing settlement callback retained; parent refresh now also includes `modUpdates/game` alongside `mods/game` and `libraryAudit/game`. Shared import callback. |
-| App / GameBananaImport | ingest | Changed parent callback: settles `modUpdates/game` as well as Mods/audit; fresh cached update rows otherwise omit a newly imported Mod. |
-| App / VariantSelector | switchVariant | Unchanged: transactional active-Variant update already refreshes `variants/modId` and `conflicts/game` on success. Existing refetch guard stays intact. |
-| App / ImportZipButton | importMutation | Existing settlement callback retained; same expanded parent callback as adoption/GameBanana import. |
-| App / ZipDropZone | importMutation | Existing settlement callback retained; same expanded parent callback. |
+| ModList | toggle | Unchanged: already settles `mods/game` and `conflicts/game`. |
+| ModList | retryRecovery | Unchanged: already settles `mods/game` and `conflicts/game`; persistent feedback survives disappearing recovery controls. |
+| ModList | retireEnabledTransition | Unchanged: already settles `mods/game` and `conflicts/game`. |
+| ModList / AdoptButton | adopt | Existing settlement callback retained; parent refresh now also includes `modUpdates/game` alongside `mods/game` and `libraryAudit/game`. Shared import callback. |
+| ModList / GameBananaImport | ingest | Changed parent callback: settles `modUpdates/game` as well as Mods/audit; fresh cached update rows otherwise omit a newly imported Mod. |
+| ModList / VariantSelector | switchVariant | Unchanged: transactional active-Variant update already refreshes `variants/modId` and `conflicts/game` on success. Existing refetch guard stays intact. |
+| ModList / ImportZipButton | importMutation | Existing settlement callback retained; same expanded parent callback as adoption/GameBanana import. |
+| ModList / ZipDropZone | importMutation | Existing settlement callback retained; same expanded parent callback. |
 | ImporterOriginPanel | accept | Changed: settles `gamePathStatus/game`, `importerOrigin/game` and `importer`; proposal installation can leave recovery state after rejection. Error is outside the conditional proposal. |
 | ImporterOriginPanel | decline | Existing success boundary retained; shared helper adds path-state to Origin/importer refresh after atomic dismissal. Its error notice now stays outside the proposal with the install error. |
 | ImporterOriginPanel | undo | Existing success boundary retained; shared helper adds path-state to Origin/importer refresh after atomic dismissal restoration. |
@@ -233,3 +233,14 @@ filesystem fixtures; they do not validate a real user-selected Windows drive.
 No new client validation
 was added; native rejection of a nonexistent Game path remains an existing
 backend limitation, tracked separately in #276.
+
+## Confirmed-empty import landing — #300
+
+`ModList` and its Mod-row and import controls moved into their own module.
+All ten moved mutation sites retain their policies and query keys. Imports
+and adoption use one parent callback for `mods/game`, `libraryAudit/game`, and
+`modUpdates/game` on settlement in both layouts. Controls retain their mounted
+identity when the first Mod changes the landing into the populated toolbar.
+Only a successful empty Mod query shows the import landing; pending and failed
+reads keep explicit loading or error feedback. The inventory now contains
+41 call sites in ten files.

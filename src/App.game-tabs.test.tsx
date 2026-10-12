@@ -290,7 +290,7 @@ it("moves to the remaining installed Game when Settings clears the selected Game
   expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("region", { name: "Genshin Impact header" })).toBeVisible();
   expect(screen.getByRole("region", { name: "Genshin Impact status" })).toBeVisible();
-  expect(await screen.findByRole("heading", { name: /^Mods \(/ })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "Add Mods for Genshin Impact" })).toBeVisible();
 });
 
 it("does not invent a return Game when Settings opens with no configured Games", async () => {
