@@ -83,6 +83,45 @@ it("keeps populated content, the import toolbar and drop zone", async () => {
   expect(container.querySelector(".dropzone")!.compareDocumentPosition(screen.getByText("March Outfit")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
+it("keeps rows, Variants and both recovery warnings visible when the Conflict query fails", async () => {
+  mods = [{
+    ...outfit,
+    reinstall_recovery: {
+      reason: "Original deployment is locked", attemptedAt: "2026-10-07T12:00:00Z", attempts: 1,
+      libraryPath: outfit.library_path, stagedPath: "C:/Library/srmi/.gmm-reinstall-stage",
+      quarantinePath: "C:/Library/srmi/.gmm-delete-old", junctionWithdrawn: true,
+      junctionWithdrawalError: null,
+    },
+    enabled_transition_recovery: {
+      intendedEnabled: true, reason: "Producer identity is unavailable",
+      attemptedAt: "2026-10-07T12:00:00Z", attempts: 1,
+      junctionPath: "C:/Game/Mods/March Outfit", ownerUncertain: true,
+    },
+  }];
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => {
+    if (command === "detect_conflicts") return Promise.reject(new Error("Conflict scan unavailable"));
+    if (command === "list_variants") return Promise.resolve({
+      variants: ["Red", "Blue"].map((name) => ({ id: name, mod_id: outfit.id, name, subpath: name })),
+      activeVariantId: "Red",
+    });
+    return implementation(command, args);
+  });
+  renderMods();
+  const error = await screen.findByText("GMM could not check this game's Mod conflicts.");
+  expect(error.closest('[role="alert"]')).toHaveTextContent("Conflict scan unavailable");
+  expect(error.closest('[role="alert"]')).toHaveTextContent("Conflict information is unavailable; this is not a “no conflicts” result.");
+  expect(screen.getByText("March Outfit")).toBeVisible();
+  expect(await screen.findByRole("radio", { name: "Red" })).toBeChecked();
+  expect(screen.getByRole("radio", { name: "Blue" })).toBeDisabled();
+  const reinstall = screen.getByRole("region", { name: "Interrupted reinstall recovery for March Outfit" });
+  expect(within(reinstall).getByText("Unavailable — interrupted reinstall needs recovery")).toBeVisible();
+  expect(within(reinstall).getByRole("button", { name: "Retry recovery" })).toBeEnabled();
+  const transition = screen.getByRole("region", { name: "Interrupted enable or disable recovery for March Outfit" });
+  expect(within(transition).getByText("Unavailable — deployment recovery is still pending")).toBeVisible();
+  expect(within(transition).getByRole("button", { name: /retire producer/ })).toBeEnabled();
+});
+
 const routes = ["adopt", "zip", "gamebanana", "drop"] as const;
 async function openRoute(entry: typeof routes[number], container: HTMLElement) {
   if (entry === "drop") {
@@ -126,6 +165,7 @@ it.each(["adopt", "zip"] as const)("a cancelled %s picker does not import or ena
   await screen.findByRole("heading", { name: "Add Mods for Honkai: Star Rail" });
   await openRoute(entry, container);
   expect(screen.getByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" })).toBeDisabled();
+  expect(container.querySelector("[data-command-failure-kind]")).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(invoke.mock.calls.some(([command]) => command === "adopt_folder" || command === "import_zip")).toBe(false);
 });

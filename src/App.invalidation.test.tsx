@@ -682,7 +682,12 @@ it("leads with Add game and setup access when completion has no saved install pa
   expect(screen.getByRole("button", { name: "Add game" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "Run setup again" })).toBeEnabled();
   expect(screen.queryByRole("heading", { name: "Genshin Impact" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: "Add Mods for Genshin Impact" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: /^Mods \(/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Adopt folder…" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Import ZIP…" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Paste GameBanana URL…" })).not.toBeInTheDocument();
+  expect(screen.queryByText("Test Outfit")).not.toBeInTheDocument();
+  expect(screen.queryByText("Drop a .zip for Genshin Impact here")).not.toBeInTheDocument();
   expect(screen.queryByText(/setup complete/i)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Launch/ })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Add game" }));
