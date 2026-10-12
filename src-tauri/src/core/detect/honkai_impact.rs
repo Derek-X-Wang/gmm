@@ -207,7 +207,7 @@ pub fn is_honkai_impact_display_name(s: &str) -> bool {
 /// Read Epic install records for this Game. Inject the manifest-store directory
 /// for fixtures; `None` uses the Windows store and returns empty on other OSes.
 pub fn detect_from_epic(manifest_root: Option<&Path>) -> Vec<PathBuf> {
-    super::epic::install_candidates(manifest_root, is_honkai_impact_display_name, validate)
+    super::epic::install_candidates(manifest_root, is_honkai_impact_display_name, validate, None)
 }
 
 /// Production orchestrator: registry → Epic manifests → common paths. Returns the

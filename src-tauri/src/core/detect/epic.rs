@@ -26,10 +26,12 @@ struct InstallManifest {
 /// Read Epic candidates for one Game, accepting only directories its optional
 /// validator recognizes. `manifest_root` overrides the store, not an install
 /// location. Missing/unreadable stores and individual bad records yield nothing.
+/// `playable_suffix` adds one known layout to the existing one-level expansion.
 pub fn install_candidates(
     manifest_root: Option<&Path>,
     matches_game: fn(&str) -> bool,
     validate: fn(&Path) -> bool,
+    playable_suffix: Option<&str>,
 ) -> Vec<PathBuf> {
     let root = manifest_root
         .map(Path::to_path_buf)
@@ -81,6 +83,8 @@ pub fn install_candidates(
         {
             continue;
         }
+        // Keep the recorded launch path compatible with linked installs.
+        // Only the additional suffix probe rejects directory links.
         let executable = install.join(launch);
         #[allow(
             clippy::disallowed_methods,
@@ -96,7 +100,50 @@ pub fn install_candidates(
         }
         candidates.push(install);
     }
-    super::validated_candidates(candidates, validate)
+    expanded_candidates(candidates, validate, playable_suffix)
+}
+
+fn expanded_candidates(
+    candidates: Vec<PathBuf>,
+    validate: fn(&Path) -> bool,
+    playable_suffix: Option<&str>,
+) -> Vec<PathBuf> {
+    // Each manifest checks its launch executable once and yields at most
+    // two roots, with no separate launch-parent directory probes.
+    // Per unique Epic root: one root + at most 256 immediate entries + one
+    // fixed suffix = at most 258 validator calls. The suffix has at most four
+    // components (five no-follow metadata probes including the root). Never
+    // enumerate below the immediate level: raising blind recursion to depth
+    // four would multiply the 256-entry bound at every level.
+    const MAX_PLAYABLE_SUFFIX_DEPTH: usize = 4;
+    let suffix = playable_suffix
+        .map(Path::new)
+        .filter(|path| path.components().count() <= MAX_PLAYABLE_SUFFIX_DEPTH);
+    let mut seen = std::collections::HashSet::new();
+    let mut emitted = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for root in candidates {
+        if !seen.insert(root.clone()) {
+            continue;
+        }
+        let mut playable = super::validated_candidates([root.clone()], validate);
+        // Retain the existing rule that a valid root wins over descendants.
+        if playable.first() != Some(&root) {
+            if let Some(directory) =
+                suffix.and_then(|suffix| super::real_relative_directory(&root, suffix))
+            {
+                if validate(&directory) {
+                    playable.push(directory);
+                }
+            }
+        }
+        out.extend(
+            playable
+                .into_iter()
+                .filter(|path| emitted.insert(path.clone())),
+        );
+    }
+    out
 }
 
 fn read_manifest(path: &Path) -> Option<InstallManifest> {
@@ -130,3 +177,6 @@ fn default_manifest_root() -> Option<PathBuf> {
 fn default_manifest_root() -> Option<PathBuf> {
     None
 }
+
+#[cfg(test)]
+mod tests;
