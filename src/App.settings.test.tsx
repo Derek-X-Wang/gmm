@@ -374,6 +374,7 @@ it("re-renders durable quarantine, launch reservations and audit findings after 
   expect(navigationCommands.filter((command) =>
     !/^(get_|list_)/.test(command) && !navigationReads.has(command),
   )).toEqual([]);
+  await userEvent.click(screen.getByRole("button", { name: /Needs attention.*All Games/ }));
   expect(within(screen.getByRole("region", { name: "Attention across all Games" })).getByText(auditPath)).toBeVisible();
   await openGame();
   expect(screen.getByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent(auditPath);

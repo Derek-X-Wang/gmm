@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { attentionStatus, type AttentionReport } from "./api";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 
@@ -15,33 +15,78 @@ export function AttentionView() {
     refetchOnMount: false,
   });
 
+  const [expanded, setExpanded] = useState(false);
+  const regionId = useId();
+  const indicator = useRef<HTMLButtonElement>(null);
+  const knownSafety = report.data?.safeToProceed === true || report.data?.safeToProceed === false;
+  const previous = report.isFetching || report.isError;
+  const loud = report.isSuccess && !report.isFetching && report.data.safeToProceed === false;
+  const findings = report.data ? findingCount(report.data) : 0;
+  const checkingLabel = report.data ? "Refreshing attention…" : "Checking attention…";
+  const label = report.isFetching ? checkingLabel
+    : report.isError || !knownSafety ? "Attention unavailable"
+    : loud ? "Needs attention" : "No attention needed";
+
+  function collapse() {
+    setExpanded(false);
+    indicator.current?.focus();
+  }
+
   return (
-    <section className="card" aria-label="Attention across all Games" aria-busy={report.isFetching}>
-      <div className="row row--between">
-        <h2>Needs attention</h2>
-        <button onClick={() => void report.refetch()} disabled={report.isFetching}>
+    <section className="attention-indicator" aria-label="Attention across all Games" aria-busy={report.isFetching}>
+      <div className="attention-indicator__controls">
+        <button ref={indicator} className={`attention-indicator__toggle${loud ? " attention-indicator__toggle--loud" : ""}`}
+          aria-expanded={expanded} aria-controls={regionId}
+          onClick={() => expanded ? collapse() : setExpanded(true)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && expanded) { event.stopPropagation(); collapse(); }
+          }}>
+          {loud ? <span role="img" aria-label="Warning">⚠</span> : null}
+          <span>{label}</span>
+          <span className="attention-indicator__scope">All Games{!previous && knownSafety ? ` · ${findings} ${findings === 1 ? "finding" : "findings"}` : ""}</span>
+        </button>
+        <button className="attention-indicator__refresh" onClick={() => void report.refetch()} disabled={report.isFetching}>
           Refresh attention
         </button>
       </div>
-      <p className="muted small">All Games. Refresh after making changes to check again.</p>
-      {report.isFetching ? <p role="status">Checking attention…</p> : null}
+      {report.isFetching ? <span role="status" className="muted small">{checkingLabel}</span> : null}
       {report.isError ? (
         <CommandErrorNotice error={report.error} heading="Could not check attention"
           detail="Attention status is unavailable. Refresh to try again." />
-      ) : !report.isFetching && report.data?.safeToProceed ? (
-        <p role="status">Nothing needs attention in this report.</p>
-      ) : !report.isFetching && report.data ? (
-        <OutstandingAttention report={report.data} />
       ) : null}
-      {!report.isFetching && !report.isError && report.data ? (
-        <p className="muted small">
-          Checked at <time dateTime={new Date(report.dataUpdatedAt).toISOString()}>
-            {new Date(report.dataUpdatedAt).toLocaleTimeString()}
-          </time>. This is a snapshot; each action checks its own availability.
-        </p>
+      {report.isSuccess && !report.isFetching && !knownSafety ? (
+        <p role="status">Attention status is unavailable. Refresh to try again.</p>
       ) : null}
+      <div id={regionId} role="region" aria-label="All-Games attention report" hidden={!expanded}
+        className="attention-indicator__report" onKeyDown={(event) => {
+          if (event.key === "Escape") { event.stopPropagation(); collapse(); }
+        }}>
+        {expanded ? <>
+          <h2>Attention across all Games</h2>
+          <p className="muted small">All Games. Refresh after making changes to check again.</p>
+          {report.data ? <>
+            <p className="muted small">
+              {previous ? "Previous snapshot. Checked at " : "Checked at "}<time dateTime={new Date(report.dataUpdatedAt).toISOString()}>
+                {new Date(report.dataUpdatedAt).toLocaleString()}
+              </time>. This is a snapshot; each action checks its own availability.
+            </p>
+            {report.data.safeToProceed === true ? (
+              <p role="status">{previous ? "The previous report found nothing needing attention." : "Nothing needs attention in this report."}</p>
+            ) : null}
+            <OutstandingAttention report={report.data} />
+          </> : null}
+          <button onClick={collapse}>Collapse attention report</button>
+        </> : null}
+      </div>
     </section>
   );
+}
+
+function findingCount(report: AttentionReport): number {
+  return report.reinstalls.length + report.enabledTransitions.length + report.importerEvacuations.length
+    + report.stagedLibraryOperations.length + report.sessionLaunches.length + (report.activeSession ? 1 : 0)
+    + report.libraryAudits.reduce((count, audit) => count + audit.unreferenced.length + audit.duplicates.length, 0)
+    + report.libraryRootOverlaps.length + report.modPathOverlaps.length;
 }
 
 function AttentionGroup({ title, guidance, items }: {

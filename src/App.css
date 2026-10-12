@@ -608,3 +608,24 @@ code {
   overflow-wrap: anywhere;
   flex: 1 1 260px;
 }
+
+/* Compact all-Games attention indicator; expansion alone exposes the report. */
+.attention-indicator { display: grid; gap: 0.5rem; min-width: 0; }
+.attention-indicator__controls { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+.attention-indicator__toggle,
+.attention-indicator__refresh {
+  background: transparent;
+  color: inherit;
+  border: 1px solid #71717a;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.85rem;
+}
+.attention-indicator__toggle { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.attention-indicator__scope { color: #a1a1aa; font-size: 0.75rem; }
+.attention-indicator__toggle--loud { border-color: #fbbf24; color: #fbbf24; }
+.attention-indicator__report { border: 1px solid #71717a; border-radius: 8px; padding: 0.75rem; }
+.attention-indicator__report h2 { margin: 0; font-size: 1rem; }
+@media (prefers-color-scheme: light) {
+  .attention-indicator__scope { color: #52525b; }
+  .attention-indicator__toggle--loud { border-color: #92400e; color: #92400e; }
+}
