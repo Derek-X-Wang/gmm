@@ -91,6 +91,7 @@ async fn diagnostics_command_exports_with_unparseable_stored_skips() {
         app.manage(core);
         let bundle = temp.path().join("diagnostics.zip");
         gmm_lib::commands::export_diagnostics_bundle(
+            app.handle().clone(),
             app.state(),
             temp.path().join("logs"),
             bundle.clone(),
@@ -122,6 +123,7 @@ async fn diagnostics_command_writes_the_supplied_updater_error() {
     app.manage(core);
     let bundle = temp.path().join("diagnostics.zip");
     gmm_lib::commands::export_diagnostics_bundle(
+        app.handle().clone(),
         app.state(),
         temp.path().join("logs"),
         bundle.clone(),
@@ -209,6 +211,7 @@ async fn diagnostics_only_claims_skips_the_frontend_honours_and_never_repairs_st
         app.manage(core);
         let bundle = temp.path().join("diagnostics.zip");
         gmm_lib::commands::export_diagnostics_bundle(
+            app.handle().clone(),
             app.state(),
             temp.path().join("logs"),
             bundle.clone(),

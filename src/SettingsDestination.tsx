@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  detectGameInstallPath, getGameInstallPath, getGamePathStatus, getProxyConfig,
+  detectGameInstallPath, getAppVersion, getGameInstallPath, getGamePathStatus, getProxyConfig,
   rebuildJunctions, setGameInstallPath, setProxyConfig, testProxyConnection,
   type GameCode, type GameCode as ApiGameCode, type GamePathStatus, type GameSummary,
 } from "./api";
@@ -95,6 +95,7 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
             ))}
             {pages.has("gmm") ? <div hidden={page !== "gmm"}>
               <h2>GMM settings</h2>
+              <ApplicationVersion />
               <GlobalLibraryRootEditor games={games} onGamePage={onPageChange} />
               <NetworkPanel />
               <UpdatesPanel />
@@ -106,6 +107,15 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
       </main>
     </div>
   );
+}
+
+function ApplicationVersion() {
+  const version = useQuery({ queryKey: ["appVersion"], queryFn: getAppVersion, staleTime: Infinity });
+  return <div aria-label="GMM version">
+    {version.isPending ? <p role="status">Reading GMM version…</p> : null}
+    {version.data ? <p>Version {version.data}</p> : null}
+    <CommandErrorNotice error={version.error} />
+  </div>;
 }
 
 export function gamePathLine(status: GamePathStatus): string {

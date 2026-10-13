@@ -3854,6 +3854,7 @@ impl Core {
         };
 
         Ok(diagnostics::SettingsSnapshot {
+            app_version: None,
             library_root: Some(library_root),
             library_root_overlaps_importer_backups,
             game_install_paths,

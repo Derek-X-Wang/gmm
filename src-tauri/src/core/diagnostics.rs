@@ -176,6 +176,9 @@ pub enum UpdaterSkipStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct SettingsSnapshot {
+    /// Running binary version, populated from Tauri package info at export.
+    #[serde(default)]
+    pub app_version: Option<String>,
     /// Library root (file paths are not considered secret).
     pub library_root: Option<PathBuf>,
     /// Whether the persisted Library root overlaps GMM's importer backup tree.
@@ -205,6 +208,7 @@ impl SettingsSnapshot {
             .as_ref()
             .map(|raw| redact_proxy_userinfo(raw));
         Self {
+            app_version: self.app_version.clone(),
             library_root: self.library_root.clone(),
             library_root_overlaps_importer_backups: self.library_root_overlaps_importer_backups,
             game_install_paths: self.game_install_paths.clone(),
