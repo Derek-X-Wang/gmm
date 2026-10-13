@@ -150,19 +150,19 @@ the Settings presentation to reclaim it.
 
 ### Open shell decisions
 
-The maintainer has **not** decided the following. They are recorded here so
+The maintainer has **not** decided the remaining open items below. They are recorded here so
 that no ticket treats them as settled. Items marked *needed for coherence* were
 not raised as open in #326, but this document cannot specify them without a
-decision.
+decision. Resolved items are retained here as **DECIDED**.
 
-| Open item | What is known | Source |
+| Item | What is known | Source |
 | --- | --- | --- |
 | Window default size, minimum size, and remembered size and position | The window is configured at 800x600, with no minimum and no remembered size or position. | #326 |
 | Keyboard access and accelerators | Menu accelerators, standard Windows shortcuts, and keyboard-only paths to each surface. The existing Escape return from Settings is preserved (arrival contract below); nothing else is decided. | #326 |
 | Per-flow evidence from the Windows playbook | #326 carries a read-only evidence playbook for a Windows session. Its results inform the two items above. | #326 |
 | Menu structure | Which menus exist, their names and order, and whether **Check for updates**, Diagnostics, or Quit appear as menu items in addition to their current homes. Only the move of Settings and **Run setup again** is decided. | Raised in #326, not settled |
 | Dialog size and behavior in a small window | Whether the dialog is resizable, how large it is relative to the window, and how it fits at the minimum window size. Depends on window sizing. | *needed for coherence* |
-| Status bar presentation of long content | The bar must carry every fact in the per-Game payload, including the list of **Missing Game entries:**. How a list that exceeds one line is shown is not decided. No fact may be dropped silently. | #324, *needed for coherence* |
+| Status bar presentation of long content — **DECIDED** | For missing required Game entries, the bar shows a warning sign and **Missing Game entries**, without the missing paths. The requirement to carry the list in the bar is withdrawn. No fact disappears without a route to it: the bar's Settings link opens that Game's page, where the missing paths remain visible. | #348 |
 | Mod inspector and the main-screen no-sidebar rule | #327 adds a docked panel beside the Mod list. This document says the main screen has no sidebar or dock (#282, #283). #327 must reconcile the two when it is specified. | #327, *needed for coherence* |
 
 A visual pass (how the application looks, as opposed to how native it feels)
@@ -237,7 +237,9 @@ A saved Game directory confirmed missing has its own wording: **Game: Saved
 installation cannot be found**, identifying the missing directory and retaining
 the saved path and Settings link. An existing saved directory with missing
 required Game entries instead says **Game: Required Game files or directories
-not found** and lists **Missing Game entries:** with the missing paths (#324).
+not found**, with a warning sign and **Missing Game entries**. The bar does not
+list the missing paths; its Settings link opens that Game's page, where the
+paths remain visible (#348, refining #324).
 Both report Model Importer state as unverified. Do not reuse “no saved path” or
 “Model Importer not installed.”
 All status-bar states follow the filesystem and path-state contract below; only
