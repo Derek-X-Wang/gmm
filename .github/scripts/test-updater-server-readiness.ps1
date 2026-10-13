@@ -3,6 +3,43 @@ Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot "updater-server-readiness.ps1")
 
+function Get-TimeoutBudgetWrite {
+    param(
+        [System.Management.Automation.Language.Ast]$Ast,
+        [string]$VariableName
+    )
+
+    $Ast.FindAll({
+        param($node)
+        if ($node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
+            # Typed targets wrap the variable; scope qualifiers must not hide it.
+            return $null -ne $node.Left.Find({
+                param($target)
+                # VariablePath.UnqualifiedPath is internal to PowerShell; strip
+                # the scope from its public UserPath to compare the same name.
+                $target -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $target.VariablePath.IsVariable -and
+                    ($target.VariablePath.UserPath -replace "^[^:]+:", "") -eq $VariableName
+            }, $true)
+        }
+        if ($node -is [System.Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq "Set-Variable") {
+            # Bind without executing: positional names, -Name, and -Name: all
+            # work even when another parameter (for example -Scope) comes first.
+            $binding = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($node)
+            if (-not $binding.BoundParameters.ContainsKey("Name")) { return $false }
+            $name = $binding.BoundParameters["Name"].Value
+            return $name -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                ($name.Value -split ":")[-1] -eq $VariableName
+        }
+        return $false
+    }, $true)
+}
+
+# This guards ordinary budget edits, not arbitrary program semantics. Known
+# limits: an early in-loop elapsed-time break, aliases, & $cmd, concatenated
+# command names, Invoke-Expression, and computed Set-Variable names.
+
 # Observing both old ceilings expire would cost at least 13s + 15s before
 # other tests run. Check the shipped defaults structurally to keep this suite
 # under 30s; exercise the real polling and expiry behavior separately below.
@@ -40,14 +77,11 @@ foreach ($functionName in @("Wait-ForUpdateServerBind", "Wait-ForUpdateServer"))
         $condition.Right.VariablePath.UserPath -ne "TimeoutSeconds") {
         throw "$functionName polling loop must compare elapsed time directly against the unclamped TimeoutSeconds budget"
     }
-    $timeoutAssignments = @($body.FindAll({
-        param($node)
-        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-            $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-            $node.Left.VariablePath.UserPath -eq "TimeoutSeconds"
-    }, $true))
-    if ($timeoutAssignments.Count -ne 0) {
-        throw "$functionName must not reassign the TimeoutSeconds budget"
+    $timeoutWrites = @(Get-TimeoutBudgetWrite -Ast $body -VariableName "TimeoutSeconds")
+    if ($timeoutWrites.Count -ne 0) {
+        $write = $timeoutWrites[0]
+        $site = "updater-server-readiness.ps1:$($write.Extent.StartLineNumber):$($write.Extent.StartColumnNumber)"
+        throw "$site $functionName must not reassign the TimeoutSeconds budget"
     }
 }
 
@@ -61,19 +95,44 @@ $updaterAst = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($parseErrors.Count -ne 0) {
     throw "updater-e2e.ps1 could not be parsed"
 }
-$startupAssignments = @($updaterAst.FindAll({
-    param($node)
-    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
-        $node.Left.VariablePath.UserPath -eq "ServerStartupTimeoutSeconds"
-}, $true))
-if ($startupAssignments.Count -ne 1 -or $startupAssignments[0].Right.Expression.SafeGetValue() -ne 120) {
+$startupWrites = @(Get-TimeoutBudgetWrite -Ast $updaterAst -VariableName "ServerStartupTimeoutSeconds")
+if ($startupWrites.Count -ne 1) {
+    $write = if ($startupWrites.Count -gt 1) { $startupWrites[1] }
+    $site = if ($null -ne $write) {
+        "updater-e2e.ps1:$($write.Extent.StartLineNumber):$($write.Extent.StartColumnNumber)"
+    } else { "updater-e2e.ps1" }
+    throw "$site must declare ServerStartupTimeoutSeconds once and never reassign its budget"
+}
+if ($startupWrites[0] -isnot [System.Management.Automation.Language.AssignmentStatementAst] -or
+    $startupWrites[0].Right.Expression.SafeGetValue() -ne 120) {
     throw "updater-e2e.ps1 must pass a 120s server startup ceiling"
+}
+# Guard calls only when the function declares TimeoutSeconds: use metadata for
+# imported helpers and AST parameters for functions in the unexecuted CI script.
+# A future Wait-ForUpdateServer* function with no such parameter is unrelated.
+$budgetFunctionNames = @(Get-Command "Wait-ForUpdateServer*" -CommandType Function | Where-Object {
+    $_.Parameters.ContainsKey("TimeoutSeconds")
+} | Select-Object -ExpandProperty Name)
+$localFunctions = @($updaterAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -like "Wait-ForUpdateServer*"
+}, $true))
+foreach ($function in $localFunctions) {
+    $parameters = @($function.Parameters | Where-Object { $null -ne $_ })
+    if ($null -ne $function.Body.ParamBlock) {
+        $parameters += $function.Body.ParamBlock.Parameters
+    }
+    # Local declarations take precedence over imported functions of the same name.
+    $budgetFunctionNames = @($budgetFunctionNames | Where-Object { $_ -ne $function.Name })
+    if (@($parameters | Where-Object { $_.Name.VariablePath.UserPath -eq "TimeoutSeconds" }).Count -gt 0) {
+        $budgetFunctionNames += $function.Name
+    }
 }
 $readinessCalls = @($updaterAst.FindAll({
     param($node)
     $node -is [System.Management.Automation.Language.CommandAst] -and
-        $node.GetCommandName() -like "Wait-ForUpdateServer*"
+        $node.GetCommandName() -in $budgetFunctionNames
 }, $true))
 if ($readinessCalls.Count -eq 0) {
     throw "updater-e2e.ps1 must contain server readiness calls"
