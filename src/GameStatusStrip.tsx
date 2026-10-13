@@ -1,13 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
+import type { ReactNode } from "react";
 import { checkImporterUpdate, getGamePathStatus, type GameCode, type GamePathStatus } from "./api";
 import { commandFailureMessage } from "./commandError";
 
-function pathSummary(value: GamePathStatus): { line: string; detail?: string } {
+function pathSummary(value: GamePathStatus): { line: string; detail?: ReactNode } {
   const path = value.gamePath;
   switch (path.status) {
     case "unreadable": return { line: "Cannot tell — install path unreadable · Model Importer unverified", detail: `${path.path}: ${path.error}` };
     case "savedPathNotFound": return { line: "Saved installation cannot be found · Model Importer unverified", detail: path.paths.join(", ") };
-    case "requiredEntriesNotFound": return { line: "Required Game files or directories not found · Model Importer unverified", detail: `Missing Game entries: ${path.paths.join(", ")}` };
+    case "requiredEntriesNotFound": return { line: "Required Game files or directories not found · Model Importer unverified", detail: <><span role="img" aria-label="Warning">⚠</span> Missing Game entries</> };
     case "invalid": return { line: "Cannot verify Game layout · Model Importer unverified", detail: path.error };
     case "noSavedPath": return { line: "No saved install path · Model Importer unverified" };
     case "readable":

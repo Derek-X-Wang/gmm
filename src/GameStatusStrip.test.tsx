@@ -113,10 +113,17 @@ it.each([
   expect(strip).not.toHaveTextContent(other);
   expect(strip).toHaveTextContent("Game and Model Importer (SRMI)");
   expect(strip).toHaveTextContent(`Saved Game path: ${savedPath}`);
-  for (const missing of paths) expect(strip).toHaveTextContent(missing);
-  // The detail is a separate text node; the saved-path code cannot satisfy this.
-  expect(within(strip).getByText(state === "savedPathNotFound" ? paths.join(", ") : `Missing Game entries: ${paths.join(", ")}`, { selector: "span" })).toBeVisible();
-  if (state === "requiredEntriesNotFound") expect(strip).toHaveTextContent(`Missing Game entries: ${paths.join(", ")}`);
+  if (state === "requiredEntriesNotFound") {
+    for (const missing of paths) expect(strip).not.toHaveTextContent(missing);
+    expect(within(strip).getByRole("img", { name: "Warning" })).toBeVisible();
+    expect(within(strip).getByRole("img", { name: "Warning" })).toHaveTextContent(/^⚠$/);
+    expect(within(strip).getByText("Missing Game entries", { exact: true })).toBeVisible();
+  } else {
+    // The detail is a separate text node; the saved-path code cannot satisfy this.
+    expect(within(strip).getByText(paths.join(", "), { selector: "span", exact: true })).toBeVisible();
+    expect(within(strip).getByText(savedPath, { selector: "code", exact: true })).toBeVisible();
+    expect(within(strip).queryByRole("img", { name: "Warning" })).not.toBeInTheDocument();
+  }
   expect(strip).not.toHaveTextContent(/not installed|healthy|Installed version:|Pinned|Unhealthy/);
   expect(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" })).toBeVisible();
 });
