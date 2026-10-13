@@ -1,3 +1,6 @@
+// @ts-expect-error Node types are not part of the frontend; Vitest provides this test-only runtime.
+import { readFileSync } from "node:fs";
+
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -469,7 +472,7 @@ it("keeps unrelated Game controls available when the aggregate needs attention",
 });
 
 
-it("renders the approved seven main-screen slots in order with scoped notices and no configuration", async () => {
+it("renders the approved six main-screen slots in order with scoped notices and no configuration", async () => {
   startupFailures = [{ game: "gimi", kind: "invalidActiveVariant", error: variantError }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (command, args) => {
@@ -485,17 +488,23 @@ it("renders the approved seven main-screen slots in order with scoped notices an
   const header = screen.getByRole("region", { name: "Genshin Impact header" });
   const global = screen.getByRole("region", { name: "Global status" });
   const notices = screen.getByRole("region", { name: "Game and operation notices" });
-  // Seven since #351: the window bar is gone — its wordmark duplicated the OS
-  // title bar and both its actions are native menu items now.
+  // Six since #352: the window bar went in #351 — its wordmark duplicated the
+  // OS title bar and both its actions are native menu items — and the
+  // per-Game status is no longer a slot in the page at all. It is window
+  // chrome now, pinned to the bottom in the `contentinfo` bar below.
   expect(Array.from(main.children)).toEqual([
     header,
     global,
     screen.getByRole("tablist", { name: "Game" }).parentElement!.parentElement,
-    screen.getByRole("region", { name: "Genshin Impact status" }),
     notices,
     screen.getByRole("heading", { name: "Add Mods for Genshin Impact" }).closest("section"),
     screen.getByRole("heading", { name: "Mod updates" }).closest("section"),
   ]);
+  const statusBar = screen.getByRole("contentinfo");
+  const status = screen.getByRole("region", { name: "Genshin Impact status" });
+  expect(main).not.toContainElement(status);
+  expect(statusBar).toContainElement(status);
+  expect(main.nextElementSibling).toBe(statusBar);
   expect(within(header).getByRole("heading", { level: 1 })).toHaveTextContent("Genshin Impact");
   expect(within(header).getByRole("button", { name: "Game running…" })).toBeDisabled();
   expect(within(global).getByRole("region", { name: "Attention across all Games" })).toBeVisible();
@@ -525,4 +534,164 @@ it("renders the approved seven main-screen slots in order with scoped notices an
   }
   await userEvent.click(within(notices).getByRole("button", { name: "Review Genshin Impact recovery in Settings" }));
   expect(await screen.findByRole("button", { name: "Retry Model Importer recovery" })).toBeVisible();
+});
+
+// The status bar (#352). jsdom computes no layout: `getBoundingClientRect`
+// returns zeros and `position: fixed` is not implemented, so nothing below
+// proves the rendered geometry. What these tests do prove is everything
+// decidable without a layout engine — where the bar sits in the document,
+// what it is allowed to contain, and that the pinning declarations reach it
+// from the authored stylesheet. The rendered result at 1100x760 and at the
+// 900x600 minimum (#351) is a Windows check, named in the PR.
+
+/** Run `body` with the authored stylesheet in the document. */
+async function withAppCss(body: () => Promise<void>): Promise<void> {
+  const style = document.createElement("style");
+  style.textContent = readFileSync("src/App.css", "utf8");
+  document.head.appendChild(style);
+  try {
+    await body();
+  } finally {
+    style.remove();
+  }
+}
+
+it("pins the per-Game status to the bottom of the window instead of the page flow", async () => {
+  await withAppCss(async () => {
+    renderWithQuery(<App />);
+    const bar = await screen.findByRole("contentinfo");
+    const main = screen.getByRole("main");
+
+    // Outside `<main>`, after it, and holding the strip: a band left at the
+    // end of the page flow fails here before any style is consulted.
+    expect(bar.tagName).toBe("FOOTER");
+    expect(main.nextElementSibling).toBe(bar);
+    expect(bar).toContainElement(screen.getByRole("region", { name: "Genshin Impact status" }));
+
+    const pinned = getComputedStyle(bar);
+    expect(
+      [pinned.position, pinned.bottom, pinned.left, pinned.right],
+      "the bar is fixed to the viewport, not laid out in the page",
+    ).toEqual(["fixed", "0px", "0px", "0px"]);
+    // Fixed over scrolling content, so the surface has to be opaque: a
+    // transparent bar renders the Mod list through its own text.
+    expect(pinned.backgroundColor).toMatch(/^rgb\([^)]*\)$/);
+    expect(pinned.borderTopWidth).not.toBe("0px");
+
+    // `.app` is a centred 880px column, so the bar cannot live inside it and
+    // still span the window — hence the sibling placement above.
+    expect(getComputedStyle(main).maxWidth).toBe("880px");
+
+    // The clearance invariant: `.app`'s bottom padding must be at least as
+    // tall as the bar can grow, or the last card ends up underneath it.
+    const tallest = parseFloat(pinned.maxHeight);
+    expect(tallest).toBeGreaterThan(0);
+    expect(
+      parseFloat(getComputedStyle(main).paddingBottom),
+      "`.app`'s bottom padding is the fixed bar's scroll clearance",
+    ).toBeGreaterThanOrEqual(tallest);
+  });
+});
+
+it("keeps the status bar's only control the Settings link", async () => {
+  renderWithQuery(<App />);
+  const bar = await screen.findByRole("contentinfo");
+  await within(bar).findByText("Game: Game readable · Model Importer healthy");
+
+  // The specification forbids a path editor, Install/Update, rollback,
+  // Importer Pin control, Origin editor and Library mutation control here.
+  // Enumerating every interactive descendant catches all of them, and any
+  // control nobody has thought of yet, instead of naming them one by one.
+  const interactive = Array.from(bar.querySelectorAll([
+    "a", "button", "input", "select", "textarea", "summary", "label",
+    "[role=button]", "[role=link]", "[role=checkbox]", "[role=switch]",
+    "[role=menuitem]", "[role=tab]", "[tabindex]", "[contenteditable]",
+  ].join(", ")));
+  expect(interactive.map((element) => [element.tagName, element.textContent])).toEqual([
+    ["BUTTON", "Settings for Genshin Impact"],
+  ]);
+  // Load-bearing for focus return: the arrival marker is what the return
+  // chain resolves after the Settings dialog closes.
+  expect(interactive[0]).toHaveAttribute("data-settings-arrival", "game");
+});
+
+it("announces the status bar once, through the strip's own live region", async () => {
+  renderWithQuery(<App />);
+  const bar = await screen.findByRole("contentinfo");
+  await within(bar).findByText("Game: Game readable · Model Importer healthy");
+
+  // The landmark is the `<footer>` itself; the strip's summary is the single
+  // live region. A live region on the bar as well would announce every status
+  // change twice.
+  expect(bar).not.toHaveAttribute("aria-live");
+  expect(bar).not.toHaveAttribute("aria-atomic");
+  const live = Array.from(bar.querySelectorAll("[aria-live], [role=status], [role=alert], [role=log]"));
+  expect(live.map((element) => element.getAttribute("role"))).toEqual(["status"]);
+  expect(within(bar).getByRole("status")).toHaveTextContent("Game and Model Importer (GIMI)");
+});
+
+it("keeps #348's warning sign and wording for missing Game entries in the bar", async () => {
+  const missing = ["C:/Game/GenshinImpact.exe", "C:/Game/GenshinImpact_Data"];
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_path_status") return {
+      game: "gimi",
+      savedPath: "C:/Game",
+      gamePath: { status: "requiredEntriesNotFound", paths: missing },
+      modelImporter: { status: "unverified", path: null, error: "Game layout unverified" },
+    };
+    return implementation(command, args);
+  });
+  renderWithQuery(<App />);
+  const bar = await screen.findByRole("contentinfo");
+
+  expect(await within(bar).findByText(
+    "Game: Required Game files or directories not found · Model Importer unverified",
+  )).toBeVisible();
+  // Exact sign and exact words, so a different glyph, a different label or
+  // different wording fails rather than only an absent one.
+  expect(within(bar).getByRole("img", { name: "Warning" })).toHaveTextContent(/^⚠$/);
+  expect(within(bar).getByText("Missing Game entries", { exact: true })).toBeVisible();
+  for (const path of missing) expect(bar).not.toHaveTextContent(path);
+
+  // No fact disappears without a route to it: the bar's link opens that
+  // Game's Settings page, where the missing paths remain.
+  await userEvent.click(within(bar).getByRole("button", { name: "Settings for Genshin Impact" }));
+  expect(await screen.findByRole("textbox", { name: "Genshin Impact install path" })).toBeVisible();
+});
+
+it("gives the status bar an opaque surface in light mode as well as dark", () => {
+  // jsdom does not evaluate `prefers-color-scheme`, so the light block is
+  // unreachable through `getComputedStyle` on the real bar. Read the authored
+  // rules that match it instead, the way `AttentionView.test.tsx` does.
+  const authored: string = readFileSync("src/App.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const bar = document.createElement("footer");
+  bar.className = "status-bar";
+  // An unclassed `<footer>` excludes the rules that reach every element, such
+  // as the `*` box-sizing rule, leaving the bar's own two.
+  const other = document.createElement("footer");
+  const rules = [...authored.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selectors]) => selectors.split(",").some((raw) => {
+      const selector = raw.trim();
+      return bar.matches(selector) && !other.matches(selector);
+    }));
+  expect(rules, "the bar needs a dark rule and a prefers-color-scheme: light rule").toHaveLength(2);
+
+  for (const [, , declarations] of rules) {
+    const probe = document.createElement("footer");
+    probe.setAttribute("style", declarations);
+    document.body.appendChild(probe);
+    try {
+      expect(
+        getComputedStyle(probe).backgroundColor,
+        "a fixed bar with a see-through surface renders the page through its text",
+      ).toMatch(/^rgb\([^)]*\)$/);
+    } finally {
+      probe.remove();
+    }
+  }
+  // The light rule has to state the text colour too. The bar inherits no
+  // light-mode treatment: the only other light-mode surface is
+  // `.settings-screen`, which the bar is never inside.
+  expect(rules[1][2]).toMatch(/(^|;)\s*color\s*:/);
 });

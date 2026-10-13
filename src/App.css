@@ -16,7 +16,11 @@ body {
 .app {
   max-width: 880px;
   margin: 0 auto;
-  padding: 2rem 1.5rem 4rem;
+  /* The bottom padding is the status bar's scroll clearance, not decoration:
+   * the bar is fixed to the viewport, so without it the last card would sit
+   * under the bar at the end of the page. It must stay at or above
+   * `.status-bar`'s `max-height`; `App.test.tsx` holds that invariant. */
+  padding: 2rem 1.5rem 8rem;
   display: grid;
   gap: 1.5rem;
 }
@@ -573,14 +577,61 @@ code {
   display: none;
 }
 
+/* Status bar: the per-Game status is pinned to the bottom of the window, not
+ * laid out as a band in the page (#326, #352).
+ *
+ * Fixed to the viewport rather than a height chain on a wrapper above `.app`.
+ * Both satisfy the ticket, but the height-chain form has to move the scrolling
+ * element from the window into `.app`, and the main screen's Settings return
+ * reads `window.scrollY` and calls `window.scrollTo` to restore the scroll
+ * position and the anchored Mod row (App.tsx). Those seams are mocked in the
+ * tests, so moving the scroller would keep every existing guard green while
+ * breaking scroll restoration on Windows. Fixed positioning leaves the window
+ * as the scroller and touches no behaviour outside this file.
+ *
+ * `.app` is `max-width: 880px; margin: 0 auto`, so a bar inside it would be
+ * 880px wide and centred; this one is a sibling of `<main>` and spans the
+ * window. Its inline padding re-centres the content on `.app`'s 880px column
+ * so the two line up, while the surface itself still reaches both edges.
+ *
+ * `max-height` with its own scroll keeps the bar from growing over the page
+ * when a long status wraps at the 900px minimum window width (#351); `.app`'s
+ * bottom padding is sized at or above it as the clearance. */
+.status-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  max-height: 7rem;
+  overflow-y: auto;
+  padding-block: 0.65rem;
+  padding-inline: calc(max(0px, (100% - 880px) / 2) + 1.5rem);
+  background: #18181b;
+  border-top: 1px solid #2e2e36;
+}
+
+@media (prefers-color-scheme: light) {
+  /* The bar still needs an opaque surface here: it is fixed over scrolling
+   * content, so anything transparent renders the page through its text. It
+   * keeps the dark surface rather than borrowing `.settings-screen`'s light
+   * palette because `:root` sets `background: #18181b` in both schemes, so
+   * the main screen this bar borders is dark under a light OS theme too. A
+   * light bar would be a light band across a dark page. If the main screen
+   * ever gains a light theme, this block is where the bar follows it. */
+  .status-bar {
+    background: #18181b;
+    color: #e5e5e5;
+    border-top-color: #2e2e36;
+  }
+}
+
 .game-status-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
-  border-block: 1px solid #2e2e36;
-  padding-block: 0.65rem;
   font-size: 0.85rem;
 }
 

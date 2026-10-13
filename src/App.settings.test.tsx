@@ -905,3 +905,41 @@ it("leaves focus on the Settings navigation control the user clicked", async () 
   expect(pageButton("GMM settings")).toHaveFocus();
   expect(screen.getByRole("heading", { name: "Settings", level: 1 })).not.toHaveFocus();
 });
+
+// The per-Game Settings link moved into the bottom status bar in #352, so it
+// is no longer inside `<main>`. The return chain resolves
+// `[data-settings-arrival="..."]` across the whole document and then falls
+// back to the selected Game tab, Add game, and the main region, so none of
+// these answers may change because the link moved.
+it.each([
+  ["game", "button"], ["game", "escape"],
+  ["global", "button"], ["global", "escape"],
+  ["add", "button"], ["add", "escape"],
+])("returns focus to the %s arrival control on %s return", async (arrival, route) => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+
+  if (arrival === "game") await openGame();
+  else if (arrival === "global") await openGlobal();
+  else {
+    await userEvent.click(screen.getByRole("button", { name: "Add game" }));
+    await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
+  }
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+
+  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  else fireEvent.keyDown(window, { key: "Escape" });
+
+  const expected = arrival === "game"
+    ? screen.getByRole("button", { name: "Settings for Honkai: Star Rail" })
+    : arrival === "add"
+      ? screen.getByRole("button", { name: "Add game" })
+      : screen.getByRole("tab", { name: "Honkai: Star Rail" });
+  expect(expected).toHaveFocus();
+  expect(document.body).not.toHaveFocus();
+  // Specifically for the moved control: it is reached from outside `<main>`.
+  if (arrival === "game") {
+    expect(screen.getByRole("main")).not.toContainElement(expected);
+    expect(screen.getByRole("contentinfo")).toContainElement(expected);
+  }
+});

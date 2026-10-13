@@ -292,14 +292,6 @@ function MainApp({
             onChange={setActiveGame}
             onAddGame={(game) => openSettings(game, "add")}
           />
-          {hasActiveGame ? <GameStatusStrip
-            game={activeGame}
-            displayName={active.displayName}
-            savedPath={activePath.data ?? null}
-            pathReadError={activePath.error}
-            pathReadPending={activePath.isFetching}
-            onSettings={() => openSettings(activeGame)}
-          /> : null}
           <div className="main-screen__notices" role="region" aria-label="Game and operation notices">
             {skipped ? (
               <section className="card finish-setup-banner" role="status">
@@ -330,6 +322,27 @@ function MainApp({
             <ModUpdatesPanel game={activeGame} />
           </> : null}
         </main>
+      ) : null}
+      {/*
+        The per-Game status is window chrome, not a slot in the page, so it is
+        a sibling of `<main>` rather than one of its children, pinned to the
+        bottom of the window by `.status-bar` in App.css (#326, #352).
+        `<footer>` is a direct child of the render root here, so it carries
+        the `contentinfo` landmark on its own; wrapping it in sectioning
+        content would silently drop that. Its only control stays the strip's
+        Settings link — the bar is not a second home for actions (#285, #326).
+      */}
+      {settingsPage === null && hasActiveGame ? (
+        <footer className="status-bar">
+          <GameStatusStrip
+            game={activeGame}
+            displayName={active.displayName}
+            savedPath={activePath.data ?? null}
+            pathReadError={activePath.error}
+            pathReadPending={activePath.isFetching}
+            onSettings={() => openSettings(activeGame)}
+          />
+        </footer>
       ) : null}
     </>
   );
