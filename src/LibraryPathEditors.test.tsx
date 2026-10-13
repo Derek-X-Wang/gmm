@@ -86,7 +86,7 @@ it("puts only the global editor on GMM and only the named override on each Game,
   await userEvent.click((await region(scopes[0].region)).getByRole("link", { name: "Library override for Honkai: Star Rail" }));
   expect(await screen.findByRole("textbox", { name: "Honkai: Star Rail Library path" })).toHaveValue(paths.perGameEffective.srmi);
   expect(screen.queryByRole("textbox", { name: scopes[1].label })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(writes()).toHaveLength(0);
 });
 
@@ -125,7 +125,7 @@ it.each(scopes)("retains a dirty draft across navigation without a move on $page
   await userEvent.type(await screen.findByRole("textbox", { name: label }), "draft");
   expect(screen.getByRole("button", { name: `Apply ${label}` })).toBeEnabled();
   await userEvent.click(nav(page === "gmm" ? "Genshin Impact" : "GMM settings"));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await userEvent.click(screen.getByRole("button", { name: "Open Settings again" }));
   expect(screen.getByRole("textbox", { name: label })).toHaveValue(`${page === "gmm" ? paths.effectiveRoot : paths.perGameEffective.gimi}draft`);
   expect(writes()).toHaveLength(0);
@@ -400,11 +400,11 @@ it.each(["page", "back"])("keeps the sibling audit after the Library group and o
   expect(library.nextElementSibling).toBe(audit);
   expect(within(audit).getByRole("button", { name: "Inspect" })).toBeVisible();
   if (route === "page") await userEvent.click(nav("GMM settings"));
-  else await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  else await userEvent.click(screen.getByRole("button", { name: "Close" }));
   if (route === "back") {
     expect(screen.queryByRole("navigation", { name: "Settings pages" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Settings" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Back to Mods" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
   }
   expect(audit).toBeInTheDocument();
   expect(audit).not.toBeVisible();

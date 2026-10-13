@@ -156,6 +156,45 @@ decision must account for the controls that are operations rather than
 settings, such as Re-detect, Install, and Browse. Those cannot be buffered
 (#326).
 
+**How the main screen behind it is held out of reach.** Until #353 Settings was
+a destination that unmounted the main screen, so nothing behind it could be
+clicked or focused and no containment had to be written. The dialog leaves the
+screen mounted, so the containment is now explicit and has three parts, all
+required (#353):
+
+- The main screen and the status bar carry `inert` while the dialog is open.
+  That is the browser's own containment — no pointer events, no focus, no place
+  in the accessibility tree — and WebView2 has honoured it since Chromium 102.
+  `App.css` states the pointer half of the same rule as `[inert] {
+  pointer-events: none }`, so the refusal is in the cascade as well as in the
+  engine and is observable without a layout engine.
+- They also carry `aria-hidden`, and the dialog carries `role="dialog"` and
+  `aria-modal="true"`. Together these leave the dialog as the only surface
+  assistive technology can reach, including on any runtime that does not
+  implement `inert`.
+- The dialog owns a focus cycle of its own: Tab and Shift+Tab move between its
+  own tab stops and wrap, and a Tab pressed while focus sits outside the dialog
+  pulls focus back into it. This is the dialog's own guarantee rather than a
+  property of the window around it, so one missing attribute on the window
+  chrome cannot let Tab walk into the screen behind. The cycle skips the
+  retained `hidden` Settings pages, which is the same property
+  `LibraryPathEditors.test.tsx` already holds for those pages.
+
+A native `<dialog>` with `showModal()` would supply the first and third parts
+itself. It was rejected because the surface's `hidden` attribute is what
+retires it between visits and keeps the retained pages' drafts alive (#309,
+#344), `showModal()` cannot be called on a hidden element, and jsdom
+implements neither — the retention guards would have had to be rewritten
+around an untestable mechanism (#353).
+
+Opening the dialog scrolls nothing. The main screen stays where the user left
+it and the dialog scrolls inside itself, so there is no entry scroll position
+to take and nothing to put back in the ordinary case. The return still
+restores the anchored Mod row, because the main screen can reflow while the
+dialog is open — a notice above the Mod list appears or clears — and the
+anchor is how the user's place survives that (#353; see
+[Arrival and return contract](#arrival-and-return-contract)).
+
 ### Status bar
 
 The per-Game status strip's content moves to a **status bar at the bottom of
@@ -175,6 +214,17 @@ the scroll position and the anchored Mod row. The bar keeps a bounded
 page at the 900x600 minimum window size (#351), and the clearance is held at
 or above that height. The strip's summary remains the only live region in the
 bar; the bar itself announces nothing (#352).
+
+The bar **stays on screen while the Settings dialog is open**, inert with the
+main screen (#353). #352 rendered it only when no Settings page was open,
+which was right while Settings replaced the whole screen. Under the dialog the
+main screen stays visible behind, so a bar that disappeared would change the
+shape of the window behind the dialog and pop back on Close, and `.app`'s
+bottom padding — the bar's scroll clearance — would be left holding a gap with
+nothing in it. Unmounting it would also take the `data-settings-arrival`
+marker that the focus return resolves after Close. Because it is visible, it
+is inert: a visible bar may not be a live second route into Settings while
+Settings is already open.
 
 ### The docked panel goes to the selected Mod
 
@@ -200,7 +250,7 @@ decision. Resolved items are retained here as **DECIDED**.
 | Per-flow evidence from the Windows playbook | #326 carries a read-only evidence playbook for a Windows session. Its results inform the two items above. | #326 |
 | Menu structure — **DECIDED** | **&File** { Settings…, separator, Exit } and **&Help** { Check for updates…, Run setup again, Diagnostics…, separator, About GMM }. **Check for updates** and Diagnostics are menu routes to their existing homes on the Settings GMM page, not new surfaces; Exit and About GMM are predefined items. See [Native menu and window identity](#native-menu-and-window-identity). | #351 |
 | Menu keyboard accelerators and Alt mnemonics on Windows — **KNOWN LIMITATION, not an oversight** | Neither works reliably: WebView2 receives the key press before the host window does, so the menu never sees it ([tauri-apps/wry#451](https://github.com/tauri-apps/wry/issues/451), open; [tauri-apps/tauri#4085](https://github.com/tauri-apps/tauri/issues/4085)). Clicking works. The labels keep `&` mnemonics so Windows underlines a letter if a future runtime delivers the key, no accelerator is declared, and no JavaScript keyboard workaround exists — a declared shortcut would label behaviour that does not happen. Do not reopen this as a bug against the menu; it is upstream. | #351 |
-| Dialog size and behavior in a small window | Whether the dialog is resizable, how large it is relative to the window, and how it fits at the minimum window size. Depends on window sizing. | *needed for coherence* |
+| Dialog size and behavior in a small window — **DECIDED** | The dialog is bounded by the window, not given a fixed size: at most 1120px wide and as tall as the window allows, inset 2rem from every edge, which is 836x536 at the 900x600 minimum (#351) and settles at the 1120px content width from 1100x760 up. The panel scrolls inside itself, so a long Settings page never pushes it past the window edge. It is **not resizable**: a resize handle would add window-management state that #326 left undecided, and there is nothing for it to reveal — the dialog shows one page at a time and its two-column layout already reflows at 600px. | #353 |
 | Status bar presentation of long content — **DECIDED** | For missing required Game entries, the bar shows a warning sign and **Missing Game entries**, without the missing paths. The requirement to carry the list in the bar is withdrawn. No fact disappears without a route to it: the bar's Settings link opens that Game's page, where the missing paths remain visible. | #348 |
 | Mod inspector and the main-screen no-sidebar rule | #327 adds a docked panel beside the Mod list. This document says the main screen has no sidebar or dock (#282, #283). #327 must reconcile the two when it is specified. | #327, *needed for coherence* |
 

@@ -18,8 +18,29 @@ import { ImporterRecommendations } from "./ImporterRecommendations";
 
 export type SettingsPage = GameCode | "gmm";
 
-/** Destination owner outlives visits. Visited Settings pages retain drafts,
- * pending operations and feedback; the main screen itself is unmounted. */
+const TITLE = "settings-dialog-title";
+
+/**
+ * Elements that take focus. The retained Settings pages stay mounted and
+ * `hidden`, so an ancestor check is what keeps a hidden page out of the tab
+ * cycle; jsdom computes no layout, so an `offsetParent` or `getClientRects`
+ * test would exclude everything instead. `[inert]` is honoured for the same
+ * reason the main screen carries it: an inert subtree takes no focus.
+ */
+const FOCUSABLE = "a[href], button, input, select, textarea, summary, [tabindex]";
+
+function tabStops(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((element) =>
+    !(element as HTMLButtonElement).disabled
+    && Number(element.getAttribute("tabindex") ?? "0") >= 0
+    && (element as HTMLInputElement).type !== "hidden"
+    && element.getAttribute("aria-hidden") !== "true"
+    && element.closest("[hidden], [inert]") === null);
+}
+
+/** Modal Settings dialog over the main screen (#326, #353). The owner outlives
+ * visits: visited Settings pages retain drafts, pending operations and
+ * feedback, and the main screen stays mounted behind the dialog, inert. */
 export function SettingsDestination({ games, page, returnGame, onPageChange, onBack }: {
   games: GameSummary[];
   page: SettingsPage | null;
@@ -29,6 +50,7 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
 }) {
   const [visited, setVisited] = useState<Set<SettingsPage>>(new Set());
   const heading = useRef<HTMLHeadingElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
   const previousPage = useRef<SettingsPage | null>(null);
   const statuses = useQueries({ queries: games.map((game) => ({
     queryKey: ["gamePathStatus", game.code],
@@ -63,15 +85,54 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
     window.addEventListener("keydown", escape);
     return () => window.removeEventListener("keydown", escape);
   }, [page, onBack]);
+  // Containment. Until #353 the main screen was unmounted while Settings was
+  // open, so nothing behind Settings could take focus. The dialog leaves it
+  // mounted, and `inert` plus `aria-modal` are what hold it out of the focus
+  // order and the accessibility tree in the browser. Neither is implemented by
+  // jsdom, and more importantly neither is a property this component owns: a
+  // single missing attribute on the window chrome would let Tab walk out of
+  // the dialog and into the screen behind it. The cycle below is the dialog's
+  // own guarantee, independent of what the surrounding window did.
+  useEffect(() => {
+    if (page === null) return;
+    const contain = (event: KeyboardEvent) => {
+      const container = dialog.current;
+      if (event.key !== "Tab" || event.defaultPrevented || container === null) return;
+      const stops = tabStops(container);
+      if (stops.length === 0) return;
+      const active = document.activeElement;
+      // Focus outside the dialog, or on the heading, which is a focus target
+      // but not a tab stop: start the cycle rather than leaving the dialog.
+      const index = active instanceof HTMLElement ? stops.indexOf(active) : -1;
+      const next = index === -1
+        ? stops[event.shiftKey ? stops.length - 1 : 0]
+        : stops[(index + (event.shiftKey ? -1 : 1) + stops.length) % stops.length];
+      event.preventDefault();
+      next.focus();
+    };
+    window.addEventListener("keydown", contain);
+    return () => window.removeEventListener("keydown", contain);
+  }, [page]);
   const pages = new Set(visited);
   if (page !== null) pages.add(page);
   return (
+    // The scrim covers the main screen; the dialog is the panel inside it.
+    // `hidden` on the scrim is still what retires the whole surface between
+    // visits, so the retained pages inside it keep their drafts (#309, #344).
     <div className="settings-screen" hidden={page === null}>
-      <main className="app settings-destination">
+      <div className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby={TITLE} ref={dialog}>
+        {/* Close is the only dismissal, with Escape. There is no OK, Cancel or
+            Apply: each editor commits its own change through its own mutation
+            before the user reaches any button, so a Cancel would have to
+            abandon changes that are already saved (#326). */}
         <header className="app__header row row--between">
-          <h1 ref={heading} tabIndex={-1}>Settings</h1>
+          <h1 id={TITLE} ref={heading} tabIndex={-1}>Settings</h1>
           <div>
-            <button onClick={onBack}>Back to Mods</button>
+            <button onClick={onBack}>Close</button>
+            {/* The Game behind the dialog is visible now, but naming it is
+                still the only thing that states which Game Close returns to
+                when no Game is configured at all — and that it does not
+                invent one (#285, App.game-tabs.test.tsx). */}
             {returnGame ? <p className="muted small">Return to {returnGame}</p> : null}
           </div>
         </header>
@@ -116,7 +177,7 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
             </div> : null}
           </div>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

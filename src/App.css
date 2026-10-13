@@ -526,8 +526,65 @@ code {
 
 /* Retained Settings pages are never exposed when inactive. */
 [hidden] { display: none !important; }
-.settings-screen { min-height: 100vh; }
-.settings-destination { max-width: 1120px; }
+
+/* Containment for the Settings dialog (#353). `inert` is the browser's own
+ * mechanism — an inert subtree takes no pointer events, no focus and no place
+ * in the accessibility tree — and WebView2 has honoured it since Chromium
+ * 102. The declaration below is not a substitute for it: it states the
+ * pointer half of the same rule in the stylesheet, so a region that is marked
+ * inert is refused by the cascade as well as by the engine, and so the
+ * refusal is observable without a layout engine. */
+[inert] { pointer-events: none; }
+
+/* Settings is a modal dialog drawn over the main screen inside the same
+ * window, not a destination that replaces it (#326, #353).
+ *
+ * `.settings-screen` is the scrim. It is fixed over the whole viewport, above
+ * `.status-bar`'s `z-index: 20`, and `hidden` on it is still what retires the
+ * entire surface between visits — the retained Settings pages inside it keep
+ * their drafts because they are hidden, not unmounted (#309, #344).
+ *
+ * Sizing (#353). The dialog is bounded by the window rather than given a
+ * fixed size: `width: min(1120px, 100%)` against the scrim's content box and
+ * `max-height: 100%`, with the scrim's 2rem padding as the inset. At the
+ * 900x600 window minimum (#351) that is an 836x536 panel with 32px of the
+ * main screen visible on every side, so it reads as a dialog over the screen
+ * rather than a page that replaced it; at 1100x760 and above it settles at
+ * its 1120px content width. The panel scrolls inside itself, so a long
+ * Settings page never pushes the dialog past the window edge, and
+ * `overscroll-behavior: contain` on the scrim stops that scroll from chaining
+ * into the main screen behind.
+ *
+ * It is not resizable. A resize handle would add window-management state that
+ * #326 explicitly left undecided, and there is nothing for it to reveal: the
+ * dialog shows one page at a time and its two-column layout already reflows
+ * at 600px, so the useful widths are the ones the window already gives it. */
+.settings-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: rgba(9, 9, 11, 0.62);
+}
+
+.settings-dialog {
+  width: min(1120px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  display: grid;
+  gap: 1.5rem;
+  align-content: start;
+  padding: 1.5rem;
+  background: #18181b;
+  border: 1px solid #2e2e36;
+  border-radius: 12px;
+  box-shadow: 0 1.5rem 3.75rem rgba(0, 0, 0, 0.55);
+}
+
 .settings-layout { display: grid; grid-template-columns: minmax(150px, 240px) minmax(0, 1fr); gap: 1.5rem; }
 .settings-navigation { display: flex; flex-direction: column; gap: .5rem; align-self: start; }
 .settings-navigation h2 { font-size: .9rem; margin: 1rem 0 .25rem; }
@@ -539,16 +596,19 @@ code {
 .settings-content p { overflow-wrap: anywhere; }
 .settings-content input.path { min-width: 0; width: 100%; }
 @media (max-width: 600px) {
+  .settings-screen { padding: .6rem; }
   .settings-layout { grid-template-columns: minmax(115px, 35%) minmax(0, 1fr); gap: .6rem; }
-  .settings-destination { padding: 1rem .6rem; }
+  .settings-dialog { padding: 1rem .6rem; }
   .settings-content .row { align-items: stretch; }
   .settings-content input { min-width: 0; width: 100%; }
 }
 @media (prefers-color-scheme: light) {
-  .settings-screen { background: #f4f4f5; color: #18181b; }
-  .settings-screen .card { background: #fff; border-color: #d4d4d8; }
-  .settings-screen .muted { color: #52525b; }
-  .settings-screen input { background: #fafafa; color: #18181b; border-color: #d4d4d8; }
+  /* The light palette belongs to the panel, not the scrim: the scrim is a
+   * dim over the main screen in both schemes. */
+  .settings-dialog { background: #f4f4f5; color: #18181b; border-color: #d4d4d8; }
+  .settings-dialog .card { background: #fff; border-color: #d4d4d8; }
+  .settings-dialog .muted { color: #52525b; }
+  .settings-dialog input { background: #fafafa; color: #18181b; border-color: #d4d4d8; }
   .settings-navigation button { background: #fff; color: #18181b; border-color: #d4d4d8; }
   .settings-navigation button span { color: #52525b; }
 }

@@ -236,7 +236,15 @@ it.each(["retry", "retireProducer"] as const)("refreshes changed Model Importer 
   await userEvent.click(await screen.findByRole("button", {
     name: action === "retry" ? "Retry Model Importer recovery" : /I confirmed no other GMM is changing this importer/,
   }));
-  expect(await screen.findByText("New recorded importer obstruction")).toBeInTheDocument();
+  // Scoped to the dialog since #353: Settings is a modal dialog now, so the
+  // main screen's own recovery notice for the same evacuation stays mounted
+  // behind it and reports the same reason. This is what the Settings copy
+  // shows, not whichever copy a document-wide query happened to reach.
+  const settings = within(screen.getByRole("dialog", { name: "Settings" }));
+  expect(await settings.findByText("New recorded importer obstruction")).toBeInTheDocument();
+  expect(settings.queryByText("Previous importer obstruction")).not.toBeInTheDocument();
+  // The stale reason is gone from the whole window, not merely re-scoped out
+  // of view: the main screen reads the same refreshed query.
   expect(screen.queryByText("Previous importer obstruction")).not.toBeInTheDocument();
 });
 
@@ -252,7 +260,7 @@ it.each(["adopt", "zip", "drop", "gamebanana"] as const)("refreshes the orphan L
   await screen.findByRole("radio", { name: "Old Red" });
   await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("audit_library", { game: "gimi" }));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   if (entry === "drop") {
     const file = Object.assign(new File(["zip"], "outfit.zip"), { path: "C:\\Downloads\\outfit.zip" });
     fireEvent.drop(container.querySelector(".dropzone")!, { dataTransfer: { files: [file] } });
@@ -324,7 +332,7 @@ it.each(["root", "perGame"] as const)("refreshes persisted paths and Mod state a
     : within(library).getAllByRole("button", { name: "Change…" })[0]);
   expect(await screen.findByDisplayValue(field === "root" ? "D:\\Library" : "D:\\Library\\gimi")).toBeInTheDocument();
   expect(screen.getByText("Library move failed")).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(await screen.findByRole("checkbox", { name: "Disabled" })).toBeEnabled();
 });
 
@@ -353,7 +361,7 @@ it("refreshes Mod recovery changed during a failed Junction rebuild", async () =
   await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
   await userEvent.click(screen.getByRole("button", { name: "Rebuild junctions" }));
   expect(await screen.findByText("Rebuild failed")).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(await screen.findByRole("region", { name: "Interrupted reinstall recovery for Test Outfit" })).toBeInTheDocument();
 });
 
@@ -463,7 +471,7 @@ it("does not apply a path when the picker is cancelled", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Change global root…" }));
   expect(invoke.mock.calls.filter(([name]) => name === "set_library_root")).toHaveLength(0);
   expect(field).toHaveValue("C:\\GMM\\librarydraft");
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(await screen.findByDisplayValue("C:\\GMM\\logs")).toHaveAttribute("readonly");
 });
 
@@ -641,7 +649,7 @@ it.each(importCases)("settles Mods, Library audit and Mod updates for $entry in 
   // Visit Settings once so its production audit observer has a fresh cached result.
   await userEvent.click(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("audit_library", { game: "srmi" }));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   if (entry === "drop") {
     fireEvent.drop(container.querySelector(".dropzone")!, { dataTransfer: { files: [Object.assign(new File(["zip"], "outfit.zip"), { path: "C:/Downloads/outfit.zip" })] } });
   } else {

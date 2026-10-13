@@ -98,14 +98,14 @@ it("shows only the three installed games as tabs and opens a remaining game's se
   expect(screen.queryByRole("tab", { name: "Genshin Impact" })).not.toBeInTheDocument();
   expect(screen.getByText("Return to Honkai: Star Rail")).toBeVisible();
   expect(invoke.mock.calls.filter(([command]) => command.startsWith("set_") || command.startsWith("install_"))).toEqual([]);
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(tabNames()).toEqual(["Honkai: Star Rail", "Zenless Zone Zero", "Wuthering Waves"]);
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("button", { name: "Add game" })).toHaveFocus();
   await userEvent.click(screen.getByRole("button", { name: "Add game" }));
   await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
   await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:\\Genshin{Enter}");
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(tabNames()).toEqual([
     "Genshin Impact", "Honkai: Star Rail", "Zenless Zone Zero", "Wuthering Waves",
   ]));
@@ -127,10 +127,10 @@ it("keeps every supported game reachable with no install paths and promotes the 
     await userEvent.click(screen.getByRole("button", { name: "Add game" }));
     await userEvent.click(screen.getByRole("button", { name: `Set up ${game.displayName}` }));
     expect(await screen.findByRole("textbox", { name: `${game.displayName} install path` })).toHaveValue("");
-    if (game.code !== "efmi") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+    if (game.code !== "efmi") await userEvent.click(screen.getByRole("button", { name: "Close" }));
   }
   await userEvent.type(screen.getByRole("textbox", { name: "Arknights: Endfield install path" }), "C:\\Endfield{Enter}");
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(tabNames()).toEqual(["Arknights: Endfield"]));
   expect(screen.getByRole("tab", { name: "Arknights: Endfield" })).toHaveAttribute("aria-selected", "true");
 });
@@ -154,7 +154,7 @@ it("removes a tab when its saved path is cleared and keeps setup reachable", asy
   const path = screen.getByRole("textbox", { name: "Honkai: Star Rail install path" });
   await userEvent.clear(path);
   await userEvent.click(screen.getByRole("button", { name: "Apply Honkai: Star Rail install path" }));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(tabNames()).toEqual([]));
   await userEvent.click(screen.getByRole("button", { name: "Add game" }));
   expect(screen.getByRole("button", { name: "Set up Honkai: Star Rail" })).toBeInTheDocument();
@@ -173,7 +173,7 @@ it("adds a tab after auto-detect saves a previously unconfigured game's path", a
   await userEvent.click(await screen.findByRole("button", { name: "Add game" }));
   await userEvent.click(screen.getByRole("button", { name: "Set up Arknights: Endfield" }));
   await userEvent.click(screen.getByRole("button", { name: "Auto-detect" }));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(tabNames()).toEqual(["Arknights: Endfield"]));
   await userEvent.click(screen.getByRole("button", { name: "Settings for Arknights: Endfield" }));
   expect(screen.getByRole("textbox", { name: "Arknights: Endfield install path" })).toHaveValue("C:\\DetectedEndfield");
@@ -318,7 +318,7 @@ it("moves to the remaining installed Game when Settings clears the selected Game
   await userEvent.clear(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }));
   await userEvent.click(screen.getByRole("button", { name: "Apply Honkai: Star Rail install path" }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_game_install_path", { game: "srmi", path: "" }));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(tabNames()).toEqual(["Genshin Impact"]));
   expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("region", { name: "Genshin Impact header" })).toBeVisible();
@@ -331,9 +331,9 @@ it("does not invent a return Game when Settings opens with no configured Games",
   await screen.findByRole("button", { name: "Add game" });
   await clickMenuItem(listen, "settings");
   expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
-  expect(screen.getByRole("button", { name: "Back to Mods" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Close" })).toBeVisible();
   expect(screen.queryByText(/^Return to /)).not.toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(tabNames()).toEqual([]);
   expect(screen.getByText("No game install paths set. Add a game to get started.")).toBeVisible();
 });
@@ -416,7 +416,7 @@ it.each([
     ? { game: "gimi", path: "C:/Genshin" } : { game: "gimi" }));
   try {
     expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toBeDisabled();
-    await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(tabNames()).toEqual(["Honkai: Star Rail", "Wuthering Waves"]);
     expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("button", { name: "Add game" })).toHaveFocus();
@@ -443,7 +443,7 @@ it.each([
     expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toHaveValue("C:/Genshin");
     expect(screen.getByLabelText("Onboarding Genshin path")).toHaveTextContent("C:/Genshin");
   }
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(tabNames()).toEqual(rejected ? ["Honkai: Star Rail", "Wuthering Waves"] : ["Genshin Impact", "Honkai: Star Rail", "Wuthering Waves"]);
   expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("button", { name: "Add game" })).toHaveFocus();
@@ -483,7 +483,7 @@ it.each(["global", "game", "add"])("restores the selected Game, Mod anchor and %
       await userEvent.click(within(screen.getByRole("navigation", { name: "Settings pages" })).getByRole("button", { name: /Arknights: Endfield/ }));
       Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
       rowTop = 20;
-      if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+      if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Close" }));
       else fireEvent.keyDown(window, { key: "Escape" });
       expect(screen.getByText("Return Outfit")).toBeVisible();
       expect(window.scrollTo).toHaveBeenLastCalledWith(0, 60);
@@ -509,7 +509,7 @@ it("returns focus to the selected tab when saving the last absent Game removes A
   await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
   await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:/Genshin{Enter}");
   await waitFor(() => expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toHaveValue("C:/Genshin"));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(tabNames()).toEqual(games.map((game) => game.displayName));
   expect(screen.queryByRole("button", { name: "Add game" })).not.toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
