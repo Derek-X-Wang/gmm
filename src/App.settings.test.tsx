@@ -92,6 +92,26 @@ beforeEach(() => {
   });
 });
 
+it.each(["before a Settings visit", "after Back"])("hides the Settings root itself %s", async (stage) => {
+  const { container } = renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  const root = container.querySelector<HTMLElement>(".settings-screen")!;
+  expect(root).toBeInTheDocument();
+
+  if (stage === "after Back") {
+    await openGame();
+    expect(root).not.toHaveAttribute("hidden");
+    expect(root).toBeVisible();
+    expect(root).toContainElement(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }));
+    await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  }
+
+  // A hidden page inside Settings cannot satisfy an attribute check on its root.
+  expect(root).toBeInTheDocument();
+  expect(root).toHaveAttribute("hidden");
+  expect(root).not.toBeVisible();
+});
+
 it.each(["global", "game"])("replaces all main content and preserves independent selection by %s arrival", async (arrival) => {
   renderApp();
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });
