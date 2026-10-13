@@ -7,6 +7,7 @@ function pathSummary(value: GamePathStatus): { line: string; detail?: string } {
   switch (path.status) {
     case "unreadable": return { line: "Cannot tell — install path unreadable · Model Importer unverified", detail: `${path.path}: ${path.error}` };
     case "savedPathNotFound": return { line: "Saved installation cannot be found · Model Importer unverified", detail: path.paths.join(", ") };
+    case "requiredEntriesNotFound": return { line: "Required Game files or directories not found · Model Importer unverified", detail: `Missing Game entries: ${path.paths.join(", ")}` };
     case "invalid": return { line: "Cannot verify Game layout · Model Importer unverified", detail: path.error };
     case "noSavedPath": return { line: "No saved install path · Model Importer unverified" };
     case "readable":
@@ -56,8 +57,8 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
   return <section className="game-status-strip" aria-label={`${displayName} status`} aria-busy={pending}>
     <div className="game-status-strip__summary" role="status">
       <div className="row">
-      <strong>Model Importer ({game.toUpperCase()})</strong>
-      <span>{summary.line}</span>
+      <strong>Game and Model Importer ({game.toUpperCase()})</strong>
+      <span>Game: {summary.line}</span>
       {absent ? <span className="muted small">Unhealthy</span> : null}
       {version ? <span className="muted small">{previousMetadata ? "Previous: Installed version: " : "Installed version: "}<code>{version}</code></span> : null}
       {installed && metadataVerified && update.data?.pinned ? <span className="muted small" aria-label="Importer Pin applies">{previousMetadata ? "Previous: Pinned" : "Pinned"}</span> : null}
@@ -67,7 +68,7 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
         : metadataPending ? "Checking installed version and Importer Pin…"
         : "Installed version check unavailable."}</span> : null}
       </div>
-      {path ? <span className="muted small">{pending || error ? "Last saved path: " : "Saved path: "}<code>{path}</code></span> : null}
+      {path ? <span className="muted small">{pending || error ? "Last saved Game path: " : "Saved Game path: "}<code>{path}</code></span> : null}
       {summary.detail ? <span className="muted small">{summary.detail}</span> : null}
     </div>
     <button data-settings-arrival="game" onClick={onSettings}>Settings for {displayName}</button>

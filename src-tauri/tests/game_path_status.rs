@@ -53,7 +53,7 @@ async fn unset_is_configuration_only_and_importer_is_unverified() {
 }
 
 #[tokio::test]
-async fn missing_saved_path_is_named_and_retained() {
+async fn missing_saved_directory_and_present_directory_with_missing_entries_are_distinct() {
     let (tmp, core, db) = fixture().await;
     let missing = tmp.path().join("missing");
     assert_eq!(
@@ -79,6 +79,34 @@ async fn missing_saved_path_is_named_and_retained() {
     ));
     assert_eq!(
         core.game_install_path(GameCode::Gimi).await.unwrap(),
+        Some(missing.clone())
+    );
+    // The same saved path now names an existing, readable directory. Only its
+    // required Game entries are absent; importer inspection remains unverified.
+    fs::create_dir(&missing).unwrap();
+    fs::read_dir(&missing).unwrap();
+    let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert_eq!(status.saved_path, Some(missing.clone()));
+    assert_eq!(
+        serde_json::to_value(&status).unwrap()["gamePath"]["status"],
+        "requiredEntriesNotFound"
+    );
+    assert_eq!(
+        status.game_path,
+        GamePathState::RequiredEntriesNotFound {
+            paths: vec![
+                missing.join("GenshinImpact.exe"),
+                missing.join("YuanShen.exe"),
+                missing.join("GenshinImpact_Data")
+            ],
+        }
+    );
+    assert!(matches!(
+        status.model_importer,
+        ModelImporterState::Unverified { .. }
+    ));
+    assert_eq!(
+        core.game_install_path(GameCode::Gimi).await.unwrap(),
         Some(missing)
     );
 }
@@ -91,9 +119,14 @@ async fn missing_game_files_are_named_without_claiming_an_absent_importer() {
     save_fixture_path(&db, GameCode::Gimi, &game).await;
     fs::remove_file(game.join("GenshinImpact.exe")).unwrap();
     let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert_eq!(status.saved_path, Some(game.clone()));
+    assert_eq!(
+        serde_json::to_value(&status).unwrap()["gamePath"]["status"],
+        "requiredEntriesNotFound"
+    );
     assert_eq!(
         status.game_path,
-        GamePathState::SavedPathNotFound {
+        GamePathState::RequiredEntriesNotFound {
             paths: vec![game.join("GenshinImpact.exe"), game.join("YuanShen.exe")],
         }
     );
@@ -104,9 +137,14 @@ async fn missing_game_files_are_named_without_claiming_an_absent_importer() {
     fs::write(game.join("YuanShen.exe"), b"CN executable").unwrap();
     fs::remove_dir(game.join("GenshinImpact_Data")).unwrap();
     let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert_eq!(status.saved_path, Some(game.clone()));
+    assert_eq!(
+        serde_json::to_value(&status).unwrap()["gamePath"]["status"],
+        "requiredEntriesNotFound"
+    );
     assert_eq!(
         status.game_path,
-        GamePathState::SavedPathNotFound {
+        GamePathState::RequiredEntriesNotFound {
             paths: vec![game.join("GenshinImpact_Data")]
         }
     );

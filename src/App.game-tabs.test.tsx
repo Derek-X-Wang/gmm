@@ -246,14 +246,15 @@ it("retains last known tab membership and its repair route after a saved-path re
   expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toBeVisible();
 });
 
-it.each(["unreadable", "savedPathNotFound", "importerAbsent"])("keeps the configured tab and repair route when filesystem state is %s", async (state) => {
+it.each(["unreadable", "savedPathNotFound", "requiredEntriesNotFound", "importerAbsent"])("keeps the configured tab and repair route when filesystem state is %s", async (state) => {
   paths = { srmi: "C:/StarRail" };
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (command, args) => {
     if (command === "get_game_path_status") return {
       game: args.game, savedPath: paths[args.game as GameCode] ?? null,
       gamePath: state === "unreadable" ? { status: "unreadable", path: "C:/StarRail", error: "Access denied" }
-        : state === "savedPathNotFound" ? { status: "savedPathNotFound", paths: ["C:/StarRail/StarRail.exe"] } : { status: "readable" },
+        : state === "savedPathNotFound" ? { status: "savedPathNotFound", paths: ["C:/StarRail"] }
+        : state === "requiredEntriesNotFound" ? { status: "requiredEntriesNotFound", paths: ["C:/StarRail/StarRail.exe"] } : { status: "readable" },
       modelImporter: state === "importerAbsent" ? { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] }
         : { status: "unverified", path: null, error: "Cannot inspect files" },
     };
@@ -261,9 +262,10 @@ it.each(["unreadable", "savedPathNotFound", "importerAbsent"])("keeps the config
   });
   renderWithQuery(<App />);
   const line = state === "unreadable" ? "Cannot tell — install path unreadable · Model Importer unverified"
-    : state === "savedPathNotFound" ? "Saved installation cannot be found · Model Importer unverified" : "Game readable · Model Importer not installed";
+    : state === "savedPathNotFound" ? "Saved installation cannot be found · Model Importer unverified"
+    : state === "requiredEntriesNotFound" ? "Required Game files or directories not found · Model Importer unverified" : "Game readable · Model Importer not installed";
   const strip = await screen.findByRole("region", { name: "Honkai: Star Rail status" });
-  expect(await within(strip).findByText(line)).toBeVisible();
+  expect(await within(strip).findByText(`Game: ${line}`)).toBeVisible();
   expect(tabNames()).toEqual(["Honkai: Star Rail"]);
   expect(strip).toHaveTextContent("C:/StarRail");
   expect(strip).not.toHaveTextContent(/version|no saved/i);
@@ -334,7 +336,7 @@ it("agrees with the Settings row that a rejected path check is unavailable", asy
   });
   renderWithQuery(<App />);
   const strip = await screen.findByRole("region", { name: "Honkai: Star Rail status" });
-  expect(await within(strip).findByText("Cannot tell — path check unavailable · Model Importer unverified")).toBeVisible();
+  expect(await within(strip).findByText("Game: Cannot tell — path check unavailable · Model Importer unverified")).toBeVisible();
   expect(strip).toHaveTextContent("Path check channel closed");
   expect(strip).toHaveTextContent("C:/StarRail");
   expect(strip).not.toHaveTextContent(/unreadable|not installed|version/i);

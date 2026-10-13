@@ -81,8 +81,10 @@ must not claim its Junctions were repaired.
 ### Per-Game status strip
 
 The thin read-only status strip links to that Game's Settings page (#283).
-The human decision on #285 sets its payload: Model Importer name, its
-healthy / unhealthy / unverified state, the saved path, the verified installed
+The human decisions on #285 and #324 set its payload:
+**`Game and Model Importer (<Importer>)`**, with a labelled Game fact, Model
+Importer name and its healthy / unhealthy / unverified state, the saved Game
+path, the verified installed
 version, and a compact pin marker when an Importer Pin applies. Importer Origin
 detail stays in Settings and does not appear in the strip. The strip contains
 no path editor, Install/Update, rollback, Importer Pin control, Origin editor,
@@ -95,9 +97,13 @@ but its Model Importer is confirmed absent, keep the strip visible with
 **Model Importer not installed** and its Settings link. That link is the route
 to fixing this state (#285 human decision).
 
-A saved path confirmed missing has its own wording: **Saved installation cannot
-be found**, identifying the missing path/file and retaining the saved path and
-Settings link. Do not reuse “no saved path” or “Model Importer not installed.”
+A saved Game directory confirmed missing has its own wording: **Game: Saved
+installation cannot be found**, identifying the missing directory and retaining
+the saved path and Settings link. An existing saved directory with missing
+required Game entries instead says **Game: Required Game files or directories
+not found** and lists **Missing Game entries:** with the missing paths (#324).
+Both report Model Importer state as unverified. Do not reuse “no saved path” or
+“Model Importer not installed.”
 All strip states follow the filesystem and path-state contract below; only
 verified installed facts may supply an installed version (#285 human decision).
 
@@ -125,7 +131,7 @@ an update-check error, and an active Game Session at the same time.
 | Surface | States and required result |
 | --- | --- |
 | Selected Game/inventory | Registry/path reads pending, available, or failed; zero configured paths; one or more configured paths; selected Game changes. Show read failures as unavailable, with Settings reachable. Never render an absent Game as an installed tab. |
-| Status strip | Checking, verified Game/Model Importer facts, or unavailable check, plus the four path cases below and the distinct saved-path-missing report. Keep read-only and preserve the decided payload and wording above; the strip stays visible when a readable Game has no Model Importer (#285 human decision). |
+| Status strip | Checking, verified Game/Model Importer facts, or unavailable check, plus the four path cases below and distinct reports for a missing saved Game directory and missing required Game entries. Keep read-only and preserve the decided payload and wording above; the strip stays visible when a readable Game has no Model Importer (#285 human decision). |
 | Launch | Ready action, launching, active Game Session, returned session, or rejected launch. Preserve `launch_game` and its existing AV-pattern guidance via `av_guidance`; keep other command failures visible near Launch. Pending/session locks do not remove the primary action's identity. |
 | Game Session context | Reading/unavailable, no active session, active session, cleaned stale session, or interrupted launch reservation. Continue existing session-event refresh across destination changes so return does not fabricate an ended session. |
 | Mods/Variants | Mod query pending/error, confirmed empty, or populated; existing enabled/disabled choices; Variants absent, loading/error, or available; Variant change pending/success/failure; recovery quarantine. Retain existing controls and their individual gates. |
@@ -210,10 +216,18 @@ nowhere on disk. Auto-detection failure does not strengthen it into that claim.
 Similarly, a recorded Importer Origin or version alone is not proof of readable
 Model Importer files (#284, #285; ADR 0005).
 
-Only an explicit `NotFound` proves filesystem absence. If the **saved Game path
-itself** or a required Game file returns `NotFound`, retain that saved path and
-configured tab, identify the missing path/file, and say the saved installation
-cannot be found. Do not call this prototype `missing`: that state means a
+Only an explicit `NotFound` proves filesystem absence. Report two distinct
+Game path states (#324): `savedPathNotFound` means the **saved Game directory
+itself** is confirmed absent; `requiredEntriesNotFound` means that directory
+exists but required Game files or directories are confirmed missing. Recheck
+the saved directory before reporting missing required entries; if it vanished,
+report the missing saved directory, and keep a failed recheck as uncertainty.
+Retain the saved path and configured tab in both states, identify the missing
+paths, and keep the Model Importer unverified. Only the first state says the
+saved installation cannot be found. Settings must name the Game in that claim,
+including beneath a Model Importer heading: **Saved Game installation cannot
+be found**. Settings and the strip label required-entry details **Missing Game
+entries:**. Do not call either state prototype `missing`: that state means a
 readable Game with no Model Importer. Do not erase the setting or relabel it
 `absent`. If Model Importer inspection fails while the Game is readable, keep
 the verified Game fact and report Model Importer state as unverified; it is not

@@ -29,9 +29,13 @@ pub enum GamePathState {
     NoSavedPath,
     /// The existing fallible GameProfile validator verified the Game layout.
     Readable,
-    /// Each named path returned NotFound. Executable alternatives are listed
-    /// together only when all alternatives are confirmed missing.
+    /// The saved Game directory itself returned NotFound.
     SavedPathNotFound {
+        paths: Vec<PathBuf>,
+    },
+    /// The saved directory exists, but required Game entries returned NotFound.
+    /// Executable alternatives are listed only when all are confirmed missing.
+    RequiredEntriesNotFound {
         paths: Vec<PathBuf>,
     },
     /// A known wrong type or rejected layout. This is not proven absence.
@@ -109,6 +113,15 @@ fn inspect_game(
     path: &Path,
     validate: Option<ValidateFn>,
 ) -> Result<GamePathState> {
+    inspect_game_with_metadata(game, path, validate, metadata_at)
+}
+
+fn inspect_game_with_metadata(
+    game: GameCode,
+    path: &Path,
+    validate: Option<ValidateFn>,
+    mut metadata_at: impl FnMut(&Path) -> Result<Option<fs::Metadata>>,
+) -> Result<GamePathState> {
     let profile = game.profile();
     let mut validation_failure = None;
     if let Some(validate) = validate {
@@ -184,7 +197,17 @@ fn inspect_game(
     Ok(if missing.is_empty() {
         invalid()
     } else {
-        GamePathState::SavedPathNotFound { paths: missing }
+        // Child NotFound results can follow the directory disappearing. Make
+        // the specific missing-entry claim only after rechecking its scope.
+        let Some(metadata) = metadata_at(path)? else {
+            return Ok(GamePathState::SavedPathNotFound {
+                paths: vec![path.to_path_buf()],
+            });
+        };
+        if !metadata.is_dir() {
+            return Ok(invalid());
+        }
+        GamePathState::RequiredEntriesNotFound { paths: missing }
     })
 }
 
@@ -318,6 +341,73 @@ mod tests {
     }
 
     #[test]
+    fn missing_entries_recheck_saved_directory_after_child_lookups() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("Game");
+        fs::create_dir(&path).unwrap();
+        let mut reads = Vec::new();
+        let state = inspect_game_with_metadata(GameCode::Gimi, &path, None, |entry| {
+            // The initial directory lookup succeeds; it vanishes before any
+            // child lookup, as it can when a drive disconnects.
+            if reads.len() == 1 {
+                fs::remove_dir(&path).unwrap();
+            }
+            reads.push(entry.to_path_buf());
+            metadata_at(entry)
+        })
+        .unwrap();
+        assert_eq!(
+            state,
+            GamePathState::SavedPathNotFound {
+                paths: vec![path.clone()]
+            }
+        );
+        assert_eq!(
+            reads,
+            vec![
+                path.clone(),
+                path.join("GenshinImpact.exe"),
+                path.join("YuanShen.exe"),
+                path.join(detect::genshin::DATA_DIR_NAME),
+                path,
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_entries_recheck_preserves_uncertainty_and_wrong_directory_type() {
+        for unavailable in [true, false] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let path = tmp.path().join("Game");
+            fs::create_dir(&path).unwrap();
+            let mut root_reads = 0;
+            let result = inspect_game_with_metadata(GameCode::Gimi, &path, None, |entry| {
+                if entry == path {
+                    root_reads += 1;
+                    if root_reads == 2 {
+                        if unavailable {
+                            return Err(Error::Io {
+                                path: path.clone(),
+                                source: io::Error::from(io::ErrorKind::PermissionDenied),
+                            });
+                        }
+                        fs::remove_dir(&path).unwrap();
+                        fs::write(&path, b"replacement file").unwrap();
+                    }
+                }
+                metadata_at(entry)
+            });
+            if unavailable {
+                assert!(matches!(result, Err(Error::Io { path: failed, source })
+                    if failed == path && source.kind() == io::ErrorKind::PermissionDenied));
+            } else {
+                assert!(matches!(result, Ok(GamePathState::Invalid { .. })));
+            }
+            assert_eq!(root_reads, 2);
+        }
+    }
+
+    #[test]
     fn validator_not_found_diagnoses_every_executable_alternative() {
         fn vanished_alternative(path: &Path) -> Result<bool> {
             Err(Error::Io {
@@ -337,7 +427,7 @@ mod tests {
         let state = inspect_game(GameCode::Gimi, path, Some(vanished_alternative)).unwrap();
         assert_eq!(
             state,
-            GamePathState::SavedPathNotFound {
+            GamePathState::RequiredEntriesNotFound {
                 paths: vec![path.join("GenshinImpact.exe"), path.join("YuanShen.exe")],
             },
             "all alternatives must be directly confirmed missing, not just the failed one"

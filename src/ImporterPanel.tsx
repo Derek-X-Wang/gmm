@@ -3,11 +3,27 @@ import {
   checkImporterUpdate, fetchLatestImporterRelease, getImporterEvacuationRecovery,
   installImporter, rollbackImporter, setImporterPinned,
   retryImporterEvacuationRecovery, retireInterruptedImporterEvacuation,
-  getGamePathStatus, type GameCode,
+  getGamePathStatus, type GameCode, type GamePathStatus,
 } from "./api";
 import { ImporterEvacuationRecoveryWarning } from "./ImporterEvacuationRecoveryWarning";
 import { LoaderVersionNote } from "./LoaderVersionNote";
 import { CommandErrorNotice } from "./CommandErrorNotice";
+
+function importerPathLine(value: GamePathStatus): string {
+  switch (value.gamePath.status) {
+    case "noSavedPath": return "Set a readable Game install path before installing a Model Importer.";
+    case "savedPathNotFound": return "Saved Game installation cannot be found · Model Importer unverified";
+    case "requiredEntriesNotFound": return `Required Game files or directories not found: ${value.gamePath.paths.join(", ")} · Model Importer unverified`;
+    case "unreadable":
+    case "invalid": return "Cannot tell · Model Importer filesystem unverified";
+    case "readable":
+      switch (value.modelImporter.status) {
+        case "installed": return `${value.game.toUpperCase()} installed · Game readable`;
+        case "requiredEntriesNotFound": return "Game readable · Model Importer not installed";
+        case "unverified": return "Cannot tell · Model Importer filesystem unverified";
+      }
+  }
+}
 
 /** Per-Game importer configuration and evacuation recovery in Settings. */
 export function ImporterPanel({
@@ -75,12 +91,8 @@ export function ImporterPanel({
   const blocked = changing || (!installed && !absent) || evacuation.isError || evacuation.isFetching || evacuation.data !== null;
   const verifiedVersion = installed && !update.isError && !update.isFetching ? update.data?.installedVersion : null;
   const pathState = path.isPending || path.isFetching ? "Checking Game and Model Importer…"
-    : path.isError ? "Cannot tell · Model Importer filesystem unverified"
-    : installed ? `${importerLabel} installed · Game readable`
-    : absent ? "Game readable · Model Importer not installed"
-    : path.data?.gamePath.status === "noSavedPath" ? "Set a readable Game install path before installing a Model Importer."
-    : path.data?.gamePath.status === "savedPathNotFound" ? "Saved installation cannot be found · Model Importer unverified"
-    : "Cannot tell · Model Importer filesystem unverified";
+    : path.isError || !path.data ? "Cannot tell · Model Importer filesystem unverified"
+    : importerPathLine(path.data);
   const filesystem = path.data?.modelImporter;
 
   return (

@@ -136,8 +136,10 @@ export async function getGameInstallPath(game: GameCode): Promise<string | null>
  * Prototype mapping (docs/design/main-screen.md):
  * noSavedPath -> `absent` (configuration only, never a disk absence claim).
  * unreadable -> `unreadable`; retain the saved path and configured tab.
- * savedPathNotFound -> saved installation cannot be found; this is NOT the
- * prototype `missing` row, and the saved path/configured tab must be retained.
+ * savedPathNotFound -> the saved Game directory itself was not found.
+ * requiredEntriesNotFound -> named Game files/directories were not found in
+ * an existing saved directory. Both retain the saved path/configured tab;
+ * neither is the prototype `missing` row (which concerns the Model Importer).
  * readable + installed Model Importer -> `healthy`.
  * readable + requiredEntriesNotFound Model Importer -> prototype `missing`.
  * readable + unverified Model Importer keeps the verified Game fact; it must
@@ -147,6 +149,7 @@ export type GamePathState =
   | { status: "noSavedPath" }
   | { status: "readable" }
   | { status: "savedPathNotFound"; paths: string[] }
+  | { status: "requiredEntriesNotFound"; paths: string[] }
   | { status: "invalid"; error: string }
   | { status: "unreadable"; path: string; error: string };
 
