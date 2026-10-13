@@ -36,7 +36,7 @@ function Wait-ForUpdateServerBind {
         [string]$StandardErrorPath,
 
         [ValidateRange(1, 300)]
-        [int]$TimeoutSeconds = 13
+        [int]$TimeoutSeconds = 120
     )
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -95,7 +95,7 @@ function Wait-ForUpdateServer {
         [int]$Port,
 
         [ValidateRange(1, 300)]
-        [int]$TimeoutSeconds = 15,
+        [int]$TimeoutSeconds = 120,
 
         [System.Diagnostics.Process]$ServerProcess,
         [string]$StandardOutputPath,
