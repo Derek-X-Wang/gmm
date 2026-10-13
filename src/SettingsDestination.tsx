@@ -130,9 +130,9 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
           <div>
             <button onClick={onBack}>Close</button>
             {/* The Game behind the dialog is visible now, but naming it is
-                still the only thing that states which Game Close returns to
-                when no Game is configured at all — and that it does not
-                invent one (#285, App.game-tabs.test.tsx). */}
+                still what states which Game Close returns to, and the line's
+                absence when no Game is configured at all is what shows GMM
+                does not invent one (#285, App.game-tabs.test.tsx). */}
             {returnGame ? <p className="muted small">Return to {returnGame}</p> : null}
           </div>
         </header>
