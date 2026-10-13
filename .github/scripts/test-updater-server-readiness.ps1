@@ -7,12 +7,47 @@ Set-StrictMode -Version Latest
 # other tests run. Check the shipped defaults structurally to keep this suite
 # under 30s; exercise the real polling and expiry behavior separately below.
 foreach ($functionName in @("Wait-ForUpdateServerBind", "Wait-ForUpdateServer")) {
-    $parameters = (Get-Command $functionName).ScriptBlock.Ast.Body.ParamBlock.Parameters
+    $command = Get-Command $functionName
+    $body = $command.ScriptBlock.Ast.Body
+    $parameters = $body.ParamBlock.Parameters
     $timeoutParameter = @($parameters | Where-Object {
         $_.Name.VariablePath.UserPath -eq "TimeoutSeconds"
     })
     if ($timeoutParameter.Count -ne 1 -or $timeoutParameter[0].DefaultValue.SafeGetValue() -ne 120) {
         throw "$functionName must ship a 120s default readiness ceiling"
+    }
+
+    # A correct default is useless if validation rejects the CI ceiling or
+    # the loop silently clamps it. Check the budget without waiting 120s.
+    $timeoutRanges = @($command.Parameters["TimeoutSeconds"].Attributes | Where-Object {
+        $_ -is [System.Management.Automation.ValidateRangeAttribute]
+    })
+    if ($timeoutRanges.Count -ne 1 -or $timeoutRanges[0].MinRange -gt 1 -or
+        $timeoutRanges[0].MaxRange -lt 120) {
+        throw "$functionName TimeoutSeconds validation must accept 1s tests and the 120s CI ceiling"
+    }
+    $loops = @($body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.WhileStatementAst]
+    }, $true))
+    if ($loops.Count -ne 1) {
+        throw "$functionName must have one readiness polling loop"
+    }
+    $condition = $loops[0].Condition.PipelineElements[0].Expression
+    if ($condition -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
+        $condition.Operator -ne [System.Management.Automation.Language.TokenKind]::Ilt -or
+        $condition.Right -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+        $condition.Right.VariablePath.UserPath -ne "TimeoutSeconds") {
+        throw "$functionName polling loop must compare elapsed time directly against the unclamped TimeoutSeconds budget"
+    }
+    $timeoutAssignments = @($body.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Left.VariablePath.UserPath -eq "TimeoutSeconds"
+    }, $true))
+    if ($timeoutAssignments.Count -ne 0) {
+        throw "$functionName must not reassign the TimeoutSeconds budget"
     }
 }
 
@@ -35,7 +70,36 @@ $startupAssignments = @($updaterAst.FindAll({
 if ($startupAssignments.Count -ne 1 -or $startupAssignments[0].Right.Expression.SafeGetValue() -ne 120) {
     throw "updater-e2e.ps1 must pass a 120s server startup ceiling"
 }
-Write-Host "both helper defaults and the CI startup ceiling are 120s"
+$readinessCalls = @($updaterAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -like "Wait-ForUpdateServer*"
+}, $true))
+if ($readinessCalls.Count -eq 0) {
+    throw "updater-e2e.ps1 must contain server readiness calls"
+}
+foreach ($call in $readinessCalls) {
+    $timeoutArguments = @(
+        for ($index = 0; $index -lt $call.CommandElements.Count; $index++) {
+            $element = $call.CommandElements[$index]
+            if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $element.ParameterName -eq "TimeoutSeconds") {
+                if ($null -ne $element.Argument) {
+                    $element.Argument
+                } elseif ($index + 1 -lt $call.CommandElements.Count) {
+                    $call.CommandElements[$index + 1]
+                }
+            }
+        }
+    )
+    if ($timeoutArguments.Count -ne 1 -or
+        $timeoutArguments[0] -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+        $timeoutArguments[0].VariablePath.UserPath -ne "ServerStartupTimeoutSeconds") {
+        $site = "updater-e2e.ps1:$($call.Extent.StartLineNumber):$($call.Extent.StartColumnNumber)"
+        throw "$site $($call.GetCommandName()) must bind -TimeoutSeconds to `$ServerStartupTimeoutSeconds"
+    }
+}
+Write-Host "both helper defaults and all $($readinessCalls.Count) CI readiness calls use the unclamped 120s ceiling"
 
 function Test-DelayedReadiness {
     param(
@@ -133,7 +197,7 @@ if ($failure -notmatch [Regex]::Escape($unusedPort.ToString())) {
 if ($failure -notmatch "timed out") {
     throw "unused-port failure was not the readiness deadline: $failure"
 }
-Write-Host "unused port $unusedPort failed with the readiness diagnostic in 1s to under 2s"
+Write-Host "unused port $unusedPort failed with the readiness diagnostic in $($stopwatch.Elapsed.TotalSeconds)s (expected 1s to under 2s)"
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("gmm-readiness-" + [Guid]::NewGuid())
 $standardOutput = Join-Path $testRoot "server.stdout.log"
@@ -165,7 +229,7 @@ try {
     if ($stopwatch.Elapsed.TotalSeconds -lt 1 -or $stopwatch.Elapsed.TotalSeconds -ge 2) {
         throw "bind expiry took $($stopwatch.Elapsed.TotalSeconds)s; expected 1s to under 2s"
     }
-    Write-Host "live server with no output failed as bind expiry in 1s to under 2s"
+    Write-Host "live server with no output failed as bind expiry in $($stopwatch.Elapsed.TotalSeconds)s (expected 1s to under 2s)"
 
     Set-Content $standardError "local update server bind failed: address already in use"
     $failure = $null
@@ -197,7 +261,7 @@ try {
     if ($boundPort -ne 12345 -or $stopwatch.Elapsed.TotalSeconds -ge 5) {
         throw "bind success returned port $boundPort in $($stopwatch.Elapsed.TotalSeconds)s; expected port 12345 in under 5s"
     }
-    Write-Host "bind success returned on the published line in under 5s with the default ceiling"
+    Write-Host "bind success returned on the published line in $($stopwatch.Elapsed.TotalSeconds)s with the default ceiling (expected under 5s)"
 
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     try {
@@ -208,7 +272,7 @@ try {
         if ($stopwatch.Elapsed.TotalSeconds -ge 5) {
             throw "connection acceptance took $($stopwatch.Elapsed.TotalSeconds)s; expected under 5s"
         }
-        Write-Host "connection acceptance returned in under 5s with the default ceiling"
+        Write-Host "connection acceptance returned in $($stopwatch.Elapsed.TotalSeconds)s with the default ceiling (expected under 5s)"
     } finally {
         $listener.Stop()
     }
