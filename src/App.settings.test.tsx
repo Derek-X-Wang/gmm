@@ -130,11 +130,21 @@ it("adds an absent Game only on accepted save and returns to the original Game",
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
 });
 
+it("names missing Game entries in the Settings path details", async () => {
+  const missing = ["C:\\StarRail\\StarRail.exe", "C:\\StarRail\\StarRail_Data"];
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail",
+    gamePath: { status: "requiredEntriesNotFound", paths: missing },
+    modelImporter: { status: "unverified", path: null, error: "Game layout unverified" } };
+  renderApp();
+  await openGame();
+  expect(await screen.findByText(`Missing Game entries: ${missing.join(", ")}`, { selector: "p" })).toBeVisible();
+});
+
 const outcomes: { gamePath: GamePathStatus["gamePath"]; modelImporter: GamePathStatus["modelImporter"]; line: string }[] = [
   { gamePath: { status: "noSavedPath" }, modelImporter: { status: "unverified", path: null, error: "no setting" }, line: "Absent · no saved path" },
   { gamePath: { status: "readable" }, modelImporter: { status: "installed" }, line: "SRMI installed · Game readable" },
   { gamePath: { status: "readable" }, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] }, line: "Game readable · Model Importer not installed" },
-  { gamePath: { status: "savedPathNotFound", paths: ["C:\\StarRail"] }, modelImporter: { status: "unverified", path: null, error: "Missing Game" }, line: "Saved installation cannot be found · Model Importer unverified" },
+  { gamePath: { status: "savedPathNotFound", paths: ["C:\\StarRail"] }, modelImporter: { status: "unverified", path: null, error: "Missing Game" }, line: "Saved Game installation cannot be found · Model Importer unverified" },
   { gamePath: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\StarRail.exe"] }, modelImporter: { status: "unverified", path: null, error: "Missing executable" }, line: "Required Game files or directories not found · Model Importer unverified" },
   { gamePath: { status: "unreadable", path: "C:\\StarRail", error: "Access denied" }, modelImporter: { status: "unverified", path: null, error: "Access denied" }, line: "Cannot tell · path unreadable; Model Importer unverified" },
   { gamePath: { status: "invalid", error: "Wrong path type" }, modelImporter: { status: "unverified", path: null, error: "Wrong layout" }, line: "Cannot verify Game layout · Model Importer unverified" },
@@ -145,6 +155,10 @@ it.each(outcomes)("renders the separate path-state row: $line", async ({ gamePat
   renderApp();
   await openGame();
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent(line));
+  if (gamePath.status === "savedPathNotFound") {
+    expect(screen.getAllByText("Saved Game installation cannot be found · Model Importer unverified", { selector: "p" })).toHaveLength(2);
+    expect(screen.queryByText("Saved installation cannot be found · Model Importer unverified")).not.toBeInTheDocument();
+  }
   for (const other of outcomes.filter((value) => value.line !== line)) {
     expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(other.line);
   }

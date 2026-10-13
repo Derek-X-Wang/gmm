@@ -67,15 +67,18 @@ it("allows an explicit install for a readable Game with confirmed absent importe
   expect(screen.queryByRole("button", { name: "Pin to current" })).not.toBeInTheDocument();
 });
 it.each([
-  ["no saved path", { status: "noSavedPath" }, { status: "unverified", path: null, error: "No path" }],
-  ["Game entries missing", { status: "requiredEntriesNotFound", paths: ["C:/Game/Game.exe"] }, { status: "unverified", path: null, error: "Missing executable" }],
-  ["saved path missing", { status: "savedPathNotFound", paths: ["C:/Game"] }, { status: "unverified", path: null, error: "Missing executable" }],
-  ["unreadable Game", { status: "unreadable", path: "C:/Game", error: "Access denied" }, { status: "unverified", path: "C:/Game", error: "Access denied" }],
-  ["invalid Game", { status: "invalid", error: "Wrong layout" }, { status: "unverified", path: null, error: "Wrong layout" }],
-  ["unverified importer", { status: "readable" }, { status: "unverified", path: "C:/Game/Core", error: "Sharing violation" }],
-] as const)("does not offer writes or infer a version for %s", async (_, gamePath, modelImporter) => {
+  ["no saved path", { status: "noSavedPath" }, { status: "unverified", path: null, error: "No path" }, "Set a readable Game install path before installing a Model Importer.", "Saved Game installation cannot be found"],
+  ["Game entries missing", { status: "requiredEntriesNotFound", paths: ["C:/Game/Game.exe"] }, { status: "unverified", path: null, error: "Missing executable" }, "Required Game files or directories not found: C:/Game/Game.exe · Model Importer unverified", "Saved Game installation cannot be found"],
+  ["saved path missing", { status: "savedPathNotFound", paths: ["C:/Game"] }, { status: "unverified", path: null, error: "Missing executable" }, "Saved Game installation cannot be found · Model Importer unverified", "Required Game files or directories not found"],
+  ["unreadable Game", { status: "unreadable", path: "C:/Game", error: "Access denied" }, { status: "unverified", path: "C:/Game", error: "Access denied" }, "Cannot tell · Model Importer filesystem unverified", "Saved Game installation cannot be found"],
+  ["invalid Game", { status: "invalid", error: "Wrong layout" }, { status: "unverified", path: null, error: "Wrong layout" }, "Cannot tell · Model Importer filesystem unverified", "Saved Game installation cannot be found"],
+  ["unverified importer", { status: "readable" }, { status: "unverified", path: "C:/Game/Core", error: "Sharing violation" }, "Cannot tell · Model Importer filesystem unverified", "Saved Game installation cannot be found"],
+] as const)("does not offer writes or infer a version for %s", async (_, gamePath, modelImporter, line, other) => {
   path = { ...path, gamePath: { ...gamePath }, modelImporter: { ...modelImporter } } as GamePathStatus;
   render();
+  expect(await screen.findByText(line)).toBeVisible();
+  expect(screen.queryByText(new RegExp(other))).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Model Importer (GIMI)" })).toBeVisible();
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_game_path_status", { game: "gimi" }));
   expect(screen.getByRole("button", { name: "Importer installation unavailable" })).toBeDisabled();
   expect(screen.queryByText(/· Installed/)).not.toBeInTheDocument();

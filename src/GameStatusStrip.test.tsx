@@ -63,6 +63,8 @@ it.each([
   expect(strip).toHaveTextContent("Game and Model Importer (SRMI)");
   expect(strip).toHaveTextContent(`Saved Game path: ${savedPath}`);
   for (const missing of paths) expect(strip).toHaveTextContent(missing);
+  // The detail is a separate text node; the saved-path code cannot satisfy this.
+  expect(within(strip).getByText(state === "savedPathNotFound" ? paths.join(", ") : `Missing Game entries: ${paths.join(", ")}`, { selector: "span" })).toBeVisible();
   if (state === "requiredEntriesNotFound") expect(strip).toHaveTextContent(`Missing Game entries: ${paths.join(", ")}`);
   expect(strip).not.toHaveTextContent(/not installed|healthy|Installed version:|Pinned|Unhealthy/);
   expect(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" })).toBeVisible();
