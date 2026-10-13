@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createUpdateController as createController, declinedBuildKey } from "./updater";
 import { memorySkipStorage } from "./test/updaterStorage";
+import skipFixtures from "./test/updaterSkipFixtures.json";
 let storage = memorySkipStorage();
 const createUpdateController = (check: Parameters<typeof createController>[0], store = storage) => createController(check, store);
 
@@ -142,13 +143,24 @@ it("the controller keeps an unanswered offer without installing while time passe
   const controller = createUpdateController(vi.fn().mockResolvedValue(update));
   await controller.checkForUpdates(true);
   expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
-  // Drain all currently scheduled work, including delays beyond the old 60s horizon.
-  await vi.runOnlyPendingTimersAsync();
-  for (const target of [window, document]) {
-    for (const event of ["focus", "visibilitychange"]) {
-      target.dispatchEvent(new Event(event));
-      await vi.runOnlyPendingTimersAsync();
-      expect(update.downloadAndInstall).not.toHaveBeenCalled();
+  // Advance five minutes of fake Date/performance time even with no queued timer.
+  // tickAsync runs chained timeouts, interval ticks, animation frames and their
+  // promise continuations due in this window; runOnlyPendingTimersAsync does not.
+  // This is a bounded observation window, not a deadline for user consent.
+  await vi.advanceTimersByTimeAsync(300_000);
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
+  for (const visibility of ["hidden", "visible"] as const) {
+    const visibilityState = vi.spyOn(document, "visibilityState", "get").mockReturnValue(visibility);
+    try {
+      for (const target of [window, document]) {
+        for (const event of ["focus", "visibilitychange"]) {
+          target.dispatchEvent(new Event(event));
+          await vi.advanceTimersByTimeAsync(300_000);
+          expect(update.downloadAndInstall).not.toHaveBeenCalled();
+        }
+      }
+    } finally {
+      visibilityState.mockRestore();
     }
   }
   expect(update.downloadAndInstall).not.toHaveBeenCalled();
@@ -229,6 +241,18 @@ it.each([
   const controller = createUpdateController(vi.fn().mockResolvedValue(update));
   await controller.checkForUpdates(true);
   expect(controller.getSnapshot()).toMatchObject({ kind: "available", version: "0.4.0" });
+  expect(storage.getItem(declinedBuildKey)).toBe(stored);
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
+});
+
+it.each(skipFixtures)("the controller's stored skip decision agrees with diagnostics: $name", async ({ stored, honoured }) => {
+  storage.setItem(declinedBuildKey, stored);
+  const update = fakeUpdate("0.4.0");
+  const controller = createUpdateController(vi.fn().mockResolvedValue(update));
+  await controller.checkForUpdates(true);
+  expect(controller.getSnapshot()).toMatchObject(honoured
+    ? { kind: "declined", version: "0.4.0", remembered: true }
+    : { kind: "available", version: "0.4.0" });
   expect(storage.getItem(declinedBuildKey)).toBe(stored);
   expect(update.downloadAndInstall).not.toHaveBeenCalled();
 });

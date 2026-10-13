@@ -158,6 +158,18 @@ fn is_gmm_log(path: &Path) -> bool {
     name.contains(LOG_FILE_SUFFIX)
 }
 
+/// Whether stored skip metadata can participate in the frontend's exact match.
+/// This reports storage compatibility, not whether any currently offered build matches.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdaterSkipStatus {
+    #[default]
+    Absent,
+    Usable,
+    Unreadable,
+    Noncanonical,
+}
+
 /// Snapshot of the bits of GMM's settings we include in a diagnostics
 /// bundle. Sensitive fields are marked here so the redactor at the
 /// boundary cannot forget them.
@@ -176,6 +188,8 @@ pub struct SettingsSnapshot {
     pub proxy_url: Option<String>,
     #[serde(default)]
     pub updater_skipped_build: Option<super::settings::SkippedUpdate>,
+    #[serde(default)]
+    pub updater_skip_status: UpdaterSkipStatus,
     #[serde(default)]
     pub updater_error: Option<String>,
 }
@@ -196,6 +210,7 @@ impl SettingsSnapshot {
             game_install_paths: self.game_install_paths.clone(),
             proxy_url,
             updater_skipped_build: self.updater_skipped_build.clone(),
+            updater_skip_status: self.updater_skip_status,
             updater_error: self.updater_error.clone(),
         }
     }

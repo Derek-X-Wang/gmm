@@ -159,3 +159,80 @@ async fn invalid_skip_writes_are_rejected_without_replacing_a_valid_skip() {
         );
     }
 }
+
+#[tokio::test]
+async fn diagnostics_only_claims_skips_the_frontend_honours_and_never_repairs_storage() {
+    use tauri::Manager;
+
+    // These same literal fixtures run through the real frontend controller.
+    // Diagnostics may claim a skip only when that controller remembers it.
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("../../src/test/updaterSkipFixtures.json"))
+            .expect("shared frontend/Rust skip fixtures");
+    for case in cases.as_array().expect("fixtures") {
+        let name = case["name"].as_str().expect("name");
+        let stored = case["stored"].as_str().expect("stored skip");
+        let honoured = case["honoured"].as_bool().expect("frontend decision");
+        let temp = tempfile::tempdir().expect("temp");
+        let db = format!("sqlite://{}/gmm.db?mode=rwc", temp.path().display());
+        let core = Core::new(temp.path().join("library"), &db)
+            .await
+            .expect("core");
+        let pool = sqlx::SqlitePool::connect(&db).await.expect("open storage");
+        gmm_lib::core::settings::put(
+            &pool,
+            gmm_lib::core::settings::keys::skipped_update(),
+            Some(stored),
+        )
+        .await
+        .expect("seed raw skip");
+
+        let snapshot = core.settings_snapshot().await.expect("snapshot");
+        assert_eq!(
+            snapshot.updater_skipped_build.is_some(),
+            honoured,
+            "{name}: diagnostics must agree with the frontend's skip decision"
+        );
+        assert_eq!(
+            core.skipped_update()
+                .await
+                .expect("raw skip after snapshot"),
+            Some(stored.into()),
+            "{name}: a snapshot must not repair or delete the raw value"
+        );
+        assert_eq!(
+            serde_json::to_value(&snapshot).expect("snapshot JSON")["updater_skip_status"],
+            case["status"],
+            "{name}: snapshot must explain why a stored skip is ignored"
+        );
+        let app = tauri::test::mock_app();
+        app.manage(core);
+        let bundle = temp.path().join("diagnostics.zip");
+        gmm_lib::commands::export_diagnostics_bundle(
+            app.state(),
+            temp.path().join("logs"),
+            bundle.clone(),
+            None,
+        )
+        .await
+        .expect("export diagnostics");
+        let bundled = bundled_settings(&bundle);
+        assert_eq!(
+            !bundled["updater_skipped_build"].is_null(),
+            honoured,
+            "{name}: the bundle must agree with the frontend's skip decision"
+        );
+        assert_eq!(
+            bundled["updater_skip_status"], case["status"],
+            "{name}: bundle must preserve skip compatibility status"
+        );
+        assert_eq!(
+            app.state::<Core>()
+                .skipped_update()
+                .await
+                .expect("raw skip after export"),
+            Some(stored.into()),
+            "{name}: exporting diagnostics must not repair or delete the raw value"
+        );
+    }
+}
