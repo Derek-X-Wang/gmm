@@ -4,8 +4,10 @@
 
 This specification covers the specification half of #285. It records the
 accepted information architecture and both human decisions on the attention
-indicator and status strip. Implementation ticket granularity and slicing need
-a separate human decision and are outside this specification.
+indicator and status strip. It also records the application-shell decisions of
+#326: a native menu, Settings as a modal dialog, and a bottom status bar.
+Implementation ticket granularity and slicing need a separate human decision
+and are outside this specification.
 
 The binding sources are:
 
@@ -20,11 +22,23 @@ The binding sources are:
   and independent selection. Round 2 supersedes the earlier candidates. The
   map's two sections become separate pages; its sidebar prohibition applies
   only to the main screen. These are explicit refinements, not contradictions.
+  #326 later replaced the full-screen presentation with a modal dialog; the
+  rest of round 2 stands.
 - [#285 — final brief](https://github.com/Derek-X-Wang/gmm/issues/285#issuecomment-6104678223):
   the attention and status-strip requirements, Add game destination, Settings
   row state, and Library split. Human review on #285 accepted both presentation
   recommendations; those decisions are recorded under their surfaces below.
   The earlier strip brief also requires a read-only report.
+- [#326 — application shell](https://github.com/Derek-X-Wang/gmm/issues/326):
+  the [modal-dialog decision](https://github.com/Derek-X-Wang/gmm/issues/326#issuecomment-6133172167)
+  and the [Close-only decision with the settled list](https://github.com/Derek-X-Wang/gmm/issues/326#issuecomment-6133386264).
+  These revise the shell only. Settings becomes a modal dialog instead of a
+  full-screen destination, global actions move to a native menu, the window
+  bar's wordmark goes, and the status strip becomes a bottom status bar. #326
+  states that the honesty rules, the per-Game status reporting, and the
+  Settings information architecture from #282 through #285 stand. Where this
+  document now departs from #284's full-screen destination, the section says so
+  and names #326.
 
 [CONTEXT.md](../../CONTEXT.md) defines the domain terms used here. ADRs
 [0001](../adr/0001-gplv3-and-embed-3dmloader.md),
@@ -49,6 +63,111 @@ paths, preview notices, control header, or timestamps as application data. Its
 warning styling is a reference only; the human decision on #285 governs the
 attention indicator's loud shape below.
 
+The #326 shell decisions supersede parts of both frames. In the main-screen
+prototype, the window bar and the strip's position below the tabs no longer
+apply. In the Settings prototype, the full-screen frame and **Back to Mods** no
+longer apply. Its Games list, GMM entry, page content, and grouping still apply
+inside the dialog. The shell comparison canvas used in #326 shows OK / Cancel /
+Apply on board B. That point is out of date; the Close-only decision governs
+(#326).
+
+## Application shell
+
+The maintainer chose the broad reading of #326: a redesign pass toward a native
+Windows application, not a menu bar added to the current screen. This section
+records what was decided. It does not change what the application reports or
+how Settings is organised (#326).
+
+### Native menu and window identity
+
+Global actions move from in-page chrome into a native menu (#326). The global
+actions in the window bar today are the Settings control and **Run setup
+again**. Both become menu items. The Settings item opens the Settings dialog on
+its GMM page, as the window-bar control did (arrival contract below). **Run
+setup again** keeps its existing behavior: it is unavailable while a reset is
+pending, and a failure stays visible as a persistent error on the main screen,
+not inside the menu.
+
+The in-page window bar's `GMM` wordmark goes. The OS title bar already carries
+the application's name, so showing it twice adds nothing (#326). With the
+wordmark and both global actions gone, the window bar has no content left and
+is not part of the main-screen hierarchy below.
+
+Which menus exist, their names and order, and whether any other item appears
+in them is not yet decided. See [Open shell decisions](#open-shell-decisions).
+
+### Settings as a modal dialog
+
+Settings opens as a **modal dialog** over the main screen (#326). The
+maintainer chose it over the full-screen destination, a separate window, and a
+docked panel. It is drawn inside the main window, not as a separate OS window.
+It opens from the menu's Settings item. The existing status-bar Settings link
+and Add game also open it, on a Game page (arrival contract below). While it is
+open, the main screen stays in place behind it and does not accept input.
+Closing the dialog shows the main screen exactly as it was left.
+
+This replaces the full-screen destination of #284 round 2. That round chose a
+full screen so Settings would not show Launch or the Mod list while the user
+configures. The dialog keeps that rule for its own content: it contains no
+Launch control and no Mod list. Everything else from #284 round 2 stands
+inside the dialog: the list of all six Games, the separate GMM entry, one page
+at a time, and a Game selection independent of the main screen.
+
+The dialog dismisses with **Close only**. It has no OK, Cancel, or Apply
+(#326). Settings changes continue to commit as they do today: each editor
+commits its own change through its own mutation. The dialog is a container,
+not a transaction. Nothing in it may claim a reversal the code cannot perform.
+
+The reason is architectural. A toggle changed inside the dialog is already
+saved before the user reaches any button. A Cancel would therefore have to
+abandon changes that are already committed, which the code cannot do. A Cancel
+that does not cancel is the same defect as the controls and messages this
+repository has removed for claiming more than they establish. Windows 11's own
+Settings also applies changes at once and has no OK or Cancel (#326).
+
+Transactional settings editing is not rejected; it is a separate decision that
+#326 did not take. If buffered edits with a real Cancel are wanted later, that
+decision must account for the controls that are operations rather than
+settings, such as Re-detect, Install, and Browse. Those cannot be buffered
+(#326).
+
+### Status bar
+
+The per-Game status strip's content moves to a **status bar at the bottom of
+the window** (#326). It still reports the Game and the Model Importer as
+separately labelled facts, as #324 also requires. Its payload, wording, path
+states, read-only rule, and Settings link are unchanged; see
+[Per-Game status bar](#per-game-status-bar).
+
+### The docked panel goes to the selected Mod
+
+The docked panel was a candidate for Settings in #326 and lost to the modal
+dialog. It is not discarded. It is reassigned to the selected Mod's detail in
+[#327](https://github.com/Derek-X-Wang/gmm/issues/327). The split is the
+ordinary desktop one: a dialog configures the application; a panel follows the
+selection (#326). This document does not specify that panel. Do not reopen
+the Settings presentation to reclaim it.
+
+### Open shell decisions
+
+The maintainer has **not** decided the following. They are recorded here so
+that no ticket treats them as settled. Items marked *needed for coherence* were
+not raised as open in #326, but this document cannot specify them without a
+decision.
+
+| Open item | What is known | Source |
+| --- | --- | --- |
+| Window default size, minimum size, and remembered size and position | The window is configured at 800x600, with no minimum and no remembered size or position. | #326 |
+| Keyboard access and accelerators | Menu accelerators, standard Windows shortcuts, and keyboard-only paths to each surface. The existing Escape return from Settings is preserved (arrival contract below); nothing else is decided. | #326 |
+| Per-flow evidence from the Windows playbook | #326 carries a read-only evidence playbook for a Windows session. Its results inform the two items above. | #326 |
+| Menu structure | Which menus exist, their names and order, and whether **Check for updates**, Diagnostics, or Quit appear as menu items in addition to their current homes. Only the move of Settings and **Run setup again** is decided. | Raised in #326, not settled |
+| Dialog size and behavior in a small window | Whether the dialog is resizable, how large it is relative to the window, and how it fits at the minimum window size. Depends on window sizing. | *needed for coherence* |
+| Status bar presentation of long content | The bar must carry every fact in the per-Game payload, including the list of **Missing Game entries:**. How a list that exceeds one line is shown is not decided. No fact may be dropped silently. | #324, *needed for coherence* |
+| Mod inspector and the main-screen no-sidebar rule | #327 adds a docked panel beside the Mod list. This document says the main screen has no sidebar or dock (#282, #283). #327 must reconcile the two when it is specified. | #327, *needed for coherence* |
+
+A visual pass (how the application looks, as opposed to how native it feels)
+is a separate axis and is not part of #326 (#326).
+
 ## Main-screen information architecture
 
 The main screen manages Mods for one Game: browse the Library, enable/disable,
@@ -56,18 +175,25 @@ review Conflicts, and launch (#282). Candidate A gives the Mod list the first
 large content area. There is no main-screen sidebar, session dock, or collapsible
 setup disclosure (#282, #283).
 
-Use this hierarchy from candidate A (#283):
+Use this hierarchy from candidate A (#283), as revised by #326:
 
-1. Window bar: GMM identity and the global Settings control.
+1. Native menu, above the page content: the global Settings item and **Run
+   setup again** (#326).
 2. Game header: the selected Game name and a prominent primary
    `Launch <Game name>` action.
 3. Global header line: the compact expandable all-Games attention indicator
    and Game Session context.
 4. Horizontal tabs for installed Games, with Add game beside the tabs.
-5. Thin read-only status strip for the selected Game, with its Settings link.
-6. Conditional recovery/setup notices, scoped to the affected Game or operation.
-7. Mods: populated Library or the import-led empty state.
-8. `ModUpdatesPanel` for this Game, after the Mod content.
+5. Conditional recovery/setup notices, scoped to the affected Game or operation.
+6. Mods: populated Library or the import-led empty state.
+7. `ModUpdatesPanel` for this Game, after the Mod content.
+8. Status bar at the bottom of the window: the selected Game's read-only
+   status, with its Settings link (#326).
+
+Candidate A put a window bar first, with the GMM wordmark and the global
+Settings control, and placed the status strip directly below the tabs (#283).
+#326 removes the window bar and moves the strip's content to the bottom status
+bar. See [Application shell](#application-shell).
 
 Conditional notices must not bring the configuration panels back above the Mod
 list (#282). A per-Mod recovery warning stays on that Mod's row. A Game-level
@@ -78,22 +204,32 @@ resume controls remain available (#282). A healthy completed startup needs no
 recovery card. A reconcile failure names the affected Game and the error and
 must not claim its Junctions were repaired.
 
-### Per-Game status strip
+### Per-Game status bar
 
-The thin read-only status strip links to that Game's Settings page (#283).
-The human decisions on #285 and #324 set its payload:
-**`Game and Model Importer (<Importer>)`**, with a labelled Game fact, Model
-Importer name and its healthy / unhealthy / unverified state, the saved Game
-path, the verified installed
-version, and a compact pin marker when an Importer Pin applies. Importer Origin
-detail stays in Settings and does not appear in the strip. The strip contains
-no path editor, Install/Update, rollback, Importer Pin control, Origin editor,
-or Library mutation control.
+#283 introduced this report as a thin status strip below the Game tabs. #326
+moves its content to a status bar at the bottom of the window. Only its
+position changes; the payload, wording, and path-state rules below stand.
+
+The read-only status bar links to that Game's Settings page (#283), which
+opens in the Settings dialog. The human decisions on #285 and #324 set its
+payload: **`Game and Model Importer (<Importer>)`**, with a labelled Game fact,
+Model Importer name and the Model Importer state the check established, the
+saved Game path, the verified installed version, and a compact pin marker when
+an Importer Pin applies. That state is one of three: required entries present
+(`installed`), required entries not found (`requiredEntriesNotFound`), or not
+verified (`unverified`). A wrong-type entry is `unverified` and carries its
+layout error. No state is a fault label. A Model Importer that was never
+installed is the normal state before installation, not a broken one (#340).
+The data cannot yet tell an absent Model Importer from a damaged one; see
+[Known data limitation](#known-data-limitation). Importer Origin detail stays
+in Settings and does not appear in the status bar. The status bar contains no path editor,
+Install/Update, rollback, Importer Pin control, Origin editor, or Library
+mutation control.
 
 When the path is unreadable, the line leads with **Cannot tell — install path
 unreadable**. Keep the saved path, report Model Importer state as unverified,
 never say “not installed,” and never infer a version. When the Game is readable
-but its Model Importer is confirmed absent, keep the strip visible with
+but its Model Importer is confirmed absent, keep the status bar visible with
 **Model Importer not installed** and its Settings link. That link is the route
 to fixing this state (#285 human decision).
 
@@ -104,8 +240,17 @@ required Game entries instead says **Game: Required Game files or directories
 not found** and lists **Missing Game entries:** with the missing paths (#324).
 Both report Model Importer state as unverified. Do not reuse “no saved path” or
 “Model Importer not installed.”
-All strip states follow the filesystem and path-state contract below; only
+All status-bar states follow the filesystem and path-state contract below; only
 verified installed facts may supply an installed version (#285 human decision).
+
+### Known data limitation
+
+This is **not** a decided behavior. It is recorded here so that no ticket
+treats the current wording as proof of a distinction the data does not make.
+
+| Open item | What is known | Source |
+| --- | --- | --- |
+| Absent versus damaged Model Importer | A Model Importer that was never installed and an installed one that has lost required entries both report `requiredEntriesNotFound`. Nothing downstream can tell them apart, so both get the absent wording. A damaged install cannot be reported until the data separates the two. Do not add a fault label to `requiredEntriesNotFound` in the meantime. | [#341](https://github.com/Derek-X-Wang/gmm/issues/341) |
 
 ### Surface ownership
 
@@ -121,6 +266,9 @@ verified installed facts may supply an installed version (#285 human decision).
 | All-Games importer-recommendations switch | GMM page, with a named link from each Game's Importer Origin group. | #284 candidate B, ADR 0005 |
 | `NetworkPanel`, `UpdatesPanel`, `Diagnostics` | GMM page. | #282, #284 |
 | `LibraryAuditWarning` | Conditional recovery surface on its Game; retain its existing attachment to the Game install-path group when that group moves to Settings. | #282 recovery preservation, #284 |
+| `WindowBar` (Settings control, **Run setup again**, `GMM` wordmark) | Removed from the page. Settings and **Run setup again** become native menu items; the wordmark is dropped. | #326 |
+| `GameStatusStrip` | Status bar at the bottom of the window, selected Game; payload and wording unchanged. | #283, #285, #324, #326 |
+| `SettingsDestination` | Modal Settings dialog over the main screen, dismissed with Close only. | #284 round 2, #326 |
 
 ### Main-surface states
 
@@ -131,9 +279,9 @@ an update-check error, and an active Game Session at the same time.
 | Surface | States and required result |
 | --- | --- |
 | Selected Game/inventory | Registry/path reads pending, available, or failed; zero configured paths; one or more configured paths; selected Game changes. Show read failures as unavailable, with Settings reachable. Never render an absent Game as an installed tab. |
-| Status strip | Checking, verified Game/Model Importer facts, or unavailable check, plus the four path cases below and distinct reports for a missing saved Game directory and missing required Game entries. Keep read-only and preserve the decided payload and wording above; the strip stays visible when a readable Game has no Model Importer (#285 human decision). |
+| Status bar | Checking, verified Game/Model Importer facts, or unavailable check, plus the four path cases below and distinct reports for a missing saved Game directory and missing required Game entries. Keep read-only and preserve the decided payload and wording above; the status bar stays visible when a readable Game has no Model Importer (#285 human decision). |
 | Launch | Ready action, launching, active Game Session, returned session, or rejected launch. Preserve `launch_game` and its existing AV-pattern guidance via `av_guidance`; keep other command failures visible near Launch. Pending/session locks do not remove the primary action's identity. |
-| Game Session context | Reading/unavailable, no active session, active session, cleaned stale session, or interrupted launch reservation. Continue existing session-event refresh across destination changes so return does not fabricate an ended session. |
+| Game Session context | Reading/unavailable, no active session, active session, cleaned stale session, or interrupted launch reservation. Continue existing session-event refresh while the Settings dialog is open, so closing it does not fabricate an ended session. |
 | Mods/Variants | Mod query pending/error, confirmed empty, or populated; existing enabled/disabled choices; Variants absent, loading/error, or available; Variant change pending/success/failure; recovery quarantine. Retain existing controls and their individual gates. |
 | Conflicts | Checking/error, verified none, or verified conflicts. A failed check is not a no-Conflict result. Preserve existing row disclosures; do not choose a winner. |
 | Mod updates | Global weekly preference loading/error or enabled/disabled; Game check pending/error or successful with no updates/available updates; row update checking preference; apply pending/success/failure. A failed check is not “current,” and failed apply feedback survives a disappearing badge. |
@@ -141,12 +289,19 @@ an update-check error, and an active Game Session at the same time.
 
 ## Game navigation and independent Settings context
 
-Settings replaces the main screen completely. It contains no Launch control or
-Mod list, including hidden overlay content or a main-screen backdrop (#284 round
-2). Keep the Settings title and **Back to Mods** action above the destination.
-Down its left side, list every supported Game under Games. Each row has the Game
-name and one line of state. Put **GMM settings** below that list under its own
-Application heading. Show one selected page at a time (#284 candidate B).
+Settings opens as a modal dialog over the main screen (#326). The dialog
+contains no Launch control or Mod list (#284 round 2). The main screen stays
+behind it, unchanged and not accepting input, until the dialog closes (#326).
+Keep the Settings title and the **Close** action in the dialog. Down its left
+side, list every supported Game under Games. Each row has the Game name and one
+line of state. Put **GMM settings** below that list under its own Application
+heading. Show one selected page at a time (#284 candidate B).
+
+#284 round 2 made Settings a full-screen destination that replaced the main
+screen completely, with a **Back to Mods** action and no main-screen backdrop.
+Its purpose was to keep Launch and the Mod list out of Settings. #326 replaces
+that presentation with the dialog. The dialog's own content still excludes
+both, and the main screen behind it cannot be used until the dialog closes.
 
 All six titles are reachable: Genshin Impact (`gimi`), Honkai: Star Rail (`srmi`),
 Zenless Zone Zero (`zzmi`), Wuthering Waves (`wwmi`), Honkai Impact 3rd (`himi`),
@@ -158,20 +313,23 @@ inside Settings only. It is not shared permanent chrome (#282, #284).
 
 | Action | Destination | Effect on main-screen selection |
 | --- | --- | --- |
-| Status-strip Settings link for Game X | Settings, Game X page. | None. |
-| Window-bar Settings control | Settings, GMM page. | None; global arrival implies no selected Game page. |
-| Add game, then choose Game X | Settings, Game X page, with its install-path editor reachable. | None; do not create a main-screen tab by selecting it. |
+| Status-bar Settings link for Game X | Settings dialog, Game X page. | None. |
+| Menu Settings item | Settings dialog, GMM page. | None; global arrival implies no selected Game page. |
+| Add game, then choose Game X | Settings dialog, Game X page, with its install-path editor reachable. | None; do not create a main-screen tab by selecting it. |
 | Select a Game row in Settings | That Game's Settings page. | None, for either arrival route. |
 | Select GMM settings or a named scope link | The named Settings page. | None. |
-| Back to Mods, or the prototype's Escape return | Main, the Game left on entry. | Restore that selection and the user's place in its Mod list. |
+| Close, or the existing Escape return | Dialog closes; main shows the Game left on entry. | Restore that selection and the user's place in its Mod list. |
 
-The first two routes are unchanged and binding (#284 round 2). Add game is the
-existing setup affordance routed to the now-decided destination (#285). Retain
-its supported-Game chooser rather than silently choosing a Game. Do not adopt
+The first two routes are binding (#284 round 2). #326 moves the global entry
+point from the window bar to the menu and keeps its GMM-page arrival. Add game
+is the existing setup affordance routed to the now-decided destination (#285),
+which now opens in the dialog (#326). Retain its supported-Game chooser rather
+than silently choosing a Game. Do not adopt
 candidate A's shared selection or candidate C's route-dependent policy (#284).
 Navigation within Settings can change its own page and Game selection only.
-Its header and form labels name the Game being configured; Back identifies the
-main-screen return Game, as candidate B does.
+Its header and form labels name the Game being configured. Candidate B's Back
+action named the main-screen return Game. The dialog's action is **Close**
+(#326), and the return Game stays visible behind the dialog.
 
 ### Installed-only tabs and adding a Game
 
@@ -186,9 +344,10 @@ and #285 uncertainty requirement).
 Setting a valid install path is how an absent Game gains a main-screen tab
 (#284). The change refreshes tab membership after the backend accepts it; a
 failed save does not add a tab. Adding a Game while in Settings does not select
-it on main. Back still returns to the prior Game. If no Game was selected
-because there were no configured paths, use the existing first-installed-Game
-fallback after paths load; this is initialization, not shared Settings selection.
+it on main. Closing the dialog still returns to the prior Game. If no Game was
+selected because there were no configured paths, use the existing
+first-installed-Game fallback after paths load; this is initialization, not
+shared Settings selection.
 
 While saved paths load, report that the inventory is being checked. If one read
 fails, name the affected Game and retain any last known configured membership;
@@ -216,17 +375,17 @@ nowhere on disk. Auto-detection failure does not strengthen it into that claim.
 Similarly, a recorded Importer Origin or version alone is not proof of readable
 Model Importer files (#284, #285; ADR 0005).
 
-Only an explicit `NotFound` proves filesystem absence. Report two distinct
-Game path states (#324): `savedPathNotFound` means the **saved Game directory
+Only an explicit `NotFound` proves filesystem absence. Report two distinct Game
+path states (#324): `savedPathNotFound` means the **saved Game directory
 itself** is confirmed absent; `requiredEntriesNotFound` means that directory
-exists but required Game files or directories are confirmed missing. Recheck
-the saved directory before reporting missing required entries; if it vanished,
+exists but required Game files or directories are confirmed missing. Recheck the
+saved directory before reporting missing required entries; if it vanished,
 report the missing saved directory, and keep a failed recheck as uncertainty.
 Retain the saved path and configured tab in both states, identify the missing
 paths, and keep the Model Importer unverified. Only the first state says the
 saved installation cannot be found. Settings must name the Game in that claim,
-including beneath a Model Importer heading: **Saved Game installation cannot
-be found**. Settings and the strip label required-entry details **Missing Game
+including beneath a Model Importer heading: **Saved Game installation cannot be
+found**. Settings and the status bar label required-entry details **Missing Game
 entries:**. Do not call either state prototype `missing`: that state means a
 readable Game with no Model Importer. Do not erase the setting or relabel it
 `absent`. If Model Importer inspection fails while the Game is readable, keep
@@ -246,8 +405,10 @@ Use candidate B's content grouping (#284): Game path first, Model Importer and
 Importer Origin groups next, then the Game's Library path. On GMM, put the
 global Library root first, then Network, GMM updates, importer recommendations,
 and Diagnostics. The reference uses full-width path groups and paired smaller
-cards when space permits; narrow windows wrap the forms while retaining the
-left navigation. Do not introduce another destination shape.
+cards when space permits; a narrow dialog wraps the forms while retaining the
+left navigation. The modal dialog is the only Settings shape (#326); do not
+introduce another. The dialog's size relative to the window is an
+[open shell decision](#open-shell-decisions).
 
 ### Per-Game page
 
@@ -350,8 +511,8 @@ These preserve the existing domain safety boundaries while moving surfaces
 After a recovery action, keep result/error feedback outside any conditional row,
 badge, proposal, or notice that the refresh can remove. Preserve stable focus
 and the existing live-region announcements. Do not erase an error when the
-Settings route changes or a refreshed row disappears (#285 invalidation
-constraint and the committed mutation audit).
+Settings dialog opens, closes, or changes page, or when a refreshed row
+disappears (#285 invalidation constraint and the committed mutation audit).
 
 ### Per-surface gates
 
@@ -451,6 +612,15 @@ The following remain outside this effort (#282, #285):
 - Merging prototypes, creating implementation tickets, closing #285 or the
   map, or enabling automatic merge before human review.
 
+The shell change adds these (#326):
+
+- Transactional settings editing: buffered edits with a real Cancel. It is a
+  separate decision, not rejected, and must account for operations that cannot
+  be buffered.
+- A visual pass. How the application looks is a separate axis from how native
+  it feels.
+- The selected Mod's docked detail panel, which belongs to #327.
+
 ## Implementation acceptance scenarios
 
 These are future implementation checks, not claims that this draft ran the app
@@ -459,8 +629,13 @@ These are future implementation checks, not claims that this draft ran the app
 | Scenario | Required observation |
 | --- | --- |
 | Three configured Games out of six | Three horizontal main tabs; six selectable Settings rows; no main sidebar. |
-| Either Settings arrival | Strip opens its Game; window bar opens GMM; neither visit exposes Launch or a Mod list. |
-| Switch Game or GMM page inside Settings | Main selection and list position stay unchanged when returning. |
+| Either Settings arrival | Status-bar link opens the dialog on its Game; the menu Settings item opens it on GMM; neither dialog contains Launch or a Mod list (#326). |
+| Switch Game or GMM page inside Settings | Main selection and list position stay unchanged when the dialog closes. |
+| Settings dialog open | The main screen stays behind the dialog and accepts no input; the dialog's only dismiss action is **Close**; no OK, Cancel, or Apply exists (#326). |
+| Change a setting, then Close | The change was committed by its own editor before Close; Close reverts nothing and nothing claims it did. A test fails if a control's label promises a reversal the implementation does not perform (#326). |
+| Native menu | Settings and **Run setup again** are menu items that dispatch their existing actions; **Run setup again** is unavailable while a reset is pending, and its failure stays visible on the main screen (#326). |
+| Application identity | The page shows no `GMM` wordmark and no in-page window bar; the OS title bar carries the name (#326). |
+| Status bar | The selected Game's status sits at the bottom of the window, with Game and Model Importer as separately labelled facts and every payload state and wording above (#324, #326). |
 | Add absent Game, accept/reject path | Its Settings editor is reachable without a tab; accepted save adds membership; rejection does not; previous main selection is preserved. |
 | Healthy/unreadable/missing/absent | Render four distinct outcomes from the path table; keep unreadable saved paths; do not infer version/absence. |
 | Saved Game file `NotFound`, or another I/O error | Keep saved configuration; identify confirmed missing file versus cannot-tell failure. Neither becomes “no saved path.” |
@@ -470,4 +645,4 @@ These are future implementation checks, not claims that this draft ran the app
 | Attention true/false/error/refresh | Quiet/loud/unavailable/checking are distinct; only false triggers loud; all-Games findings remain a dated explicit-refresh snapshot. |
 | One quarantined Mod or active session | Existing scoped locks apply; unrelated navigation/settings are usable; `safe_to_proceed` is not a global gate. |
 | Recovery action removes its own row | Stable focus and outcome/error survive disappearance; every affected cached query refreshes on the proper success/settlement boundary. |
-| Narrow window and light/dark appearance | Accepted hierarchy and Settings list remain usable; paths/forms wrap without horizontal overflow, as the reference assets demonstrate. |
+| Narrow window and light/dark appearance | Accepted hierarchy and Settings list remain usable; paths/forms wrap without horizontal overflow, as the reference assets demonstrate. The minimum window size that defines "narrow" is an open shell decision (#326). |
