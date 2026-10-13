@@ -1,4 +1,5 @@
 import { invoke } from "./commandError";
+import { updater } from "./updater";
 
 /**
  * Forward a frontend error to the Tauri-side JSON-lines logger. Never
@@ -28,7 +29,7 @@ export async function exportDiagnosticsBundle(
   logDir: string,
   destPath: string,
 ): Promise<void> {
-  await invoke("export_diagnostics_bundle", { logDir, destPath });
+  await invoke("export_diagnostics_bundle", { logDir, destPath, updaterError: updater.getLastError() });
 }
 
 /**

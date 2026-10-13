@@ -1,181 +1,197 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createUpdateController as createController, declinedBuildKey } from "./updater";
+import { memorySkipStorage } from "./test/updaterStorage";
+let storage = memorySkipStorage();
+const createUpdateController = (check: Parameters<typeof createController>[0], store = storage) => createController(check, store);
 
-// The updater module talks to two Tauri plugins. Both are mocked so the
-// state machine can be driven deterministically without a backend.
-const check = vi.fn();
-const relaunch = vi.fn();
+vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
 
-vi.mock("@tauri-apps/plugin-updater", () => ({
-  check: (...args: unknown[]) => check(...args),
-}));
-vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: (...args: unknown[]) => relaunch(...args),
-}));
-
-const { checkAndInstallSilently, checkInteractively } = await import("./updater");
-
-type StateKind = string;
-
-/** Collect the `kind` of every state the FSM passes through. */
-function recorder() {
-  const kinds: StateKind[] = [];
-  const states: unknown[] = [];
+function fakeUpdate(version = "0.5.0") {
   return {
-    kinds,
-    states,
-    onState: (s: { kind: StateKind }) => {
-      kinds.push(s.kind);
-      states.push(s);
-    },
+    version,
+    body: "Release notes",
+    rawJson: { url: `https://example.com/${version}.msi`, signature: `signed-${version}` },
+    downloadAndInstall: vi.fn(async (onEvent) => {
+      onEvent({ event: "Started", data: { contentLength: 100 } });
+      onEvent({ event: "Progress", data: { chunkLength: 40 } });
+      onEvent({ event: "Progress", data: { chunkLength: 60 } });
+      onEvent({ event: "Finished" });
+    }),
   };
 }
 
-/** Build a fake `Update` whose downloadAndInstall replays progress events. */
-function fakeUpdate(opts: { version?: string; body?: string; contentLength?: number } = {}) {
-  return {
-    version: opts.version ?? "0.2.0",
-    body: opts.body ?? null,
-    downloadAndInstall: vi.fn(
-      async (onEvent: (e: Record<string, unknown>) => void) => {
-        onEvent({ event: "Started", data: { contentLength: opts.contentLength ?? 100 } });
-        onEvent({ event: "Progress", data: { chunkLength: 40 } });
-        onEvent({ event: "Progress", data: { chunkLength: 60 } });
-        onEvent({ event: "Finished", data: {} });
-      },
-    ),
-  };
-}
+beforeEach(() => { storage = memorySkipStorage(); });
 
-beforeEach(() => {
-  check.mockReset();
-  relaunch.mockReset();
-});
-
-describe("checkInteractively", () => {
-  it("reports up-to-date when the backend returns no update", async () => {
-    check.mockResolvedValue(null);
-    const rec = recorder();
-
-    await checkInteractively(rec.onState);
-
-    expect(rec.kinds).toEqual(["checking", "up-to-date"]);
-  });
-
-  it("walks checking → available → downloading → installed on a real update", async () => {
-    check.mockResolvedValue(fakeUpdate({ version: "9.9.9" }));
-    const rec = recorder();
-
-    await checkInteractively(rec.onState);
-
-    expect(rec.kinds[0]).toBe("checking");
-    expect(rec.kinds).toContain("available");
-    expect(rec.kinds).toContain("downloading");
-    expect(rec.kinds[rec.kinds.length - 1]).toBe("installed");
-  });
-
-  it("surfaces the offered version so the UI can name it", async () => {
-    check.mockResolvedValue(fakeUpdate({ version: "1.2.3" }));
-    const rec = recorder();
-
-    await checkInteractively(rec.onState);
-
-    const available = rec.states.find(
-      (s): s is { kind: string; version: string } =>
-        (s as { kind: string }).kind === "available",
-    );
-    expect(available?.version).toBe("1.2.3");
-  });
-
-  it("accumulates downloaded bytes across progress events", async () => {
-    check.mockResolvedValue(fakeUpdate({ contentLength: 100 }));
-    const rec = recorder();
-
-    await checkInteractively(rec.onState);
-
-    const downloads = rec.states.filter(
-      (s): s is { kind: string; downloaded: number; total: number | null } =>
-        (s as { kind: string }).kind === "downloading",
-    );
-    // Started(0) → Progress(+40) → Progress(+60)
-    expect(downloads[downloads.length - 1]?.downloaded).toBe(100);
-    expect(downloads[downloads.length - 1]?.total).toBe(100);
-  });
-
-  it("reports an error state instead of throwing when the check fails", async () => {
-    check.mockRejectedValue(new Error("network unreachable"));
-    const rec = recorder();
-
-    await expect(checkInteractively(rec.onState)).resolves.toBeUndefined();
-
-    expect(rec.kinds).toEqual(["checking", "error"]);
-    const err = rec.states[rec.states.length - 1] as { message: string };
-    expect(err.message).toContain("network unreachable");
-  });
-
-  it("reports an error state when the download fails midway", async () => {
-    check.mockResolvedValue({
-      version: "0.2.0",
-      body: null,
-      downloadAndInstall: vi.fn(async () => {
-        throw new Error("signature mismatch");
-      }),
-    });
-    const rec = recorder();
-
-    await checkInteractively(rec.onState);
-
-    expect(rec.kinds[rec.kinds.length - 1]).toBe("error");
-    expect(
-      (rec.states[rec.states.length - 1] as { message: string }).message,
-    ).toContain("signature mismatch");
-  });
-
-  it("never relaunches on its own — that stays the caller's decision", async () => {
-    check.mockResolvedValue(fakeUpdate());
-    const rec = recorder();
-
-    await checkInteractively(rec.onState);
-
-    expect(relaunch).not.toHaveBeenCalled();
-  });
-});
-
-describe("checkAndInstallSilently", () => {
-  it("does nothing when there is no update", async () => {
-    check.mockResolvedValue(null);
-
-    await checkAndInstallSilently();
-
-    expect(relaunch).not.toHaveBeenCalled();
-  });
-
-  it("installs and relaunches when an update exists", async () => {
+describe("update consent", () => {
+  it.each([true, false])("check (background=%s) stops before any download or install", async (background) => {
     const update = fakeUpdate();
-    check.mockResolvedValue(update);
-
-    await checkAndInstallSilently();
-
+    const controller = createUpdateController(vi.fn().mockResolvedValue(update));
+    await controller.checkForUpdates(background);
+    expect(update.downloadAndInstall).not.toHaveBeenCalled();
+    expect(controller.getSnapshot()).toMatchObject({ kind: "available", version: "0.5.0" });
+    await controller.install();
     expect(update.downloadAndInstall).toHaveBeenCalledOnce();
-    expect(relaunch).toHaveBeenCalledOnce();
+    expect(controller.getSnapshot()).toEqual({ kind: "installed" });
   });
 
-  it("swallows failures so a broken update check can never block startup", async () => {
-    check.mockRejectedValue(new Error("GitHub 503"));
-
-    await expect(checkAndInstallSilently()).resolves.toBeUndefined();
-    expect(relaunch).not.toHaveBeenCalled();
+  it("declining persists the version and never installs, including a stale install action", async () => {
+    const update = fakeUpdate();
+    const controller = createUpdateController(vi.fn().mockResolvedValue(update));
+    await controller.checkForUpdates(true);
+    await controller.decline();
+    await controller.install();
+    expect(update.downloadAndInstall).not.toHaveBeenCalled();
+    expect(storage.getItem(declinedBuildKey)).toContain("signed-0.5.0");
+    expect(controller.getSnapshot()).toEqual({ kind: "declined", version: "0.5.0" });
+    expect(update.downloadAndInstall).not.toHaveBeenCalled();
   });
 
-  it("does not relaunch when the install itself fails", async () => {
-    check.mockResolvedValue({
-      version: "0.2.0",
-      body: null,
-      downloadAndInstall: vi.fn(async () => {
-        throw new Error("disk full");
-      }),
+  it("a fresh launch suppresses a skipped version but offers a different version", async () => {
+    const skipped = fakeUpdate();
+    const firstLaunch = createUpdateController(vi.fn().mockResolvedValue(skipped));
+    await firstLaunch.checkForUpdates(true);
+    await firstLaunch.decline();
+    const nextLaunch = createUpdateController(vi.fn().mockResolvedValue(skipped));
+    await nextLaunch.checkForUpdates(true);
+    expect(nextLaunch.getSnapshot()).toEqual({ kind: "declined", version: "0.5.0", remembered: true });
+    expect(skipped.downloadAndInstall).not.toHaveBeenCalled();
+    const newer = fakeUpdate("0.6.0");
+    const laterLaunch = createUpdateController(vi.fn().mockResolvedValue(newer));
+    await laterLaunch.checkForUpdates(true);
+    expect(laterLaunch.getSnapshot()).toMatchObject({ kind: "available", version: "0.6.0" });
+    expect(newer.downloadAndInstall).not.toHaveBeenCalled();
+    // A deliberate check can reconsider the declined release.
+    await nextLaunch.checkForUpdates();
+    expect(nextLaunch.getSnapshot()).toMatchObject({ kind: "available", version: "0.5.0" });
+    expect(skipped.downloadAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("reports storage failure without installing or claiming the choice was saved", async () => {
+    const update = fakeUpdate();
+    const storage = { getItem: () => null, setItem: () => { throw new Error("storage unavailable"); } };
+    const controller = createUpdateController(vi.fn().mockResolvedValue(update), storage);
+    await controller.checkForUpdates(true);
+    await controller.decline();
+    expect(controller.getSnapshot()).toMatchObject({ kind: "error", message: expect.stringContaining("could not remember") });
+    await controller.install();
+    expect(update.downloadAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("reports unreadable decline storage rather than offering a previously declined release", async () => {
+    const update = fakeUpdate();
+    const storage = { getItem: () => { throw new Error("storage unavailable"); }, setItem: vi.fn() };
+    const controller = createUpdateController(vi.fn().mockResolvedValue(update), storage);
+    await controller.checkForUpdates(true);
+    expect(controller.getSnapshot()).toMatchObject({ kind: "error" });
+    expect(update.downloadAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("serializes duplicate checks and installs and reports accumulated progress", async () => {
+    let resolveCheck!: (update: ReturnType<typeof fakeUpdate>) => void;
+    const check = vi.fn(() => new Promise<ReturnType<typeof fakeUpdate>>((resolve) => { resolveCheck = resolve; }));
+    const controller = createUpdateController(check);
+    const first = controller.checkForUpdates(true);
+    await controller.checkForUpdates();
+    expect(check).toHaveBeenCalledOnce();
+    const update = fakeUpdate();
+    resolveCheck(update);
+    await first;
+    const states: unknown[] = [];
+    controller.subscribe(() => states.push(controller.getSnapshot()));
+    const install = controller.install();
+    await controller.install();
+    await controller.checkForUpdates();
+    await install;
+    expect(update.downloadAndInstall).toHaveBeenCalledOnce();
+    expect(check).toHaveBeenCalledOnce();
+    expect(states).toContainEqual({ kind: "downloading", downloaded: 100, total: 100 });
+  });
+
+  it("does not claim installation succeeded at download Finished if the installer fails", async () => {
+    const update = fakeUpdate();
+    update.downloadAndInstall.mockImplementation(async (onEvent) => {
+      onEvent({ event: "Finished" });
+      throw new Error("installer failed");
     });
-
-    await expect(checkAndInstallSilently()).resolves.toBeUndefined();
-    expect(relaunch).not.toHaveBeenCalled();
+    const controller = createUpdateController(vi.fn().mockResolvedValue(update));
+    const states: unknown[] = [];
+    controller.subscribe(() => states.push(controller.getSnapshot()));
+    await controller.checkForUpdates();
+    await controller.install();
+    expect(states).not.toContainEqual({ kind: "installed" });
+    expect(controller.getSnapshot()).toEqual({ kind: "error", message: "Update installation failed: installer failed" });
   });
+});
+
+it("skipping build A never suppresses build B with the same application version", async () => {
+  const a = fakeUpdate("0.4.0");
+  const b = { ...fakeUpdate("0.4.0"), rawJson: { url: "https://example.com/alpha.3.msi", signature: "signed-alpha.3" } };
+  const first = createUpdateController(vi.fn().mockResolvedValue(a));
+  await first.checkForUpdates(true);
+  await first.decline();
+  const restarted = createUpdateController(vi.fn().mockResolvedValue(b));
+  await restarted.checkForUpdates(true);
+  expect(restarted.getSnapshot()).toMatchObject({ kind: "available", version: "0.4.0" });
+  expect(b.downloadAndInstall).not.toHaveBeenCalled();
+});
+
+afterEach(() => vi.useRealTimers());
+it("the controller keeps an unanswered offer without installing while time passes", async () => {
+  vi.useFakeTimers();
+  const update = fakeUpdate();
+  const controller = createUpdateController(vi.fn().mockResolvedValue(update));
+  await controller.checkForUpdates(true);
+  expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
+  expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
+  await controller.install();
+  expect(update.downloadAndInstall).toHaveBeenCalledOnce();
+});
+
+it("missing signed artifact metadata fails toward offering the build again", async () => {
+  const update = { version: "0.4.0", downloadAndInstall: vi.fn() };
+  const first = createUpdateController(vi.fn().mockResolvedValue(update));
+  await first.checkForUpdates(true);
+  await first.decline();
+  const restarted = createUpdateController(vi.fn().mockResolvedValue(update));
+  await restarted.checkForUpdates(true);
+  expect(restarted.getSnapshot()).toMatchObject({ kind: "available" });
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
+});
+
+it.each(["new signature", "new release URL"])("a static manifest with %s offers another build on the same version line", async (change) => {
+  const a = { ...fakeUpdate("0.4.0"), rawJson: { platforms: {
+    "windows-x86_64-msi": { url: "https://example.com/alpha.2.msi", signature: "signed-alpha.2" },
+    "windows-x86_64": { url: "https://example.com/alpha.2.msi", signature: "signed-alpha.2" },
+  } } };
+  const first = createUpdateController(vi.fn().mockResolvedValue(a));
+  await first.checkForUpdates(true);
+  await first.decline();
+  // Reordering JSON keys is the same build and must stay quiet after restart.
+  const reordered = { ...a, rawJson: { platforms: {
+    "windows-x86_64": a.rawJson.platforms["windows-x86_64"],
+    "windows-x86_64-msi": a.rawJson.platforms["windows-x86_64-msi"],
+  } } };
+  const same = createUpdateController(vi.fn().mockResolvedValue(reordered));
+  await same.checkForUpdates(true);
+  expect(same.getSnapshot()).toMatchObject({ kind: "declined", remembered: true });
+  const b = { ...a, rawJson: { platforms: { ...a.rawJson.platforms,
+    "windows-x86_64-msi": change === "new signature"
+      ? { url: "https://example.com/alpha.2.msi", signature: "signed-rebuilt" }
+      : { url: "https://example.com/alpha.3.msi", signature: "signed-alpha.2" },
+  } } };
+  const different = createUpdateController(vi.fn().mockResolvedValue(b));
+  await different.checkForUpdates(true);
+  expect(different.getSnapshot()).toMatchObject({ kind: "available", version: "0.4.0" });
+  expect(b.downloadAndInstall).not.toHaveBeenCalled();
+});
+
+it("an unidentifiable build is offered even when skip storage is unavailable", async () => {
+  const update = { version: "0.4.0", downloadAndInstall: vi.fn() };
+  const store = { getItem: () => { throw new Error("storage unavailable"); }, setItem: vi.fn() };
+  const controller = createUpdateController(vi.fn().mockResolvedValue(update), store);
+  await controller.checkForUpdates(true);
+  expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
 });

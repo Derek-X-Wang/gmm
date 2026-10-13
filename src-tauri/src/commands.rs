@@ -209,6 +209,18 @@ pub fn log_frontend_error(error: FrontendError) -> CommandResult<()> {
     Ok(())
 }
 
+#[tauri::command]
+pub async fn get_skipped_update(core: State<'_, Core>) -> CommandResult<Option<String>> {
+    core.skipped_update().await.map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_skipped_update(core: State<'_, Core>, build: String) -> CommandResult<()> {
+    core.set_skipped_update(&build)
+        .await
+        .map_err(CommandError::from)
+}
+
 /// Tauri command — user-initiated bundle export. Writes a zip to
 /// `dest_path`. The zip contains the last 7 days of logs plus a redacted
 /// `settings.json` snapshot.
@@ -217,8 +229,10 @@ pub async fn export_diagnostics_bundle(
     core: State<'_, Core>,
     log_dir: PathBuf,
     dest_path: PathBuf,
+    updater_error: Option<String>,
 ) -> CommandResult<()> {
-    let snapshot = core.settings_snapshot().await.map_err(CommandError::from)?;
+    let mut snapshot = core.settings_snapshot().await.map_err(CommandError::from)?;
+    snapshot.updater_error = updater_error;
     // The build is sync I/O; offload so we don't block the Tauri event
     // loop while the zip is being written.
     let log_dir_owned = log_dir.clone();

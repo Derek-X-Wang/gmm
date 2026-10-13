@@ -22,9 +22,17 @@ vi.mock("./diagnostics", () => ({
   diagnosticsLogDir: vi.fn().mockResolvedValue("C:\\GMM\\logs"),
   exportDiagnosticsBundle: vi.fn(),
 }));
-vi.mock("./updater", () => ({
-  checkInteractively: vi.fn(),
-}));
+vi.mock("./updater", () => {
+  const idle = { kind: "idle" };
+  return { updater: {
+    getSnapshot: () => idle,
+    subscribe: () => () => {},
+    checkForUpdates: vi.fn(),
+    install: vi.fn(),
+    decline: vi.fn(),
+    reportRestartError: vi.fn(),
+  } };
+});
 vi.mock("./ImporterOriginPanel", () => ({ ImporterOriginPanel: () => null }));
 vi.mock("./LibraryAuditWarning", () => ({ LibraryAuditWarning: () => null }));
 vi.mock("./LoaderVersionNote", () => ({ LoaderVersionNote: () => null }));

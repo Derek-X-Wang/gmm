@@ -48,10 +48,20 @@ where
     Ok(())
 }
 
-/// Canonical key strings used by the rest of the codebase. Kept in one
-/// place so a typo is impossible to silently introduce.
+/// The version shown to the user and the signed artifact identity they skipped.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct SkippedUpdate {
+    pub version: String,
+    pub identity: String,
+}
+
+/// Canonical setting keys.
 pub mod keys {
     use super::GameCode;
+
+    pub fn skipped_update() -> &'static str {
+        "updater.skippedBuild"
+    }
 
     pub fn library_root() -> &'static str {
         "library.root"

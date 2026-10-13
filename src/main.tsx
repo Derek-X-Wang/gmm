@@ -4,13 +4,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { installGlobalErrorHandlers } from "./diagnostics";
-import { checkAndInstallSilently } from "./updater";
+import { updater } from "./updater";
+import { StartupUpdateNotice } from "./UpdatesPanel";
 
 installGlobalErrorHandlers();
 
-// Background update check on app start. Best-effort: failures only log;
-// signature mismatches surface via tauri-plugin-updater's own modal.
-void checkAndInstallSilently();
+// Startup checks only. The global notice asks before downloading or installing.
+void updater.checkForUpdates(true);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -26,6 +26,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <App />
+        <StartupUpdateNotice />
       </QueryClientProvider>
     </ErrorBoundary>
   </React.StrictMode>,
