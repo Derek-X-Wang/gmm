@@ -57,11 +57,74 @@ async function openGlobal() {
 function pageButton(name: string) {
   return within(screen.getByRole("navigation", { name: "Settings pages" })).getByRole("button", { name: new RegExp(name) });
 }
-function noMainContent() {
-  expect(screen.queryByRole("region", { name: "Honkai: Star Rail header", hidden: true })).not.toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: /^Mods \(/, hidden: true })).not.toBeInTheDocument();
-  expect(document.querySelector(".dropzone")).toBeNull();
-  expect(screen.queryByRole("button", { name: /Launch Honkai/, hidden: true })).not.toBeInTheDocument();
+/** The Settings dialog, by its role rather than by a class name. */
+function dialog() {
+  return screen.getByRole("dialog", { name: "Settings" });
+}
+function mainScreen() {
+  return document.querySelector<HTMLElement>("main[data-main-screen]");
+}
+function statusBar() {
+  return document.querySelector<HTMLElement>("footer.status-bar");
+}
+/** Every main-screen landmark the old `noMainContent()` named. */
+const MAIN_CONTENT = {
+  launch: { role: "button", name: /Launch Honkai/ },
+  header: { role: "region", name: "Honkai: Star Rail header" },
+  mods: { role: "heading", name: /^(Mods \(|Add Mods for )/ },
+} as const;
+
+/**
+ * Replaces #284's `noMainContent()` (#353).
+ *
+ * That assertion asked for no Launch control, no Mod heading and no dropzone
+ * anywhere in the document, not even hidden — and it held because Settings
+ * was a destination that unmounted the main screen. Settings is a modal
+ * dialog now and the main screen stays in place behind it, so absence is no
+ * longer the property on offer and an unchanged assertion would fail for the
+ * right reason. What replaces it is the property the dialog actually owes:
+ * the main screen is still there, whole, and cannot be used. Each element the
+ * old assertion named is still named here — once as present behind the
+ * dialog, once as unreachable — so nothing it covered went uncovered.
+ *
+ * Reachability here is the accessibility tree, which is what `hidden: true`
+ * switches off and what tells "present behind" from "available". The pointer
+ * and focus halves need the authored stylesheet and a real Tab press; they
+ * have their own tests below.
+ */
+function mainScreenBehindDialogIsInert() {
+  const main = mainScreen();
+  const bar = statusBar();
+  // Still mounted, and still whole: a dialog that unmounted the screen behind
+  // it, or emptied it, fails here.
+  expect(main).toBeInTheDocument();
+  expect(bar).toBeInTheDocument();
+  for (const { role, name } of Object.values(MAIN_CONTENT)) {
+    expect(screen.getByRole(role, { name, hidden: true })).toBeInTheDocument();
+  }
+  expect(main!.querySelector(".dropzone")).not.toBeNull();
+  expect(bar!).toContainElement(screen.getByRole("button", { name: "Settings for Honkai: Star Rail", hidden: true }));
+
+  // …and out of reach. Both regions are inert and out of the accessibility
+  // tree, so each control above is unreachable rather than gone.
+  for (const region of [main!, bar!]) {
+    expect(region).toHaveAttribute("inert");
+    expect(region).toHaveAttribute("aria-hidden", "true");
+  }
+  for (const { role, name } of Object.values(MAIN_CONTENT)) {
+    expect(screen.queryByRole(role, { name })).not.toBeInTheDocument();
+  }
+  expect(screen.queryByRole("button", { name: "Settings for Honkai: Star Rail" })).not.toBeInTheDocument();
+  // The two landmarks go with them: a modal dialog is the only surface.
+  expect(screen.queryByRole("main")).not.toBeInTheDocument();
+  expect(screen.queryByRole("contentinfo")).not.toBeInTheDocument();
+
+  // The dialog keeps the content rule it inherited from the full-screen
+  // destination: no Launch control and no Mod list of its own (#284 round 2).
+  const inside = within(dialog());
+  expect(inside.queryByRole("button", { name: /^Launch /, hidden: true })).not.toBeInTheDocument();
+  expect(inside.queryByRole("heading", { name: MAIN_CONTENT.mods.name, hidden: true })).not.toBeInTheDocument();
+  expect(dialog().querySelector(".dropzone")).toBeNull();
 }
 
 beforeEach(() => {
@@ -116,7 +179,7 @@ it.each(["before a Settings visit", "after Back"])("hides the Settings root itse
       expect(root).toBeVisible();
       expect(getComputedStyle(root).display).not.toBe("none");
       expect(root).toContainElement(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }));
-      await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+      await userEvent.click(screen.getByRole("button", { name: "Close" }));
     }
 
     // Check both parts: hidden on the root and App.css suppressing its display.
@@ -125,30 +188,47 @@ it.each(["before a Settings visit", "after Back"])("hides the Settings root itse
     expect(root).toHaveAttribute("hidden");
     expect(root).not.toBeVisible();
     expect(getComputedStyle(root).display).toBe("none");
+
+    // The computed value above catches an authored rule that outranks the
+    // hiding — which is the break the dialog made possible, since the scrim
+    // now carries a `display` of its own for centring the panel (#353).
+    //
+    // It cannot catch the authored rule being deleted: jsdom's own user-agent
+    // stylesheet implements `[hidden] { display: none }`, so the value stays
+    // `none` with no author rule at all. In the browser it would not. There
+    // the user-agent rule loses to any author `display` on the same element,
+    // and `.settings-screen` has one — so `[hidden]`'s `!important` is what
+    // keeps the surface and its retained pages hidden, and nothing about its
+    // presence is observable from the rendered tree. Read the authored text
+    // instead, the way `App.test.tsx` reads the status bar's light-mode rules.
+    expect(
+      readFileSync("src/App.css", "utf8"),
+      "`[hidden]` must outrank `.settings-screen`'s own display, or the retired surface reappears",
+    ).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important\s*;?\s*\}/);
   } finally {
     style.remove();
   }
 });
 
-it.each(["global", "game"])("replaces all main content and preserves independent selection by %s arrival", async (arrival) => {
+it.each(["global", "game"])("keeps the main screen inert behind the dialog and preserves independent selection by %s arrival", async (arrival) => {
   renderApp();
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });
   if (arrival === "global") await openGlobal();
   else await openGame();
   expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
   expect(pageButton(arrival === "global" ? "GMM settings" : "Honkai: Star Rail")).toHaveAttribute("aria-current", "page");
-  noMainContent();
+  mainScreenBehindDialogIsInert();
   const navigation = screen.getByRole("navigation", { name: "Settings pages" });
   expect(within(navigation).getAllByRole("button")).toHaveLength(7);
   for (const game of games) {
     await userEvent.click(pageButton(game.displayName));
     expect(screen.getByRole("textbox", { name: `${game.displayName} install path` })).toBeInTheDocument();
     expect(screen.getByText("Return to Honkai: Star Rail")).toBeInTheDocument();
-    noMainContent();
+    mainScreenBehindDialogIsInert();
   }
   await userEvent.click(pageButton("GMM settings"));
   expect(screen.getByPlaceholderText("proxy URL")).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
   // The global arrival has no control of its own in the page since #351, so
   // its focus return falls through to the selected Game tab. The per-Game
@@ -171,7 +251,7 @@ it("adds an absent Game only on accepted save and returns to the original Game",
   await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
   await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:\\Genshin{Enter}");
   expect(await screen.findByText("Rejected layout")).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("tab", { name: "Genshin Impact" })).not.toBeInTheDocument();
   await openGame();
   await userEvent.click(pageButton("Genshin Impact"));
@@ -179,7 +259,7 @@ it("adds an absent Game only on accepted save and returns to the original Game",
   await userEvent.type(screen.getByRole("textbox", { name: "Genshin Impact install path" }), "C:\\Genshin");
   await userEvent.click(screen.getByRole("button", { name: "Apply Genshin Impact install path" }));
   await waitFor(() => expect(paths.gimi).toBe("C:\\Genshin"));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(await screen.findByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "false");
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
 });
@@ -219,7 +299,7 @@ it.each(outcomes)("renders the separate path-state row: $line", async ({ gamePat
   if (gamePath.status === "invalid" || modelImporter.status === "unverified" && gamePath.status === "readable") {
     expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(/not installed|Absent|cannot be found/);
   }
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toBeInTheDocument();
 });
 
@@ -246,7 +326,7 @@ it("keeps path, rebuild and Network feedback across page changes, return, and la
   await userEvent.click(pageButton("Genshin Impact"));
   await userEvent.click(pageButton("GMM settings"));
   expect(screen.getByText("Proxy failure retained")).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await openGame();
   expect(screen.getByText("Path failure retained")).toBeVisible();
   expect(screen.getByText("Rebuild failure retained")).toBeVisible();
@@ -265,14 +345,14 @@ it("refreshes Game Session events while Settings is open without repeating stale
   const reads = invoke.mock.calls.filter(([command]) => command === "current_session").length;
   await act(async () => events["session-started"]());
   await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "current_session").length).toBeGreaterThan(reads));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(await screen.findByText("ZZMI is running")).toBeInTheDocument();
   expect(screen.queryByText(/ended unexpectedly/)).not.toBeInTheDocument();
   expect(invoke.mock.calls.filter(([command]) => command === "clean_stale_session")).toHaveLength(1);
   await openGame();
   session = null;
   await act(async () => events["session-ended"]());
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByText("ZZMI is running")).not.toBeInTheDocument());
   expect(listen).toHaveBeenCalledTimes(3);
 });
@@ -290,7 +370,7 @@ it.each(["button", "escape"])("restores the user's Mod-list scroll position on %
   Object.defineProperty(window, "scrollY", { configurable: true, value: 860 });
   await openGame();
   await userEvent.click(pageButton("Wuthering Waves"));
-  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Close" }));
   else fireEvent.keyDown(window, { key: "Escape" });
   expect(screen.getByText("Return Outfit")).toBeInTheDocument();
   expect(scrollTo).toHaveBeenLastCalledWith(0, 860);
@@ -335,7 +415,7 @@ it("restores the same Mod row when content above it changes during Settings", as
     await openGame();
     Object.defineProperty(window, "scrollY", { configurable: true, value: 0 });
     rowTop = 20;
-    await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(scrollTo).toHaveBeenLastCalledWith(0, 60);
   } finally {
     bounds.mockRestore();
@@ -402,7 +482,7 @@ it("keeps the Mod list available across Settings even when inactive cache entrie
   await openGame();
   await userEvent.click(pageButton("GMM settings"));
   returning = true;
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(await screen.findByText("Retained Outfit")).toBeVisible();
   expect(screen.queryByText("List read is now unavailable")).not.toBeInTheDocument();
 });
@@ -433,7 +513,7 @@ it("re-renders durable quarantine, launch reservations and audit findings after 
   const navigationCalls = invoke.mock.calls.length;
   await openGame();
   expect(await screen.findByRole("region", { name: "Unreferenced Library folders and duplicate Mod records" })).toHaveTextContent(auditPath);
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.getByRole("region", { name: "Interrupted reinstall recovery for Durable Outfit" })).toHaveTextContent("this Mod may still be loading");
   expect(screen.getByRole("region", { name: "Interrupted SRMI launch" })).toHaveTextContent("kept the launch reservation");
   const navigationReads = new Set([
@@ -511,7 +591,7 @@ it("keeps keyboard focus on the Game navigation button after changing pages", as
   renderApp();
   await openGame();
   const next = pageButton("Genshin Impact");
-  await userEvent.tab(); // Back to Mods
+  await userEvent.tab(); // Close
   await userEvent.tab(); // First Game row
   expect(next).toHaveFocus();
   await userEvent.keyboard("{Enter}");
@@ -524,7 +604,7 @@ it("refreshes cached Settings path-state when setup finishes", async () => {
   renderApp();
   await openGame();
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await clickMenuItem(listen, "run-setup");
   await screen.findByRole("heading", { name: "GMM — first-run setup" });
   states.srmi = { ...states.srmi, modelImporter: { status: "installed" } };
@@ -583,7 +663,7 @@ it("keeps importer groups only on each visited Game page, in order, while preser
   expect(gamePage).toHaveAttribute("hidden");
   await userEvent.click(pageButton("Honkai: Star Rail"));
   expect(screen.getByLabelText("Owner")).toHaveValue("draft-owner");
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("heading", { name: /Model Importer \(/ })).not.toBeInTheDocument();
   await openGame();
   expect(screen.getByLabelText("Owner")).toHaveValue("draft-owner");
@@ -612,7 +692,7 @@ it.each(["retry_importer_evacuation_recovery", "accept_importer_origin_proposal"
   await openGame();
   await userEvent.click(await screen.findByRole("button", { name: writer.includes("evacuation") ? "Retry Model Importer recovery" : "Switch and install" }));
   await userEvent.click(pageButton("GMM settings"));
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   changed = true;
   await act(async () => reject(new Error("Late importer failure retained")));
   await openGame();
@@ -638,7 +718,7 @@ it("keeps application groups only on GMM in the approved order and links back to
   expect(screen.queryByRole("checkbox", { name: /Recommend importer origins/ })).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "View GMM importer recommendations" }));
   expect(pageButton("GMM settings")).toHaveAttribute("aria-current", "page");
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.getByRole("heading", { name: "Mod updates" })).toBeVisible();
   for (const name of ["Network", "GMM updates", "Importer recommendations", "Diagnostics"]) {
     expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
@@ -728,7 +808,7 @@ it.each([
     expect(pageButton(game.displayName)).not.toHaveAttribute("aria-current");
   }
   expect(screen.getByRole("heading", { name: panel })).toBeVisible();
-  noMainContent();
+  mainScreenBehindDialogIsInert();
 });
 
 it("resets onboarding from the menu once, and not again while the reset is pending", async () => {
@@ -780,7 +860,7 @@ it("falls back to Add game when a menu-opened visit returns with no Game tab", a
 
   await clickMenuItem(listen, "settings");
   expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   // No Game is installed, so there is no selected tab either. Focus must not
   // be left on <body>: the next Tab press would restart from the top.
@@ -799,7 +879,7 @@ it("falls back to the main region when a menu-opened visit returns before any co
 
   await clickMenuItem(listen, "settings");
   expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   expect(screen.queryByRole("tab")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Add game" })).not.toBeInTheDocument();
@@ -833,7 +913,7 @@ it.each(["button", "escape"])("keeps the main-screen return point when a menu ac
   await clickMenuItem(listen, "diagnostics");
   expect(pageButton("GMM settings")).toHaveAttribute("aria-current", "page");
 
-  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Close" }));
   else fireEvent.keyDown(window, { key: "Escape" });
   expect(screen.getByText("Return Outfit")).toBeInTheDocument();
   expect(scrollTo).toHaveBeenLastCalledWith(0, 860);
@@ -847,7 +927,7 @@ it("keeps the arrival control when a menu action arrives during a per-Game visit
   await openGame();
   await clickMenuItem(listen, "check-updates");
   expect(pageButton("GMM settings")).toHaveAttribute("aria-current", "page");
-  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   // Entry was the status-bar link, so that is where focus belongs. A menu
   // action during the visit must not re-point the return at the `"global"`
@@ -927,7 +1007,7 @@ it.each([
   }
   expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
 
-  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Close" }));
   else fireEvent.keyDown(window, { key: "Escape" });
 
   const expected = arrival === "game"
@@ -942,4 +1022,230 @@ it.each([
     expect(screen.getByRole("main")).not.toContainElement(expected);
     expect(screen.getByRole("contentinfo")).toContainElement(expected);
   }
+});
+
+// ---- #353 — Settings as a modal dialog over the main screen ----
+//
+// The containment below did not exist before #353. Settings was a destination
+// that unmounted the main screen, so nothing behind it could be clicked or
+// focused. The dialog leaves the screen mounted, and `inert`, `aria-modal`
+// and the dialog's own focus cycle are what replace the unmount.
+
+/** Run `body` with the authored stylesheet in the document. jsdom computes no
+ * layout, but it does apply the cascade, so the pointer half of inertness is
+ * observable from the real stylesheet rather than from a stub. */
+async function withAppCss(body: () => Promise<void>): Promise<void> {
+  const style = document.createElement("style");
+  style.textContent = readFileSync("src/App.css", "utf8");
+  document.head.appendChild(style);
+  try {
+    await body();
+  } finally {
+    style.remove();
+  }
+}
+
+it("refuses pointer input to the main screen and the status bar behind the dialog", async () => {
+  await withAppCss(async () => {
+    renderApp();
+    await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+    const launch = screen.getByRole("button", { name: /Launch Honkai/ });
+    const link = screen.getByRole("button", { name: "Settings for Honkai: Star Rail" });
+    expect(getComputedStyle(launch).pointerEvents).not.toBe("none");
+
+    await userEvent.click(link);
+
+    // Both regions refuse the pointer, and so does every control inside them:
+    // `pointer-events` inherits, so one declaration on the inert region covers
+    // the whole screen rather than a list of controls someone has to keep up
+    // to date.
+    for (const element of [mainScreen()!, statusBar()!, launch, link]) {
+      expect(getComputedStyle(element).pointerEvents).toBe("none");
+    }
+    await expect(userEvent.click(launch)).rejects.toThrow(/pointer-events: none/);
+    await expect(userEvent.click(link)).rejects.toThrow(/pointer-events: none/);
+    expect(invoke.mock.calls.filter(([command]) => command === "launch_game")).toEqual([]);
+
+    // The dialog's own controls are unaffected by the rule above…
+    await userEvent.click(pageButton("GMM settings"));
+    expect(pageButton("GMM settings")).toHaveAttribute("aria-current", "page");
+
+    // …and Close gives the window back, on the same nodes: a click that was
+    // refused a moment ago now opens Settings again.
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    for (const element of [mainScreen()!, statusBar()!, launch, link]) {
+      expect(getComputedStyle(element).pointerEvents).not.toBe("none");
+    }
+    await userEvent.click(link);
+    expect(dialog()).toBeVisible();
+  });
+});
+
+it("holds Tab inside the dialog instead of letting it reach the window behind", async () => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  await openGame();
+  // Leave a retained page behind as well, so the cycle has a hidden region to
+  // stay out of too — the property `LibraryPathEditors.test.tsx` proves for
+  // the pages, held here for the dialog as a whole.
+  await userEvent.click(pageButton("GMM settings"));
+  const retained = document.querySelector<HTMLElement>('[data-settings-page="srmi"]')!;
+  expect(retained).toHaveAttribute("hidden");
+
+  const visited = new Set<Element>();
+  for (let press = 0; press < 30; press++) {
+    await userEvent.tab();
+    const focused = document.activeElement as HTMLElement;
+    expect(dialog()).toContainElement(focused);
+    expect(mainScreen()).not.toContainElement(focused);
+    expect(statusBar()).not.toContainElement(focused);
+    expect(retained.contains(focused)).toBe(false);
+    expect(focused).not.toBe(document.body);
+    visited.add(focused);
+  }
+  // A cycle of one would satisfy every assertion above while trapping the
+  // user on a single control.
+  expect(visited.size).toBeGreaterThan(1);
+
+  // Backwards too: Shift+Tab off the dialog's first control wraps inside it
+  // rather than stepping out into the screen behind.
+  for (let press = 0; press < 12; press++) {
+    await userEvent.tab({ shift: true });
+    expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+  }
+
+  // And it recovers. Focus parked outside the dialog — which is where the
+  // browser leaves it the moment the main screen becomes inert — is pulled
+  // back in by the next Tab instead of walking on through the main screen.
+  screen.getByRole("button", { name: /Launch Honkai/, hidden: true }).focus();
+  await userEvent.tab();
+  expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+});
+
+it("closes on Escape only when nothing inside the dialog has consumed it", async () => {
+  renderApp();
+  await openGame();
+
+  // The Library action forms cancel their own prompt on Escape, and they also
+  // stop propagation, so the dialog's window handler never sees those presses
+  // at all — which is why the test above them passes either way. This is the
+  // other half of the contract, and the half the handler itself has to honour:
+  // a consumer that prevents the default without stopping propagation. Capture
+  // phase, so it runs before the dialog's own listener, exactly as a handler
+  // nested inside the dialog would.
+  const consume = (event: KeyboardEvent) => event.preventDefault();
+  window.addEventListener("keydown", consume, true);
+  try {
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(dialog()).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toBeVisible();
+  } finally {
+    window.removeEventListener("keydown", consume, true);
+  }
+
+  // Unconsumed, the same press closes it — so the assertion above is about the
+  // ordering, not about Escape having been wired up at all.
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" })).toHaveFocus();
+});
+
+it("is a modal dialog whose only dismissal is Close", async () => {
+  renderApp();
+  await openGame();
+  const panel = dialog();
+  const title = screen.getByRole("heading", { name: "Settings", level: 1 });
+
+  expect(panel).toHaveAttribute("aria-modal", "true");
+  expect(panel).toHaveAttribute("aria-labelledby", title.id);
+  expect(panel).toContainElement(title);
+  // Not a second `main` landmark: the main screen behind the dialog owns that
+  // one, and two would make `main` ambiguous for a screen reader as much as
+  // for a test.
+  expect(panel.tagName).toBe("DIV");
+
+  // The dialog's own chrome holds exactly one control, and it is Close. OK,
+  // Cancel and Apply are not merely absent by name — there is nowhere in the
+  // dialog's chrome for a second dismissal to be.
+  const header = panel.querySelector("header")!;
+  expect(within(header).getAllByRole("button").map((button) => button.textContent)).toEqual(["Close"]);
+  // Nothing anywhere in the dialog claims a reversal of a committed setting.
+  // Each editor commits its own change through its own mutation before the
+  // user reaches any button, so a Cancel here could not cancel (#326).
+  expect(within(panel).queryByRole("button", { name: /^(OK|Apply|Cancel|Discard|Revert|Done)$/ })).not.toBeInTheDocument();
+
+  await userEvent.click(within(header).getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("keeps the status bar on screen behind the dialog and live again on Close", async () => {
+  renderApp();
+  const bar = await screen.findByRole("contentinfo");
+  await within(bar).findByText("Game: Game readable · Model Importer unverified");
+
+  await openGame();
+
+  // It stays. The bar is part of the window the dialog is drawn over, so a bar
+  // that vanished would change the shape of the window behind the dialog and
+  // pop back on Close, and `.app`'s bottom padding — the bar's scroll
+  // clearance — would be left holding a gap with nothing in it (#352).
+  // Unmounting it would also take the arrival marker that the focus return
+  // resolves after Close.
+  expect(statusBar()).toBe(bar);
+  expect(bar).toBeVisible();
+  expect(bar).toHaveTextContent("Game: Game readable · Model Importer unverified");
+  expect(bar.querySelector('[data-settings-arrival="game"]')).not.toBeNull();
+  // …inert with the main screen, so a visible bar is not a live second route
+  // into Settings while Settings is already open.
+  expect(bar).toHaveAttribute("inert");
+  expect(bar).toHaveAttribute("aria-hidden", "true");
+  expect(screen.queryByRole("contentinfo")).not.toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: "Escape" });
+
+  expect(screen.getByRole("contentinfo")).toBe(bar);
+  expect(bar).not.toHaveAttribute("inert");
+  expect(bar).not.toHaveAttribute("aria-hidden");
+  expect(within(bar).getByRole("button", { name: "Settings for Honkai: Star Rail" })).toHaveFocus();
+});
+
+/**
+ * Sizing (#353). jsdom computes no layout: it resolves no `min()`, applies no
+ * `max-height`, and `getBoundingClientRect` returns zeros. Nothing here proves
+ * the dialog's rendered size, or that the main screen is visible around it.
+ * What it does prove is that the authored stylesheet bounds the dialog inside
+ * the window with an inset and gives it its own scroll, instead of letting it
+ * fill the window like the destination it replaced. The rendered result at
+ * 1100x760 and at the 900x600 minimum (#351) is a Windows check, named in the
+ * PR.
+ */
+it("bounds the dialog inside an inset scrim instead of filling the window", async () => {
+  await withAppCss(async () => {
+    renderApp();
+    await openGame();
+    const scrim = document.querySelector<HTMLElement>(".settings-screen")!;
+    expect(scrim).toContainElement(dialog());
+
+    const over = getComputedStyle(scrim);
+    expect([over.position, over.inset, over.display]).toEqual(["fixed", "0px", "grid"]);
+    // Above `.status-bar`'s own `z-index: 20`, or the pinned bar would draw
+    // over the dialog it is supposed to be behind.
+    expect(Number(over.zIndex)).toBeGreaterThan(20);
+    // The inset is what leaves the main screen visible around the dialog, so
+    // it reads as a dialog rather than a page. 2rem on each side puts the
+    // panel at 836x536 inside the 900x600 window minimum (#351).
+    expect(parseFloat(over.padding)).toBeGreaterThan(0);
+    // The scrim scrolls, and that scroll does not chain into the main screen
+    // behind it.
+    expect([over.overflow, over.overscrollBehavior]).toEqual(["auto", "contain"]);
+
+    const sized = getComputedStyle(dialog());
+    // Bounded by the window rather than given a fixed size, and scrolling
+    // inside itself so a long Settings page cannot push it past the edge.
+    expect(sized.width).toBe("min(1120px, 100%)");
+    expect(sized.maxHeight).toBe("100%");
+    expect(sized.overflow).toBe("auto");
+    // Not resizable (#353). Adding a resize affordance fails here.
+    expect(sized.resize).toBe("none");
+  });
 });

@@ -124,7 +124,7 @@ unchanged: install, rollback, retry and retirement settle all `importer` reads,
 this Game's `importerOrigin` and `gamePathStatus`; the atomic pin write refreshes
 those reads on success. The two groups now follow the Game install-path group
 inside each visited Settings page. Their live observers, drafts and operation
-feedback survive hidden pages and Back to Mods. Recovery errors and outcomes
+feedback survive hidden pages and Close. Recovery errors and outcomes
 remain outside the warning that settlement can remove. Origin acceptance still
 settles, while override/dismissal writes retain their atomic-success boundary.
 

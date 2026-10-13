@@ -174,11 +174,10 @@ function MainApp({
   const sessionSurface = useSessionPresentation({ staleSession, onDismiss: dismissStaleSession });
   const launchSurface = useLaunchGame({ game: activeGame, displayName: active.displayName });
   // Snapshot the main screen on entry and only on entry. Every in-page
-  // control is unmounted with the main screen, so each could only ever open
-  // the first visit; the menu can fire during one. By then there is no
-  // `[data-mod-id]` row to anchor to and `window.scrollY` belongs to the
-  // Settings surface, so re-snapshotting would return the user to the
-  // Settings scroll position instead of where they left their Mod list. A
+  // control is inert while the dialog is open, so each could only ever open
+  // the first visit; the menu can fire during one, and a second snapshot
+  // would overwrite the arrival control with `"global"` and the saved
+  // position with whatever the window has scrolled to behind the dialog. A
   // menu action during a visit changes the page and nothing else.
   const openSettings = (page: SettingsPage, control = "game") => {
     if (!visiting.current) {
@@ -195,6 +194,12 @@ function MainApp({
     visiting.current = false;
     setSettingsPage(null);
   };
+  // Opening the dialog scrolls nothing: the main screen stays in place behind
+  // it and the dialog scrolls inside itself, so there is no entry scroll to
+  // take and nothing to put back on exit in the ordinary case. The
+  // restoration below still runs, because the main screen can reflow while
+  // the dialog is open — a notice above the Mod list appears or clears — and
+  // the anchored row is how the user's place survives that.
   useLayoutEffect(() => {
     if (settingsPage === null) {
       if (returnControl.current === null) return;
@@ -215,7 +220,7 @@ function MainApp({
         ?? document.querySelector<HTMLElement>('[data-settings-arrival="add"]')
         ?? document.querySelector<HTMLElement>("main[data-main-screen]");
       control?.focus({ preventScroll: true });
-    } else window.scrollTo(0, 0);
+    }
   }, [settingsPage]);
 
   // `reopenSetup.isPending` is a render value, so two menu actions delivered
@@ -267,6 +272,15 @@ function MainApp({
     };
   }, []);
 
+  // Settings is a modal dialog drawn over the main screen, not a destination
+  // that replaces it (#326, #353). The main screen and the status bar stay
+  // mounted and in place behind it and are made inert for the duration, so
+  // the window the user left is still the window they come back to. `inert`
+  // is the browser's containment — no pointer events, no focus, no
+  // accessibility tree — and `aria-hidden` states the same thing for
+  // assistive technology that predates it. The dialog carries its own focus
+  // cycle as well, so a missing attribute here cannot let Tab out of it.
+  const behind = settingsPage !== null;
   return (
     <>
       <SettingsDestination
@@ -276,53 +290,51 @@ function MainApp({
         onPageChange={setSettingsPage}
         onBack={closeSettings}
       />
-      {settingsPage === null ? (
-        <main className="app" data-main-screen tabIndex={-1}>
-          {hasActiveGame ? <GameHeader displayName={active.displayName} action={launchSurface.action} /> : null}
-          <GlobalHeaderLine>
-            <AttentionView />
-            {sessionSurface.context}
-          </GlobalHeaderLine>
-          <GameTabs
-            games={installed}
-            remaining={remaining}
-            pending={pathsPending}
-            pathsUnavailable={pathErrors.length > 0}
-            active={activeGame}
-            onChange={setActiveGame}
-            onAddGame={(game) => openSettings(game, "add")}
-          />
-          <div className="main-screen__notices" role="region" aria-label="Game and operation notices">
-            {skipped ? (
-              <section className="card finish-setup-banner" role="status">
-                <div>
-                  <strong>Setup isn't finished yet.</strong>
-                  <span className="muted small">
-                    {" "}You skipped one or more steps. Resume any time.
-                  </span>
-                </div>
-                <button onClick={onResumeWizard}>Resume setup</button>
-              </section>
-            ) : null}
-            <StartupReconcileNotice games={list} />
-            {sessionSurface.notices}
-            {hasActiveGame ? launchSurface.notice : null}
-            {hasActiveGame ? <GameRecoveryNotice game={activeGame} displayName={active.displayName}
-              onSettings={() => openSettings(activeGame)} /> : null}
-            {pathErrors.length > 0 ? (
-              <OperationFailureNotice
-                heading="GMM could not read some game install paths."
-                detail="Use a game tab or Add game to check the affected paths in Settings."
-                errors={pathErrors}
-              />
-            ) : null}
-          </div>
-          {hasActiveGame ? <>
-            <ModList game={activeGame} displayName={active.displayName} />
-            <ModUpdatesPanel game={activeGame} />
-          </> : null}
-        </main>
-      ) : null}
+      <main className="app" data-main-screen tabIndex={-1} inert={behind} aria-hidden={behind || undefined}>
+        {hasActiveGame ? <GameHeader displayName={active.displayName} action={launchSurface.action} /> : null}
+        <GlobalHeaderLine>
+          <AttentionView />
+          {sessionSurface.context}
+        </GlobalHeaderLine>
+        <GameTabs
+          games={installed}
+          remaining={remaining}
+          pending={pathsPending}
+          pathsUnavailable={pathErrors.length > 0}
+          active={activeGame}
+          onChange={setActiveGame}
+          onAddGame={(game) => openSettings(game, "add")}
+        />
+        <div className="main-screen__notices" role="region" aria-label="Game and operation notices">
+          {skipped ? (
+            <section className="card finish-setup-banner" role="status">
+              <div>
+                <strong>Setup isn't finished yet.</strong>
+                <span className="muted small">
+                  {" "}You skipped one or more steps. Resume any time.
+                </span>
+              </div>
+              <button onClick={onResumeWizard}>Resume setup</button>
+            </section>
+          ) : null}
+          <StartupReconcileNotice games={list} />
+          {sessionSurface.notices}
+          {hasActiveGame ? launchSurface.notice : null}
+          {hasActiveGame ? <GameRecoveryNotice game={activeGame} displayName={active.displayName}
+            onSettings={() => openSettings(activeGame)} /> : null}
+          {pathErrors.length > 0 ? (
+            <OperationFailureNotice
+              heading="GMM could not read some game install paths."
+              detail="Use a game tab or Add game to check the affected paths in Settings."
+              errors={pathErrors}
+            />
+          ) : null}
+        </div>
+        {hasActiveGame ? <>
+          <ModList game={activeGame} displayName={active.displayName} />
+          <ModUpdatesPanel game={activeGame} />
+        </> : null}
+      </main>
       {/*
         The per-Game status is window chrome, not a slot in the page, so it is
         a sibling of `<main>` rather than one of its children, pinned to the
@@ -331,9 +343,15 @@ function MainApp({
         the `contentinfo` landmark on its own; wrapping it in sectioning
         content would silently drop that. Its only control stays the strip's
         Settings link — the bar is not a second home for actions (#285, #326).
+
+        It stays on screen while the Settings dialog is open, inert with the
+        main screen. The bar is part of the window the dialog is drawn over: a
+        bar that disappeared would change the shape of the window behind the
+        dialog and pop back on Close, and `.app`'s bottom padding — the bar's
+        scroll clearance — would become a gap with nothing in it (#352, #353).
       */}
-      {settingsPage === null && hasActiveGame ? (
-        <footer className="status-bar">
+      {hasActiveGame ? (
+        <footer className="status-bar" inert={behind} aria-hidden={behind || undefined}>
           <GameStatusStrip
             game={activeGame}
             displayName={active.displayName}
