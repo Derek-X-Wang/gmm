@@ -69,7 +69,21 @@ it("the actual startup offer stays unanswered without installing while time pass
   check.mockResolvedValue({ version: "0.5.0", downloadAndInstall });
   await act(async () => { await import("./main"); });
   expect(screen.getByRole("button", { name: "Install update" })).toBeVisible();
-  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  // Drain pending work without imposing a fixed deadline on consent.
+  await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+  for (const visibility of ["hidden", "visible"] as const) {
+    const visibilityState = vi.spyOn(document, "visibilityState", "get").mockReturnValue(visibility);
+    for (const target of [window, document]) {
+      for (const event of ["focus", "visibilitychange"]) {
+        await act(async () => {
+          target.dispatchEvent(new Event(event));
+          await vi.runOnlyPendingTimersAsync();
+        });
+        expect(downloadAndInstall).not.toHaveBeenCalled();
+      }
+    }
+    visibilityState.mockRestore();
+  }
   expect(downloadAndInstall).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "Install update" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Install update" }));

@@ -142,7 +142,15 @@ it("the controller keeps an unanswered offer without installing while time passe
   const controller = createUpdateController(vi.fn().mockResolvedValue(update));
   await controller.checkForUpdates(true);
   expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
-  await vi.advanceTimersByTimeAsync(60_000);
+  // Drain all currently scheduled work, including delays beyond the old 60s horizon.
+  await vi.runOnlyPendingTimersAsync();
+  for (const target of [window, document]) {
+    for (const event of ["focus", "visibilitychange"]) {
+      target.dispatchEvent(new Event(event));
+      await vi.runOnlyPendingTimersAsync();
+      expect(update.downloadAndInstall).not.toHaveBeenCalled();
+    }
+  }
   expect(update.downloadAndInstall).not.toHaveBeenCalled();
   expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
   await controller.install();
@@ -160,7 +168,12 @@ it("missing signed artifact metadata fails toward offering the build again", asy
   expect(update.downloadAndInstall).not.toHaveBeenCalled();
 });
 
-it.each(["new signature", "new release URL"])("a static manifest with %s offers another build on the same version line", async (change) => {
+it.each([
+  ["windows-x86_64", "new signature"],
+  ["windows-x86_64", "new release URL"],
+  ["windows-x86_64-msi", "new signature"],
+  ["windows-x86_64-msi", "new release URL"],
+])("a static manifest with %s's %s offers another build on the same version line", async (platform, change) => {
   const a = { ...fakeUpdate("0.4.0"), rawJson: { platforms: {
     "windows-x86_64-msi": { url: "https://example.com/alpha.2.msi", signature: "signed-alpha.2" },
     "windows-x86_64": { url: "https://example.com/alpha.2.msi", signature: "signed-alpha.2" },
@@ -177,7 +190,8 @@ it.each(["new signature", "new release URL"])("a static manifest with %s offers 
   await same.checkForUpdates(true);
   expect(same.getSnapshot()).toMatchObject({ kind: "declined", remembered: true });
   const b = { ...a, rawJson: { platforms: { ...a.rawJson.platforms,
-    "windows-x86_64-msi": change === "new signature"
+    // Each platform contributes to identity, even when another sorts last.
+    [platform]: change === "new signature"
       ? { url: "https://example.com/alpha.2.msi", signature: "signed-rebuilt" }
       : { url: "https://example.com/alpha.3.msi", signature: "signed-alpha.2" },
   } } };
@@ -189,9 +203,32 @@ it.each(["new signature", "new release URL"])("a static manifest with %s offers 
 
 it("an unidentifiable build is offered even when skip storage is unavailable", async () => {
   const update = { version: "0.4.0", downloadAndInstall: vi.fn() };
-  const store = { getItem: () => { throw new Error("storage unavailable"); }, setItem: vi.fn() };
+  const store = { getItem: vi.fn(() => { throw new Error("storage unavailable"); }), setItem: vi.fn() };
   const controller = createUpdateController(vi.fn().mockResolvedValue(update), store);
   await controller.checkForUpdates(true);
   expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
+  await controller.decline();
+  expect(controller.getSnapshot()).toEqual({ kind: "declined", version: "0.4.0", remembered: false });
+  expect(store.getItem).not.toHaveBeenCalled();
+  expect(store.setItem).not.toHaveBeenCalled();
+  await controller.install();
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
+  const restarted = createUpdateController(vi.fn().mockResolvedValue(update), store);
+  await restarted.checkForUpdates(true);
+  expect(restarted.getSnapshot()).toMatchObject({ kind: "available" });
+});
+
+it.each([
+  "not JSON",
+  JSON.stringify({ version: "0.4.0" }),
+  JSON.stringify({ version: "0.4.0", identity: 123 }),
+])("an incompatible stored skip (%s) does not hide an update offer", async (stored) => {
+  storage.setItem(declinedBuildKey, stored);
+  const update = fakeUpdate("0.4.0");
+  const controller = createUpdateController(vi.fn().mockResolvedValue(update));
+  await controller.checkForUpdates(true);
+  expect(controller.getSnapshot()).toMatchObject({ kind: "available", version: "0.4.0" });
+  expect(storage.getItem(declinedBuildKey)).toBe(stored);
   expect(update.downloadAndInstall).not.toHaveBeenCalled();
 });

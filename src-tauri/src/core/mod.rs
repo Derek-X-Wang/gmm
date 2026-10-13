@@ -3839,9 +3839,9 @@ impl Core {
             updater_skipped_build: self
                 .skipped_update()
                 .await?
-                .map(|value| serde_json::from_str(&value))
-                .transpose()
-                .map_err(|error| Error::Diagnostics(format!("invalid skipped update: {error}")))?,
+                // Incompatible or damaged skip metadata must not disable diagnostics.
+                // Ignore it in the snapshot without rewriting the persisted value.
+                .and_then(|value| serde_json::from_str(&value).ok()),
             updater_error: None,
         })
     }
