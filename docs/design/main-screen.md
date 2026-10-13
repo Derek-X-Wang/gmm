@@ -213,10 +213,16 @@ position changes; the payload, wording, and path-state rules below stand.
 The read-only status bar links to that Game's Settings page (#283), which
 opens in the Settings dialog. The human decisions on #285 and #324 set its
 payload: **`Game and Model Importer (<Importer>)`**, with a labelled Game fact,
-Model Importer name and its healthy / unhealthy / unverified state, the saved
-Game path, the verified installed version, and a compact pin marker when an
-Importer Pin applies. Importer Origin detail stays in Settings and does not
-appear in the status bar. The status bar contains no path editor,
+Model Importer name and the Model Importer state the check established, the
+saved Game path, the verified installed version, and a compact pin marker when
+an Importer Pin applies. That state is one of three: required entries present
+(`installed`), required entries not found (`requiredEntriesNotFound`), or not
+verified (`unverified`). A wrong-type entry is `unverified` and carries its
+layout error. No state is a fault label. A Model Importer that was never
+installed is the normal state before installation, not a broken one (#340).
+The data cannot yet tell an absent Model Importer from a damaged one; see
+[Known data limitation](#known-data-limitation). Importer Origin detail stays
+in Settings and does not appear in the status bar. The status bar contains no path editor,
 Install/Update, rollback, Importer Pin control, Origin editor, or Library
 mutation control.
 
@@ -236,6 +242,15 @@ Both report Model Importer state as unverified. Do not reuse “no saved path”
 “Model Importer not installed.”
 All status-bar states follow the filesystem and path-state contract below; only
 verified installed facts may supply an installed version (#285 human decision).
+
+### Known data limitation
+
+This is **not** a decided behavior. It is recorded here so that no ticket
+treats the current wording as proof of a distinction the data does not make.
+
+| Open item | What is known | Source |
+| --- | --- | --- |
+| Absent versus damaged Model Importer | A Model Importer that was never installed and an installed one that has lost required entries both report `requiredEntriesNotFound`. Nothing downstream can tell them apart, so both get the absent wording. A damaged install cannot be reported until the data separates the two. Do not add a fault label to `requiredEntriesNotFound` in the meantime. | [#341](https://github.com/Derek-X-Wang/gmm/issues/341) |
 
 ### Surface ownership
 
