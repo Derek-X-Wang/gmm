@@ -164,6 +164,18 @@ separately labelled facts, as #324 also requires. Its payload, wording, path
 states, read-only rule, and Settings link are unchanged; see
 [Per-Game status bar](#per-game-status-bar).
 
+The bar is a `<footer>` outside `<main>`, so it carries the `contentinfo`
+landmark and is not one of the main-screen slots above. It is **fixed to the
+viewport**, and `.app`'s bottom padding is its scroll clearance (#352). The
+alternative — a height chain on a wrapper above `.app` — was rejected because
+it has to move the scrolling element from the window into `.app`, while the
+Settings return reads `window.scrollY` and calls `window.scrollTo` to restore
+the scroll position and the anchored Mod row. The bar keeps a bounded
+`max-height` with its own scroll so a long wrapped status cannot grow over the
+page at the 900x600 minimum window size (#351), and the clearance is held at
+or above that height. The strip's summary remains the only live region in the
+bar; the bar itself announces nothing (#352).
+
 ### The docked panel goes to the selected Mod
 
 The docked panel was a candidate for Settings in #326 and lost to the modal
