@@ -153,7 +153,28 @@ it("Settings keeps an unanswered offer without installing while time passes", as
   fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
   await act(async () => {});
   expect(screen.getByRole("button", { name: "Install update" })).toBeVisible();
-  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  // Advance five minutes of fake Date/performance time even with no queued timer.
+  // tickAsync runs chained timeouts, interval ticks, animation frames and their
+  // promise continuations due in this window; runOnlyPendingTimersAsync does not.
+  // This is a bounded observation window, not a deadline for user consent.
+  await act(async () => { await vi.advanceTimersByTimeAsync(300_000); });
+  expect(downloadAndInstall).not.toHaveBeenCalled();
+  for (const visibility of ["hidden", "visible"] as const) {
+    const visibilityState = vi.spyOn(document, "visibilityState", "get").mockReturnValue(visibility);
+    try {
+      for (const target of [window, document]) {
+        for (const event of ["focus", "visibilitychange"]) {
+          await act(async () => {
+            target.dispatchEvent(new Event(event));
+            await vi.advanceTimersByTimeAsync(300_000);
+          });
+          expect(downloadAndInstall).not.toHaveBeenCalled();
+        }
+      }
+    } finally {
+      visibilityState.mockRestore();
+    }
+  }
   expect(downloadAndInstall).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "Install update" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Install update" }));
@@ -171,4 +192,16 @@ it("an offline startup error can be closed without retrying or losing diagnostic
   expect(screen.queryByLabelText("GMM update")).not.toBeInTheDocument();
   expect(check).toHaveBeenCalledOnce();
   expect(controller.getLastError()).toBe("Update check failed: offline");
+});
+
+it.each(["settings", "startup"])("%s explains that an unidentifiable skipped build will be offered again", async (entry) => {
+  const downloadAndInstall = vi.fn();
+  const controller = createUpdateController(vi.fn().mockResolvedValue({ version: "0.5.0", downloadAndInstall }));
+  renderWithQuery(entry === "startup" ? <StartupUpdateNotice controller={controller} /> : <UpdatesPanel controller={controller} />);
+  await act(() => controller.checkForUpdates(entry === "startup"));
+  await userEvent.click(screen.getByRole("button", { name: "Skip this build" }));
+  expect(screen.getByText(/This build could not be identified/)).toHaveTextContent("It will be offered again on launch.");
+  expect(controller.getSnapshot()).toEqual({ kind: "declined", version: "0.5.0", remembered: false });
+  expect(storage.getItem("updater.skippedBuild")).toBeNull();
+  expect(downloadAndInstall).not.toHaveBeenCalled();
 });
