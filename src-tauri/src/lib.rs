@@ -2,6 +2,7 @@ pub mod command_error;
 pub mod commands;
 #[deny(clippy::disallowed_methods)]
 pub mod core;
+pub mod menu;
 pub mod runtime;
 
 #[cfg(test)]
@@ -181,6 +182,15 @@ pub fn run() {
         .manage(core)
         .manage(startup_reconcile_state)
         .manage(crate::runtime::SessionRuntime::new())
+        // The native File/Help menu (#351). It is attached app-wide in
+        // `setup` rather than per window, and every clickable GMM item is
+        // forwarded to React — the handlers already live there.
+        .setup(|app| {
+            let menu = crate::menu::build_menu(app.handle())?;
+            app.set_menu(menu)?;
+            Ok(())
+        })
+        .on_menu_event(|app, event| crate::menu::forward_menu_event(app, event.id().0.as_str()))
         .invoke_handler(tauri::generate_handler![
             commands::attention_status,
             commands::list_mods,

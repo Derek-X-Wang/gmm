@@ -440,13 +440,6 @@ code {
   border-color: #1e3a5f;
 }
 
-.app__help {
-  background: transparent;
-  color: #93c5fd;
-  border: 1px solid #2e2e36;
-  padding: 0.3rem 0.7rem;
-}
-
 /*
  * Game navigation uses saved install paths for tabs and keeps the
  * remaining supported games in a separate setup picker.
@@ -556,17 +549,7 @@ code {
   .settings-navigation button span { color: #52525b; }
 }
 
-/* Main: identity, Game action, global facts, navigation, then the Library. */
-.window-bar {
-  border-bottom: 1px solid #2e2e36;
-  padding-bottom: 0.75rem;
-}
-
-.window-bar > strong {
-  font-size: 1rem;
-  letter-spacing: 0.04em;
-}
-
+/* Main: Game action, global facts, navigation, then the Library. */
 .game-header h1 {
   margin: 0;
   font-size: 1.75rem;

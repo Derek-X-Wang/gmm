@@ -4,13 +4,15 @@ import { beforeEach, expect, it, vi } from "vitest";
 
 import type { ConflictReport, ImporterEvacuationRecovery, ModVariants } from "./api";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
+import { clickMenuItem } from "./test/menu";
 
-const { invoke, openDialog } = vi.hoisted(() => ({
+const { invoke, openDialog, listen } = vi.hoisted(() => ({
   invoke: vi.fn(),
   openDialog: vi.fn(),
+  listen: vi.fn().mockResolvedValue(() => { }),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => { }) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openDialog, save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("./diagnostics", () => ({
@@ -314,7 +316,8 @@ it.each(["root", "perGame"] as const)("refreshes persisted paths and Mod state a
   responses.list_mods = [modFixture(true)];
   renderApp();
   await screen.findByRole("checkbox", { name: "Enabled" });
-  await userEvent.click(screen.getByRole("button", { name: field === "root" ? "Settings" : "Settings for Genshin Impact" }));
+  if (field === "root") await clickMenuItem(listen, "settings");
+  else await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
   const library = await screen.findByRole("region", { name: field === "root" ? "Global Library root settings" : "Library for Genshin Impact" });
   await userEvent.click(field === "root"
     ? within(library).getByRole("button", { name: "Change global root…" })
@@ -394,7 +397,8 @@ it.each(pathFields)("applies typed $label only after Enter", async ({ label, com
     return {};
   };
   renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: command === "set_library_root" ? "Settings" : "Settings for Genshin Impact" }));
+  if (command === "set_library_root") await clickMenuItem(listen, "settings");
+  else await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
   const field = await screen.findByDisplayValue(initial);
   expect(field).not.toHaveAttribute("readonly");
   await userEvent.clear(field);
@@ -415,7 +419,8 @@ it.each(pathFields)("shows backend refusal for typed $label", async ({ label, co
     : "This path does not exist or cannot be used.";
   mutations[command] = () => { throw { kind: "other", message }; };
   renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: command === "set_library_root" ? "Settings" : "Settings for Genshin Impact" }));
+  if (command === "set_library_root") await clickMenuItem(listen, "settings");
+  else await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
   const field = await screen.findByDisplayValue(initial);
   expect(field).not.toHaveAttribute("readonly");
   await userEvent.clear(field);
@@ -438,7 +443,8 @@ it.each(pathFields)("keeps the folder picker working for $label", async ({ label
     return {};
   };
   renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: command === "set_library_root" ? "Settings" : "Settings for Genshin Impact" }));
+  if (command === "set_library_root") await clickMenuItem(listen, "settings");
+  else await userEvent.click(await screen.findByRole("button", { name: "Settings for Genshin Impact" }));
   const field = await screen.findByLabelText(label);
   await userEvent.type(field, "unfinished");
   await userEvent.click(within(field.closest(".row") as HTMLElement).getByRole("button", { name: picked }));
@@ -451,7 +457,7 @@ it.each(pathFields)("keeps the folder picker working for $label", async ({ label
 it("does not apply a path when the picker is cancelled", async () => {
   openDialog.mockResolvedValue(null);
   renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   const field = await screen.findByLabelText("Global Library root");
   await userEvent.type(field, "draft");
   await userEvent.click(screen.getByRole("button", { name: "Change global root…" }));
@@ -468,7 +474,7 @@ it("shows the persisted proxy configuration after a partially failed save", asyn
     throw new Error("Proxy settings partly saved");
   };
   renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   const url = await screen.findByPlaceholderText("proxy URL");
   await userEvent.type(url, "http://draft-proxy:8080");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -494,7 +500,9 @@ it("refreshes partial onboarding reset while retaining the setup error", async (
     throw new Error("Setup reset partly saved");
   };
   renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: "Run setup again" }));
+  await screen.findByRole("heading", { name: "Genshin Impact" });
+  // Help → Run setup again is a native menu item since #351.
+  await clickMenuItem(listen, "run-setup");
   expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeInTheDocument();
   expect(screen.getByText("Setup reset partly saved")).toBeInTheDocument();
 });
@@ -690,7 +698,8 @@ it("leads with Add game and setup access when completion has no saved install pa
   renderApp();
   expect(await screen.findByText("No game install paths set. Add a game to get started.")).toBeVisible();
   expect(screen.getByRole("button", { name: "Add game" })).toBeEnabled();
-  expect(screen.getByRole("button", { name: "Run setup again" })).toBeEnabled();
+  // Setup access moved to Help → Run setup again in the native menu (#351).
+  expect(screen.queryByRole("button", { name: "Run setup again" })).not.toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Genshin Impact" })).not.toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: /^Mods \(/ })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Adopt folder…" })).not.toBeInTheDocument();
@@ -703,6 +712,10 @@ it("leads with Add game and setup access when completion has no saved install pa
   await userEvent.click(screen.getByRole("button", { name: "Add game" }));
   await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
   expect(await screen.findByRole("heading", { name: "Genshin Impact install path" })).toBeVisible();
+  // A user with no saved path must still be able to re-run setup; the only
+  // route left is the menu.
+  await clickMenuItem(listen, "run-setup");
+  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
 });
 
 it("keeps Resume setup available after skipping and returns through the same wizard", async () => {

@@ -4,10 +4,11 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { getGameInstallPath, type GameCode, type GameSummary } from "./api";
 import { useQuery } from "@tanstack/react-query";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
+import { clickMenuItem } from "./test/menu";
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("./diagnostics", () => ({ diagnosticsLogDir: vi.fn().mockResolvedValue("C:\\GMM\\logs"), exportDiagnosticsBundle: vi.fn() }));
@@ -328,7 +329,7 @@ it("moves to the remaining installed Game when Settings clears the selected Game
 it("does not invent a return Game when Settings opens with no configured Games", async () => {
   renderWithQuery(<App />);
   await screen.findByRole("button", { name: "Add game" });
-  await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
   expect(screen.getByRole("button", { name: "Back to Mods" })).toBeVisible();
   expect(screen.queryByText(/^Return to /)).not.toBeInTheDocument();
@@ -472,8 +473,10 @@ it.each(["global", "game", "add"])("restores the selected Game, Mod anchor and %
     for (const route of ["button", "escape"]) {
       rowTop = -40;
       Object.defineProperty(window, "scrollY", { configurable: true, value: 860 });
-      const name = arrival === "global" ? "Settings" : arrival === "game" ? "Settings for Wuthering Waves" : "Add game";
-      await userEvent.click(screen.getByRole("button", { name }));
+      const name = arrival === "game" ? "Settings for Wuthering Waves" : "Add game";
+      // The global route is File → Settings… in the native menu since #351.
+      if (arrival === "global") await clickMenuItem(listen, "settings");
+      else await userEvent.click(screen.getByRole("button", { name }));
       if (arrival === "add") await userEvent.click(screen.getByRole("button", { name: "Set up Genshin Impact" }));
       expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toHaveFocus();
       expect(screen.getByText("Return to Wuthering Waves")).toBeVisible();
@@ -485,7 +488,11 @@ it.each(["global", "game", "add"])("restores the selected Game, Mod anchor and %
       expect(screen.getByText("Return Outfit")).toBeVisible();
       expect(window.scrollTo).toHaveBeenLastCalledWith(0, 60);
       expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
-      expect(screen.getByRole("button", { name })).toHaveFocus();
+      // The global arrival has no control of its own to return to, so its
+      // focus falls back to the selected Game tab (#351).
+      expect(arrival === "global"
+        ? screen.getByRole("tab", { name: "Wuthering Waves" })
+        : screen.getByRole("button", { name })).toHaveFocus();
       expect(tabNames()).toEqual(["Honkai: Star Rail", "Wuthering Waves"]);
     }
   } finally {

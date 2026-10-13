@@ -3,16 +3,16 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 
 import { renderWithQuery } from "./test/harness";
+import { clickMenuItem } from "./test/menu";
 
-const { invoke, openDialog } = vi.hoisted(() => ({
+const { invoke, openDialog, listen } = vi.hoisted(() => ({
   invoke: vi.fn(),
   openDialog: vi.fn(),
+  listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn().mockResolvedValue(() => {}),
-}));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...args: unknown[]) => openDialog(...args),
   save: vi.fn(),
@@ -307,7 +307,7 @@ it("shows a Library path failure instead of resolving forever", async () => {
   };
   renderWithQuery(<App />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   const heading = await screen.findByText(/could not resolve Library paths/i);
   const alert = heading.closest('[role="alert"]');
   expect(alert).not.toBeNull();
@@ -394,7 +394,7 @@ it("routes a relocation Variant failure to selection repair and never recommends
   ];
   renderWithQuery(<App />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   await userEvent.click(await screen.findByRole("button", { name: /change global root/i }));
 
   await waitFor(() =>
@@ -423,7 +423,7 @@ it("reports a setting-only overlap repair instead of presenting it as a successf
   overlapRepair = true;
   renderWithQuery(<App />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   const changeRoot = await screen.findByRole("button", { name: /change global root/i });
   expect(
     screen.queryByText(/library setting changed, but existing mod folders were not moved/i),
@@ -469,7 +469,7 @@ it("keeps unrelated Game controls available when the aggregate needs attention",
 });
 
 
-it("renders the approved eight main-screen slots in order with scoped notices and no configuration", async () => {
+it("renders the approved seven main-screen slots in order with scoped notices and no configuration", async () => {
   startupFailures = [{ game: "gimi", kind: "invalidActiveVariant", error: variantError }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (command, args) => {
@@ -485,8 +485,9 @@ it("renders the approved eight main-screen slots in order with scoped notices an
   const header = screen.getByRole("region", { name: "Genshin Impact header" });
   const global = screen.getByRole("region", { name: "Global status" });
   const notices = screen.getByRole("region", { name: "Game and operation notices" });
+  // Seven since #351: the window bar is gone — its wordmark duplicated the OS
+  // title bar and both its actions are native menu items now.
   expect(Array.from(main.children)).toEqual([
-    screen.getByRole("banner", { name: "GMM" }),
     header,
     global,
     screen.getByRole("tablist", { name: "Game" }).parentElement!.parentElement,
@@ -513,6 +514,11 @@ it("renders the approved eight main-screen slots in order with scoped notices an
     "Adopt for Genshin Impact", "Import ZIP for Genshin Impact", "GameBanana for Genshin Impact",
   ]);
   expect(main.querySelector("aside")).toBeNull();
+  expect(main.querySelector("header.window-bar")).toBeNull();
+  expect(screen.queryByRole("banner", { name: "GMM" })).not.toBeInTheDocument();
+  expect(screen.queryByText("GMM")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Settings" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Run setup again" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Retry Model Importer recovery" })).not.toBeInTheDocument();
   for (const name of ["Network", "GMM updates", "Importer recommendations", "Diagnostics", "Global Library root", "Genshin Impact install path", "Model Importer (GIMI)"]) {
     expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
