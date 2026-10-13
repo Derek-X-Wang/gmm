@@ -221,17 +221,25 @@ pub async fn set_skipped_update(core: State<'_, Core>, build: String) -> Command
         .map_err(CommandError::from)
 }
 
+/// Running version from the binary's compiled Tauri package metadata.
+#[tauri::command]
+pub fn get_app_version<R: tauri::Runtime>(app: AppHandle<R>) -> CommandResult<String> {
+    Ok(app.package_info().version.to_string())
+}
+
 /// Tauri command — user-initiated bundle export. Writes a zip to
 /// `dest_path`. The zip contains the last 7 days of logs plus a redacted
 /// `settings.json` snapshot.
 #[tauri::command]
-pub async fn export_diagnostics_bundle(
+pub async fn export_diagnostics_bundle<R: tauri::Runtime>(
+    app: AppHandle<R>,
     core: State<'_, Core>,
     log_dir: PathBuf,
     dest_path: PathBuf,
     updater_error: Option<String>,
 ) -> CommandResult<()> {
     let mut snapshot = core.settings_snapshot().await.map_err(CommandError::from)?;
+    snapshot.app_version = Some(get_app_version(app)?);
     snapshot.updater_error = updater_error;
     // The build is sync I/O; offload so we don't block the Tauri event
     // loop while the zip is being written.

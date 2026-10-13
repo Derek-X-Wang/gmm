@@ -167,7 +167,7 @@ fn defined_commands() -> BTreeSet<String> {
                 .strip_prefix("pub async fn ")
                 .or_else(|| t.strip_prefix("pub fn "));
             if let Some(sig) = sig {
-                if let Some(name) = sig.split('(').next() {
+                if let Some(name) = sig.split(['(', '<']).next() {
                     out.insert(name.trim().to_string());
                 }
                 break;

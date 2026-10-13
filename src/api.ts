@@ -6,6 +6,11 @@ import {
 } from "./commandError";
 export type { SurfaceFailureKind } from "./commandError";
 
+/** Version of the running binary, supplied by Tauri's compiled package info. */
+export function getAppVersion(): Promise<string> {
+  return invoke<string>("get_app_version");
+}
+
 export type GameCode = "gimi" | "srmi" | "zzmi" | "wwmi" | "himi" | "efmi";
 
 export type Source = "manual" | "local" | "gamebanana";

@@ -64,9 +64,15 @@ async fn unreadable_skip_is_logged_and_distinguished_from_absence_in_the_bundle(
     let app = tauri::test::mock_app();
     app.manage(core);
     let bundle = temp.path().join("diagnostics.zip");
-    gmm_lib::commands::export_diagnostics_bundle(app.state(), log_dir, bundle.clone(), None)
-        .await
-        .expect("export with damaged skip");
+    gmm_lib::commands::export_diagnostics_bundle(
+        app.handle().clone(),
+        app.state(),
+        log_dir,
+        bundle.clone(),
+        None,
+    )
+    .await
+    .expect("export with damaged skip");
     let bundled = bundled_settings(&bundle);
     assert!(bundled["updater_skipped_build"].is_null());
     assert_eq!(bundled["updater_skip_status"], "unreadable");

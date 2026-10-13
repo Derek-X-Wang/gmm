@@ -197,6 +197,7 @@ pub fn run() {
             commands::set_game_install_path,
             commands::log_frontend_error,
             commands::get_skipped_update,
+            commands::get_app_version,
             commands::set_skipped_update,
             commands::export_diagnostics_bundle,
             commands::diagnostics_log_dir,
