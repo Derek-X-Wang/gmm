@@ -188,6 +188,23 @@ it.each(["before a Settings visit", "after Back"])("hides the Settings root itse
     expect(root).toHaveAttribute("hidden");
     expect(root).not.toBeVisible();
     expect(getComputedStyle(root).display).toBe("none");
+
+    // The computed value above catches an authored rule that outranks the
+    // hiding — which is the break the dialog made possible, since the scrim
+    // now carries a `display` of its own for centring the panel (#353).
+    //
+    // It cannot catch the authored rule being deleted: jsdom's own user-agent
+    // stylesheet implements `[hidden] { display: none }`, so the value stays
+    // `none` with no author rule at all. In the browser it would not. There
+    // the user-agent rule loses to any author `display` on the same element,
+    // and `.settings-screen` has one — so `[hidden]`'s `!important` is what
+    // keeps the surface and its retained pages hidden, and nothing about its
+    // presence is observable from the rendered tree. Read the authored text
+    // instead, the way `App.test.tsx` reads the status bar's light-mode rules.
+    expect(
+      readFileSync("src/App.css", "utf8"),
+      "`[hidden]` must outrank `.settings-screen`'s own display, or the retired surface reappears",
+    ).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important\s*;?\s*\}/);
   } finally {
     style.remove();
   }
@@ -1103,6 +1120,34 @@ it("holds Tab inside the dialog instead of letting it reach the window behind", 
   screen.getByRole("button", { name: /Launch Honkai/, hidden: true }).focus();
   await userEvent.tab();
   expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+});
+
+it("closes on Escape only when nothing inside the dialog has consumed it", async () => {
+  renderApp();
+  await openGame();
+
+  // The Library action forms cancel their own prompt on Escape, and they also
+  // stop propagation, so the dialog's window handler never sees those presses
+  // at all — which is why the test above them passes either way. This is the
+  // other half of the contract, and the half the handler itself has to honour:
+  // a consumer that prevents the default without stopping propagation. Capture
+  // phase, so it runs before the dialog's own listener, exactly as a handler
+  // nested inside the dialog would.
+  const consume = (event: KeyboardEvent) => event.preventDefault();
+  window.addEventListener("keydown", consume, true);
+  try {
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(dialog()).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toBeVisible();
+  } finally {
+    window.removeEventListener("keydown", consume, true);
+  }
+
+  // Unconsumed, the same press closes it — so the assertion above is about the
+  // ordering, not about Escape having been wired up at all.
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" })).toHaveFocus();
 });
 
 it("is a modal dialog whose only dismissal is Close", async () => {
