@@ -38,7 +38,19 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
   useLayoutEffect(() => {
     if (page !== null) {
       setVisited((previous) => new Set([...previous, page]));
-      if (previousPage.current === null) heading.current?.focus();
+      // Entry focuses the heading. A later page change does too, but only
+      // when the focused control is inside the page being hidden. The native
+      // menu can switch pages while focus sits in an editor (#351), and
+      // unlike a navigation click there is no in-page control for focus to
+      // land on, so it would be stranded on a hidden element and the next Tab
+      // would restart at the top of the window. A navigation button stays
+      // visible, so focus must not be taken from it.
+      const active = document.activeElement;
+      const strandedInHiddenPage = previousPage.current !== null
+        && previousPage.current !== page
+        && active instanceof HTMLElement
+        && active.closest("[data-settings-page]") !== null;
+      if (previousPage.current === null || strandedInHiddenPage) heading.current?.focus();
     }
     previousPage.current = page;
   }, [page]);
@@ -84,7 +96,7 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
           </nav>
           <div className="settings-content">
             {games.filter((game) => pages.has(game.code)).map((game) => (
-              <div key={game.code} hidden={page !== game.code}>
+              <div key={game.code} data-settings-page={game.code} hidden={page !== game.code}>
                 <h2>{game.displayName}</h2>
                 <GamePathPage game={game.code} displayName={game.displayName} />
                 <ImporterPanel game={game.code} displayName={game.displayName} />
@@ -93,7 +105,7 @@ export function SettingsDestination({ games, page, returnGame, onPageChange, onB
                 <LibraryAuditWarning game={game.code} />
               </div>
             ))}
-            {pages.has("gmm") ? <div hidden={page !== "gmm"}>
+            {pages.has("gmm") ? <div data-settings-page="gmm" hidden={page !== "gmm"}>
               <h2>GMM settings</h2>
               <ApplicationVersion />
               <GlobalLibraryRootEditor games={games} onGamePage={onPageChange} />

@@ -4,7 +4,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
-import { clickMenuItem } from "./test/menu";
+import { clickMenuItem, clickMenuItemsInOneTick } from "./test/menu";
 import type { GameCode, GamePathStatus, GameSummary, SessionInfo } from "./api";
 
 const { invoke, listen, unlisten } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn(), unlisten: vi.fn() }));
@@ -807,4 +807,101 @@ it("falls back to the main region when a menu-opened visit returns before any co
   expect(main).not.toBeNull();
   expect(main).toHaveFocus();
   expect(document.body).not.toHaveFocus();
+});
+
+// The menu is reachable from every state, including from inside an open
+// Settings visit. The in-page controls never were: the Settings button was
+// unmounted with the main screen. Every assumption the old handlers made
+// about when they could run has to be re-proved for the menu.
+
+it.each(["button", "escape"])("keeps the main-screen return point when a menu action arrives mid-visit, on %s return", async (route) => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "list_mods" ? [{
+    id: "mod-return", game: "srmi", name: "Return Outfit", source: "manual",
+    library_path: "C:\\GMM\\library\\srmi\\mod-return", enabled: false,
+    reinstall_recovery: null, enabled_transition_recovery: null,
+  }] : command === "list_variants" ? { variants: [], activeVariantId: null } : original(command, args));
+  renderApp();
+  await screen.findByText("Return Outfit");
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+
+  Object.defineProperty(window, "scrollY", { configurable: true, value: 860 });
+  await clickMenuItem(listen, "settings");
+  // The main screen is unmounted now, so this is the Settings surface's own
+  // scroll position and there is no `[data-mod-id]` row to anchor to.
+  Object.defineProperty(window, "scrollY", { configurable: true, value: 150 });
+  await clickMenuItem(listen, "diagnostics");
+  expect(pageButton("GMM settings")).toHaveAttribute("aria-current", "page");
+
+  if (route === "button") await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+  else fireEvent.keyDown(window, { key: "Escape" });
+  expect(screen.getByText("Return Outfit")).toBeInTheDocument();
+  expect(scrollTo).toHaveBeenLastCalledWith(0, 860);
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+});
+
+it("keeps the arrival control when a menu action arrives during a per-Game visit", async () => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+
+  await openGame();
+  await clickMenuItem(listen, "check-updates");
+  expect(pageButton("GMM settings")).toHaveAttribute("aria-current", "page");
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+
+  // Entry was the status-bar link, so that is where focus belongs. A menu
+  // action during the visit must not re-point the return at the `"global"`
+  // arrival, which has no control in the page at all.
+  expect(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" })).toHaveFocus();
+});
+
+it("starts one reset when two run-setup events arrive before React commits", async () => {
+  const original = invoke.getMockImplementation()!;
+  let finishReset!: () => void;
+  invoke.mockImplementation(async (command, args) => command === "reset_onboarding"
+    ? new Promise<void>((yes) => { finishReset = yes; })
+    : original(command, args));
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+
+  // No flush between the two deliveries. `reopenSetup.isPending` is a render
+  // value, so both would read `false` and `reset_onboarding` — which re-runs
+  // first-run setup — would run twice concurrently.
+  await clickMenuItemsInOneTick(listen, "run-setup", "run-setup");
+
+  expect(invoke.mock.calls.filter(([command]) => command === "reset_onboarding")).toHaveLength(1);
+  await act(async () => finishReset());
+  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+});
+
+it("moves focus out of a Settings page the menu is about to hide", async () => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+
+  await openGame();
+  const editor = screen.getByRole("textbox", { name: "Honkai: Star Rail install path" });
+  editor.focus();
+  expect(editor).toHaveFocus();
+
+  await clickMenuItem(listen, "diagnostics");
+
+  // The Game page is hidden now. Nothing in the page moved focus — the menu
+  // is not a control that can take it — so focus would sit on a hidden
+  // element and the next Tab would restart at the top of the window.
+  expect(editor).not.toBeVisible();
+  expect(editor).not.toHaveFocus();
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toHaveFocus();
+});
+
+it("leaves focus on the Settings navigation control the user clicked", async () => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+
+  await openGame();
+  await userEvent.click(pageButton("GMM settings"));
+
+  // The navigation button stays visible, so moving focus to the heading
+  // would take it away from the control the user is operating.
+  expect(pageButton("GMM settings")).toHaveFocus();
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).not.toHaveFocus();
 });

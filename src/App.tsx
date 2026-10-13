@@ -163,19 +163,37 @@ function MainApp({
   const returnPosition = useRef(0);
   const returnControl = useRef<string | null>(null);
   const returnAnchor = useRef<{ id: string; top: number } | null>(null);
+  // Mirrors `settingsPage`, but synchronously. The menu can deliver two
+  // actions before React commits the first, and a render value read in the
+  // second would still say the visit had not started.
+  const visiting = useRef(false);
   // Keep the current list's data observed across navigation. A long Settings
   // visit must not evict it and clamp the return scroll to an empty screen.
   useQuery({ queryKey: ["mods", activeGame], queryFn: () => listMods(activeGame) });
   const { staleSession, dismissStaleSession } = useSessionLifecycle();
   const sessionSurface = useSessionPresentation({ staleSession, onDismiss: dismissStaleSession });
   const launchSurface = useLaunchGame({ game: activeGame, displayName: active.displayName });
+  // Snapshot the main screen on entry and only on entry. Every in-page
+  // control is unmounted with the main screen, so each could only ever open
+  // the first visit; the menu can fire during one. By then there is no
+  // `[data-mod-id]` row to anchor to and `window.scrollY` belongs to the
+  // Settings surface, so re-snapshotting would return the user to the
+  // Settings scroll position instead of where they left their Mod list. A
+  // menu action during a visit changes the page and nothing else.
   const openSettings = (page: SettingsPage, control = "game") => {
-    returnControl.current = control;
-    returnPosition.current = window.scrollY;
-    const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-mod-id]"));
-    const anchor = rows.find((row) => row.getBoundingClientRect().bottom > 0);
-    returnAnchor.current = anchor ? { id: anchor.dataset.modId!, top: anchor.getBoundingClientRect().top } : null;
+    if (!visiting.current) {
+      visiting.current = true;
+      returnControl.current = control;
+      returnPosition.current = window.scrollY;
+      const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-mod-id]"));
+      const anchor = rows.find((row) => row.getBoundingClientRect().bottom > 0);
+      returnAnchor.current = anchor ? { id: anchor.dataset.modId!, top: anchor.getBoundingClientRect().top } : null;
+    }
     setSettingsPage(page);
+  };
+  const closeSettings = () => {
+    visiting.current = false;
+    setSettingsPage(null);
   };
   useLayoutEffect(() => {
     if (settingsPage === null) {
@@ -200,11 +218,20 @@ function MainApp({
     } else window.scrollTo(0, 0);
   }, [settingsPage]);
 
+  // `reopenSetup.isPending` is a render value, so two menu actions delivered
+  // before React commits would both read `false` and start two concurrent
+  // `reset_onboarding` calls — two first-run setups, not a cosmetic race.
+  // This flag is written before the call and cleared when it settles, so the
+  // second delivery in the same tick already sees it.
+  const resetInFlight = useRef(false);
   const reopenSetup = useMutation({
     mutationFn: () => resetOnboarding(),
     onSuccess: onResumeWizard,
     onError: onSetupFailure,
-    onSettled: () => qc.invalidateQueries({ queryKey: ["onboarding", "status"] }),
+    onSettled: () => {
+      resetInFlight.current = false;
+      qc.invalidateQueries({ queryKey: ["onboarding", "status"] });
+    },
   });
 
   // The File/Help menu is built in Rust (`src-tauri/src/menu.rs`), so a click
@@ -223,10 +250,12 @@ function MainApp({
           openSettings("gmm", "global");
           return;
         case "run-setup":
-          // Unavailable while a reset is pending, as the in-page control was.
-          // The menu item cannot grey itself out from here: its enabled state
-          // lives in the OS, not in a React render.
-          if (!reopenSetup.isPending) reopenSetup.mutate();
+          // Unavailable while a reset is already running, as the in-page
+          // control was. The menu item cannot grey itself out from here: its
+          // enabled state lives in the OS, not in a React render.
+          if (resetInFlight.current) return;
+          resetInFlight.current = true;
+          reopenSetup.mutate();
           return;
       }
     };
@@ -245,7 +274,7 @@ function MainApp({
         page={settingsPage}
         returnGame={hasActiveGame ? active.displayName : null}
         onPageChange={setSettingsPage}
-        onBack={() => setSettingsPage(null)}
+        onBack={closeSettings}
       />
       {settingsPage === null ? (
         <main className="app" data-main-screen tabIndex={-1}>
