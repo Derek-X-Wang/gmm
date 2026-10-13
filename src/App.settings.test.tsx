@@ -10,7 +10,17 @@ vi.mock("@tauri-apps/api/event", () => ({ listen }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("./diagnostics", () => ({ diagnosticsLogDir: vi.fn().mockResolvedValue("C:\\GMM\\logs"), exportDiagnosticsBundle: vi.fn() }));
-vi.mock("./updater", () => ({ checkInteractively: vi.fn() }));
+vi.mock("./updater", () => {
+  const idle = { kind: "idle" };
+  return { updater: {
+    getSnapshot: () => idle,
+    subscribe: () => () => {},
+    checkForUpdates: vi.fn(),
+    install: vi.fn(),
+    decline: vi.fn(),
+    reportRestartError: vi.fn(),
+  } };
+});
 vi.mock("./LoaderVersionNote", () => ({ LoaderVersionNote: () => null }));
 const { default: App } = await import("./App");
 
