@@ -48,8 +48,6 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
   const path = savedPath ?? status.data?.savedPath;
   const installed = !error && !pending && status.data?.gamePath.status === "readable"
     && status.data.modelImporter.status === "installed";
-  const absent = !error && !pending && status.data?.gamePath.status === "readable"
-    && status.data.modelImporter.status === "requiredEntriesNotFound";
   const metadataVerified = !update.isError && update.data != null;
   const previousMetadata = metadataVerified && update.isFetching;
   const metadataPending = update.isPending || update.isFetching;
@@ -59,7 +57,6 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
       <div className="row">
       <strong>Game and Model Importer ({game.toUpperCase()})</strong>
       <span>Game: {summary.line}</span>
-      {absent ? <span className="muted small">Unhealthy</span> : null}
       {version ? <span className="muted small">{previousMetadata ? "Previous: Installed version: " : "Installed version: "}<code>{version}</code></span> : null}
       {installed && metadataVerified && update.data?.pinned ? <span className="muted small" aria-label="Importer Pin applies">{previousMetadata ? "Previous: Pinned" : "Pinned"}</span> : null}
       {installed && !version ? <span className="muted small">{update.isError

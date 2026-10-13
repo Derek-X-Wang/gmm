@@ -22,6 +22,32 @@ beforeEach(() => {
   props.onSettings.mockClear();
 });
 
+it("reports a never-installed Model Importer without fault language", async () => {
+  pathStatus = { ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] } };
+  updateStatus.installedVersion = null;
+  renderWithQuery(<GameStatusStrip {...props} />);
+  const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
+  expect(await within(strip).findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
+  expect(strip).not.toHaveTextContent(/unhealthy|fault|broken|degraded/i);
+  expect(strip).not.toHaveTextContent(/Model Importer healthy|Installed version:|Pinned/);
+  await userEvent.click(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  expect(props.onSettings).toHaveBeenCalledTimes(1);
+});
+
+it("keeps an existing wrong-type Model Importer entry distinct from absence", async () => {
+  const error = "Model Importer entry C:/StarRail/Core must be a directory.";
+  pathStatus = { ...readable, modelImporter: { status: "unverified", path: "C:/StarRail/Core", error } };
+  // Recorded install metadata cannot upgrade failed filesystem evidence.
+  updateStatus.pinned = true;
+  renderWithQuery(<GameStatusStrip {...props} />);
+  const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
+  expect(await within(strip).findByText("Game: Game readable · Model Importer unverified")).toBeVisible();
+  expect(within(strip).getByText(error)).toBeVisible();
+  expect(strip).not.toHaveTextContent(/not installed|Model Importer healthy|Installed version:|Pinned/);
+  await userEvent.click(within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  expect(props.onSettings).toHaveBeenCalledTimes(1);
+});
+
 it.each([
   [{ ...readable, gamePath: { status: "unreadable", path: savedPath, error: "Access denied" } }, "Game: Cannot tell — install path unreadable · Model Importer unverified", "Access denied"],
   [{ ...readable, gamePath: { status: "savedPathNotFound", paths: [savedPath] } }, "Game: Saved installation cannot be found · Model Importer unverified", savedPath],
@@ -37,8 +63,7 @@ it.each([
   expect(strip).toHaveTextContent(detail as string);
   expect(strip).toHaveTextContent(savedPath);
   expect(strip).toHaveTextContent("Game and Model Importer (SRMI)");
-  if (line === "Game: Game readable · Model Importer not installed") expect(strip).toHaveTextContent("Unhealthy");
-  else expect(strip).not.toHaveTextContent("Unhealthy");
+  expect(strip).not.toHaveTextContent("Unhealthy");
   expect(strip).not.toHaveTextContent("Pinned");
   expect(within(strip).getByText(savedPath, { selector: "code" })).toBeVisible();
   if (line !== "Game: Game readable · Model Importer not installed") expect(strip).not.toHaveTextContent(/not installed|no saved/i);
@@ -340,7 +365,7 @@ it.each([
   updateStatus.pinned = true;
   const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
   await screen.findByText("Game: Game readable · Model Importer not installed");
-  expect(screen.getByRole("status")).toHaveTextContent("Unhealthy");
+  expect(screen.getByRole("status")).not.toHaveTextContent(/unhealthy|fault|broken|degraded/i);
   rerender(<GameStatusStrip {...props} {...pathProps} />);
   expect(screen.getByRole("status")).toHaveTextContent("Model Importer unverified");
   expect(screen.getByRole("status")).not.toHaveTextContent(/Unhealthy|not installed|Pinned|Installed version:/);
@@ -360,7 +385,7 @@ it("withdraws cached absence while the status refresh is checking", async () => 
   expect(screen.getByRole("status")).not.toHaveTextContent(/Unhealthy|not installed|Pinned|Installed version:/);
   await act(async () => { resolve(pathStatus); await refresh; });
   expect(await screen.findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
-  expect(screen.getByRole("status")).toHaveTextContent("Unhealthy");
+  expect(screen.getByRole("status")).not.toHaveTextContent(/unhealthy|fault|broken|degraded/i);
 });
 
 it("keeps a failed status check ahead of a held recheck without reusing cached absence", async () => {
