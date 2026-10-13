@@ -131,6 +131,7 @@ async fn snapshot_redacts_userinfo_pasted_into_url() {
         library_root_overlaps_importer_backups: false,
         game_install_paths: Default::default(),
         proxy_url: Some("http://user:pass@proxy.local:8080".into()),
+        ..SettingsSnapshot::default()
     };
     let redacted = snapshot.redacted();
     let url = redacted.proxy_url.unwrap();

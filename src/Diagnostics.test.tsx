@@ -4,7 +4,8 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { renderWithQuery } from "./test/harness";
 import { Diagnostics } from "./Diagnostics.tsx";
 
-const { invoke, save } = vi.hoisted(() => ({ invoke: vi.fn(), save: vi.fn() }));
+const { invoke, save, check } = vi.hoisted(() => ({ invoke: vi.fn(), save: vi.fn(), check: vi.fn() }));
+vi.mock("@tauri-apps/plugin-updater", () => ({ check }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save }));
 beforeEach(() => {
@@ -65,7 +66,7 @@ it("exports only to the chosen local artifact and shows pending and completion",
   await userEvent.click(screen.getByRole("button", { name: "Export diagnostics bundle" }));
   expect(screen.getByRole("button", { name: "Bundling…" })).toBeDisabled();
   expect(save).toHaveBeenCalledWith({ defaultPath: "gmm-diagnostics.zip", filters: [{ name: "ZIP archive", extensions: ["zip"] }] });
-  expect(invoke).toHaveBeenCalledWith("export_diagnostics_bundle", { logDir: "C:/GMM/logs", destPath: "C:/Exports/report.zip" });
+  expect(invoke).toHaveBeenCalledWith("export_diagnostics_bundle", { logDir: "C:/GMM/logs", destPath: "C:/Exports/report.zip", updaterError: null });
   await act(async () => finish());
   expect(await screen.findByText(/Saved bundle to/)).toHaveTextContent("C:/Exports/report.zip");
 });
@@ -77,4 +78,18 @@ it.each(["dialog", "export"])("shows %s failure without claiming a saved bundle"
   await userEvent.click(screen.getByRole("button", { name: "Export diagnostics bundle" }));
   expect(await screen.findByText("Local export refused")).toBeVisible();
   expect(screen.queryByText(/Saved bundle to/)).not.toBeInTheDocument();
+});
+
+it("the exported snapshot receives the last updater error even after a successful retry", async () => {
+  const { updater } = await import("./updater");
+  check.mockRejectedValueOnce(new Error("offline"));
+  await updater.checkForUpdates(true);
+  check.mockResolvedValueOnce(null);
+  await updater.checkForUpdates(true);
+  renderWithQuery(<Diagnostics />);
+  await screen.findByDisplayValue("C:/GMM/logs");
+  await userEvent.click(screen.getByRole("button", { name: "Export diagnostics bundle" }));
+  expect(invoke).toHaveBeenCalledWith("export_diagnostics_bundle", {
+    logDir: "C:/GMM/logs", destPath: "C:/Exports/report.zip", updaterError: "Update check failed: offline",
+  });
 });

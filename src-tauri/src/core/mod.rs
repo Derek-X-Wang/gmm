@@ -3789,6 +3789,16 @@ impl Core {
         Ok(result)
     }
 
+    pub async fn skipped_update(&self) -> Result<Option<String>> {
+        settings::get(&self.pool, settings::keys::skipped_update()).await
+    }
+
+    pub async fn set_skipped_update(&self, build: &str) -> Result<()> {
+        serde_json::from_str::<settings::SkippedUpdate>(build)
+            .map_err(|error| Error::Diagnostics(format!("invalid skipped update: {error}")))?;
+        settings::put(&self.pool, settings::keys::skipped_update(), Some(build)).await
+    }
+
     /// Snapshot of the user-facing settings, for diagnostics bundles.
     /// Sensitive fields are NOT redacted here — call
     /// [`diagnostics::SettingsSnapshot::redacted`] before serialising.
@@ -3826,6 +3836,13 @@ impl Core {
             // Populated by slice 10 (proxy settings). Leaving blank here
             // means the bundle just shows `null` until then.
             proxy_url: None,
+            updater_skipped_build: self
+                .skipped_update()
+                .await?
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|error| Error::Diagnostics(format!("invalid skipped update: {error}")))?,
+            updater_error: None,
         })
     }
 

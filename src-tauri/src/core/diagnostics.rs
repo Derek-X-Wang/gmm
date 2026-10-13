@@ -174,6 +174,10 @@ pub struct SettingsSnapshot {
     /// `userinfo` portion is always redacted before the snapshot is
     /// serialised. See [`Self::redacted`].
     pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub updater_skipped_build: Option<super::settings::SkippedUpdate>,
+    #[serde(default)]
+    pub updater_error: Option<String>,
 }
 
 impl SettingsSnapshot {
@@ -191,6 +195,8 @@ impl SettingsSnapshot {
             library_root_overlaps_importer_backups: self.library_root_overlaps_importer_backups,
             game_install_paths: self.game_install_paths.clone(),
             proxy_url,
+            updater_skipped_build: self.updater_skipped_build.clone(),
+            updater_error: self.updater_error.clone(),
         }
     }
 }

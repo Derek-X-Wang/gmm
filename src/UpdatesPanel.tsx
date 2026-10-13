@@ -19,10 +19,13 @@ function UpdateStatus({ controller }: { controller: UpdateController }) {
       {state.notes ? <p className="small">{state.notes}</p> : null}
       <div className="row">
         <button onClick={() => void controller.install()}>Install update</button>
-        <button onClick={controller.decline}>Skip this version</button>
+        <button onClick={() => void controller.decline()}>Skip this build</button>
       </div>
     </> : null}
-    {state.kind === "declined" ? <p>Version {state.version} was skipped. Check for updates to review it again.</p> : null}
+    {state.kind === "declined" ? <>
+      <p>Version {state.version} was skipped. Check for updates to review it again.</p>
+      {state.remembered === false ? <p>This build could not be identified. It will be offered again on launch.</p> : null}
+    </> : null}
     {state.kind === "downloading" ? <p className="muted">
       Downloading{state.total ? ` (${Math.round((100 * state.downloaded) / state.total)}%)` : "…"}
     </p> : null}
@@ -63,7 +66,7 @@ export function StartupUpdateNotice({ controller = updater }: { controller?: Upd
     style={{ position: "fixed", bottom: 16, right: 16, maxWidth: "min(420px, calc(100vw - 32px))", maxHeight: "70vh", overflowY: "auto", zIndex: 1000 }}>
     <h2>GMM update</h2>
     <UpdateStatus controller={controller} />
-    {state.kind === "declined" ? <button onClick={() => setDismissed(state)}>Close update notice</button> : null}
+    {state.kind === "declined" || state.kind === "error" ? <button onClick={() => setDismissed(state)}>Close update notice</button> : null}
     {state.kind === "error" ? <button onClick={() => void controller.checkForUpdates(true)}>Retry update check</button> : null}
   </aside>;
 }

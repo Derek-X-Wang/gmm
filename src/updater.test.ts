@@ -1,5 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createUpdateController, declinedVersionKey } from "./updater";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createUpdateController as createController, declinedBuildKey } from "./updater";
+import { memorySkipStorage } from "./test/updaterStorage";
+let storage = memorySkipStorage();
+const createUpdateController = (check: Parameters<typeof createController>[0], store = storage) => createController(check, store);
 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
 
@@ -7,6 +10,7 @@ function fakeUpdate(version = "0.5.0") {
   return {
     version,
     body: "Release notes",
+    rawJson: { url: `https://example.com/${version}.msi`, signature: `signed-${version}` },
     downloadAndInstall: vi.fn(async (onEvent) => {
       onEvent({ event: "Started", data: { contentLength: 100 } });
       onEvent({ event: "Progress", data: { chunkLength: 40 } });
@@ -16,7 +20,7 @@ function fakeUpdate(version = "0.5.0") {
   };
 }
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => { storage = memorySkipStorage(); });
 
 describe("update consent", () => {
   it.each([true, false])("check (background=%s) stops before any download or install", async (background) => {
@@ -34,10 +38,10 @@ describe("update consent", () => {
     const update = fakeUpdate();
     const controller = createUpdateController(vi.fn().mockResolvedValue(update));
     await controller.checkForUpdates(true);
-    controller.decline();
+    await controller.decline();
     await controller.install();
     expect(update.downloadAndInstall).not.toHaveBeenCalled();
-    expect(localStorage.getItem(declinedVersionKey)).toBe("0.5.0");
+    expect(storage.getItem(declinedBuildKey)).toContain("signed-0.5.0");
     expect(controller.getSnapshot()).toEqual({ kind: "declined", version: "0.5.0" });
     expect(update.downloadAndInstall).not.toHaveBeenCalled();
   });
@@ -46,7 +50,7 @@ describe("update consent", () => {
     const skipped = fakeUpdate();
     const firstLaunch = createUpdateController(vi.fn().mockResolvedValue(skipped));
     await firstLaunch.checkForUpdates(true);
-    firstLaunch.decline();
+    await firstLaunch.decline();
     const nextLaunch = createUpdateController(vi.fn().mockResolvedValue(skipped));
     await nextLaunch.checkForUpdates(true);
     expect(nextLaunch.getSnapshot()).toEqual({ kind: "declined", version: "0.5.0", remembered: true });
@@ -67,7 +71,7 @@ describe("update consent", () => {
     const storage = { getItem: () => null, setItem: () => { throw new Error("storage unavailable"); } };
     const controller = createUpdateController(vi.fn().mockResolvedValue(update), storage);
     await controller.checkForUpdates(true);
-    controller.decline();
+    await controller.decline();
     expect(controller.getSnapshot()).toMatchObject({ kind: "error", message: expect.stringContaining("could not remember") });
     await controller.install();
     expect(update.downloadAndInstall).not.toHaveBeenCalled();
@@ -117,4 +121,77 @@ describe("update consent", () => {
     expect(states).not.toContainEqual({ kind: "installed" });
     expect(controller.getSnapshot()).toEqual({ kind: "error", message: "Update installation failed: installer failed" });
   });
+});
+
+it("skipping build A never suppresses build B with the same application version", async () => {
+  const a = fakeUpdate("0.4.0");
+  const b = { ...fakeUpdate("0.4.0"), rawJson: { url: "https://example.com/alpha.3.msi", signature: "signed-alpha.3" } };
+  const first = createUpdateController(vi.fn().mockResolvedValue(a));
+  await first.checkForUpdates(true);
+  await first.decline();
+  const restarted = createUpdateController(vi.fn().mockResolvedValue(b));
+  await restarted.checkForUpdates(true);
+  expect(restarted.getSnapshot()).toMatchObject({ kind: "available", version: "0.4.0" });
+  expect(b.downloadAndInstall).not.toHaveBeenCalled();
+});
+
+afterEach(() => vi.useRealTimers());
+it("the controller keeps an unanswered offer without installing while time passes", async () => {
+  vi.useFakeTimers();
+  const update = fakeUpdate();
+  const controller = createUpdateController(vi.fn().mockResolvedValue(update));
+  await controller.checkForUpdates(true);
+  expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
+  expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
+  await controller.install();
+  expect(update.downloadAndInstall).toHaveBeenCalledOnce();
+});
+
+it("missing signed artifact metadata fails toward offering the build again", async () => {
+  const update = { version: "0.4.0", downloadAndInstall: vi.fn() };
+  const first = createUpdateController(vi.fn().mockResolvedValue(update));
+  await first.checkForUpdates(true);
+  await first.decline();
+  const restarted = createUpdateController(vi.fn().mockResolvedValue(update));
+  await restarted.checkForUpdates(true);
+  expect(restarted.getSnapshot()).toMatchObject({ kind: "available" });
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
+});
+
+it.each(["new signature", "new release URL"])("a static manifest with %s offers another build on the same version line", async (change) => {
+  const a = { ...fakeUpdate("0.4.0"), rawJson: { platforms: {
+    "windows-x86_64-msi": { url: "https://example.com/alpha.2.msi", signature: "signed-alpha.2" },
+    "windows-x86_64": { url: "https://example.com/alpha.2.msi", signature: "signed-alpha.2" },
+  } } };
+  const first = createUpdateController(vi.fn().mockResolvedValue(a));
+  await first.checkForUpdates(true);
+  await first.decline();
+  // Reordering JSON keys is the same build and must stay quiet after restart.
+  const reordered = { ...a, rawJson: { platforms: {
+    "windows-x86_64": a.rawJson.platforms["windows-x86_64"],
+    "windows-x86_64-msi": a.rawJson.platforms["windows-x86_64-msi"],
+  } } };
+  const same = createUpdateController(vi.fn().mockResolvedValue(reordered));
+  await same.checkForUpdates(true);
+  expect(same.getSnapshot()).toMatchObject({ kind: "declined", remembered: true });
+  const b = { ...a, rawJson: { platforms: { ...a.rawJson.platforms,
+    "windows-x86_64-msi": change === "new signature"
+      ? { url: "https://example.com/alpha.2.msi", signature: "signed-rebuilt" }
+      : { url: "https://example.com/alpha.3.msi", signature: "signed-alpha.2" },
+  } } };
+  const different = createUpdateController(vi.fn().mockResolvedValue(b));
+  await different.checkForUpdates(true);
+  expect(different.getSnapshot()).toMatchObject({ kind: "available", version: "0.4.0" });
+  expect(b.downloadAndInstall).not.toHaveBeenCalled();
+});
+
+it("an unidentifiable build is offered even when skip storage is unavailable", async () => {
+  const update = { version: "0.4.0", downloadAndInstall: vi.fn() };
+  const store = { getItem: () => { throw new Error("storage unavailable"); }, setItem: vi.fn() };
+  const controller = createUpdateController(vi.fn().mockResolvedValue(update), store);
+  await controller.checkForUpdates(true);
+  expect(controller.getSnapshot()).toMatchObject({ kind: "available" });
+  expect(update.downloadAndInstall).not.toHaveBeenCalled();
 });
