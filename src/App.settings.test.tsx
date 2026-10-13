@@ -1,3 +1,5 @@
+// @ts-expect-error Node types are not part of the frontend; Vitest provides this test-only runtime.
+import { readFileSync } from "node:fs";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -93,23 +95,33 @@ beforeEach(() => {
 });
 
 it.each(["before a Settings visit", "after Back"])("hides the Settings root itself %s", async (stage) => {
-  const { container } = renderApp();
-  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
-  const root = container.querySelector<HTMLElement>(".settings-screen")!;
-  expect(root).toBeInTheDocument();
+  const style = document.createElement("style");
+  style.textContent = readFileSync("src/App.css", "utf8");
+  document.head.appendChild(style);
+  try {
+    const { container } = renderApp();
+    await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+    const root = container.querySelector<HTMLElement>(".settings-screen")!;
+    expect(root).toBeInTheDocument();
 
-  if (stage === "after Back") {
-    await openGame();
-    expect(root).not.toHaveAttribute("hidden");
-    expect(root).toBeVisible();
-    expect(root).toContainElement(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }));
-    await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+    if (stage === "after Back") {
+      await openGame();
+      expect(root).not.toHaveAttribute("hidden");
+      expect(root).toBeVisible();
+      expect(getComputedStyle(root).display).not.toBe("none");
+      expect(root).toContainElement(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }));
+      await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+    }
+
+    // Check both parts: hidden on the root and App.css suppressing its display.
+    // toBeVisible alone accepts hidden even if CSS makes the root display: block.
+    expect(root).toBeInTheDocument();
+    expect(root).toHaveAttribute("hidden");
+    expect(root).not.toBeVisible();
+    expect(getComputedStyle(root).display).toBe("none");
+  } finally {
+    style.remove();
   }
-
-  // A hidden page inside Settings cannot satisfy an attribute check on its root.
-  expect(root).toBeInTheDocument();
-  expect(root).toHaveAttribute("hidden");
-  expect(root).not.toBeVisible();
 });
 
 it.each(["global", "game"])("replaces all main content and preserves independent selection by %s arrival", async (arrival) => {
