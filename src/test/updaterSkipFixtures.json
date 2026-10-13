@@ -1,0 +1,50 @@
+[
+  {
+    "name": "canonical",
+    "stored": "{\"version\":\"0.4.0\",\"identity\":\"[\\\"0.4.0\\\",[[\\\"dynamic\\\",\\\"https://example.com/0.4.0.msi\\\",\\\"signed-0.4.0\\\"]]]\"}",
+    "honoured": true,
+    "status": "usable"
+  },
+  {
+    "name": "reordered fields",
+    "stored": "{\"identity\":\"[\\\"0.4.0\\\",[[\\\"dynamic\\\",\\\"https://example.com/0.4.0.msi\\\",\\\"signed-0.4.0\\\"]]]\",\"version\":\"0.4.0\"}",
+    "honoured": false,
+    "status": "noncanonical"
+  },
+  {
+    "name": "extra field",
+    "stored": "{\"version\":\"0.4.0\",\"identity\":\"[\\\"0.4.0\\\",[[\\\"dynamic\\\",\\\"https://example.com/0.4.0.msi\\\",\\\"signed-0.4.0\\\"]]]\",\"extra\":true}",
+    "honoured": false,
+    "status": "noncanonical"
+  },
+  {
+    "name": "whitespace",
+    "stored": " {\"version\":\"0.4.0\",\"identity\":\"[\\\"0.4.0\\\",[[\\\"dynamic\\\",\\\"https://example.com/0.4.0.msi\\\",\\\"signed-0.4.0\\\"]]]\"} ",
+    "honoured": false,
+    "status": "noncanonical"
+  },
+  {
+    "name": "escaped version",
+    "stored": "{\"version\":\"0.\\u0034.0\",\"identity\":\"[\\\"0.4.0\\\",[[\\\"dynamic\\\",\\\"https://example.com/0.4.0.msi\\\",\\\"signed-0.4.0\\\"]]]\"}",
+    "honoured": false,
+    "status": "noncanonical"
+  },
+  {
+    "name": "invalid JSON",
+    "stored": "not JSON",
+    "honoured": false,
+    "status": "unreadable"
+  },
+  {
+    "name": "old shape",
+    "stored": "{\"version\":\"0.4.0\"}",
+    "honoured": false,
+    "status": "unreadable"
+  },
+  {
+    "name": "wrong identity type",
+    "stored": "{\"version\":\"0.4.0\",\"identity\":123}",
+    "honoured": false,
+    "status": "unreadable"
+  }
+]

@@ -69,7 +69,28 @@ it("the actual startup offer stays unanswered without installing while time pass
   check.mockResolvedValue({ version: "0.5.0", downloadAndInstall });
   await act(async () => { await import("./main"); });
   expect(screen.getByRole("button", { name: "Install update" })).toBeVisible();
-  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  // Advance five minutes of fake Date/performance time even with no queued timer.
+  // tickAsync runs chained timeouts, interval ticks, animation frames and their
+  // promise continuations due in this window; runOnlyPendingTimersAsync does not.
+  // This is a bounded observation window, not a deadline for user consent.
+  await act(async () => { await vi.advanceTimersByTimeAsync(300_000); });
+  expect(downloadAndInstall).not.toHaveBeenCalled();
+  for (const visibility of ["hidden", "visible"] as const) {
+    const visibilityState = vi.spyOn(document, "visibilityState", "get").mockReturnValue(visibility);
+    try {
+      for (const target of [window, document]) {
+        for (const event of ["focus", "visibilitychange"]) {
+          await act(async () => {
+            target.dispatchEvent(new Event(event));
+            await vi.advanceTimersByTimeAsync(300_000);
+          });
+          expect(downloadAndInstall).not.toHaveBeenCalled();
+        }
+      }
+    } finally {
+      visibilityState.mockRestore();
+    }
+  }
   expect(downloadAndInstall).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "Install update" })).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Install update" }));

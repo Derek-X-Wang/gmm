@@ -3829,6 +3829,30 @@ impl Core {
             Err(error) => return Err(error),
         };
 
+        // Incompatible or damaged skip metadata must not disable diagnostics.
+        // Read once and leave the stored bytes intact. The frontend honours only
+        // its exact JSON.stringify shape, so parsing alone cannot establish a skip.
+        let (updater_skipped_build, updater_skip_status) = match self.skipped_update().await? {
+            None => (None, diagnostics::UpdaterSkipStatus::Absent),
+            Some(value) => match serde_json::from_str::<settings::SkippedUpdate>(&value) {
+                Ok(skip) if serde_json::to_string(&skip).ok().as_deref() == Some(&value) => {
+                    (Some(skip), diagnostics::UpdaterSkipStatus::Usable)
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        "stored updater skip is noncanonical; the build will be offered again"
+                    );
+                    (None, diagnostics::UpdaterSkipStatus::Noncanonical)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "stored updater skip is unreadable; the build will be offered again"
+                    );
+                    (None, diagnostics::UpdaterSkipStatus::Unreadable)
+                }
+            },
+        };
+
         Ok(diagnostics::SettingsSnapshot {
             library_root: Some(library_root),
             library_root_overlaps_importer_backups,
@@ -3836,12 +3860,8 @@ impl Core {
             // Populated by slice 10 (proxy settings). Leaving blank here
             // means the bundle just shows `null` until then.
             proxy_url: None,
-            updater_skipped_build: self
-                .skipped_update()
-                .await?
-                .map(|value| serde_json::from_str(&value))
-                .transpose()
-                .map_err(|error| Error::Diagnostics(format!("invalid skipped update: {error}")))?,
+            updater_skipped_build,
+            updater_skip_status,
             updater_error: None,
         })
     }
