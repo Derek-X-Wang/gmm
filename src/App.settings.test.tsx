@@ -4,6 +4,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
+import { clickMenuItem } from "./test/menu";
 import type { GameCode, GamePathStatus, GameSummary, SessionInfo } from "./api";
 
 const { invoke, listen, unlisten } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn(), unlisten: vi.fn() }));
@@ -47,6 +48,11 @@ function renderApp() {
 }
 async function openGame() {
   await userEvent.click(await screen.findByRole("button", { name: "Settings for Honkai: Star Rail" }));
+}
+/** File → Settings…, the only global route into Settings since #351. */
+async function openGlobal() {
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  await clickMenuItem(listen, "settings");
 }
 function pageButton(name: string) {
   return within(screen.getByRole("navigation", { name: "Settings pages" })).getByRole("button", { name: new RegExp(name) });
@@ -127,7 +133,8 @@ it.each(["before a Settings visit", "after Back"])("hides the Settings root itse
 it.each(["global", "game"])("replaces all main content and preserves independent selection by %s arrival", async (arrival) => {
   renderApp();
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });
-  await userEvent.click(screen.getByRole("button", { name: arrival === "global" ? "Settings" : "Settings for Honkai: Star Rail" }));
+  if (arrival === "global") await openGlobal();
+  else await openGame();
   expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
   expect(pageButton(arrival === "global" ? "GMM settings" : "Honkai: Star Rail")).toHaveAttribute("aria-current", "page");
   noMainContent();
@@ -143,7 +150,12 @@ it.each(["global", "game"])("replaces all main content and preserves independent
   expect(screen.getByPlaceholderText("proxy URL")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
-  expect(screen.getByRole("button", { name: arrival === "global" ? "Settings" : "Settings for Honkai: Star Rail" })).toHaveFocus();
+  // The global arrival has no control of its own in the page since #351, so
+  // its focus return falls through to the selected Game tab. The per-Game
+  // arrival still returns to the control that was used.
+  expect(arrival === "global"
+    ? screen.getByRole("tab", { name: "Honkai: Star Rail" })
+    : screen.getByRole("button", { name: "Settings for Honkai: Star Rail" })).toHaveFocus();
   expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Honkai: Star Rail", "Zenless Zone Zero", "Wuthering Waves"]);
 });
 
@@ -245,7 +257,9 @@ it("refreshes Game Session events while Settings is open without repeating stale
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });
   const removed = unlisten.mock.calls.length;
   await openGame();
-  expect(listen).toHaveBeenCalledTimes(2);
+  // session-started, session-ended and the native menu channel (#351) — one
+  // subscription each, and a Settings visit must not re-subscribe any of them.
+  expect(listen).toHaveBeenCalledTimes(3);
   expect(unlisten).toHaveBeenCalledTimes(removed);
   session = { game: "zzmi", pid: 123, startedAt: "2026-10-11T00:00:00Z" } as SessionInfo;
   const reads = invoke.mock.calls.filter(([command]) => command === "current_session").length;
@@ -260,7 +274,7 @@ it("refreshes Game Session events while Settings is open without repeating stale
   await act(async () => events["session-ended"]());
   await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
   await waitFor(() => expect(screen.queryByText("ZZMI is running")).not.toBeInTheDocument());
-  expect(listen).toHaveBeenCalledTimes(2);
+  expect(listen).toHaveBeenCalledTimes(3);
 });
 
 it.each(["button", "escape"])("restores the user's Mod-list scroll position on %s return", async (route) => {
@@ -511,7 +525,7 @@ it("refreshes cached Settings path-state when setup finishes", async () => {
   await openGame();
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
   await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
-  await userEvent.click(screen.getByRole("button", { name: "Run setup again" }));
+  await clickMenuItem(listen, "run-setup");
   await screen.findByRole("heading", { name: "GMM — first-run setup" });
   states.srmi = { ...states.srmi, modelImporter: { status: "installed" } };
   await userEvent.click(screen.getByRole("button", { name: "Skip setup" }));
@@ -614,7 +628,7 @@ it("keeps application groups only on GMM in the approved order and links back to
   for (const name of ["Network", "GMM updates", "Importer recommendations", "Diagnostics"]) {
     expect(screen.queryByRole("heading", { name })).not.toBeInTheDocument();
   }
-  await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   const content = screen.getByRole("heading", { name: "Global Library root" }).parentElement!.parentElement!;
   expect(within(content).getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual([
     "GMM settings", "Global Library root", "Network", "GMM updates", "Importer recommendations", "Diagnostics",
@@ -643,7 +657,7 @@ it("preserves Network saved credentials, edits, pending actions and successful p
     return original(command, args);
   });
   renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   const password = await screen.findByPlaceholderText("(set — leave blank to keep)");
   expect(password).toHaveValue("");
   expect(password).toHaveAttribute("type", "password");
@@ -672,7 +686,7 @@ it("keeps Network loading, unset and unavailable states distinct", async () => {
   let resolve!: (value: unknown) => void;
   invoke.mockImplementation(async (command, args) => command === "get_proxy_config" ? new Promise((yes) => { resolve = yes; }) : original(command, args));
   const { client } = renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   expect(screen.getByText("Reading Network configuration…")).toBeVisible();
   await act(async () => resolve({ url: null, username: null, passwordSet: false }));
   expect(await screen.findByPlaceholderText("password")).toHaveValue("");
@@ -687,8 +701,110 @@ it("keeps Network connection failures visible", async () => {
   const original = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (command, args) => { if (command === "test_proxy_connection") throw new Error("Proxy connection refused"); return original(command, args); });
   renderApp();
-  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+  await clickMenuItem(listen, "settings");
   await userEvent.click(screen.getByRole("button", { name: "Test connection" }));
   expect(await screen.findByText("Proxy connection refused")).toBeVisible();
   expect(screen.queryByText("Proxy reachable.")).not.toBeInTheDocument();
+});
+
+// ---- #351 — the native File/Help menu ----
+
+it.each([
+  { action: "settings", panel: "Global Library root" },
+  { action: "check-updates", panel: "GMM updates" },
+  { action: "diagnostics", panel: "Diagnostics" },
+] as const)("routes the $action menu item to the Settings GMM page", async ({ action, panel }) => {
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  expect(screen.queryByRole("heading", { name: panel })).not.toBeInTheDocument();
+
+  await clickMenuItem(listen, action);
+
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+  // Check for updates and Diagnostics are routes to panels that already live
+  // on the GMM page. Landing on a Game page, or not opening at all, fails.
+  expect(pageButton("GMM settings")).toHaveAttribute("aria-current", "page");
+  for (const game of games) {
+    expect(pageButton(game.displayName)).not.toHaveAttribute("aria-current");
+  }
+  expect(screen.getByRole("heading", { name: panel })).toBeVisible();
+  noMainContent();
+});
+
+it("resets onboarding from the menu once, and not again while the reset is pending", async () => {
+  const original = invoke.getMockImplementation()!;
+  let finishReset!: () => void;
+  invoke.mockImplementation(async (command, args) => command === "reset_onboarding"
+    ? new Promise<void>((yes) => { finishReset = yes; })
+    : original(command, args));
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+
+  await clickMenuItem(listen, "run-setup");
+  const resets = () => invoke.mock.calls.filter(([command]) => command === "reset_onboarding");
+  expect(resets()).toHaveLength(1);
+  // The in-page control was disabled while pending. The menu item cannot grey
+  // itself out, so a second click must not start a second reset.
+  await clickMenuItem(listen, "run-setup");
+  expect(resets()).toHaveLength(1);
+
+  await act(async () => finishReset());
+  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+});
+
+it("keeps a failed menu reset on the main screen instead of losing it with the menu", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "reset_onboarding") throw new Error("Setup reset refused");
+    return original(command, args);
+  });
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+
+  await clickMenuItem(listen, "run-setup");
+
+  // A failure stays a persistent error on the main screen; the menu it was
+  // started from is already closed and can hold nothing.
+  expect(await screen.findByText("Setup reset refused")).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "GMM — first-run setup" })).not.toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toBeVisible();
+  // Still retryable: the failure is a notice, not a dead end.
+  await clickMenuItem(listen, "run-setup");
+  expect(invoke.mock.calls.filter(([command]) => command === "reset_onboarding")).toHaveLength(2);
+});
+
+it("falls back to Add game when a menu-opened visit returns with no Game tab", async () => {
+  paths = {};
+  renderApp();
+  await screen.findByRole("button", { name: "Add game" });
+
+  await clickMenuItem(listen, "settings");
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+
+  // No Game is installed, so there is no selected tab either. Focus must not
+  // be left on <body>: the next Tab press would restart from the top.
+  expect(screen.getByRole("button", { name: "Add game" })).toHaveFocus();
+});
+
+it("falls back to the main region when a menu-opened visit returns before any control exists", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "get_game_install_path"
+    ? new Promise(() => {})
+    : original(command, args));
+  renderApp();
+  // Install paths never resolve, so the tab strip shows neither a tab nor
+  // Add game — the menu is reachable before either exists.
+  expect(await screen.findByText("Checking game install paths…")).toBeVisible();
+
+  await clickMenuItem(listen, "settings");
+  expect(screen.getByRole("heading", { name: "Settings", level: 1 })).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Back to Mods" }));
+
+  expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Add game" })).not.toBeInTheDocument();
+  const main = document.querySelector("main[data-main-screen]");
+  expect(main).not.toBeNull();
+  expect(main).toHaveFocus();
+  expect(document.body).not.toHaveFocus();
 });

@@ -711,6 +711,20 @@ export async function launchGame(game: GameCode): Promise<SessionInfo> {
 export const SESSION_STARTED_EVENT = "session-started";
 export const SESSION_ENDED_EVENT = "session-ended";
 
+// ---- #351 — native File/Help menu ----
+
+/**
+ * Channel the native menu forwards a clicked item on. The payload is the
+ * item's id. Declared in `src-tauri/src/menu.rs`; `tests/menu.rs` fails if
+ * the two sides drift, because a renamed id clicks into nowhere.
+ */
+export const MENU_ACTION_EVENT = "menu://action";
+
+/** Every menu item that reaches React. Exit and About are handled by the OS. */
+export const MENU_ACTIONS = ["settings", "check-updates", "run-setup", "diagnostics"] as const;
+
+export type MenuAction = (typeof MENU_ACTIONS)[number];
+
 // ---- slice 16-b (#24) — onboarding wizard ----
 
 /**

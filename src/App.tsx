@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { WindowBar } from "./WindowBar";
 import { GameHeader } from "./GameHeader";
 import { GlobalHeaderLine } from "./GlobalHeaderLine";
 import { ModList } from "./ModList";
@@ -34,9 +33,11 @@ import {
   getStartupReconcileStatus,
   listMods,
   listModUpdates,
+  MENU_ACTION_EVENT,
   modUpdatesGloballyEnabled,
   setModUpdatesGloballyEnabled,
   type GameCode as ApiGameCode,
+  type MenuAction,
 } from "./api";
 import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarning";
 import { OnboardingWizard } from "./OnboardingWizard";
@@ -185,8 +186,16 @@ function MainApp({
         ? window.scrollY + anchor.getBoundingClientRect().top - returnAnchor.current.top
         : returnPosition.current;
       window.scrollTo(0, top);
+      // The menu's Settings item is not a control in the page, so the
+      // `"global"` arrival has nothing of its own to return to and the chain
+      // below has to end somewhere real: the selected Game tab, else Add game
+      // when no Game is installed yet, else the main region itself. Falling
+      // through to `<body>` would drop the user out of the tab order after
+      // every visit opened from the menu.
       const control = document.querySelector<HTMLElement>(`[data-settings-arrival="${returnControl.current}"]`)
-        ?? document.querySelector<HTMLElement>('.game-tabs__tab[aria-selected="true"]');
+        ?? document.querySelector<HTMLElement>('.game-tabs__tab[aria-selected="true"]')
+        ?? document.querySelector<HTMLElement>('[data-settings-arrival="add"]')
+        ?? document.querySelector<HTMLElement>("main[data-main-screen]");
       control?.focus({ preventScroll: true });
     } else window.scrollTo(0, 0);
   }, [settingsPage]);
@@ -198,6 +207,37 @@ function MainApp({
     onSettled: () => qc.invalidateQueries({ queryKey: ["onboarding", "status"] }),
   });
 
+  // The File/Help menu is built in Rust (`src-tauri/src/menu.rs`), so a click
+  // arrives here as an event. Every item routes to the handler its in-page
+  // control used; the menu reimplements nothing. Held in a ref so the
+  // subscription outlives the re-render each handler closes over.
+  const onMenuAction = useRef<(action: MenuAction) => void>(() => {});
+  useLayoutEffect(() => {
+    onMenuAction.current = (action) => {
+      switch (action) {
+        // Check for updates and Diagnostics are routes to the panels that
+        // already live on the Settings GMM page, not second copies of them.
+        case "settings":
+        case "check-updates":
+        case "diagnostics":
+          openSettings("gmm", "global");
+          return;
+        case "run-setup":
+          // Unavailable while a reset is pending, as the in-page control was.
+          // The menu item cannot grey itself out from here: its enabled state
+          // lives in the OS, not in a React render.
+          if (!reopenSetup.isPending) reopenSetup.mutate();
+          return;
+      }
+    };
+  });
+  useEffect(() => {
+    const unlisten = listen<MenuAction>(MENU_ACTION_EVENT, (event) => onMenuAction.current(event.payload));
+    return () => {
+      unlisten.then((stop) => stop()).catch(() => {});
+    };
+  }, []);
+
   return (
     <>
       <SettingsDestination
@@ -208,12 +248,7 @@ function MainApp({
         onBack={() => setSettingsPage(null)}
       />
       {settingsPage === null ? (
-        <main className="app">
-          <WindowBar
-            onSettings={() => openSettings("gmm", "global")}
-            onSetup={() => reopenSetup.mutate()}
-            setupPending={reopenSetup.isPending}
-          />
+        <main className="app" data-main-screen tabIndex={-1}>
           {hasActiveGame ? <GameHeader displayName={active.displayName} action={launchSurface.action} /> : null}
           <GlobalHeaderLine>
             <AttentionView />

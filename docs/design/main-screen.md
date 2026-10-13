@@ -93,8 +93,33 @@ the application's name, so showing it twice adds nothing (#326). With the
 wordmark and both global actions gone, the window bar has no content left and
 is not part of the main-screen hierarchy below.
 
-Which menus exist, their names and order, and whether any other item appears
-in them is not yet decided. See [Open shell decisions](#open-shell-decisions).
+The maintainer decided the layout (#351):
+
+| Menu | Items, in order |
+| --- | --- |
+| **&File** | Settings…, separator, Exit |
+| **&Help** | Check for updates…, Run setup again, Diagnostics…, separator, About GMM |
+
+**Check for updates…** and **Diagnostics…** are routes to the panels that
+already live on the Settings GMM page, not second implementations of them
+(#351). **Exit** and **About GMM** are Tauri's predefined items, so the OS
+performs both; About reports the running build's version from the binary's
+compiled package metadata, the same single source `get_app_version` reads
+(#339, #350). No literal version may be introduced for it.
+
+Only the four GMM items reach the application. Each is forwarded from the Rust
+menu handler to the frontend as an event carrying the item's id, and the
+existing frontend handler for that action runs. Nothing about opening Settings
+or resetting setup is reimplemented in Rust (#351).
+
+**Run setup again** cannot grey itself out from the frontend: the item's
+enabled state lives in the OS, not in a React render. The pending gate is
+therefore applied where the action arrives — a click while a reset is already
+running starts no second reset (#351).
+
+The top-level labels carry `&` mnemonics so Windows underlines a letter, and
+no accelerator is declared. Neither is reliable on Windows; see the limitation
+row in [Open shell decisions](#open-shell-decisions).
 
 ### Settings as a modal dialog
 
@@ -157,10 +182,12 @@ decision. Resolved items are retained here as **DECIDED**.
 
 | Item | What is known | Source |
 | --- | --- | --- |
-| Window default size, minimum size, and remembered size and position | The window is configured at 800x600, with no minimum and no remembered size or position. | #326 |
-| Keyboard access and accelerators | Menu accelerators, standard Windows shortcuts, and keyboard-only paths to each surface. The existing Escape return from Settings is preserved (arrival contract below); nothing else is decided. | #326 |
+| Window default and minimum size — **DECIDED** | The window opens at 1100x760 and refuses to shrink below 900x600. The default has to fit the Settings dialog with the main screen still visible behind it; at the former 800x600 the dialog filled the window and stopped reading as a dialog. | #351 |
+| Remembered window size and position | Still not decided. The window does not remember either. | #326 |
+| Keyboard access and accelerators | Standard Windows shortcuts and keyboard-only paths to each surface. The existing Escape return from Settings is preserved (arrival contract below); nothing else is decided. Menu accelerators are blocked by the limitation row below, not open for decision. | #326 |
 | Per-flow evidence from the Windows playbook | #326 carries a read-only evidence playbook for a Windows session. Its results inform the two items above. | #326 |
-| Menu structure | Which menus exist, their names and order, and whether **Check for updates**, Diagnostics, or Quit appear as menu items in addition to their current homes. Only the move of Settings and **Run setup again** is decided. | Raised in #326, not settled |
+| Menu structure — **DECIDED** | **&File** { Settings…, separator, Exit } and **&Help** { Check for updates…, Run setup again, Diagnostics…, separator, About GMM }. **Check for updates** and Diagnostics are menu routes to their existing homes on the Settings GMM page, not new surfaces; Exit and About GMM are predefined items. See [Native menu and window identity](#native-menu-and-window-identity). | #351 |
+| Menu keyboard accelerators and Alt mnemonics on Windows — **KNOWN LIMITATION, not an oversight** | Neither works reliably: WebView2 receives the key press before the host window does, so the menu never sees it ([tauri-apps/wry#451](https://github.com/tauri-apps/wry/issues/451), open; [tauri-apps/tauri#4085](https://github.com/tauri-apps/tauri/issues/4085)). Clicking works. The labels keep `&` mnemonics so Windows underlines a letter if a future runtime delivers the key, no accelerator is declared, and no JavaScript keyboard workaround exists — a declared shortcut would label behaviour that does not happen. Do not reopen this as a bug against the menu; it is upstream. | #351 |
 | Dialog size and behavior in a small window | Whether the dialog is resizable, how large it is relative to the window, and how it fits at the minimum window size. Depends on window sizing. | *needed for coherence* |
 | Status bar presentation of long content — **DECIDED** | For missing required Game entries, the bar shows a warning sign and **Missing Game entries**, without the missing paths. The requirement to carry the list in the bar is withdrawn. No fact disappears without a route to it: the bar's Settings link opens that Game's page, where the missing paths remain visible. | #348 |
 | Mod inspector and the main-screen no-sidebar rule | #327 adds a docked panel beside the Mod list. This document says the main screen has no sidebar or dock (#282, #283). #327 must reconcile the two when it is specified. | #327, *needed for coherence* |
@@ -177,8 +204,9 @@ setup disclosure (#282, #283).
 
 Use this hierarchy from candidate A (#283), as revised by #326:
 
-1. Native menu, above the page content: the global Settings item and **Run
-   setup again** (#326).
+1. Native menu, above the page content and outside the document: File and
+   Help, carrying the global Settings item, **Run setup again**, **Check for
+   updates**, Diagnostics, Exit and About GMM (#326, #351).
 2. Game header: the selected Game name and a prominent primary
    `Launch <Game name>` action.
 3. Global header line: the compact expandable all-Games attention indicator
@@ -268,7 +296,7 @@ treats the current wording as proof of a distinction the data does not make.
 | All-Games importer-recommendations switch | GMM page, with a named link from each Game's Importer Origin group. | #284 candidate B, ADR 0005 |
 | `NetworkPanel`, `UpdatesPanel`, `Diagnostics` | GMM page. | #282, #284 |
 | `LibraryAuditWarning` | Conditional recovery surface on its Game; retain its existing attachment to the Game install-path group when that group moves to Settings. | #282 recovery preservation, #284 |
-| `WindowBar` (Settings control, **Run setup again**, `GMM` wordmark) | Removed from the page. Settings and **Run setup again** become native menu items; the wordmark is dropped. | #326 |
+| `WindowBar` (Settings control, **Run setup again**, `GMM` wordmark) | Removed from the page. Settings and **Run setup again** are native menu items; the wordmark is dropped. Done in #351. | #326, #351 |
 | `GameStatusStrip` | Status bar at the bottom of the window, selected Game; payload and wording unchanged. | #283, #285, #324, #326 |
 | `SettingsDestination` | Modal Settings dialog over the main screen, dismissed with Close only. | #284 round 2, #326 |
 
@@ -317,10 +345,17 @@ inside Settings only. It is not shared permanent chrome (#282, #284).
 | --- | --- | --- |
 | Status-bar Settings link for Game X | Settings dialog, Game X page. | None. |
 | Menu Settings item | Settings dialog, GMM page. | None; global arrival implies no selected Game page. |
+| Menu **Check for updates…** or Diagnostics… item | Settings dialog, GMM page, where both panels already live. | None; same global arrival as the Settings item. |
 | Add game, then choose Game X | Settings dialog, Game X page, with its install-path editor reachable. | None; do not create a main-screen tab by selecting it. |
 | Select a Game row in Settings | That Game's Settings page. | None, for either arrival route. |
 | Select GMM settings or a named scope link | The named Settings page. | None. |
 | Close, or the existing Escape return | Dialog closes; main shows the Game left on entry. | Restore that selection and the user's place in its Mod list. |
+
+Return also restores keyboard focus to the control the visit was opened from.
+A menu-opened visit has no such control in the page, so the global arrival
+falls back, in order, to the selected Game tab, then Add game when no Game is
+installed yet, then the main region itself. Focus may not be left on `<body>`:
+the next Tab press would restart from the top of the window (#351).
 
 The first two routes are binding (#284 round 2). #326 moves the global entry
 point from the window bar to the menu and keeps its GMM-page arrival. Add game
