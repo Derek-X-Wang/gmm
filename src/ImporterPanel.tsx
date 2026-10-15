@@ -13,7 +13,7 @@ function importerPathLine(value: GamePathStatus): string {
   switch (value.gamePath.status) {
     case "noSavedPath": return "Set a readable Game install path before installing a Model Importer.";
     case "savedPathNotFound": return "Saved Game installation cannot be found · Model Importer unverified";
-    case "requiredEntriesNotFound": return `Required Game files or directories not found: ${value.gamePath.paths.join(", ")} · Model Importer unverified`;
+    case "requiredEntriesNotFound": return `Required Game files or directories not found · Missing Game entries: ${value.gamePath.paths.join(", ")} · Model Importer unverified`;
     case "unreadable":
     case "invalid": return "Cannot tell · Model Importer filesystem unverified";
     case "readable":

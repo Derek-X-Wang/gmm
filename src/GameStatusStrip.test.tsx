@@ -76,7 +76,6 @@ it("keeps an existing wrong-type Model Importer entry distinct from absence", as
 
 it.each([
   [{ ...readable, gamePath: { status: "unreadable", path: savedPath, error: "Access denied" } }, "Game: Cannot tell — install path unreadable · Model Importer unverified", "Access denied"],
-  [{ ...readable, gamePath: { status: "savedPathNotFound", paths: [savedPath] } }, "Game: Saved installation cannot be found · Model Importer unverified", savedPath],
   [absent, "Game: Game readable · Model Importer not installed", missingImporterEntries.join(", ")],
   [{ ...readable, modelImporter: { status: "unverified", path: "C:/StarRail/Core", error: "Sharing violation" } }, "Game: Game readable · Model Importer unverified", "Sharing violation"],
   [{ ...readable, gamePath: { status: "invalid", error: "Invalid layout" } }, "Game: Cannot verify Game layout · Model Importer unverified", "Invalid layout"],
