@@ -8,13 +8,27 @@
 //!
 //! The reachability rule under test is **at least 120 x 20 logical
 //! pixels of the window's title-bar strip — its top 32 logical pixels —
-//! must overlap some connected display**. Whether Windows actually
-//! enumerates the displays GMM asks it for, and what it reports across a
-//! scaling change, is Windows-only evidence; #326 collects it.
+//! must overlap some connected display**, measured in physical pixels
+//! against that display's own scale factor.
+//!
+//! The rule is only worth as much as the rectangle it is applied to, so
+//! several tests below assert `is_reachable` about the `RestorePlan` that
+//! comes back rather than about the row that went in. A check that
+//! judges one rectangle while the window gets another is not a check;
+//! that was the first version of this feature, and
+//! [`the_plan_is_reachable_after_the_scale_factor_changes`] is the case
+//! that exposed it.
+//!
+//! Whether Windows enumerates the displays GMM asks it for, and what it
+//! reports across a scaling change, is Windows-only evidence; #326
+//! collects it.
+
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use gmm_lib::core::window_state::{
-    self, DisplayRect, PendingWindowState, SavedWindowState, DEFAULT_HEIGHT, DEFAULT_WIDTH,
-    MIN_HEIGHT, MIN_WIDTH,
+    self, DisplayRect, PendingWindowState, Quiet, RestorePlan, SavedWindowState, DEFAULT_HEIGHT,
+    DEFAULT_WIDTH, MIN_HEIGHT, MIN_WIDTH,
 };
 use gmm_lib::core::Core;
 use tempfile::TempDir;
@@ -29,12 +43,17 @@ async fn fresh_core(tmp: &TempDir) -> Core {
 /// arrangement every one of these tests restores against unless it says
 /// otherwise.
 fn one_display() -> Vec<DisplayRect> {
-    vec![DisplayRect {
-        x: 0,
-        y: 0,
-        width: 1920,
-        height: 1080,
-    }]
+    vec![display(0, 0, 1920, 1080, 1.0)]
+}
+
+fn display(x: i32, y: i32, width: u32, height: u32, scale: f64) -> DisplayRect {
+    DisplayRect {
+        x,
+        y,
+        width,
+        height,
+        scale,
+    }
 }
 
 /// A window the user left at 1400x900, 200 pixels in from the corner of
@@ -48,6 +67,16 @@ fn settled_window() -> SavedWindowState {
         scale: 1.0,
         maximized: false,
     }
+}
+
+/// The property that matters: the rectangle GMM is about to apply is
+/// reachable on the displays it was judged against.
+fn assert_plan_reachable(plan: RestorePlan, displays: &[DisplayRect], context: &str) {
+    assert!(
+        window_state::is_reachable(plan.x, plan.y, plan.width, plan.height, displays),
+        "{context}: the rect GMM applies must be the rect it checked, but \
+         {plan:?} is not reachable on {displays:?}",
+    );
 }
 
 // ---- the round trip ----
@@ -84,18 +113,8 @@ async fn size_position_and_maximised_state_survive_a_close_and_reopen() {
     );
 
     let displays = vec![
-        DisplayRect {
-            x: -1920,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        },
-        DisplayRect {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        },
+        display(-1920, 0, 1920, 1080, 1.0),
+        display(0, 0, 1920, 1080, 1.0),
     ];
     let plan = window_state::plan_restore(Some(&raw), &displays).expect("restored");
     assert_eq!(
@@ -103,6 +122,7 @@ async fn size_position_and_maximised_state_survive_a_close_and_reopen() {
         (-1920, 0, true),
         "a window closed maximised on the left display reopens maximised on the left display",
     );
+    assert_plan_reachable(plan, &displays, "maximised on the left display");
 }
 
 #[tokio::test]
@@ -116,8 +136,14 @@ async fn a_remembered_size_and_position_come_back_as_a_plan_to_apply() {
 
     let plan = window_state::plan_restore(raw.as_deref(), &one_display()).expect("restored");
     assert_eq!(
-        (plan.width, plan.height, plan.x, plan.y, plan.maximized),
-        (1400.0, 900.0, 200, 200, false),
+        plan,
+        RestorePlan {
+            width: 1400,
+            height: 900,
+            x: 200,
+            y: 200,
+            maximized: false,
+        },
         "the window reopens at the size and position it was left at",
     );
 }
@@ -143,27 +169,89 @@ async fn remembering_twice_keeps_the_newer_geometry() {
     assert_eq!((plan.x, plan.y), (40, 60));
 }
 
+// ---- one rectangle, one coordinate space ----
+
 #[test]
-fn a_maximised_window_restores_down_to_the_default_not_to_its_maximised_rect() {
-    // The pre-maximise size is deliberately not remembered (#369).
-    // Applying the maximised rect as the restore-down size would make
-    // Restore Down a no-op: the window would un-maximise onto the same
-    // pixels it already covers.
-    let maximised = SavedWindowState {
-        x: 0,
-        y: 0,
-        width: 1920,
-        height: 1080,
-        scale: 1.0,
-        maximized: true,
+fn the_plan_is_reachable_after_the_scale_factor_changes() {
+    // The case that exposed a checked rectangle and an applied rectangle
+    // coming apart. The user had GMM at 1100x750 logical on a 200%
+    // display to the left of the primary — 2200x1500 physical. Then they
+    // undocked, leaving one 1920x1080 display at 100%.
+    //
+    // About 300 physical pixels of that remembered rect reach the
+    // remaining display, so the geometry is restorable. What must not
+    // happen is GMM checking the 2200-pixel-wide rect and then applying
+    // a 1100-pixel-wide one: its right edge would land near -800 and the
+    // whole window would be off-screen, unreachable, with no way back —
+    // the exact failure this feature exists to prevent.
+    let undocked = vec![display(0, 0, 1920, 1080, 1.0)];
+    let saved_at_200 = SavedWindowState {
+        x: -1900,
+        y: 100,
+        width: 2200,
+        height: 1500,
+        scale: 2.0,
+        maximized: false,
     };
-    let raw = window_state::serialize(&maximised).expect("serialise");
-    let plan = window_state::plan_restore(Some(&raw), &one_display()).expect("restored");
+    let raw = window_state::serialize(&saved_at_200).expect("serialise");
+    let plan = window_state::plan_restore(Some(&raw), &undocked).expect("restored");
+
+    assert_plan_reachable(plan, &undocked, "the saved scale no longer applies");
     assert_eq!(
-        (plan.width, plan.height, plan.maximized),
-        (DEFAULT_WIDTH, DEFAULT_HEIGHT, true),
-        "maximise onto the remembered display, but restore down to the default size",
+        (plan.width, plan.height, plan.x, plan.y),
+        (2200, 1500, -1900, 100),
+        "the plan is physical pixels — the same numbers the check judged, \
+         not a logical size something downstream will reinterpret",
     );
+    assert!(
+        plan.x + plan.width as i32 > 0,
+        "the restored window must still reach the remaining display",
+    );
+}
+
+#[test]
+fn every_restored_plan_is_reachable_across_a_spread_of_arrangements() {
+    // The property, swept rather than sampled: whatever `plan_restore`
+    // returns is reachable on the displays it was given. A clamp, a
+    // maximised containment or a scale change that produced an
+    // unreachable plan would be caught here even without its own named
+    // test above.
+    let arrangements: [Vec<DisplayRect>; 4] = [
+        one_display(),
+        vec![display(0, 0, 3840, 2160, 2.0)],
+        vec![
+            display(-1920, 0, 1920, 1080, 1.0),
+            display(0, 0, 2560, 1440, 1.25),
+        ],
+        vec![
+            display(0, 0, 1280, 720, 1.0),
+            display(1280, 0, 3840, 2160, 2.0),
+        ],
+    ];
+
+    for displays in &arrangements {
+        for x in [-2200, -1900, -100, 0, 300, 1800, 1870, 2400, 3690] {
+            for y in [-40, -12, 0, 100, 1000] {
+                for (width, height, scale) in [(200, 150, 1.0), (1400, 900, 1.0), (2200, 1500, 2.0)]
+                {
+                    for maximized in [false, true] {
+                        let saved = SavedWindowState {
+                            x,
+                            y,
+                            width,
+                            height,
+                            scale,
+                            maximized,
+                        };
+                        let raw = window_state::serialize(&saved).expect("serialise");
+                        if let Some(plan) = window_state::plan_restore(Some(&raw), displays) {
+                            assert_plan_reachable(plan, displays, "swept arrangement");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---- the clamp ----
@@ -186,7 +274,7 @@ fn a_restored_size_is_clamped_up_to_the_minimum() {
     let plan = window_state::plan_restore(Some(&raw), &one_display()).expect("restored");
     assert_eq!(
         (plan.width, plan.height),
-        (MIN_WIDTH, MIN_HEIGHT),
+        (MIN_WIDTH as u32, MIN_HEIGHT as u32),
         "a remembered size below the minimum is clamped up to it, never applied",
     );
     assert_eq!(
@@ -199,9 +287,11 @@ fn a_restored_size_is_clamped_up_to_the_minimum() {
 #[test]
 fn the_clamp_is_in_logical_pixels_so_high_dpi_is_not_clamped_away() {
     // 1600x1100 physical at 200% is 800x550 logical: genuinely under the
-    // minimum, and must be clamped. The same physical numbers at 100%
-    // are comfortably over it and must be left alone. Comparing physical
-    // pixels against a logical minimum would get one of these wrong.
+    // minimum, and must be clamped — to 1800x1200 physical, because the
+    // minimum is logical and the window was saved at 200%. The same
+    // physical numbers at 100% are comfortably over the minimum and must
+    // be left alone. Comparing physical pixels against a logical minimum
+    // would get one of these wrong.
     let at_200 = SavedWindowState {
         x: 0,
         y: 0,
@@ -211,17 +301,13 @@ fn the_clamp_is_in_logical_pixels_so_high_dpi_is_not_clamped_away() {
         maximized: false,
     };
     let raw = window_state::serialize(&at_200).expect("serialise");
-    let plan = window_state::plan_restore(
-        Some(&raw),
-        &[DisplayRect {
-            x: 0,
-            y: 0,
-            width: 3840,
-            height: 2160,
-        }],
-    )
-    .expect("restored");
-    assert_eq!((plan.width, plan.height), (MIN_WIDTH, MIN_HEIGHT));
+    let plan = window_state::plan_restore(Some(&raw), &[display(0, 0, 3840, 2160, 2.0)])
+        .expect("restored");
+    assert_eq!(
+        (plan.width, plan.height),
+        ((MIN_WIDTH * 2.0) as u32, (MIN_HEIGHT * 2.0) as u32),
+        "the clamp is logical, so at 200% it lands at 1800x1200 physical",
+    );
 
     let at_100 = SavedWindowState {
         scale: 1.0,
@@ -229,7 +315,52 @@ fn the_clamp_is_in_logical_pixels_so_high_dpi_is_not_clamped_away() {
     };
     let raw = window_state::serialize(&at_100).expect("serialise");
     let plan = window_state::plan_restore(Some(&raw), &one_display()).expect("restored");
-    assert_eq!((plan.width, plan.height), (1600.0, 1100.0));
+    assert_eq!((plan.width, plan.height), (1600, 1100));
+}
+
+#[test]
+fn an_unclamped_size_round_trips_byte_for_byte() {
+    // A fractional scale factor is the common Windows case (125%, 150%).
+    // Dividing to logical and multiplying back would drift the remembered
+    // size by a pixel a session, so the ordinary path must not convert at
+    // all.
+    let at_125 = SavedWindowState {
+        x: 10,
+        y: 10,
+        width: 1375,
+        height: 950,
+        scale: 1.25,
+        maximized: false,
+    };
+    let raw = window_state::serialize(&at_125).expect("serialise");
+    let plan = window_state::plan_restore(Some(&raw), &[display(0, 0, 2560, 1440, 1.25)])
+        .expect("restored");
+    assert_eq!((plan.width, plan.height), (1375, 950));
+}
+
+#[test]
+fn the_clamp_runs_before_the_reachability_check() {
+    // The check has to judge the rect that will actually exist, not the
+    // one that was stored. This 200-pixel-wide remembered window hangs
+    // off the left edge with only 100 pixels on screen — not a grab area
+    // as stored, but the clamp grows it to 900x600 and 800 pixels of its
+    // title bar land on the display. Checking the stored rect first
+    // would throw away a window that reopens perfectly reachable.
+    let tiny_off_the_left_edge = SavedWindowState {
+        x: -100,
+        y: 0,
+        width: 200,
+        height: 150,
+        scale: 1.0,
+        maximized: false,
+    };
+    let raw = window_state::serialize(&tiny_off_the_left_edge).expect("serialise");
+    let plan = window_state::plan_restore(Some(&raw), &one_display()).expect("restored");
+    assert_eq!(
+        (plan.width, plan.height, plan.x),
+        (MIN_WIDTH as u32, MIN_HEIGHT as u32, -100),
+        "the clamped window is reachable, so it is restored",
+    );
 }
 
 // ---- the refusal ----
@@ -256,18 +387,8 @@ fn geometry_on_a_display_that_is_no_longer_connected_is_rejected() {
 
     // Plug the display back in and the very same row is usable again.
     let docked = vec![
-        DisplayRect {
-            x: 0,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        },
-        DisplayRect {
-            x: 1920,
-            y: 0,
-            width: 1920,
-            height: 1080,
-        },
+        display(0, 0, 1920, 1080, 1.0),
+        display(1920, 0, 1920, 1080, 1.0),
     ];
     assert!(
         window_state::plan_restore(Some(&raw), &docked).is_some(),
@@ -336,65 +457,29 @@ fn a_sliver_of_the_title_bar_at_a_screen_edge_is_not_enough_to_grab() {
 }
 
 #[test]
-fn the_reachability_rule_means_the_same_thing_at_200_percent_scaling() {
-    // The rule is in logical pixels, so the threshold has to move with
-    // the scale factor. At 200% the same 120-logical-pixel grab area is
-    // 240 physical pixels, so a 150-physical-pixel overhang that passes
-    // at 100% must fail at 200%.
-    let display_4k = vec![DisplayRect {
-        x: 0,
-        y: 0,
-        width: 3840,
-        height: 2160,
-    }];
+fn the_grab_area_is_measured_against_the_scaling_of_the_display_it_lands_on() {
+    // The rule is in logical pixels, so the physical threshold belongs to
+    // the display being tested, not to the saved row: a title bar on a
+    // 200% display is physically twice as large, and so is the grab area
+    // the user needs. The same 150-physical-pixel overhang is a grab area
+    // on a 100% display and is not one on a 200% display.
     let overhang = SavedWindowState {
         x: 3690,
         y: 100,
         width: 2400,
         height: 1600,
-        scale: 2.0,
+        scale: 1.0,
         maximized: false,
     };
     let raw = window_state::serialize(&overhang).expect("serialise");
     assert_eq!(
-        window_state::plan_restore(Some(&raw), &display_4k),
+        window_state::plan_restore(Some(&raw), &[display(0, 0, 3840, 2160, 2.0)]),
         None,
-        "150 physical pixels is only 75 logical pixels at 200%: not a grab area",
+        "150 physical pixels is only 75 logical pixels on a 200% display",
     );
-
-    let at_100 = SavedWindowState {
-        scale: 1.0,
-        ..overhang
-    };
-    let raw = window_state::serialize(&at_100).expect("serialise");
     assert!(
-        window_state::plan_restore(Some(&raw), &display_4k).is_some(),
-        "the same 150 physical pixels at 100% is a grab area",
-    );
-}
-
-#[test]
-fn the_clamp_runs_before_the_reachability_check() {
-    // The check has to judge the rect that will actually exist, not the
-    // one that was stored. This 200-pixel-wide remembered window hangs
-    // off the left edge with only 100 pixels on screen — not a grab area
-    // as stored, but the clamp grows it to 900x600 and 800 pixels of its
-    // title bar land on the display. Checking the stored rect first
-    // would throw away a window that reopens perfectly reachable.
-    let tiny_off_the_left_edge = SavedWindowState {
-        x: -100,
-        y: 0,
-        width: 200,
-        height: 150,
-        scale: 1.0,
-        maximized: false,
-    };
-    let raw = window_state::serialize(&tiny_off_the_left_edge).expect("serialise");
-    let plan = window_state::plan_restore(Some(&raw), &one_display()).expect("restored");
-    assert_eq!(
-        (plan.width, plan.height, plan.x),
-        (MIN_WIDTH, MIN_HEIGHT, -100),
-        "the clamped window is reachable, so it is restored",
+        window_state::plan_restore(Some(&raw), &[display(0, 0, 3840, 2160, 1.0)]).is_some(),
+        "the same 150 physical pixels on a 100% display is a grab area",
     );
 }
 
@@ -404,6 +489,127 @@ fn geometry_judged_against_no_displays_at_all_is_rejected() {
     // not that the window is vacuously reachable on all of them.
     let raw = window_state::serialize(&settled_window()).expect("serialise");
     assert_eq!(window_state::plan_restore(Some(&raw), &[]), None);
+}
+
+// ---- maximising onto the right display ----
+
+#[test]
+fn a_maximised_window_restores_down_to_the_default_not_to_its_maximised_rect() {
+    // The pre-maximise size is deliberately not remembered (#369).
+    // Applying the maximised rect as the restore-down size would make
+    // Restore Down a no-op: the window would un-maximise onto the same
+    // pixels it already covers.
+    let maximised = SavedWindowState {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        scale: 1.0,
+        maximized: true,
+    };
+    let raw = window_state::serialize(&maximised).expect("serialise");
+    let plan = window_state::plan_restore(Some(&raw), &one_display()).expect("restored");
+    assert_eq!(
+        plan,
+        RestorePlan {
+            width: DEFAULT_WIDTH as u32,
+            height: DEFAULT_HEIGHT as u32,
+            x: 0,
+            y: 0,
+            maximized: true,
+        },
+        "maximise onto the remembered display, but restore down to the default size",
+    );
+}
+
+#[test]
+fn the_pre_maximise_rect_is_placed_wholly_inside_the_remembered_display() {
+    // Windows maximises onto the display holding the largest part of the
+    // window. A default-sized rect left hanging over a neighbour could
+    // therefore be handed to the wrong screen, so it is contained first.
+    //
+    // Here the remembered display is smaller than the default rect in
+    // both directions and sits beside a much larger one, which is the
+    // arrangement where a hanging rect would overlap the neighbour most.
+    let small = display(0, 0, 1024, 720, 1.0);
+    let large = display(1024, 0, 3840, 2160, 2.0);
+    let maximised_on_the_small_one = SavedWindowState {
+        x: 0,
+        y: 0,
+        width: 1024,
+        height: 720,
+        scale: 1.0,
+        maximized: true,
+    };
+    let raw = window_state::serialize(&maximised_on_the_small_one).expect("serialise");
+    let plan = window_state::plan_restore(Some(&raw), &[small, large]).expect("restored");
+
+    assert_eq!(
+        plan,
+        RestorePlan {
+            width: 1024,
+            height: 720,
+            x: 0,
+            y: 0,
+            maximized: true,
+        },
+        "the default rect is cut to the display rather than hung over its neighbour",
+    );
+    assert!(
+        plan.x >= small.x
+            && plan.y >= small.y
+            && plan.x + plan.width as i32 <= small.x + small.width as i32
+            && plan.y + plan.height as i32 <= small.y + small.height as i32,
+        "the pre-maximise rect must lie wholly inside the remembered display, \
+         or Windows may maximise onto the neighbour",
+    );
+}
+
+#[test]
+fn the_pre_maximise_rect_follows_the_remembered_displays_scaling() {
+    // Restore Down should give a default-sized window on the display it
+    // lands on, which means the default's logical size scaled by *that*
+    // display's scale factor.
+    let hidpi = display(0, 0, 3840, 2160, 2.0);
+    let maximised = SavedWindowState {
+        x: 0,
+        y: 0,
+        width: 3840,
+        height: 2160,
+        scale: 2.0,
+        maximized: true,
+    };
+    let raw = window_state::serialize(&maximised).expect("serialise");
+    let plan = window_state::plan_restore(Some(&raw), &[hidpi]).expect("restored");
+    assert_eq!(
+        (plan.width, plan.height),
+        ((DEFAULT_WIDTH * 2.0) as u32, (DEFAULT_HEIGHT * 2.0) as u32),
+    );
+}
+
+#[test]
+fn a_maximised_origin_outside_every_display_falls_back_to_the_most_overlapped_one() {
+    // The remembered origin can sit just off the top of its display —
+    // the reachability rule only needs 20 logical pixels of the strip —
+    // so the display containing it may not exist. The rect's own overlap
+    // then decides, and the result is still contained.
+    let only = display(0, 0, 1920, 1080, 1.0);
+    let maximised_slightly_high = SavedWindowState {
+        x: 300,
+        y: -12,
+        width: 1600,
+        height: 1000,
+        scale: 1.0,
+        maximized: true,
+    };
+    let raw = window_state::serialize(&maximised_slightly_high).expect("serialise");
+    let plan = window_state::plan_restore(Some(&raw), &[only]).expect("restored");
+    assert_eq!(
+        (plan.x, plan.y),
+        (300, 0),
+        "the rect is nudged back inside the display it overlaps",
+    );
+    assert_plan_reachable(plan, &[only], "maximised with an off-display origin");
 }
 
 // ---- absent and unreadable state ----
@@ -463,6 +669,21 @@ async fn corrupt_remembered_state_opens_at_the_default_and_does_not_fail() {
     pool.close().await;
 }
 
+#[test]
+fn a_display_reporting_a_nonsense_scale_factor_does_not_block_a_restore() {
+    // A platform that hands back a zero or NaN scale factor must not make
+    // GMM refuse to reopen where the user left it. The display is read at
+    // 100% instead.
+    let raw = window_state::serialize(&settled_window()).expect("serialise");
+    for nonsense in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            window_state::plan_restore(Some(&raw), &[display(0, 0, 1920, 1080, nonsense)])
+                .is_some(),
+            "a scale factor of {nonsense} must be read as 100%, not as a refusal",
+        );
+    }
+}
+
 #[tokio::test]
 async fn implausible_geometry_is_never_written_in_the_first_place() {
     let tmp = TempDir::new().expect("tmp");
@@ -489,41 +710,25 @@ async fn implausible_geometry_is_never_written_in_the_first_place() {
 // ---- the write trigger ----
 
 #[test]
-fn a_drag_across_a_desk_coalesces_into_one_write() {
-    // The write trigger is a debounce after the last move or resize, not
-    // a write per event. Nothing is written on close, which is how
-    // "writing never blocks window close" is structural rather than a
-    // promise about how fast a write is.
+fn only_the_newest_geometry_is_kept_to_write() {
     let pending = PendingWindowState::default();
-
-    assert!(
-        pending.record(settled_window()),
-        "the first move must schedule a flush",
-    );
+    assert!(pending.record(settled_window()));
     for x in 201..400 {
-        assert!(
-            !pending.record(SavedWindowState {
-                x,
-                ..settled_window()
-            }),
-            "a move while a flush is pending must not schedule a second one",
-        );
+        assert!(pending.record(SavedWindowState {
+            x,
+            ..settled_window()
+        }));
     }
-
     assert_eq!(
         pending.take().map(|state| state.x),
         Some(399),
         "the one write carries where the drag ended, not where it started",
     );
     assert_eq!(pending.take(), None, "taking twice must not re-write");
-    assert!(
-        pending.record(settled_window()),
-        "a move after the flush schedules the next one",
-    );
 }
 
 #[test]
-fn a_minimised_windows_sentinel_is_dropped_without_scheduling_a_write() {
+fn a_minimised_windows_sentinel_is_dropped_and_does_not_wake_the_writer() {
     let pending = PendingWindowState::default();
     assert!(!pending.record(SavedWindowState {
         x: -32000,
@@ -531,6 +736,76 @@ fn a_minimised_windows_sentinel_is_dropped_without_scheduling_a_write() {
         ..settled_window()
     }));
     assert_eq!(pending.take(), None);
+}
+
+/// The write trigger is a **debounce**, not a throttle: every move resets
+/// the deadline, so a drag produces one write after it ends rather than
+/// one every window while it lasts. That was the stated reason for having
+/// a delay at all, so it is worth testing the timing rather than only the
+/// coalescing.
+#[test]
+fn each_move_resets_the_debounce_deadline() {
+    let quiet = Duration::from_millis(300);
+    let (tx, rx) = mpsc::channel::<()>();
+
+    // Four moves at a fifth of the quiet window apart, so the last lands
+    // at about one whole quiet window in. A throttle returns one quiet
+    // window after the *first* notification; a debounce waits a whole one
+    // out after the *last*, so it cannot return before 2x.
+    let notifier_tx = tx.clone();
+    let notifier = std::thread::spawn(move || {
+        for _ in 0..4 {
+            std::thread::sleep(quiet / 5);
+            if notifier_tx.send(()).is_err() {
+                return;
+            }
+        }
+    });
+
+    let started = Instant::now();
+    window_state::wait_until_quiet(&rx, quiet);
+    let waited = started.elapsed();
+    notifier.join().expect("notifier");
+    drop(tx);
+
+    assert!(
+        waited >= quiet + quiet / 2,
+        "a throttle would have returned after about one quiet window ({quiet:?}); \
+         a debounce must wait out the last move, and this returned after {waited:?}",
+    );
+}
+
+#[test]
+fn a_still_window_settles_after_one_quiet_window() {
+    let quiet = Duration::from_millis(80);
+    let (tx, rx) = mpsc::channel::<()>();
+    tx.send(()).expect("one move");
+    // Drain the move the writer thread's outer `recv` would have taken.
+    rx.recv().expect("the move");
+
+    let started = Instant::now();
+    assert_eq!(window_state::wait_until_quiet(&rx, quiet), Quiet::Settled);
+    assert!(
+        started.elapsed() >= quiet,
+        "the write must not land before the window has been still",
+    );
+    drop(tx);
+}
+
+#[test]
+fn a_closed_window_stops_the_wait_instead_of_holding_the_writer() {
+    // Every notifier dropped means the window is gone. The wait must end
+    // at once rather than sit out another quiet window: nothing is
+    // waiting on this thread, but a thread that lingers after shutdown is
+    // still a thread that could be mistaken for one that blocks close.
+    let (tx, rx) = mpsc::channel::<()>();
+    drop(tx);
+    let started = Instant::now();
+    assert_eq!(
+        window_state::wait_until_quiet(&rx, Duration::from_secs(30)),
+        Quiet::Disconnected,
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 // ---- the default the fallback returns to ----
@@ -584,10 +859,7 @@ fn the_declared_window_matches_the_constants_the_fallback_uses() {
 /// all, and every test above would still pass.
 #[test]
 fn the_restore_shows_the_window_on_every_path() {
-    let source = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/window.rs"),
-    )
-    .expect("read src/runtime/window.rs");
+    let source = runtime_window_source();
 
     let body = source
         .split_once("pub fn restore_and_track")
@@ -626,11 +898,7 @@ fn the_restore_shows_the_window_on_every_path() {
 /// GMM slowly losing its mind rather than as a bug.
 #[test]
 fn the_captured_size_pairs_with_the_setter_that_applies_it() {
-    let source = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/window.rs"),
-    )
-    .expect("read src/runtime/window.rs");
-
+    let source = runtime_window_source();
     assert!(
         source.contains("window.inner_size()") && !source.contains("window.outer_size()"),
         "the remembered size must be the inner size `set_size` applies",
@@ -639,4 +907,50 @@ fn the_captured_size_pairs_with_the_setter_that_applies_it() {
         source.contains("window.outer_position()") && !source.contains("window.inner_position()"),
         "the remembered position must be the outer position `set_position` applies",
     );
+}
+
+/// The plan is physical pixels and must be applied as physical pixels.
+///
+/// A `LogicalSize` here would be converted by the scale factor of
+/// whichever display the window is on at that instant — which is not
+/// necessarily the one the geometry was saved at, and not necessarily the
+/// one the check used. That mismatch is the P1 this feature shipped with
+/// in its first draft: a 2200-pixel-wide rect was checked and an
+/// 1100-pixel-wide one applied, putting the whole window off-screen. The
+/// pure core can hold the rule but not the conversion, so this guard
+/// does.
+#[test]
+fn the_plan_is_applied_in_the_coordinate_space_it_was_checked_in() {
+    let source = runtime_window_source();
+    assert!(
+        source.contains("PhysicalSize::new(plan.width, plan.height)")
+            && source.contains("PhysicalPosition::new(plan.x, plan.y)"),
+        "the plan must go out as physical pixels, unconverted",
+    );
+    assert!(
+        !source.contains("LogicalSize") && !source.contains("LogicalPosition"),
+        "a logical size or position would be reinterpreted by the current \
+         scale factor, so the window would not get the rect that was checked",
+    );
+}
+
+/// `src/runtime/window.rs` with its comments removed.
+///
+/// The guards above assert what the module *does*, and this module
+/// explains at length what it must not do — so a guard that searched the
+/// raw file would trip over the very prose warning against the mistake.
+/// No string literal in that file contains `//`, so dropping from the
+/// first `//` on each line is enough.
+fn runtime_window_source() -> String {
+    let raw = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/window.rs"),
+    )
+    .expect("read src/runtime/window.rs");
+    raw.lines()
+        .map(|line| match line.split_once("//") {
+            Some((code, _)) => code,
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

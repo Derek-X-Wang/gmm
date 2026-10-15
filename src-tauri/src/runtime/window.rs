@@ -6,7 +6,7 @@
 //! is the Tauri shell around it: read the row, ask the displays, apply
 //! the plan, show the window, and from then on remember where it goes.
 //!
-//! Two things in here are load-bearing and easy to break:
+//! Three things in here are load-bearing and easy to break:
 //!
 //! 1. **The window is declared `visible: false`** in `tauri.conf.json`,
 //!    so restoring cannot be seen as a jump from the default size to the
@@ -14,16 +14,22 @@
 //!    its `show()`, whatever else fails. Nothing in it returns early
 //!    after the window has been found, and nothing in it can panic on a
 //!    missing display, an unreadable row or a refused placement.
-//! 2. **Nothing is written on close.** Geometry is written a debounce
-//!    after the last move or resize, by a thread that close never waits
-//!    on. See [`PendingWindowState`].
+//! 2. **[`apply`] converts nothing.** The plan is physical pixels and it
+//!    goes out as `PhysicalSize` and `PhysicalPosition`, so the rectangle
+//!    the window gets is the rectangle `is_reachable` accepted. A
+//!    `LogicalSize` here would be converted by the scale factor of
+//!    whatever display the window is on at that instant, which is how a
+//!    checked rectangle and an applied rectangle come apart.
+//! 3. **Nothing is written on close.** Geometry is written once the
+//!    window has been still for [`WRITE_DEBOUNCE`], by a thread that
+//!    close never waits on.
 
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::{
-    AppHandle, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewWindow, WindowEvent,
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow, WindowEvent,
 };
 
 use crate::core::window_state::{
@@ -34,7 +40,7 @@ use crate::core::Core;
 /// The label of the window declared in `tauri.conf.json`.
 pub const MAIN_WINDOW_LABEL: &str = "main";
 
-/// How long after the last move or resize the geometry is written.
+/// How long the window must be still before its geometry is written.
 ///
 /// Long enough that a drag across two monitors is one write; short
 /// enough that the state is durable well before a user can finish
@@ -65,10 +71,18 @@ pub fn restore_and_track<R: Runtime>(app: &AppHandle<R>) {
         return;
     };
 
+    // The row is read first and the displays are enumerated after, so
+    // the arrangement the plan is judged against is as fresh as it can
+    // be. Enumerating first would leave the list stale by however long
+    // the database took — up to `READ_TIMEOUT` — and a display unplugged
+    // inside that window would be a display the check still trusted.
+    // The race cannot be closed (a monitor can go between the
+    // enumeration and the placement, microseconds later) but it is now
+    // as small as this layer can make it.
     let plan = app
         .try_state::<Core>()
-        .map(|core| read_plan(&core, &displays(&window)))
-        .unwrap_or(None);
+        .and_then(|core| read_saved(&core))
+        .and_then(|raw| window_state::plan_restore(Some(&raw), &displays(&window)));
 
     match plan {
         Some(plan) => apply(&window, plan),
@@ -80,6 +94,11 @@ pub fn restore_and_track<R: Runtime>(app: &AppHandle<R>) {
 
     // The window is declared `visible: false` so the restore above is
     // not visible as a jump. This must happen on every path.
+    //
+    // A failure here is only logged: there is no second way to show a
+    // window, so there is nothing to recover to. It would leave GMM
+    // running with nothing on screen, which is why `show()` being
+    // reachable is held by a test rather than by review.
     if let Err(e) = window.show() {
         tracing::error!(target: "gmm::window", error = %e, "could not show the main window");
     }
@@ -89,7 +108,8 @@ pub fn restore_and_track<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// The displays connected right now, as physical rectangles.
+/// The displays connected right now: physical rectangles and each one's
+/// own scale factor.
 ///
 /// An unavailable monitor list yields an empty slice, which
 /// [`window_state::plan_restore`] treats as unreachable — the safe
@@ -117,21 +137,22 @@ fn displays<R: Runtime>(window: &WebviewWindow<R>) -> Vec<DisplayRect> {
                 y: position.y,
                 width: size.width,
                 height: size.height,
+                scale: monitor.scale_factor(),
             }
         })
         .collect()
 }
 
-/// Read the remembered row and decide what to restore.
+/// Read the remembered row.
 ///
 /// Runs on its own short-lived runtime rather than Tauri's: the SQLite
 /// pool was built on the startup runtime, and a current-thread runtime
 /// per blocking read is the pattern the rest of GMM's startup already
 /// uses. Bounded by [`READ_TIMEOUT`] so a locked database delays the
 /// window instead of withholding it.
-fn read_plan(core: &Core, displays: &[DisplayRect]) -> Option<RestorePlan> {
+fn read_saved(core: &Core) -> Option<String> {
     let core = core.clone();
-    let raw = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -158,20 +179,31 @@ fn read_plan(core: &Core, displays: &[DisplayRect]) -> Option<RestorePlan> {
         })
     })
     .join()
-    .unwrap_or(None)?;
-
-    window_state::plan_restore(Some(&raw), displays)
+    // A panicking reader thread must not take the window with it.
+    .unwrap_or(None)
 }
 
-/// Apply a plan. Each step is independent: a refused size must not stop
-/// the position from being applied, or the window could end up
-/// remembered-size at a default position.
+/// Apply a plan, in physical pixels, converting nothing.
+///
+/// Position first, then size: the window is on its target display before
+/// the size lands, so Tauri's minimum-size enforcement — which is in
+/// *logical* pixels, and so depends on that display's scale factor —
+/// happens where it was predicted to. That enforcement is the one thing
+/// that can still change the applied rectangle, and it can only **grow**
+/// it, anchored at the top-left corner this function just set. Growing a
+/// rectangle from its top-left can only increase the overlap between its
+/// title-bar strip and any display, so a plan that passed
+/// [`window_state::is_reachable`] is still reachable afterwards.
+///
+/// Each step is independent: a refused size must not stop the position
+/// from being applied, or the window could end up remembered-size at a
+/// default position.
 fn apply<R: Runtime>(window: &WebviewWindow<R>, plan: RestorePlan) {
-    if let Err(e) = window.set_size(LogicalSize::new(plan.width, plan.height)) {
-        tracing::warn!(target: "gmm::window", error = %e, "could not restore window size");
-    }
     if let Err(e) = window.set_position(PhysicalPosition::new(plan.x, plan.y)) {
         tracing::warn!(target: "gmm::window", error = %e, "could not restore window position");
+    }
+    if let Err(e) = window.set_size(PhysicalSize::new(plan.width, plan.height)) {
+        tracing::warn!(target: "gmm::window", error = %e, "could not restore window size");
     }
     if plan.maximized {
         if let Err(e) = window.maximize() {
@@ -183,15 +215,15 @@ fn apply<R: Runtime>(window: &WebviewWindow<R>, plan: RestorePlan) {
 /// Start remembering the window's geometry.
 ///
 /// Move and resize events only touch memory and poke a channel; the
-/// write happens on a dedicated thread a debounce later. Close is not
-/// involved at any point.
+/// write happens on a dedicated thread once the window has been still.
+/// Close is not involved at any point.
 fn track<R: Runtime>(app: AppHandle<R>, core: Core) {
     let pending = Arc::new(PendingWindowState::default());
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return;
     };
 
-    let flush = spawn_writer(core, pending.clone());
+    let moved = spawn_writer(core, pending.clone());
 
     // The handler holds an `AppHandle`, not the window: a closure
     // installed on a window that also owns that window keeps it alive
@@ -207,15 +239,16 @@ fn track<R: Runtime>(app: AppHandle<R>, core: Core) {
             return;
         };
         if pending.record(state) {
-            // A closed channel means the writer thread is gone, which
-            // only happens at shutdown. Nothing to report.
-            let _ = flush.send(());
+            // Every accepted move notifies, because each notification is
+            // what resets the debounce deadline. A closed channel means
+            // the writer thread is gone, which only happens at shutdown.
+            let _ = moved.send(());
         }
     });
 }
 
-/// The writer thread: wake, wait out the debounce, write the newest
-/// geometry.
+/// The writer thread: wake on a move, wait for the window to be still,
+/// write the newest geometry.
 ///
 /// Deliberately not a Tauri async task. It owns its runtime, it is
 /// detached, and no part of the application — least of all window close
@@ -237,9 +270,13 @@ fn spawn_writer(core: Core, pending: Arc<PendingWindowState>) -> Sender<()> {
                 return;
             }
         };
-        // `recv` ends only when every sender is dropped, i.e. at shutdown.
+        // The outer `recv` ends only when every sender is dropped, i.e.
+        // at shutdown.
         while rx.recv().is_ok() {
-            std::thread::sleep(WRITE_DEBOUNCE);
+            // Debounce: every further move resets this deadline, so a
+            // drag produces one write after it ends rather than one
+            // every `WRITE_DEBOUNCE` while it lasts.
+            let _ = window_state::wait_until_quiet(&rx, WRITE_DEBOUNCE);
             let Some(state) = pending.take() else {
                 continue;
             };
