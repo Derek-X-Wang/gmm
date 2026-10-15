@@ -34,6 +34,7 @@ pub mod settings;
 pub mod updates;
 pub mod variants;
 pub mod volume;
+pub mod window_state;
 #[cfg(windows)]
 mod windows_directory_delete;
 pub mod zip_import;
@@ -402,6 +403,33 @@ impl Core {
         put_setting(&mut *tx, keys::onboarding_skipped(), Some("false")).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// #369: the main window's remembered geometry, exactly as stored.
+    ///
+    /// Returned raw rather than parsed because Core does not get to
+    /// decide whether it is usable: that depends on the displays
+    /// connected right now, which only the Tauri layer can see.
+    /// [`window_state::plan_restore`] makes the call.
+    pub async fn remembered_window_state(&self) -> Result<Option<String>> {
+        // Safe: an optional database string, not a filesystem observation.
+        get_setting(&self.pool, keys::window_geometry()).await
+    }
+
+    /// #369: remember the main window's geometry.
+    ///
+    /// Implausible geometry is dropped rather than stored, so a
+    /// minimised window's sentinel position can never become the thing
+    /// GMM reopens at. Callers fire this and forget it; nothing waits on
+    /// it, and in particular window close never does.
+    pub async fn remember_window_state(
+        &self,
+        state: &window_state::SavedWindowState,
+    ) -> Result<()> {
+        let Some(encoded) = window_state::serialize(state) else {
+            return Ok(());
+        };
+        put_setting(&self.pool, keys::window_geometry(), Some(&encoded)).await
     }
 
     /// Read the user-set override (if any) for the global library root.
