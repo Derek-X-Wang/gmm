@@ -8,6 +8,7 @@ import { GameStatusStrip } from "./GameStatusStrip";
 import { GameRecoveryNotice } from "./GameRecoveryNotice";
 import { AttentionView } from "./AttentionView";
 import { SettingsDestination, type SettingsPage } from "./SettingsDestination";
+import { StatusBarUpdateReading, useUpdateReading } from "./UpdatesPanel";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -173,6 +174,12 @@ function MainApp({
   const { staleSession, dismissStaleSession } = useSessionLifecycle();
   const sessionSurface = useSessionPresentation({ staleSession, onDismiss: dismissStaleSession });
   const launchSurface = useLaunchGame({ game: activeGame, displayName: active.displayName });
+  // An available GMM update is a reading in the status bar, not a card
+  // floating over it (#357). The bar carries it, so the bar exists while
+  // there is something to read even when no Game is configured yet; the
+  // reading is the gate as well as the content, so a state with nothing to
+  // read cannot leave an empty band pinned to the window.
+  const updateReading = useUpdateReading();
   // Snapshot the main screen on entry and only on entry. Every in-page
   // control is inert while the dialog is open, so each could only ever open
   // the first visit; the menu can fire during one, and a second snapshot
@@ -341,8 +348,10 @@ function MainApp({
         bottom of the window by `.status-bar` in App.css (#326, #352).
         `<footer>` is a direct child of the render root here, so it carries
         the `contentinfo` landmark on its own; wrapping it in sectioning
-        content would silently drop that. Its only control stays the strip's
-        Settings link — the bar is not a second home for actions (#285, #326).
+        content would silently drop that. Its controls stay routes into
+        Settings: the strip's own Settings link, and the GMM update reading's
+        link to the group that owns the install decision. The bar is not a
+        second home for actions (#285, #326, #346, #357).
 
         It stays on screen while the Settings dialog is open, inert with the
         main screen. The bar is part of the window the dialog is drawn over: a
@@ -350,16 +359,23 @@ function MainApp({
         dialog and pop back on Close, and `.app`'s bottom padding — the bar's
         scroll clearance — would become a gap with nothing in it (#352, #353).
       */}
-      {hasActiveGame ? (
+      {hasActiveGame || updateReading !== null ? (
         <footer className="status-bar" inert={behind} aria-hidden={behind || undefined}>
-          <GameStatusStrip
-            game={activeGame}
-            displayName={active.displayName}
-            savedPath={activePath.data ?? null}
-            pathReadError={activePath.error}
-            pathReadPending={activePath.isFetching}
-            onSettings={() => openSettings(activeGame)}
-          />
+          {hasActiveGame ? (
+            <GameStatusStrip
+              game={activeGame}
+              displayName={active.displayName}
+              savedPath={activePath.data ?? null}
+              pathReadError={activePath.error}
+              pathReadPending={activePath.isFetching}
+              onSettings={() => openSettings(activeGame)}
+            />
+          ) : null}
+          {/* After the Game facts, never in place of them: their payload and
+              wording are decided and do not move to make room (#285, #324,
+              #348). The route is the GMM page, where the GMM updates group
+              already lives, as Help → Check for updates… does (#351). */}
+          <StatusBarUpdateReading onSettings={() => openSettings("gmm", "gmm-update")} />
         </footer>
       ) : null}
     </>

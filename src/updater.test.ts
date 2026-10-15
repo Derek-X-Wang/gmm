@@ -120,7 +120,7 @@ describe("update consent", () => {
     await controller.checkForUpdates();
     await controller.install();
     expect(states).not.toContainEqual({ kind: "installed" });
-    expect(controller.getSnapshot()).toEqual({ kind: "error", message: "Update installation failed: installer failed" });
+    expect(controller.getSnapshot()).toEqual({ kind: "error", failure: "install", message: "Update installation failed: installer failed" });
   });
 });
 

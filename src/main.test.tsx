@@ -1,7 +1,7 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
+import type { UpdateController } from "./updater";
 
 const { check, relaunch, values } = vi.hoisted(() => ({ check: vi.fn(), relaunch: vi.fn(), values: new Map<string, string>() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async (command, args) => {
@@ -22,27 +22,52 @@ beforeEach(() => {
   relaunch.mockReset();
 });
 
-it("the actual startup entry checks and renders consent before issuing any install", async () => {
+/**
+ * Start the application for real and read the offer the launch produced.
+ *
+ * Since #357 the startup check paints nothing of its own: the shared
+ * controller holds what the check found and the status bar inside `<App/>`
+ * reads it, so the entry's own behaviour is observable in that controller
+ * rather than in a card beside the application. `UpdatesPanel.test.tsx` and
+ * `App.updates.test.tsx` own the two surfaces; this file owns the launch.
+ */
+async function startGmm(): Promise<UpdateController> {
+  await act(async () => { await import("./main"); });
+  return (await import("./updater")).updater;
+}
+
+it("the actual startup entry checks in the background and renders only the application", async () => {
   const downloadAndInstall = vi.fn().mockResolvedValue(undefined);
   check.mockResolvedValue({ version: "0.5.0", rawJson: { url: "https://example.com/alpha.2.msi", signature: "signed-alpha.2" }, downloadAndInstall });
-  await act(async () => { await import("./main"); });
+
+  const updater = await startGmm();
+
   expect(check).toHaveBeenCalledOnce();
   expect(screen.getByText("Game Library")).toBeVisible();
+  // The offer is held for the status bar to read. Nothing was downloaded, and
+  // the entry mounted nothing beside the application: the fixed-position
+  // notice that used to float in the corner is gone, so the launch cannot
+  // paint over the window's own status bar or over the Settings dialog (#357).
+  expect(updater.getSnapshot()).toMatchObject({ kind: "available", version: "0.5.0" });
   expect(downloadAndInstall).not.toHaveBeenCalled();
-  expect(screen.getByText(/is available/)).toHaveTextContent("0.5.0");
   expect(relaunch).not.toHaveBeenCalled();
-  await userEvent.click(screen.getByRole("button", { name: "Install update" }));
-  expect(downloadAndInstall).toHaveBeenCalledOnce();
-  expect(relaunch).not.toHaveBeenCalled();
-  expect(screen.getByRole("button", { name: "Restart to apply" })).toBeVisible();
+  expect(document.body).toHaveTextContent("Game Library");
+  expect(document.body).not.toHaveTextContent(/update/i);
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
 });
 
-it("the startup entry surfaces a failed background check without blocking the Library", async () => {
+it("the startup entry keeps a failed background check without blocking the Library", async () => {
   check.mockRejectedValue(new Error("GitHub 503"));
-  await act(async () => { await import("./main"); });
+
+  const updater = await startGmm();
+
   expect(screen.getByText("Game Library")).toBeVisible();
-  expect(screen.getByRole("alert")).toHaveTextContent("Update check failed: GitHub 503");
-  expect(screen.queryByText(/latest release/)).not.toBeInTheDocument();
+  // A launch that could not check is not a launch that found nothing: the
+  // failure and its whole message are kept, for the bar's short reading and
+  // for the Settings group's alert, and neither is painted here.
+  expect(updater.getSnapshot()).toMatchObject({ kind: "error", failure: "check" });
+  expect(updater.getLastError()).toBe("Update check failed: GitHub 503");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(relaunch).not.toHaveBeenCalled();
 });
 
@@ -51,15 +76,22 @@ afterEach(() => vi.useRealTimers());
 it("the actual startup entry respects a persisted skip after a simulated restart", async () => {
   const downloadAndInstall = vi.fn();
   check.mockResolvedValue({ version: "0.4.0", rawJson: { url: "https://example.com/alpha.2.msi", signature: "signed-alpha.2" }, downloadAndInstall });
-  await act(async () => { await import("./main"); });
-  await userEvent.click(screen.getByRole("button", { name: "Skip this build" }));
-  expect(screen.getByText(/was skipped/)).toBeVisible();
+
+  const updater = await startGmm();
+  // The decline itself belongs to the Settings group's **Skip this build**
+  // button (`UpdatesPanel.test.tsx`); what this file owns is the next launch.
+  await act(() => updater.decline());
+  expect(updater.getSnapshot()).toMatchObject({ kind: "declined", version: "0.4.0" });
   cleanup();
   vi.resetModules();
-  await act(async () => { await import("./main"); });
+
+  const restarted = await startGmm();
+
   expect(check).toHaveBeenCalledTimes(2);
   expect(screen.getByText("Game Library")).toBeVisible();
-  expect(screen.queryByLabelText("GMM update")).not.toBeInTheDocument();
+  // Remembered across the restart, so the launch has nothing to offer and
+  // the bar has nothing to read.
+  expect(restarted.getSnapshot()).toEqual({ kind: "declined", version: "0.4.0", remembered: true });
   expect(downloadAndInstall).not.toHaveBeenCalled();
 });
 
@@ -67,8 +99,10 @@ it("the actual startup offer stays unanswered without installing while time pass
   vi.useFakeTimers();
   const downloadAndInstall = vi.fn().mockResolvedValue(undefined);
   check.mockResolvedValue({ version: "0.5.0", downloadAndInstall });
-  await act(async () => { await import("./main"); });
-  expect(screen.getByRole("button", { name: "Install update" })).toBeVisible();
+
+  const updater = await startGmm();
+
+  expect(updater.getSnapshot()).toMatchObject({ kind: "available", version: "0.5.0" });
   // Advance five minutes of fake Date/performance time even with no queued timer.
   // tickAsync runs chained timeouts, interval ticks, animation frames and their
   // promise continuations due in this window; runOnlyPendingTimersAsync does not.
@@ -92,8 +126,9 @@ it("the actual startup offer stays unanswered without installing while time pass
     }
   }
   expect(downloadAndInstall).not.toHaveBeenCalled();
-  expect(screen.getByRole("button", { name: "Install update" })).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "Install update" }));
-  await act(async () => {});
+  // Still offered, never applied: only the install action the user reaches by
+  // clicking in Settings moves it, and nothing in the launch reaches it.
+  expect(updater.getSnapshot()).toMatchObject({ kind: "available", version: "0.5.0" });
+  await act(() => updater.install());
   expect(downloadAndInstall).toHaveBeenCalledOnce();
 });
