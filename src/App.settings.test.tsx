@@ -351,6 +351,8 @@ it.each(outcomes)("renders the separate path-state row: $line", async ({ gamePat
   if (gamePath.status === "savedPathNotFound") {
     expect(screen.getAllByText("Saved Game installation cannot be found · Model Importer unverified", { selector: "p" })).toHaveLength(2);
     expect(screen.queryByText("Saved installation cannot be found · Model Importer unverified")).not.toBeInTheDocument();
+    expect(within(dialog()).queryByText(/Missing Game entries:/)).not.toBeInTheDocument();
+    expect(within(dialog()).getByText(gamePath.paths.join(", "), { selector: "p", exact: true })).toBeVisible();
   }
   for (const other of outcomes.filter((value) => value.line !== line)) {
     expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(other.line);

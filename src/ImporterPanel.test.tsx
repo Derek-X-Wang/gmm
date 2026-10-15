@@ -68,7 +68,7 @@ it("allows an explicit install for a readable Game with confirmed absent importe
 });
 it.each([
   ["no saved path", { status: "noSavedPath" }, { status: "unverified", path: null, error: "No path" }, "Set a readable Game install path before installing a Model Importer.", "Saved Game installation cannot be found"],
-  ["Game entries missing", { status: "requiredEntriesNotFound", paths: ["C:/Game/Game.exe"] }, { status: "unverified", path: null, error: "Missing executable" }, "Required Game files or directories not found: C:/Game/Game.exe · Model Importer unverified", "Saved Game installation cannot be found"],
+  ["Game entries missing", { status: "requiredEntriesNotFound", paths: ["C:/Game/Game.exe"] }, { status: "unverified", path: null, error: "Missing executable" }, "Required Game files or directories not found · Missing Game entries: C:/Game/Game.exe · Model Importer unverified", "Saved Game installation cannot be found"],
   ["saved path missing", { status: "savedPathNotFound", paths: ["C:/Game"] }, { status: "unverified", path: null, error: "Missing executable" }, "Saved Game installation cannot be found · Model Importer unverified", "Required Game files or directories not found"],
   ["unreadable Game", { status: "unreadable", path: "C:/Game", error: "Access denied" }, { status: "unverified", path: "C:/Game", error: "Access denied" }, "Cannot tell · Model Importer filesystem unverified", "Saved Game installation cannot be found"],
   ["invalid Game", { status: "invalid", error: "Wrong layout" }, { status: "unverified", path: null, error: "Wrong layout" }, "Cannot tell · Model Importer filesystem unverified", "Saved Game installation cannot be found"],

@@ -346,8 +346,9 @@ in Settings and does not appear in the status bar. The status bar contains no pa
 Install/Update, rollback, Importer Pin control, Origin editor, or Library
 mutation control.
 
-When the path is unreadable, the line leads with **Cannot tell — install path
-unreadable**. Keep the saved path, report Model Importer state as unverified,
+When the path is unreadable, the line leads with **Game: Cannot tell — install path
+unreadable**, preserving the Game scope label used for every status-bar state.
+Keep the saved path, report Model Importer state as unverified,
 never say “not installed,” and never infer a version. When the Game is readable
 but its Model Importer is confirmed absent, keep the status bar visible with
 **Model Importer not installed** and its Settings link. That link is the route
@@ -511,13 +512,16 @@ path states (#324): `savedPathNotFound` means the **saved Game directory
 itself** is confirmed absent; `requiredEntriesNotFound` means that directory
 exists but required Game files or directories are confirmed missing. Recheck the
 saved directory before reporting missing required entries; if it vanished,
-report the missing saved directory, and keep a failed recheck as uncertainty.
+report the missing saved directory; if it is now the wrong type, report `invalid`
+instead of missing required entries. Keep a failed recheck as uncertainty.
 Retain the saved path and configured tab in both states, identify the missing
 paths, and keep the Model Importer unverified. Only the first state says the
 saved installation cannot be found. Settings must name the Game in that claim,
 including beneath a Model Importer heading: **Saved Game installation cannot be
-found**. Settings and the status bar label required-entry details **Missing Game
-entries:**. Do not call either state prototype `missing`: that state means a
+found**. In Settings, both the Game path details and the Model Importer panel
+label the list **Missing Game entries:**. The status bar uses a warning sign
+and **Missing Game entries**, with the list available through its Settings link
+(#348). Do not call either state prototype `missing`: that state means a
 readable Game with no Model Importer. Do not erase the setting or relabel it
 `absent`. If Model Importer inspection fails while the Game is readable, keep
 the verified Game fact and report Model Importer state as unverified; it is not
