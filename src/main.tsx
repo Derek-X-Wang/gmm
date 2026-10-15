@@ -5,11 +5,11 @@ import App from "./App";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { installGlobalErrorHandlers } from "./diagnostics";
 import { updater } from "./updater";
-import { StartupUpdateNotice } from "./UpdatesPanel";
 
 installGlobalErrorHandlers();
 
-// Startup checks only. The global notice asks before downloading or installing.
+// Startup checks only. Nothing downloads or installs without an explicit
+// click in Settings; the status bar states what the check found (#357).
 void updater.checkForUpdates(true);
 
 const queryClient = new QueryClient({
@@ -26,7 +26,6 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <App />
-        <StartupUpdateNotice />
       </QueryClientProvider>
     </ErrorBoundary>
   </React.StrictMode>,
