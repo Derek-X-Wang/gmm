@@ -738,7 +738,7 @@ These are future implementation checks, not claims that this draft ran the app
 | Settings dialog open | The main screen stays behind the dialog and accepts no input; the dialog's only dismiss action is **Close**; no OK, Cancel, or Apply exists (#326). |
 | Change a setting, then Close | The change was committed by its own editor before Close; Close reverts nothing and nothing claims it did. A test fails if a control's label promises a reversal the implementation does not perform (#326). |
 | Native menu | Settings and **Run setup again** are menu items that dispatch their existing actions; **Run setup again** is unavailable while a reset is pending, and its failure stays visible on the main screen (#326). |
-| Application identity | The page shows no `GMM` wordmark and no in-page window bar; the OS title bar carries the name (#326). |
+| Application identity | The page shows no `GMM` wordmark and no in-page window bar; the OS title bar carries the name (#326). This covers every route, including first-run setup, whose page title is **First-run setup**; the product name stays in prose there (#364). |
 | Status bar | The selected Game's status sits at the bottom of the window, with Game and Model Importer as separately labelled facts and every payload state and wording above (#324, #326). |
 | Add absent Game, accept/reject path | Its Settings editor is reachable without a tab; accepted save adds membership; rejection does not; previous main selection is preserved. |
 | Healthy/unreadable/missing/absent | Render four distinct outcomes from the path table; keep unreadable saved paths; do not infer version/absence. |

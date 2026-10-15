@@ -93,6 +93,33 @@ async function advanceToStep(n: 2 | 3 | 4) {
   }
 }
 
+describe("OnboardingWizard — route identity", () => {
+  // #364: the native title bar already says GMM, so the route must not repeat
+  // the wordmark as a title of its own. `docs/design/main-screen.md` states the
+  // page carries no `GMM` wordmark, and that rule covers this route. These
+  // assertions fail if the wordmark comes back as a page or section title.
+  it("titles the route without repeating the GMM wordmark", async () => {
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+
+    const pageTitle = await screen.findByRole("heading", { level: 1 });
+    expect(pageTitle).toHaveTextContent("First-run setup");
+    expect(pageTitle.textContent).not.toMatch(/GMM/);
+  });
+
+  it("names the product in step 1's prose, not in a second title", async () => {
+    renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
+    // Wait for the AV guidance query so step 1 is fully mounted.
+    await avCheckbox();
+
+    for (const heading of screen.getAllByRole("heading")) {
+      expect(heading.textContent).not.toMatch(/GMM/);
+    }
+    expect(
+      screen.getByText(/GMM keeps every mod in a central Library/),
+    ).toBeVisible();
+  });
+});
+
 describe("OnboardingWizard — step 1 gating", () => {
   it("starts on step 1 of 4", async () => {
     renderWithQuery(<OnboardingWizard onDone={vi.fn()} />);
