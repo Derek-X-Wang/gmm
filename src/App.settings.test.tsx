@@ -1274,6 +1274,60 @@ it("makes each radio group in the dialog one tab stop, at the checked radio", as
   expect(checked()).toEqual([radios[0][1]]);
 });
 
+/**
+ * Every control in the dialog a user must be able to reach, enumerated from
+ * the accessibility tree rather than from `tabStops`'s own selector — so this
+ * cannot agree with the production filter by construction, and `queryAllByRole`
+ * is also what leaves the retained `hidden` page's controls out. Radios are
+ * excluded on purpose: a group contributes one stop, not one per radio, which
+ * is the property the test above holds.
+ *
+ * Disabled controls are filtered because they are in the tree but out of the
+ * tab order — "Resolve…" before a record is chosen is exactly that case.
+ */
+function reachableControlsRequired(): HTMLElement[] {
+  const roles = ["button", "textbox", "combobox", "checkbox", "listbox", "link", "spinbutton"] as const;
+  return roles
+    .flatMap((role) => within(dialog()).queryAllByRole(role))
+    .filter((control) => !(control as HTMLInputElement).disabled);
+}
+
+/** Enough of a control to recognise which one went missing. */
+function controlName(control: HTMLElement): string {
+  const input = control as HTMLInputElement;
+  return `${control.tagName.toLowerCase()} ${control.getAttribute("aria-label") ?? input.placeholder
+    ?? control.textContent?.trim().slice(0, 40) ?? ""}`.trim();
+}
+
+it.each(["Honkai: Star Rail", "GMM settings"])("keeps every control on the %s page in the tab cycle, not merely contained", async (page) => {
+  // Containment is not reachability. `tabCycle()` proves Tab stays inside the
+  // dialog and that the walk wraps; neither notices a control that silently
+  // leaves the cycle, because a `tabStops()` that dropped a whole class of
+  // element keeps Tab inside the dialog and still wraps — the control just
+  // becomes unreachable by keyboard. A mutation excluding `input[type=text]`
+  // left the whole suite green while the install-path field could no longer
+  // be reached at all (#360 review).
+  //
+  // Asserting a literal list of every stop would be stronger still, and was
+  // rejected: it would have to be rewritten by any unrelated control added to
+  // any Settings page, and three other PRs are editing these pages. The
+  // property asserted here needs no such edit — it holds for whatever the
+  // panel contains, on both the per-Game page and the Application page, which
+  // between them hold every kind of control the dialog uses.
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  await openGame();
+  if (page === "GMM settings") {
+    await userEvent.click(pageButton(page));
+    await screen.findByPlaceholderText("proxy URL");
+  }
+  const required = reachableControlsRequired();
+  expect(required.length).toBeGreaterThan(5);
+
+  const stops = await tabCycle();
+  expect(required.filter((control) => !stops.includes(control)).map(controlName)).toEqual([]);
+});
+
 it("closes on Escape only when nothing inside the dialog has consumed it", async () => {
   renderApp();
   await openGame();
