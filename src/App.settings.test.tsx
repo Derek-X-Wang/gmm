@@ -254,20 +254,19 @@ it("repaints every control in the light Settings panel, not only the navigation"
     "an ordinary control in the panel needs a light-mode rule of its own",
   ).not.toHaveLength(0);
 
-  // An explicit foreground, not an inherited one: the control paints a fill,
-  // so its text colour cannot be left to whatever the panel sets.
-  const probe = document.createElement("button");
-  probe.setAttribute("style", repaints.join(";"));
-  document.body.append(probe);
-  try {
-    const painted = getComputedStyle(probe);
-    expect(
-      { color: painted.color, background: painted.backgroundColor },
-      "a painted fill with an inherited foreground is dark text on a dark button here",
-    ).toEqual({ color: expect.stringMatching(/^rgb\(/), background: expect.stringMatching(/^rgb\(/) });
-  } finally {
-    probe.remove();
-  }
+  // A stated foreground, not an inherited one: the control paints a fill, so
+  // its text colour cannot be left to whatever the panel sets. This reads the
+  // declaration rather than the computed value on purpose — jsdom resolves
+  // `color: inherit` against `<body>`, so it would report a perfectly
+  // readable black and hide the exact shape of the defect.
+  const declarations = repaints.join(";");
+  expect(
+    {
+      foreground: /(^|;)\s*color\s*:\s*(?!inherit\b)\S/.test(declarations),
+      fill: /(^|;)\s*background(-color)?\s*:\s*(?!inherit\b)\S/.test(declarations),
+    },
+    "a painted fill with an inherited foreground is dark text on a dark button here",
+  ).toEqual({ foreground: true, fill: true });
 });
 
 it.each(["global", "game"])("keeps the main screen inert behind the dialog and preserves independent selection by %s arrival", async (arrival) => {
