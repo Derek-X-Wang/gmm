@@ -58,7 +58,10 @@ export function OnboardingWizard({ onDone, onFailure }: {
   return (
     <main className="onboarding">
       <header className="onboarding__header">
-        <h1>GMM — first-run setup</h1>
+        {/* No `GMM` wordmark: the OS title bar already carries the name, and
+            the identity rule in `docs/design/main-screen.md` covers this
+            route too (#364). The product name stays in step 1's prose. */}
+        <h1>First-run setup</h1>
         <span className="muted small">Step {step} of 4</span>
       </header>
       <section className="onboarding__body">
@@ -152,7 +155,7 @@ function WelcomeStep({
       ) : (
         <p className="muted">Loading antivirus guidance…</p>
       )}
-      <h2>Welcome to GMM</h2>
+      <h2>Welcome</h2>
       <p>
         GMM keeps every mod in a central Library, separate from your game
         installs. Enabling a mod links it into the game's <code>Mods/</code>
