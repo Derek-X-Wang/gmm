@@ -29,13 +29,58 @@ const TITLE = "settings-dialog-title";
  */
 const FOCUSABLE = "a[href], button, input, select, textarea, summary, [tabindex]";
 
+/**
+ * The radio group one named radio belongs to, as HTML scopes it: the name
+ * within the radio's form owner, which is `null` for every radio in this
+ * dialog — the duplicate-Mod-record selector is a `fieldset`, not a form, so
+ * its group is scoped to the document. A radio with no name is its own group,
+ * which is why those get no key at all. The form owner is identity-compared
+ * through `forms`, since a form element is not a usable map key on its own.
+ */
+function radioGroup(element: HTMLElement, forms: Array<HTMLFormElement | null>): string | null {
+  const input = element as HTMLInputElement;
+  if (input.type !== "radio" || !input.name) return null;
+  let scope = forms.indexOf(input.form);
+  if (scope === -1) scope = forms.push(input.form) - 1;
+  return `${scope}\u0000${input.name}`;
+}
+
+/**
+ * The dialog's own tab stops, in document order (#353).
+ *
+ * A radio group is one stop, not one per radio: Tab enters the group at the
+ * checked radio and the next Tab leaves the group entirely, with the arrow
+ * keys moving inside it. That is the platform's behaviour and the ARIA
+ * radio-group pattern, and the cycle below intercepts every Tab press, so it
+ * has to reproduce it rather than inherit it (#360). The arrow keys are
+ * untouched: this handler only ever sees Tab.
+ *
+ * The stop a group contributes is the checked radio, or the first radio when
+ * none is checked — so a group with no selection is still reachable, at its
+ * first radio, exactly as in a browser. Disabled and hidden radios are
+ * already out by then, so neither can become a group's only stop.
+ */
 function tabStops(container: HTMLElement): HTMLElement[] {
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((element) =>
+  const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((element) =>
     !(element as HTMLButtonElement).disabled
     && Number(element.getAttribute("tabindex") ?? "0") >= 0
     && (element as HTMLInputElement).type !== "hidden"
     && element.getAttribute("aria-hidden") !== "true"
     && element.closest("[hidden], [inert]") === null);
+  const forms: Array<HTMLFormElement | null> = [];
+  const stopPerGroup = new Map<string, HTMLElement>();
+  for (const element of focusable) {
+    const group = radioGroup(element, forms);
+    if (group === null) continue;
+    const held = stopPerGroup.get(group);
+    if (held === undefined || (!(held as HTMLInputElement).checked && (element as HTMLInputElement).checked)) {
+      stopPerGroup.set(group, element);
+    }
+  }
+  return focusable.filter((element) => {
+    const group = radioGroup(element, forms);
+    return group === null || stopPerGroup.get(group) === element;
+  });
 }
 
 /** Modal Settings dialog over the main screen (#326, #353). The owner outlives

@@ -178,7 +178,11 @@ required (#353):
   property of the window around it, so one missing attribute on the window
   chrome cannot let Tab walk into the screen behind. The cycle skips the
   retained `hidden` Settings pages, which is the same property
-  `LibraryPathEditors.test.tsx` already holds for those pages.
+  `LibraryPathEditors.test.tsx` already holds for those pages. Because the
+  cycle intercepts every Tab press, it also has to reproduce what the browser
+  would have done inside a radio group: a group is **one** stop, entered at the
+  checked radio or at the first radio when none is checked, with the arrow keys
+  — which the handler never sees — still moving inside it (#360).
 
 A native `<dialog>` with `showModal()` would supply the first and third parts
 itself. It was rejected because the surface's `hidden` attribute is what
@@ -226,6 +230,30 @@ marker that the focus return resolves after Close. Because it is visible, it
 is inert: a visible bar may not be a live second route into Settings while
 Settings is already open.
 
+The bar also carries **one reading about GMM's own update** (#357). An
+available update is a fact that stays true until someone acts on it, which is
+what this bar is for, so it is stated here rather than in a card floating in
+the corner. The card that used to float there is removed, not relocated: it
+covered the bar's own Settings link, it drew undimmed over the modal Settings
+dialog because it was rendered outside the scrim, and it stayed
+mouse-clickable while the screen behind the dialog was inert even though the
+dialog's focus cycle made it keyboard-unreachable. A reading occupies space
+instead of floating, so it covers nothing and is inert with the bar it is in.
+
+The reading sits after the Game and Model Importer facts, whose decided
+payload and wording do not move to make room (#285, #324, #348). It states an
+offer with its version, a download in flight, an installed build waiting for a
+restart, a failed check, and a failed installation. It says nothing when the
+check is idle, running, or found the build current, and nothing after a
+decline: that question has been answered, and Settings keeps the declined
+outcome. Its only control is a route to the **GMM updates** group on the
+Settings GMM page — the same destination as Help → **Check for updates…**
+(#351). The decision to install stays there behind that group's own explicit
+click, and declining, remembering a decline and re-offering are unchanged
+(#346, ADR 0004). The reading adds a row to the bar, so it is the bar's
+`max-height` and its own scroll that keep a long Game status beside it from
+growing the bar over the page (#351, #352).
+
 ### The docked panel goes to the selected Mod
 
 The docked panel was a candidate for Settings in #326 and lost to the modal
@@ -254,6 +282,7 @@ decision. Resolved items are retained here as **DECIDED**.
 | Status bar presentation of long content — **DECIDED** | For missing required Game entries, the bar shows a warning sign and **Missing Game entries**, without the missing paths. The requirement to carry the list in the bar is withdrawn. No fact disappears without a route to it: the bar's Settings link opens that Game's page, where the missing paths remain visible. | #348 |
 | Windows 11 look: fill the window and adopt the published proportions — **DECIDED** | The window no longer centres a column. `.app` and `.onboarding` fill it and align left on a 1.5rem inline gutter, the status bar's inline padding is that same gutter instead of a gutter computed from a page width, and the line-length cap moved onto paragraph text (Microsoft caps the line, not the page). The control vocabulary moved onto Microsoft's published metrics: three corner radii (8px containers, 4px in-page elements, 2px under 32px), the Windows 11 type ramp with nothing below 12px, Segoe UI Variable named ahead of Segoe UI with nothing bundled, and a neutral 32px button with a 1px contour so the accent fill belongs to Launch alone. Nothing the application says or does changed. **A Fluent component library is rejected**: it covers the control vocabulary only, at the cost of every surface and of handing the dialog's three mutation-proved guarantees to a third party's focus manager, and its own `fontFamilyBase` is `'Segoe UI'`, so it does not even deliver the font. **Mica and Acrylic are deferred, not rejected**: they decorate a layout rather than fix one and need a transparent window, which fights the native decorations #326 gained. Reconsidered only after Windows screenshots of this result. No two-pane layout: the no-sidebar rule stands and #327 owns the panel. Specified in `docs/research/windows-native-look.md` §6.2, bounded by §6.3. | #365, #366, #367 |
 | Mod inspector and the main-screen no-sidebar rule | #327 adds a docked panel beside the Mod list. This document says the main screen has no sidebar or dock (#282, #283). #327 must reconcile the two when it is specified. | #327, *needed for coherence* |
+| An available GMM update in the window — **DECIDED** | An available update is a **reading in the bottom status bar**, after the Game and Model Importer facts, routing to the **GMM updates** group on the Settings GMM page. The fixed-position startup notice is removed, not relocated: it covered the bar's Settings link, drew undimmed over the modal Settings dialog, and stayed mouse-clickable while the screen behind the dialog was inert although the dialog's focus cycle made it keyboard-unreachable. The bar reads an offer, a download in flight, an installed build awaiting restart, a failed check and a failed installation, and says nothing when idle, checking, current, or after a decline. It is **not a second notification system and not a new consent surface**: Install update, Skip this build and Restart to apply stay in Settings behind their own explicit click, and declining, remembering a decline and re-offering are unchanged (#346, ADR 0004). The reading adds a row, so the bar's `max-height` and its own scroll keep it from growing over the page. | #357 |
 
 A visual pass (how the application looks, as opposed to how native it feels)
 is a separate axis and is not part of #326 (#326).
@@ -361,6 +390,7 @@ treats the current wording as proof of a distinction the data does not make.
 | `LibraryAuditWarning` | Conditional recovery surface on its Game; retain its existing attachment to the Game install-path group when that group moves to Settings. | #282 recovery preservation, #284 |
 | `WindowBar` (Settings control, **Run setup again**, `GMM` wordmark) | Removed from the page. Settings and **Run setup again** are native menu items; the wordmark is dropped. Done in #351. | #326, #351 |
 | `GameStatusStrip` | Status bar at the bottom of the window, selected Game; payload and wording unchanged. | #283, #285, #324, #326 |
+| `StartupUpdateNotice` | Removed from the page. An available GMM update is a reading in the status bar, routing to `UpdatesPanel` on the GMM page, which keeps every consent action. Done in #357. | #346, #357, ADR 0004 |
 | `SettingsDestination` | Modal Settings dialog over the main screen, dismissed with Close only. | #284 round 2, #326 |
 
 ### Main-surface states
@@ -372,7 +402,7 @@ an update-check error, and an active Game Session at the same time.
 | Surface | States and required result |
 | --- | --- |
 | Selected Game/inventory | Registry/path reads pending, available, or failed; zero configured paths; one or more configured paths; selected Game changes. Show read failures as unavailable, with Settings reachable. Never render an absent Game as an installed tab. |
-| Status bar | Checking, verified Game/Model Importer facts, or unavailable check, plus the four path cases below and distinct reports for a missing saved Game directory and missing required Game entries. Keep read-only and preserve the decided payload and wording above; the status bar stays visible when a readable Game has no Model Importer (#285 human decision). |
+| Status bar | Checking, verified Game/Model Importer facts, or unavailable check, plus the four path cases below and distinct reports for a missing saved Game directory and missing required Game entries. Keep read-only and preserve the decided payload and wording above; the status bar stays visible when a readable Game has no Model Importer (#285 human decision). A GMM update adds one reading after those facts, with a route to the GMM page and no consent control of its own; it is absent unless there is an offer, a download, an installed build awaiting restart, a failed check or a failed installation (#357). |
 | Launch | Ready action, launching, active Game Session, returned session, or rejected launch. Preserve `launch_game` and its existing AV-pattern guidance via `av_guidance`; keep other command failures visible near Launch. Pending/session locks do not remove the primary action's identity. |
 | Game Session context | Reading/unavailable, no active session, active session, cleaned stale session, or interrupted launch reservation. Continue existing session-event refresh while the Settings dialog is open, so closing it does not fabricate an ended session. |
 | Mods/Variants | Mod query pending/error, confirmed empty, or populated; existing enabled/disabled choices; Variants absent, loading/error, or available; Variant change pending/success/failure; recovery quarantine. Retain existing controls and their individual gates. |
@@ -407,6 +437,7 @@ inside Settings only. It is not shared permanent chrome (#282, #284).
 | Action | Destination | Effect on main-screen selection |
 | --- | --- | --- |
 | Status-bar Settings link for Game X | Settings dialog, Game X page. | None. |
+| Status-bar GMM update reading's route | Settings dialog, GMM page, where the **GMM updates** group already lives. | None; the reading is about GMM, not about a Game (#357). |
 | Menu Settings item | Settings dialog, GMM page. | None; global arrival implies no selected Game page. |
 | Menu **Check for updates…** or Diagnostics… item | Settings dialog, GMM page, where both panels already live. | None; same global arrival as the Settings item. |
 | Add game, then choose Game X | Settings dialog, Game X page, with its install-path editor reachable. | None; do not create a main-screen tab by selecting it. |
@@ -734,7 +765,7 @@ These are future implementation checks, not claims that this draft ran the app
 | Settings dialog open | The main screen stays behind the dialog and accepts no input; the dialog's only dismiss action is **Close**; no OK, Cancel, or Apply exists (#326). |
 | Change a setting, then Close | The change was committed by its own editor before Close; Close reverts nothing and nothing claims it did. A test fails if a control's label promises a reversal the implementation does not perform (#326). |
 | Native menu | Settings and **Run setup again** are menu items that dispatch their existing actions; **Run setup again** is unavailable while a reset is pending, and its failure stays visible on the main screen (#326). |
-| Application identity | The page shows no `GMM` wordmark and no in-page window bar; the OS title bar carries the name (#326). |
+| Application identity | The page shows no `GMM` wordmark and no in-page window bar; the OS title bar carries the name (#326). This covers every route, including first-run setup, whose page title is **First-run setup**; the product name stays in prose there (#364). |
 | Status bar | The selected Game's status sits at the bottom of the window, with Game and Model Importer as separately labelled facts and every payload state and wording above (#324, #326). |
 | Add absent Game, accept/reject path | Its Settings editor is reachable without a tab; accepted save adds membership; rejection does not; previous main selection is preserved. |
 | Healthy/unreadable/missing/absent | Render four distinct outcomes from the path table; keep unreadable saved paths; do not infer version/absence. |
