@@ -188,6 +188,12 @@ pub fn run() {
         .setup(|app| {
             let menu = crate::menu::build_menu(app.handle())?;
             app.set_menu(menu)?;
+            // Remembered window geometry (#369). The window is declared
+            // `visible: false` so the restore is not seen as a jump, so
+            // this call owns showing it — and shows it on every path,
+            // including every failure. It must stay after `set_menu`:
+            // attaching the menu resizes the client area on Windows.
+            crate::runtime::window::restore_and_track(app.handle());
             Ok(())
         })
         .on_menu_event(|app, event| crate::menu::forward_menu_event(app, event.id().0.as_str()))
