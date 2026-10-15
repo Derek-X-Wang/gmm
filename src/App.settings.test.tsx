@@ -1181,6 +1181,99 @@ it("holds Tab inside the dialog instead of letting it reach the window behind", 
   expect(dialog()).toContainElement(document.activeElement as HTMLElement);
 });
 
+/**
+ * The dialog's whole tab cycle, walked from the heading with real Tab presses
+ * until it wraps. Every stop is asserted to be inside the dialog, so the walk
+ * is a containment check over the entire cycle as well as a list of its stops;
+ * the 30-press loop above holds the same property under sustained pressing.
+ */
+async function tabCycle(): Promise<HTMLElement[]> {
+  screen.getByRole("heading", { name: "Settings", level: 1 }).focus();
+  const stops: HTMLElement[] = [];
+  for (let press = 0; press < 200; press += 1) {
+    await userEvent.tab();
+    const focused = document.activeElement as HTMLElement;
+    expect(dialog()).toContainElement(focused);
+    if (focused === stops[0]) return stops;
+    stops.push(focused);
+  }
+  throw new Error("the Settings dialog's tab cycle never wrapped");
+}
+
+it("makes each radio group in the dialog one tab stop, at the checked radio", async () => {
+  // The real duplicate-Mod-record selector from `LibraryAuditWarning`, not a
+  // synthetic fixture, so this stays true if that markup changes (#360).
+  //
+  // Three records in the first group, so the checked one can be neither the
+  // first radio nor the last and the before/after assertions below cannot
+  // both be satisfied by accident. Two groups, so a cycle that collapsed
+  // every radio in the dialog into one stop is not mistaken for one that
+  // groups by `name` — these radios sit in a `fieldset`, with no form owner
+  // at all, so the name is the whole of what separates them.
+  const SHARED = "C:\\GMM\\library\\srmi\\01SHARED";
+  const ALSO_SHARED = "C:\\GMM\\library\\srmi\\01ALSO";
+  const record = (path: string, id: string, name: string) => ({
+    id, game: "srmi", name, source: "manual", libraryPath: path, junctionDirName: name,
+    enabled: false, createdAt: "2026-08-23T00:00:00Z", gamebananaId: null, sourceUrl: null,
+    author: null, version: null, upstreamVersion: null, updateCheckEnabled: true,
+    screenshotUrl: null, variants: [], reinstallInProgress: false, fingerprint: `${id}-fingerprint`,
+  });
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command: string, args?: { game: GameCode; path: string }) => {
+    if (command === "audit_library" && args?.game === "srmi") return {
+      game: "srmi", unreferenced: [], totalBytes: 0, duplicates: [
+        { path: SHARED, mods: [
+          record(SHARED, "01ONE", "First record"),
+          record(SHARED, "01TWO", "Second record"),
+          record(SHARED, "01THREE", "Third record"),
+        ] },
+        { path: ALSO_SHARED, mods: [
+          record(ALSO_SHARED, "01FOUR", "Fourth record"),
+          record(ALSO_SHARED, "01FIVE", "Fifth record"),
+        ] },
+      ],
+    };
+    return original(command, args);
+  });
+  renderApp();
+  await screen.findByRole("tab", { name: "Honkai: Star Rail" });
+  await openGame();
+  const groups = await screen.findAllByRole("group", { name: "Select the one Mod record to keep" });
+  expect(groups).toHaveLength(2);
+  const radios = groups.map((group) => within(group).getAllByRole<HTMLInputElement>("radio"));
+  expect(radios.map((group) => group.length)).toEqual([3, 2]);
+  const radiosInCycle = async () =>
+    (await tabCycle()).filter((stop) => (stop as HTMLInputElement).type === "radio");
+  const checked = () => radios.flat().filter((radio) => radio.checked);
+
+  // Nothing is preselected here — the audit never chooses a keeper — and the
+  // group is still reachable, at its first radio, as it is in a browser.
+  expect(await radiosInCycle()).toEqual([radios[0][0], radios[1][0]]);
+  // Tabbing in, through and out of a group selects nothing.
+  expect(checked()).toEqual([]);
+
+  await userEvent.click(radios[0][1]);
+  expect(radios[0][1]).toBeChecked();
+  expect(radios[0][1]).toHaveFocus();
+
+  // Tab leaves the group entirely rather than stepping onto the next,
+  // unchecked record — "Resolve…" is the control after the group, and it is
+  // enabled exactly because a record is now selected.
+  const resolve = within(groups[0].closest("li")!).getByRole("button", { name: "Resolve…" });
+  await userEvent.tab();
+  expect(document.activeElement).toBe(resolve);
+
+  // Shift+Tab is the mirror image: back into the group at the checked radio,
+  // not at the last one.
+  await userEvent.tab({ shift: true });
+  expect(document.activeElement).toBe(radios[0][1]);
+
+  // One stop per group wherever the checked radio sits inside it, and the
+  // selection is untouched by the whole walk.
+  expect(await radiosInCycle()).toEqual([radios[0][1], radios[1][0]]);
+  expect(checked()).toEqual([radios[0][1]]);
+});
+
 it("closes on Escape only when nothing inside the dialog has consumed it", async () => {
   renderApp();
   await openGame();

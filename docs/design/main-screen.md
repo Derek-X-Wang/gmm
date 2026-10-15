@@ -178,7 +178,11 @@ required (#353):
   property of the window around it, so one missing attribute on the window
   chrome cannot let Tab walk into the screen behind. The cycle skips the
   retained `hidden` Settings pages, which is the same property
-  `LibraryPathEditors.test.tsx` already holds for those pages.
+  `LibraryPathEditors.test.tsx` already holds for those pages. Because the
+  cycle intercepts every Tab press, it also has to reproduce what the browser
+  would have done inside a radio group: a group is **one** stop, entered at the
+  checked radio or at the first radio when none is checked, with the arrow keys
+  — which the handler never sees — still moving inside it (#360).
 
 A native `<dialog>` with `showModal()` would supply the first and third parts
 itself. It was rejected because the surface's `hidden` attribute is what
