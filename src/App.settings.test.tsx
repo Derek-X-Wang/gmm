@@ -210,6 +210,66 @@ it.each(["before a Settings visit", "after Back"])("hides the Settings root itse
   }
 });
 
+/**
+ * The body of the `prefers-color-scheme: light` block that repaints the
+ * Settings panel, with comments stripped. jsdom evaluates no media query, so
+ * the block is unreachable through `getComputedStyle` on a rendered control;
+ * reading the authored rules is the same route `App.test.tsx` takes for the
+ * status bar's light-mode rules.
+ */
+function lightPanelRules(): string {
+  const authored: string = readFileSync("src/App.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const block = authored.indexOf("@media (prefers-color-scheme: light)", authored.indexOf(".settings-dialog {"));
+  const open = authored.indexOf("{", block);
+  let depth = 0;
+  for (let index = open; index < authored.length; index += 1) {
+    if (authored[index] === "{") depth += 1;
+    if (authored[index] === "}" && (depth -= 1) === 0) return authored.slice(open + 1, index);
+  }
+  throw new Error("the Settings panel's light-mode block is never closed");
+}
+
+it("repaints every control in the light Settings panel, not only the navigation", () => {
+  // The panel is the one light surface in the application: `:root` keeps the
+  // main screen dark in both schemes, so this is the only place a control is
+  // painted on a light background. The base `button` is a neutral fill with
+  // `color: inherit`, and `inherit` inside the panel is its own `#18181b` —
+  // dark text on a dark fill, about 1.14:1 against WCAG's 4.5:1. A light rule
+  // that names only `.settings-navigation button` leaves Close, Apply,
+  // Change…, Re-detect, Rebuild junctions and Export diagnostics bundle
+  // unreadable, so the panel has to repaint the control itself (#367).
+  //
+  // The probe's only ancestor is the panel, so a rule scoped to the
+  // navigation cannot satisfy this test.
+  const panel = document.createElement("div");
+  panel.className = "settings-dialog";
+  const control = document.createElement("button");
+  panel.append(control);
+
+  const repaints = [...lightPanelRules().matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selectors]) => selectors.split(",").some((raw) => control.matches(raw.trim())))
+    .map(([, , declarations]) => declarations);
+  expect(
+    repaints,
+    "an ordinary control in the panel needs a light-mode rule of its own",
+  ).not.toHaveLength(0);
+
+  // An explicit foreground, not an inherited one: the control paints a fill,
+  // so its text colour cannot be left to whatever the panel sets.
+  const probe = document.createElement("button");
+  probe.setAttribute("style", repaints.join(";"));
+  document.body.append(probe);
+  try {
+    const painted = getComputedStyle(probe);
+    expect(
+      { color: painted.color, background: painted.backgroundColor },
+      "a painted fill with an inherited foreground is dark text on a dark button here",
+    ).toEqual({ color: expect.stringMatching(/^rgb\(/), background: expect.stringMatching(/^rgb\(/) });
+  } finally {
+    probe.remove();
+  }
+});
+
 it.each(["global", "game"])("keeps the main screen inert behind the dialog and preserves independent selection by %s arrival", async (arrival) => {
   renderApp();
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });

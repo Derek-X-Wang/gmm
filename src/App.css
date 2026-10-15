@@ -664,6 +664,20 @@ code {
   .settings-dialog .card { background: #fff; border-color: #d4d4d8; }
   .settings-dialog .muted { color: #52525b; }
   .settings-dialog input { background: #fafafa; color: #18181b; border-color: #d4d4d8; }
+  /* Every control in the panel, not only the navigation. The base `button` is
+   * a neutral fill with `color: inherit` (#367), and `inherit` here is the
+   * panel's own `#18181b` — dark text on a dark fill, about 1.14:1 against
+   * WCAG's 4.5:1. Close, Apply, Change…, Re-detect, Rebuild junctions and
+   * Export diagnostics bundle all sit outside `.settings-navigation`, so the
+   * panel repaints the control itself rather than naming them one at a time.
+   * The three values are the navigation rule's own: Fluent's neutral button in
+   * the light theme is `colorNeutralBackground1`, which is white. */
+  .settings-dialog button { background: #fff; color: #18181b; border-color: #d4d4d8; }
+  /* Disabled has to be named here too. `.settings-dialog button` and
+   * `button:disabled` have equal specificity and this block is later, so
+   * without this rule the panel's light fill would outrank the disabled one
+   * and a disabled control would read as enabled. */
+  .settings-dialog button:disabled { background: #e4e4e7; color: #71717a; border-color: #d4d4d8; }
   .settings-navigation button { background: #fff; color: #18181b; border-color: #d4d4d8; }
   .settings-navigation button span { color: #52525b; }
 }
