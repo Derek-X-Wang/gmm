@@ -69,13 +69,60 @@ fn settled_window() -> SavedWindowState {
     }
 }
 
+/// Can a user grab this rectangle?
+///
+/// **A second implementation of the rule, written from its statement
+/// rather than shared with production.** `window_state` exposes no
+/// predicate for a test to borrow, deliberately: asserting a plan with
+/// the same function that produced it only proves the function agrees
+/// with itself, and a wrong predicate would pass.
+///
+/// The part this commits to independently is the part production got
+/// wrong once: **one** display. A window has one effective DPI, taken
+/// from the display it primarily occupies, so the title bar has one
+/// height and the grab area one size. Both are resolved here from the
+/// greatest-overlap display, computed below, and nothing else is allowed
+/// to vouch for the window.
+fn grabbable(plan: RestorePlan, displays: &[DisplayRect]) -> bool {
+    let area = |display: &DisplayRect| -> i64 {
+        let span = |start: i32, extent: u32, d_start: i32, d_extent: u32| {
+            ((start as i64 + extent as i64).min(d_start as i64 + d_extent as i64)
+                - (start as i64).max(d_start as i64))
+            .max(0)
+        };
+        span(plan.x, plan.width, display.x, display.width)
+            * span(plan.y, plan.height, display.y, display.height)
+    };
+    let Some(target) = displays
+        .iter()
+        .filter(|display| area(display) > 0)
+        .max_by(|a, b| area(a).cmp(&area(b)))
+    else {
+        return false;
+    };
+
+    let scale = target.scale;
+    let strip = (32.0 * scale) as i64;
+    let on_screen = |start: i32, extent: i64, d_start: i32, d_extent: u32| -> i64 {
+        (start as i64 + extent).min(d_start as i64 + d_extent as i64)
+            - (start as i64).max(d_start as i64)
+    };
+    on_screen(plan.x, plan.width as i64, target.x, target.width) >= (120.0 * scale) as i64
+        && on_screen(
+            plan.y,
+            strip.min(plan.height as i64),
+            target.y,
+            target.height,
+        ) >= (20.0 * scale) as i64
+}
+
 /// The property that matters: the rectangle GMM is about to apply is
-/// reachable on the displays it was judged against.
+/// one a user can grab on the displays it was judged against.
 fn assert_plan_reachable(plan: RestorePlan, displays: &[DisplayRect], context: &str) {
     assert!(
-        window_state::is_reachable(plan.x, plan.y, plan.width, plan.height, displays),
+        grabbable(plan, displays),
         "{context}: the rect GMM applies must be the rect it checked, but \
-         {plan:?} is not reachable on {displays:?}",
+         {plan:?} cannot be grabbed on {displays:?}",
     );
 }
 
@@ -216,7 +263,7 @@ fn every_restored_plan_is_reachable_across_a_spread_of_arrangements() {
     // maximised containment or a scale change that produced an
     // unreachable plan would be caught here even without its own named
     // test above.
-    let arrangements: [Vec<DisplayRect>; 4] = [
+    let arrangements: [Vec<DisplayRect>; 5] = [
         one_display(),
         vec![display(0, 0, 3840, 2160, 2.0)],
         vec![
@@ -227,11 +274,20 @@ fn every_restored_plan_is_reachable_across_a_spread_of_arrangements() {
             display(0, 0, 1280, 720, 1.0),
             display(1280, 0, 3840, 2160, 2.0),
         ],
+        // A 1x panel beside a 4x monitor: the arrangement in which a
+        // per-display rule lets the 4x neighbour vouch for a title bar
+        // the window does not have.
+        vec![
+            display(0, 0, 2560, 1440, 1.0),
+            display(2560, 0, 3840, 2160, 4.0),
+        ],
     ];
 
+    let mut restored = 0usize;
+    let mut rejected = 0usize;
     for displays in &arrangements {
         for x in [-2200, -1900, -100, 0, 300, 1800, 1870, 2400, 3690] {
-            for y in [-40, -12, 0, 100, 1000] {
+            for y in [-44, -40, -12, 0, 100, 1000] {
                 for (width, height, scale) in [(200, 150, 1.0), (1400, 900, 1.0), (2200, 1500, 2.0)]
                 {
                     for maximized in [false, true] {
@@ -244,14 +300,39 @@ fn every_restored_plan_is_reachable_across_a_spread_of_arrangements() {
                             maximized,
                         };
                         let raw = window_state::serialize(&saved).expect("serialise");
-                        if let Some(plan) = window_state::plan_restore(Some(&raw), displays) {
-                            assert_plan_reachable(plan, displays, "swept arrangement");
+                        match window_state::plan_restore(Some(&raw), displays) {
+                            Some(plan) => {
+                                restored += 1;
+                                assert_plan_reachable(plan, displays, "swept arrangement");
+                                assert!(
+                                    plan.width >= (MIN_WIDTH * 1.0) as u32
+                                        && plan.height >= (MIN_HEIGHT * 1.0) as u32,
+                                    "a restored plan may never be below the minimum in any \
+                                     coordinate space, and {plan:?} is below it even at 100%",
+                                );
+                            }
+                            None => rejected += 1,
                         }
                     }
                 }
             }
         }
     }
+
+    // A predicate that rejected everything would satisfy the assertions
+    // above by vacuity, so the sweep has to show it exercises both
+    // answers. These are floors, not pinned counts: adding a case must
+    // not force this test to be retuned.
+    assert!(
+        restored > 100,
+        "only {restored} of {} cases restored — the sweep is asserting almost nothing",
+        restored + rejected,
+    );
+    assert!(
+        rejected > 100,
+        "only {rejected} of {} cases were rejected — the sweep is not reaching the refusal",
+        restored + rejected,
+    );
 }
 
 // ---- the clamp ----
@@ -316,6 +397,48 @@ fn the_clamp_is_in_logical_pixels_so_high_dpi_is_not_clamped_away() {
     let raw = window_state::serialize(&at_100).expect("serialise");
     let plan = window_state::plan_restore(Some(&raw), &one_display()).expect("restored");
     assert_eq!((plan.width, plan.height), (1600, 1100));
+}
+
+#[test]
+fn the_clamp_follows_the_current_displays_scaling_not_the_saved_rows() {
+    // The gap the same-scale tests could not see. A 1400x900 window saved
+    // on a 1x display is 700x450 logical on a 2x one — below the 900x600
+    // the Settings dialog needs — so the clamp has to be measured against
+    // the display the window will live on, not the scale factor the row
+    // was written at.
+    //
+    // Nothing downstream rescues this: tao 0.35.2's Windows size setter
+    // forwards a programmatic size without clamping, and its
+    // `WM_WINDOWPOSCHANGING` handler returns zero rather than letting
+    // default processing validate the minimum. Treat `minWidth`/
+    // `minHeight` as unenforced for a size GMM sets itself.
+    let saved_at_100 = SavedWindowState {
+        x: 100,
+        y: 100,
+        width: 1400,
+        height: 900,
+        scale: 1.0,
+        maximized: false,
+    };
+    let raw = window_state::serialize(&saved_at_100).expect("serialise");
+
+    let plan = window_state::plan_restore(Some(&raw), &[display(0, 0, 3840, 2160, 2.0)])
+        .expect("restored");
+    assert_eq!(
+        (plan.width, plan.height),
+        ((MIN_WIDTH * 2.0) as u32, (MIN_HEIGHT * 2.0) as u32),
+        "700x450 logical on a 2x display must be clamped up to 900x600 \
+         logical, which is 1800x1200 physical",
+    );
+
+    // The other direction: the same row on a 0.5x-equivalent reading is
+    // comfortably over the minimum and must not be touched.
+    let plan = window_state::plan_restore(Some(&raw), &one_display()).expect("restored");
+    assert_eq!(
+        (plan.width, plan.height),
+        (1400, 900),
+        "on the display it was saved on, nothing is clamped",
+    );
 }
 
 #[test]
@@ -588,28 +711,86 @@ fn the_pre_maximise_rect_follows_the_remembered_displays_scaling() {
 }
 
 #[test]
-fn a_maximised_origin_outside_every_display_falls_back_to_the_most_overlapped_one() {
-    // The remembered origin can sit just off the top of its display —
-    // the reachability rule only needs 20 logical pixels of the strip —
-    // so the display containing it may not exist. The rect's own overlap
-    // then decides, and the result is still contained.
-    let only = display(0, 0, 1920, 1080, 1.0);
-    let maximised_slightly_high = SavedWindowState {
-        x: 300,
+fn the_maximise_target_is_the_display_the_window_most_overlaps_not_the_first_that_overlaps() {
+    // Two displays, both overlapped, and the one the window mostly sits
+    // on is **second** in the list — so "pick the first display that
+    // overlaps" fails this and greatest-overlap passes it. The remembered
+    // origin is also above both displays, so the rect's own overlap is
+    // the only thing that can decide.
+    let lesser = display(0, 0, 1920, 1080, 1.0);
+    let greater = display(1920, 0, 1920, 1080, 1.0);
+    let maximised_mostly_on_the_right = SavedWindowState {
+        x: 1500,
         y: -12,
         width: 1600,
         height: 1000,
         scale: 1.0,
         maximized: true,
     };
-    let raw = window_state::serialize(&maximised_slightly_high).expect("serialise");
-    let plan = window_state::plan_restore(Some(&raw), &[only]).expect("restored");
+    let raw = window_state::serialize(&maximised_mostly_on_the_right).expect("serialise");
+    let displays = [lesser, greater];
+    let plan = window_state::plan_restore(Some(&raw), &displays).expect("restored");
+
+    // 420 of the window's 1600 columns fall on `lesser` and 1180 on
+    // `greater`, so `greater` is the target and the pre-maximise rect is
+    // contained inside it — x nudged from 1500 up to 1920.
     assert_eq!(
-        (plan.x, plan.y),
-        (300, 0),
-        "the rect is nudged back inside the display it overlaps",
+        plan,
+        RestorePlan {
+            width: DEFAULT_WIDTH as u32,
+            height: DEFAULT_HEIGHT as u32,
+            x: 1920,
+            y: 0,
+            maximized: true,
+        },
+        "the pre-maximise rect must be contained inside the display the \
+         window most overlaps, not the first one it touches",
     );
-    assert_plan_reachable(plan, &[only], "maximised with an off-display origin");
+    assert_plan_reachable(plan, &displays, "maximised across two displays");
+}
+
+// ---- one display, one DPI ----
+
+#[test]
+fn a_window_is_judged_on_the_display_it_primarily_occupies() {
+    // A 1x panel beside a 4x monitor. Most of this window sits on the 1x
+    // panel, so that is where Windows would give it its DPI and its
+    // 32-pixel title bar — which ends at y=-12, above both screens. The
+    // window is unreachable and must be refused.
+    //
+    // Judging each display on its own terms accepts it instead: the 4x
+    // neighbour measures a 128-pixel strip the window does not have, sees
+    // 640x84 physical pixels of it against its own 480x80 threshold, and
+    // vouches for a window living at 1x.
+    let displays = [
+        display(0, 0, 2560, 1440, 1.0),
+        display(2560, 0, 3840, 2160, 4.0),
+    ];
+    let title_bar_above_both_screens = SavedWindowState {
+        x: 1800,
+        y: -44,
+        width: 1400,
+        height: 900,
+        scale: 1.0,
+        maximized: false,
+    };
+    let raw = window_state::serialize(&title_bar_above_both_screens).expect("serialise");
+    assert_eq!(
+        window_state::plan_restore(Some(&raw), &displays),
+        None,
+        "a high-DPI neighbour must not vouch for a title bar the window \
+         does not have",
+    );
+
+    // Nothing about the 4x display is being rejected for its own sake:
+    // drop the window 32 pixels and the same arrangement restores it.
+    let reachable = SavedWindowState {
+        y: -12,
+        ..title_bar_above_both_screens
+    };
+    let raw = window_state::serialize(&reachable).expect("serialise");
+    let plan = window_state::plan_restore(Some(&raw), &displays).expect("restored");
+    assert_plan_reachable(plan, &displays, "mostly on the 1x panel");
 }
 
 // ---- absent and unreadable state ----
@@ -941,6 +1122,41 @@ fn the_plan_is_applied_in_the_coordinate_space_it_was_checked_in() {
 /// raw file would trip over the very prose warning against the mistake.
 /// No string literal in that file contains `//`, so dropping from the
 /// first `//` on each line is enough.
+/// The writer must wait before it writes.
+///
+/// `each_move_resets_the_debounce_deadline` tests `wait_until_quiet`
+/// itself, but nothing makes the writer thread *call* it: delete the wait
+/// and the geometry is written on the first move, which is the throttle
+/// this feature already shipped once. `spawn_writer` needs a real `Core`
+/// and a runtime, so it is guarded at the source like `show()` is.
+#[test]
+fn the_writer_waits_for_the_window_to_be_still_before_it_writes() {
+    let source = runtime_window_source();
+    let body = source
+        .split_once("fn spawn_writer")
+        .expect("spawn_writer must exist")
+        .1;
+    let body = body
+        .split_once("\nfn capture")
+        .expect("spawn_writer is followed by `capture`")
+        .0;
+
+    let wait = body
+        .find("window_state::wait_until_quiet(&rx, WRITE_DEBOUNCE)")
+        .expect("the writer must debounce before writing, not write on the first move");
+    let take = body
+        .find("pending.take()")
+        .expect("the writer must take the pending geometry");
+    let write = body
+        .find("core.remember_window_state(")
+        .expect("the writer must write the geometry");
+    assert!(
+        wait < take && take < write,
+        "the wait must come before the geometry is taken and written, or \
+         a drag writes every intermediate rectangle",
+    );
+}
+
 fn runtime_window_source() -> String {
     let raw = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/window.rs"),

@@ -185,15 +185,19 @@ fn read_saved(core: &Core) -> Option<String> {
 
 /// Apply a plan, in physical pixels, converting nothing.
 ///
-/// Position first, then size: the window is on its target display before
-/// the size lands, so Tauri's minimum-size enforcement — which is in
-/// *logical* pixels, and so depends on that display's scale factor —
-/// happens where it was predicted to. That enforcement is the one thing
-/// that can still change the applied rectangle, and it can only **grow**
-/// it, anchored at the top-left corner this function just set. Growing a
-/// rectangle from its top-left can only increase the overlap between its
-/// title-bar strip and any display, so a plan that passed
-/// [`window_state::is_reachable`] is still reachable afterwards.
+/// Position first, then size, so the window is on the display the plan
+/// was judged against before the size lands.
+///
+/// The plan is not the last word on the rectangle, and it would be
+/// dishonest to claim otherwise. Tauri declares `minWidth`/`minHeight`
+/// in *logical* pixels; tao's own DPI-change handling can move and
+/// resize a window when Windows tells it the scale factor changed. The
+/// clamp in `plan_restore` therefore does the minimum-size work itself,
+/// against the target display's scale factor, rather than trusting the
+/// backend to do it: tao 0.35.2's Windows size setter forwards a
+/// programmatic size without clamping it, and its
+/// `WM_WINDOWPOSCHANGING` handler returns zero instead of letting
+/// default processing validate the minimum.
 ///
 /// Each step is independent: a refused size must not stop the position
 /// from being applied, or the window could end up remembered-size at a

@@ -159,19 +159,18 @@ pub struct DisplayRect {
 impl DisplayRect {
     /// A nonsense scale factor from the platform must not make GMM
     /// refuse to restore; treat it as 100%.
+    ///
+    /// Known gap: a *finite, positive, absurd* factor — 0.001 — still
+    /// passes here and collapses the reachability thresholds towards
+    /// zero. That is stored-data validation rather than a property of
+    /// this change, and it is recorded on #369 rather than widened into
+    /// it.
     fn usable_scale(&self) -> f64 {
         if self.scale.is_finite() && self.scale > 0.0 {
             self.scale
         } else {
             1.0
         }
-    }
-
-    fn contains(&self, x: i32, y: i32) -> bool {
-        let inside = |v: i32, start: i32, extent: u32| {
-            v >= start && (v as i64) < start as i64 + extent as i64
-        };
-        inside(x, self.x, self.width) && inside(y, self.y, self.height)
     }
 
     /// Physical area of this display's intersection with a rectangle.
@@ -228,33 +227,52 @@ pub fn serialize(state: &SavedWindowState) -> Option<String> {
 /// unreadable state, or geometry that would strand the window. The
 /// caller then leaves the window at its configured default and says
 /// nothing to the user.
+///
+/// **One display, one DPI, one rectangle.** The target display is
+/// resolved first and everything downstream is judged against that one
+/// display: the minimum-size clamp, the reachability thresholds and, for
+/// a maximised window, the containment. Windows gives a window a single
+/// effective DPI, taken from the display it primarily occupies, so
+/// judging a rectangle against each candidate display on its own terms
+/// invents title bars the window does not have — a 4x neighbour would
+/// vouch for a 128-pixel strip belonging to a window living at 1x.
 pub fn plan_restore(raw: Option<&str>, displays: &[DisplayRect]) -> Option<RestorePlan> {
     let saved = parse(raw?)?;
 
-    // Clamp the restored size up to the minimum (#351). The clamp runs
-    // before the reachability check on purpose: the check must judge the
-    // rect that will actually exist, not the one that was stored, and
-    // clamping only ever grows the rect from its top-left anchor — so
+    // The display the window would primarily occupy: greatest overlap,
+    // the rule Windows itself uses to assign a window's DPI and to pick
+    // the screen a maximise lands on. No overlap at all is already
+    // unreachable, and `None` here is that case.
+    let target = target_display(saved.x, saved.y, saved.width, saved.height, displays)?;
+    let scale = target.usable_scale();
+
+    // Clamp the restored size up to the minimum (#351), in the target
+    // display's logical pixels — **not** the saved row's. A 1400x900
+    // window saved at 1x is 700x450 logical on a 2x screen, which is
+    // below the minimum the Settings dialog needs; clamping against the
+    // scale it was saved at would let it reopen that small.
+    //
+    // The clamp is also the reason the reachability check runs after it:
+    // the check must judge the rect that will actually exist, and
+    // clamping only ever grows the rect from its top-left anchor, so
     // checking the stored rect first could throw away a window that
     // reopens perfectly reachable.
     //
     // The physical size is left byte-identical to the stored one unless
     // the clamp actually bites, so the ordinary case round-trips exactly
     // rather than through a float.
-    let logical_width = saved.width as f64 / saved.scale;
-    let logical_height = saved.height as f64 / saved.scale;
-    let physical_width = if logical_width < MIN_WIDTH {
-        (MIN_WIDTH * saved.scale).round().max(1.0) as u32
+    let physical_width = if (saved.width as f64 / scale) < MIN_WIDTH {
+        (MIN_WIDTH * scale).round().max(1.0) as u32
     } else {
         saved.width
     };
-    let physical_height = if logical_height < MIN_HEIGHT {
-        (MIN_HEIGHT * saved.scale).round().max(1.0) as u32
+    let physical_height = if (saved.height as f64 / scale) < MIN_HEIGHT {
+        (MIN_HEIGHT * scale).round().max(1.0) as u32
     } else {
         saved.height
     };
 
-    if !is_reachable(saved.x, saved.y, physical_width, physical_height, displays) {
+    if !is_reachable_on(saved.x, saved.y, physical_width, physical_height, target) {
         return None;
     }
 
@@ -274,27 +292,26 @@ pub fn plan_restore(raw: Option<&str>, displays: &[DisplayRect]) -> Option<Resto
     // pre-maximise size is deliberately not remembered (#369), so the
     // default is what Restore Down returns to.
     //
-    // That rect is then placed **wholly inside the display the window was
-    // maximised on**, because Windows maximises onto the display holding
-    // the largest part of the window: a default-sized rect left hanging
-    // over a neighbour could be handed to the wrong screen. Containment
-    // makes the choice unambiguous instead of probable, and it also makes
-    // the maximised plan reachable by construction — every pixel of its
+    // That rect is then placed **wholly inside the target display**,
+    // because Windows maximises onto the display holding the largest
+    // part of the window: a default-sized rect left hanging over a
+    // neighbour could be handed to the wrong screen. Containment makes
+    // the choice unambiguous instead of probable, and it also makes the
+    // maximised plan reachable by construction — every pixel of its
     // title bar is on a connected display.
-    let home = home_display(&saved, physical_width, physical_height, displays)?;
-    let width = ((DEFAULT_WIDTH * home.usable_scale()).round().max(1.0) as u32).min(home.width);
-    let height = ((DEFAULT_HEIGHT * home.usable_scale()).round().max(1.0) as u32).min(home.height);
+    let width = ((DEFAULT_WIDTH * scale).round().max(1.0) as u32).min(target.width);
+    let height = ((DEFAULT_HEIGHT * scale).round().max(1.0) as u32).min(target.height);
     let contained = RestorePlan {
         width,
         height,
-        // `width <= home.width` and `height <= home.height`, so the
+        // `width <= target.width` and `height <= target.height`, so the
         // clamp ranges below are never inverted.
         x: saved
             .x
-            .clamp(home.x, home.x + home.width as i32 - width as i32),
+            .clamp(target.x, target.x + target.width as i32 - width as i32),
         y: saved
             .y
-            .clamp(home.y, home.y + home.height as i32 - height as i32),
+            .clamp(target.y, target.y + target.height as i32 - height as i32),
         maximized: true,
     };
 
@@ -303,83 +320,75 @@ pub fn plan_restore(raw: Option<&str>, displays: &[DisplayRect]) -> Option<Resto
     // is reachable, not just the remembered rect. The only way a
     // contained rect fails is a display narrower than the grab area
     // itself, and opening at the default is the right answer for that.
-    is_reachable(
+    is_reachable_on(
         contained.x,
         contained.y,
         contained.width,
         contained.height,
-        displays,
+        target,
     )
     .then_some(contained)
 }
 
-/// The display a maximised window should be handed back to: the one
-/// holding its remembered origin, or failing that the one its remembered
-/// rect overlaps most.
+/// The display a window primarily occupies: the one its rectangle
+/// overlaps by the greatest area.
 ///
-/// Reachability has already passed when this is called, so some display
-/// overlaps the rect and the fallback always finds one.
-fn home_display<'a>(
-    saved: &SavedWindowState,
+/// This is both the DPI rule and the maximise rule Windows uses, so one
+/// resolution serves the clamp, the reachability thresholds and the
+/// containment. [`None`] means the rectangle touches no display at all,
+/// which is the clearest case of unreachable there is.
+fn target_display(
+    x: i32,
+    y: i32,
     width: u32,
     height: u32,
-    displays: &'a [DisplayRect],
-) -> Option<&'a DisplayRect> {
-    if let Some(display) = displays
-        .iter()
-        .find(|display| display.contains(saved.x, saved.y))
-    {
-        return Some(display);
-    }
+    displays: &[DisplayRect],
+) -> Option<&DisplayRect> {
     displays
         .iter()
-        .filter(|display| display.overlap_area(saved.x, saved.y, width, height) > 0)
-        .max_by_key(|display| display.overlap_area(saved.x, saved.y, width, height))
+        .filter(|display| display.overlap_area(x, y, width, height) > 0)
+        .max_by_key(|display| display.overlap_area(x, y, width, height))
 }
 
 /// The reachability rule: **at least 120 x 20 logical pixels of the
-/// window's title-bar strip — its top 32 logical pixels — must overlap
-/// some connected display**, measured in physical pixels against that
-/// display's own scale factor.
+/// window's title-bar strip — its top 32 logical pixels — must land on
+/// the display the window primarily occupies**, in that display's
+/// logical pixels.
 ///
 /// That is the testable form of "the user can grab the window and drag
 /// it somewhere else". It rejects the cases that strand a window: a
 /// position on a monitor that is no longer connected, a position below
 /// or to the right of a desktop that shrank, and a title bar pushed
-/// above the top of every display — the one offset a user cannot
-/// recover from, because the thing you drag with is the thing that is
-/// gone.
+/// above the top of the display — the one offset a user cannot recover
+/// from, because the thing you drag with is the thing that is gone.
 ///
-/// Public because it is a property of a *rectangle*, not only of a
-/// stored row: a test can assert it about the [`RestorePlan`] that comes
-/// back, which is the guarantee that matters.
-///
-/// An empty display list is unreachable, not vacuously reachable.
-pub fn is_reachable(x: i32, y: i32, width: u32, height: u32, displays: &[DisplayRect]) -> bool {
-    displays.iter().any(|display| {
-        let scale = display.usable_scale();
-        let strip_height = (TITLE_BAR_STRIP * scale).round() as i64;
-        let needed_width = (REACHABLE_WIDTH * scale).round() as i64;
-        let needed_height = (REACHABLE_HEIGHT * scale).round() as i64;
+/// Deliberately judged against **one** display. A window has one
+/// effective DPI and therefore one title-bar height; asking each
+/// candidate display to vouch for the window on its own terms lets a
+/// high-DPI neighbour accept a strip the window does not have.
+fn is_reachable_on(x: i32, y: i32, width: u32, height: u32, display: &DisplayRect) -> bool {
+    let scale = display.usable_scale();
+    let strip_height = (TITLE_BAR_STRIP * scale).round() as i64;
+    let needed_width = (REACHABLE_WIDTH * scale).round() as i64;
+    let needed_height = (REACHABLE_HEIGHT * scale).round() as i64;
 
-        let left = x as i64;
-        let right = left + width as i64;
-        let top = y as i64;
-        // A window shorter than the strip (impossible after the clamp,
-        // but the rule should not depend on that) contributes only its
-        // own height.
-        let bottom = top + strip_height.min(height as i64);
+    let left = x as i64;
+    let right = left + width as i64;
+    let top = y as i64;
+    // A window shorter than the strip (impossible after the clamp, but
+    // the rule should not depend on that) contributes only its own
+    // height.
+    let bottom = top + strip_height.min(height as i64);
 
-        let d_left = display.x as i64;
-        let d_right = d_left + display.width as i64;
-        let d_top = display.y as i64;
-        let d_bottom = d_top + display.height as i64;
+    let d_left = display.x as i64;
+    let d_right = d_left + display.width as i64;
+    let d_top = display.y as i64;
+    let d_bottom = d_top + display.height as i64;
 
-        let overlap_width = right.min(d_right) - left.max(d_left);
-        let overlap_height = bottom.min(d_bottom) - top.max(d_top);
+    let overlap_width = right.min(d_right) - left.max(d_left);
+    let overlap_height = bottom.min(d_bottom) - top.max(d_top);
 
-        overlap_width >= needed_width && overlap_height >= needed_height
-    })
+    overlap_width >= needed_width && overlap_height >= needed_height
 }
 
 /// The newest geometry seen, waiting to be written.
