@@ -6,5 +6,6 @@
 
 pub mod launch;
 pub mod session;
+pub mod window;
 
 pub use session::{SessionRuntime, SESSION_ENDED_EVENT, SESSION_STARTED_EVENT};

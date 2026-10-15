@@ -78,6 +78,14 @@ pub mod keys {
         "onboarding.complete"
     }
 
+    /// #369 — the main window's remembered geometry, as the JSON of a
+    /// [`crate::core::window_state::SavedWindowState`]. One row rather
+    /// than four: the numbers are only ever meaningful together, and a
+    /// half-written position is exactly the state that strands a window.
+    pub fn window_geometry() -> &'static str {
+        "window.mainGeometry"
+    }
+
     /// Slice 16-b (#24) — `true` iff the user pressed *Skip setup*
     /// instead of completing the wizard. Drives the "Finish setup"
     /// banner the spec puts on Settings until the user resumes.
