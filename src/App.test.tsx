@@ -578,11 +578,21 @@ it("pins the per-Game status to the bottom of the window instead of the page flo
     expect(pinned.backgroundColor).toMatch(/^rgb\([^)]*\)$/);
     expect(pinned.borderTopWidth).not.toBe("0px");
 
-    // The bar spans the window and lines up with the page content on `.app`'s
+    // The layout the bar is aligned to: `.app` fills the window and is not
+    // re-centred (#367). This needs its own assertion, because the gutter
+    // below stays correct whether or not the page caps its width — so a
+    // returning cap is invisible there unless whoever re-adds it also re-adds
+    // the old `calc()`, which a regression would not necessarily do.
+    const page = getComputedStyle(main);
+    expect(
+      { cap: page.maxWidth, centred: [page.marginLeft, page.marginRight].includes("auto") },
+      "the content layer fills the window: a `max-width` or an `auto` inline margin centres a column again",
+    ).toEqual({ cap: "none", centred: false });
+
+    // The bar spans the window and lines up with that page content on `.app`'s
     // own 1.5rem inline gutter. It used to add `max(0px, (100% - 880px) / 2)`
-    // to re-centre itself on a column it was not inside; `.app` fills the
-    // window now, so a gutter computed from a page width would mean the cap
-    // had come back (#367).
+    // to re-centre itself on a column it was not inside; with the column gone,
+    // the gutter is simply the page's.
     expect(
       pinned.paddingInline,
       "the bar's inline padding is the page's gutter, not a gutter computed from a page width",
