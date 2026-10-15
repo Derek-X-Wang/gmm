@@ -665,7 +665,7 @@ it("refreshes cached Settings path-state when setup finishes", async () => {
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await clickMenuItem(listen, "run-setup");
-  await screen.findByRole("heading", { name: "GMM — first-run setup" });
+  await screen.findByRole("heading", { name: "First-run setup" });
   states.srmi = { ...states.srmi, modelImporter: { status: "installed" } };
   await userEvent.click(screen.getByRole("button", { name: "Skip setup" }));
   await openGame();
@@ -888,7 +888,7 @@ it("resets onboarding from the menu once, and not again while the reset is pendi
   expect(resets()).toHaveLength(1);
 
   await act(async () => finishReset());
-  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "First-run setup" })).toBeVisible();
 });
 
 it("keeps a failed menu reset on the main screen instead of losing it with the menu", async () => {
@@ -905,7 +905,7 @@ it("keeps a failed menu reset on the main screen instead of losing it with the m
   // A failure stays a persistent error on the main screen; the menu it was
   // started from is already closed and can hold nothing.
   expect(await screen.findByText("Setup reset refused")).toBeVisible();
-  expect(screen.queryByRole("heading", { name: "GMM — first-run setup" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "First-run setup" })).not.toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toBeVisible();
   // Still retryable: the failure is a notice, not a dead end.
   await clickMenuItem(listen, "run-setup");
@@ -1010,7 +1010,7 @@ it("starts one reset when two run-setup events arrive before React commits", asy
 
   expect(invoke.mock.calls.filter(([command]) => command === "reset_onboarding")).toHaveLength(1);
   await act(async () => finishReset());
-  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "First-run setup" })).toBeVisible();
 });
 
 it("moves focus out of a Settings page the menu is about to hide", async () => {

@@ -36,7 +36,7 @@ The link target is the `Antivirus and SmartScreen` section of the repo README, w
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ GMM — first-run setup                              [_][o][x] │
+│ GMM                                                [_][o][x] │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │   ┌────────────────────────────────────────────────────┐    │
@@ -47,7 +47,7 @@ The link target is the `Antivirus and SmartScreen` section of the repo README, w
 │   │    ☐ I've read the AV note                        │    │
 │   └────────────────────────────────────────────────────┘    │
 │                                                              │
-│   Welcome to GMM                                            │
+│   Welcome                                                   │
 │                                                              │
 │   GMM keeps every mod in a central Library, separate from   │
 │   your game installs. Enabling a mod links it into the      │
@@ -97,7 +97,7 @@ Continue is always enabled, even if every game is skipped (we land them in the m
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ GMM — first-run setup                              [_][o][x] │
+│ GMM                                                [_][o][x] │
 ├──────────────────────────────────────────────────────────────┤
 │ Find your games                                              │
 │ GMM scans common install locations + the Windows registry.   │
@@ -136,7 +136,7 @@ Continue is always enabled, even if every game is skipped (we land them in the m
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ GMM — first-run setup                              [_][o][x] │
+│ GMM                                                [_][o][x] │
 ├──────────────────────────────────────────────────────────────┤
 │ Where should GMM keep your Library?                          │
 │                                                              │
@@ -176,7 +176,7 @@ Continue is always enabled, even if every game is skipped (we land them in the m
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ GMM — first-run setup                              [_][o][x] │
+│ GMM                                                [_][o][x] │
 ├──────────────────────────────────────────────────────────────┤
 │ Install Model Importers                                      │
 │ One Model Importer (3dmigoto-derived DLL) per game.          │

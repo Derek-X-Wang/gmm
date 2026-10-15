@@ -511,7 +511,7 @@ it("refreshes partial onboarding reset while retaining the setup error", async (
   await screen.findByRole("heading", { name: "Genshin Impact" });
   // Help → Run setup again is a native menu item since #351.
   await clickMenuItem(listen, "run-setup");
-  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "First-run setup" })).toBeInTheDocument();
   expect(screen.getByText("Setup reset partly saved")).toBeInTheDocument();
 });
 
@@ -723,14 +723,14 @@ it("leads with Add game and setup access when completion has no saved install pa
   // A user with no saved path must still be able to re-run setup; the only
   // route left is the menu.
   await clickMenuItem(listen, "run-setup");
-  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "First-run setup" })).toBeVisible();
 });
 
 it("keeps Resume setup available after skipping and returns through the same wizard", async () => {
   responses.is_onboarding_complete = { complete: true, skipped: true };
   renderApp();
   await userEvent.click(await screen.findByRole("button", { name: "Resume setup" }));
-  expect(await screen.findByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+  expect(await screen.findByRole("heading", { name: "First-run setup" })).toBeVisible();
   expect(invoke.mock.calls.some(([command]) => command === "reset_onboarding")).toBe(false);
   mutations.mark_onboarding_complete = () => { responses.is_onboarding_complete = { complete: true, skipped: true }; };
   await userEvent.click(screen.getByRole("button", { name: "Skip setup" }));
