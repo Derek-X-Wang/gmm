@@ -450,7 +450,7 @@ it.each([
   expect(screen.getByRole("button", { name: "Resume setup" })).toBeVisible();
   expect(invoke.mock.calls.filter(([name]) => /^(install_|mark_onboarding_complete$|reset_onboarding$)/.test(name))).toEqual([]);
   await userEvent.click(screen.getByRole("button", { name: "Resume setup" }));
-  expect(screen.getByRole("heading", { name: "GMM — first-run setup" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "First-run setup" })).toBeVisible();
 });
 
 it.each(["global", "game", "add"])("restores the selected Game, Mod anchor and %s arrival focus on Back and Escape", async (arrival) => {
