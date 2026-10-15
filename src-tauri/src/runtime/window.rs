@@ -257,6 +257,14 @@ fn spawn_writer(core: Core, pending: Arc<PendingWindowState>) -> Sender<()> {
 
 /// Read the window's current geometry.
 ///
+/// **Inner size, outer position** — the pair that matches what [`apply`]
+/// sets. Tauri's `set_size` takes an *inner* size and `set_position` an
+/// *outer* position, so capturing `outer_size` here would write back a
+/// size a decoration wider and taller than the one the next launch
+/// applies as the inner size, and the window would grow a little every
+/// session. The inner size is also what `minWidth`/`minHeight` constrain,
+/// so it is the size the 900x600 clamp is about.
+///
 /// A minimised window is skipped: Windows reports it at -32000,-32000,
 /// and remembering that is exactly the stranded window this feature
 /// exists to avoid. [`SavedWindowState::is_plausible`] would catch it
@@ -266,7 +274,7 @@ fn capture<R: Runtime>(window: &WebviewWindow<R>) -> Option<SavedWindowState> {
         return None;
     }
     let position = window.outer_position().ok()?;
-    let size = window.outer_size().ok()?;
+    let size = window.inner_size().ok()?;
     Some(SavedWindowState {
         x: position.x,
         y: position.y,

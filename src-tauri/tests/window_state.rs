@@ -615,3 +615,28 @@ fn the_restore_shows_the_window_on_every_path() {
         "a panic in restore_and_track would leave the window hidden forever",
     );
 }
+
+/// What is captured must pair with what is applied.
+///
+/// Tauri's `set_size` takes an **inner** size and `set_position` an
+/// **outer** position. Capturing the outer size instead would write back
+/// a size a decoration wider and taller than the next launch applies as
+/// the inner size, and the window would creep larger every session — a
+/// drift no single-session test can see, and one a user would read as
+/// GMM slowly losing its mind rather than as a bug.
+#[test]
+fn the_captured_size_pairs_with_the_setter_that_applies_it() {
+    let source = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime/window.rs"),
+    )
+    .expect("read src/runtime/window.rs");
+
+    assert!(
+        source.contains("window.inner_size()") && !source.contains("window.outer_size()"),
+        "the remembered size must be the inner size `set_size` applies",
+    );
+    assert!(
+        source.contains("window.outer_position()") && !source.contains("window.inner_position()"),
+        "the remembered position must be the outer position `set_position` applies",
+    );
+}

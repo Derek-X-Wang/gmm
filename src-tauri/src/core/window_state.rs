@@ -68,15 +68,21 @@ const MAX_PHYSICAL_EXTENT: i64 = 30_000;
 /// `scale` is the window's scale factor at the moment of the write, and
 /// is what converts the physical size back to the logical size the
 /// 900x600 minimum is expressed in.
+///
+/// The **position is the outer rect's** and the **size is the inner
+/// rect's**, which is the pair the Tauri setters take: anything else and
+/// the window drifts by a decoration's worth every session. The strip
+/// the reachability rule measures therefore starts at the top of the
+/// decorations, where the title bar actually is.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SavedWindowState {
     /// Physical x of the window's outer rect.
     pub x: i32,
     /// Physical y of the window's outer rect.
     pub y: i32,
-    /// Physical width of the window's outer rect.
+    /// Physical width of the window's inner rect.
     pub width: u32,
-    /// Physical height of the window's outer rect.
+    /// Physical height of the window's inner rect.
     pub height: u32,
     /// The window's scale factor when this was captured.
     pub scale: f64,
