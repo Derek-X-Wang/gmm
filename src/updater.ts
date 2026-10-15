@@ -9,7 +9,20 @@ export type UpdateState =
   | { kind: "declined"; version: string; remembered?: boolean }
   | { kind: "downloading"; downloaded: number; total: number | null }
   | { kind: "installed"; restartError?: string }
-  | { kind: "error"; message: string };
+  | { kind: "error"; failure: UpdateFailure; message: string };
+
+/**
+ * Which step could not be completed. The message already names it in prose
+ * for Settings; the discriminator is what lets a surface too small for the
+ * message — the status bar's reading (#357) — say which step failed instead
+ * of inventing a single wording for three different facts.
+ */
+export type UpdateFailure = keyof typeof failures;
+const failures = {
+  check: "Update check failed",
+  install: "Update installation failed",
+  rememberSkip: "Update skipped, but could not remember this choice",
+} as const;
 
 export const declinedBuildKey = "updater.skippedBuild";
 export interface SkipStorage {
@@ -56,9 +69,9 @@ export function createUpdateController(
     state = next;
     listeners.forEach((listener) => listener());
   };
-  const fail = (action: string, error: unknown) => {
-    lastError = `${action}: ${error instanceof Error ? error.message : String(error)}`;
-    publish({ kind: "error", message: lastError });
+  const fail = (failure: UpdateFailure, error: unknown) => {
+    lastError = `${failures[failure]}: ${error instanceof Error ? error.message : String(error)}`;
+    publish({ kind: "error", failure, message: lastError });
   };
 
   const checkForUpdates = async (background = false) => {
@@ -80,7 +93,7 @@ export function createUpdateController(
       offered = update;
       publish({ kind: "available", version: update.version, notes: update.body });
     } catch (error) {
-      fail("Update check failed", error);
+      fail("check", error);
     }
   };
 
@@ -102,7 +115,7 @@ export function createUpdateController(
       });
       publish({ kind: "installed" });
     } catch (error) {
-      fail("Update installation failed", error);
+      fail("install", error);
     }
   };
 
@@ -116,7 +129,7 @@ export function createUpdateController(
       if (identity !== null) await storage.setItem(declinedBuildKey, JSON.stringify({ version, identity }));
       publish(identity === null ? { kind: "declined", version, remembered: false } : { kind: "declined", version });
     } catch (error) {
-      fail("Update skipped, but could not remember this choice", error);
+      fail("rememberSkip", error);
     } finally {
       savingSkip = false;
     }

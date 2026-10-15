@@ -749,6 +749,8 @@ code {
   padding-inline: 1.5rem;
   background: #18181b;
   border-top: 1px solid #2e2e36;
+  display: grid;
+  gap: 0.5rem;
 }
 
 @media (prefers-color-scheme: light) {
@@ -770,6 +772,21 @@ code {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* A GMM update is a reading in this bar, after the Game facts and in the
+ * bar's own type size, not a card floating over them (#357). It adds a row,
+ * so the bar can need more than its `max-height` with a long wrapped Game
+ * status beside it; that is what the bar's own scroll is for. The bar scrolls,
+ * it never grows over the page, and `.app`'s bottom padding stays the
+ * clearance for the whole height (#351, #352). */
+.status-bar__update {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
   font-size: 14px;
