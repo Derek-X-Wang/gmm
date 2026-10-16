@@ -601,8 +601,12 @@ code {
  * 900x600 window minimum (#351) that is an 836x536 panel with 32px of the
  * main screen visible on every side, so it reads as a dialog over the screen
  * rather than a page that replaced it; at 1100x760 and above it settles at
- * its 1120px content width. The panel scrolls inside itself, so a long
- * Settings page never pushes the dialog past the window edge, and
+ * its 1120px content width. Only the page content scrolls (#379); the header
+ * stays in the first row, and navigation beside the page has an independent
+ * scroll when all six Games exceed the available height. The zero minimums
+ * let the second row and its children shrink below their content height, so
+ * the lowest controls stay inside their scroll areas at the window minimum.
+ * A long page never pushes the dialog past the window edge, and
  * `overscroll-behavior: contain` on the scrim stops that scroll from chaining
  * into the main screen behind.
  *
@@ -629,8 +633,9 @@ code {
 .settings-dialog {
   width: min(1120px, 100%);
   max-height: 100%;
-  overflow: auto;
+  overflow: hidden;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 1.5rem;
   align-content: start;
   padding: 1.5rem;
@@ -640,13 +645,28 @@ code {
   box-shadow: 0 1.5rem 3.75rem rgba(0, 0, 0, 0.55);
 }
 
-.settings-layout { display: grid; grid-template-columns: minmax(150px, 240px) minmax(0, 1fr); gap: 1.5rem; }
-.settings-navigation { display: flex; flex-direction: column; gap: .5rem; align-self: start; }
+.settings-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(150px, 240px) minmax(0, 1fr);
+  gap: 1.5rem;
+}
+.settings-navigation {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  align-self: stretch;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.settings-navigation > * { flex-shrink: 0; }
 .settings-navigation h2 { font-size: 14px; margin: 1rem 0 .25rem; }
 .settings-navigation button { text-align: left; background: #23232a; color: inherit; border: 1px solid #2e2e36; }
 .settings-navigation button[aria-current="page"] { border-color: #3b82f6; }
 .settings-navigation button span { display: block; font-size: 12px; margin-top: .25rem; color: #9a9aa3; }
-.settings-content { min-width: 0; }
+.settings-content { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .settings-content .card { padding: 1rem; }
 .settings-content p { overflow-wrap: anywhere; }
 .settings-content input.path { min-width: 0; width: 100%; }
