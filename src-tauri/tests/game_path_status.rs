@@ -901,3 +901,74 @@ async fn recorded_unreadable_entry_is_damaged_and_wrong_type_stays_unverified() 
         ModelImporterState::Unverified { ref error, record: Some(_), .. } if error.contains("must be a file"))
     );
 }
+
+#[tokio::test]
+async fn local_pin_version_is_independent_of_install_receipts() {
+    use tauri::Manager;
+    let (tmp, core, db) = fixture().await;
+    let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert_eq!(status.pinned_version, None);
+    assert!(serde_json::to_value(status).unwrap()["pinnedVersion"].is_null());
+    core.set_importer_pinned(GameCode::Gimi, Some("v0.9"))
+        .await
+        .unwrap();
+    let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert_eq!(status.pinned_version.as_deref(), Some("v0.9"));
+    assert_eq!(status.game_path, GamePathState::NoSavedPath);
+    assert!(matches!(
+        status.model_importer,
+        ModelImporterState::Unverified { record: None, .. }
+    ));
+    assert_eq!(
+        core.game_path_status(GameCode::Srmi)
+            .await
+            .unwrap()
+            .pinned_version,
+        None
+    );
+
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    importer(&game);
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert_eq!(status.pinned_version.as_deref(), Some("v0.9"));
+    assert!(matches!(
+        status.model_importer,
+        ModelImporterState::UnrecordedImporterPresent { .. }
+    ));
+    gmm_lib::core::updates::set_importer_installed(&db, GameCode::Gimi, "v1.0")
+        .await
+        .unwrap();
+    let app = tauri::test::mock_app();
+    app.manage(core);
+    let status = gmm_lib::commands::get_game_path_status(app.state(), GameCode::Gimi)
+        .await
+        .unwrap();
+    assert!(matches!(
+        status.model_importer,
+        ModelImporterState::Installed { .. }
+    ));
+    let json = serde_json::to_value(status).unwrap();
+    assert_eq!(json["pinnedVersion"], "v0.9");
+    assert_eq!(json["modelImporter"]["record"]["installedVersion"], "v1.0");
+
+    fs::remove_dir(game.join("Core")).unwrap();
+    let core = app.state::<Core>();
+    let status = core.game_path_status(GameCode::Gimi).await.unwrap();
+    assert!(matches!(
+        status.model_importer,
+        ModelImporterState::Damaged { .. }
+    ));
+    assert_eq!(status.pinned_version.as_deref(), Some("v0.9"));
+    core.set_importer_pinned(GameCode::Gimi, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        core.game_path_status(GameCode::Gimi)
+            .await
+            .unwrap()
+            .pinned_version,
+        None
+    );
+}

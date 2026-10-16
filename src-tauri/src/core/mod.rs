@@ -3414,13 +3414,16 @@ impl Core {
     pub async fn game_path_status(&self, game: GameCode) -> Result<game_path::GamePathStatus> {
         let saved_path = self.game_install_path(game).await?;
         let record = updates::importer_install_record(&self.pool, game).await?;
+        let pinned_version = updates::importer_pinned(&self.pool, game).await?;
         // Production commands and behavioural tests share this boundary. Disk
         // checks can wait on unavailable drives; keep them off async workers.
-        tokio::task::spawn_blocking(move || game_path::inspect(game, saved_path, record))
-            .await
-            .map_err(|error| {
-                Error::PathInspectionTask(format!("path inspection task join error: {error}"))
-            })
+        tokio::task::spawn_blocking(move || {
+            game_path::inspect(game, saved_path, record, pinned_version)
+        })
+        .await
+        .map_err(|error| {
+            Error::PathInspectionTask(format!("path inspection task join error: {error}"))
+        })
     }
 
     /// Validate and persist a game's install path.

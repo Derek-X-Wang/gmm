@@ -17,7 +17,7 @@ const recoveryValue: ImporterEvacuationRecovery = {
   gamePath: "C:/Game", backupPath: "C:/Backup", attempts: 1, attemptedAt: "2026-10-11",
 };
 beforeEach(() => {
-  path = { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
+  path = { pinnedVersion: null, game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
   update = { available: false, installedVersion: "1.0", latestVersion: "1.0", pinned: false, upstreamAhead: false, checkError: null };
   recovery = null;
   commands = {};
