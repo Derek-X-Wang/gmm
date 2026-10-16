@@ -1456,9 +1456,10 @@ it.each(["Honkai: Star Rail", "GMM settings"])("keeps Close and navigation outsi
   expect(layout.parentElement).toBe(panel);
   expect(navigation.parentElement).toBe(layout);
   expect(content.parentElement).toBe(layout);
-  expect(content).not.toContainElement(header);
-  expect(content).not.toContainElement(navigation);
-  expect(within(navigation).getAllByRole("button")).toHaveLength(7);
+  // Parent checks alone allow both region selectors to name the same node.
+  expect(content).not.toBe(navigation);
+  for (const name of [...games.map((game) => game.displayName), "GMM settings"])
+    expect(pageButton(name)).toBeInTheDocument();
   expect(content).toContainElement(screen.getByRole("heading", { name: page, level: 2 }));
 
   // The second row can shrink below its contents. Both nested grid items

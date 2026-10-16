@@ -606,6 +606,8 @@ code {
  * scroll when all six Games exceed the available height. The zero minimums
  * let the second row and its children shrink below their content height, so
  * the lowest controls stay inside their scroll areas at the window minimum.
+ * The header row is deliberately unbounded, so substantial new header content
+ * would consume the content row's space.
  * A long page never pushes the dialog past the window edge, and
  * `overscroll-behavior: contain` on the scrim stops that scroll from chaining
  * into the main screen behind.
