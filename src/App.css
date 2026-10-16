@@ -126,6 +126,7 @@ button:disabled {
 
 input.path,
 input[type="text"],
+input[type="password"],
 input:not([type]) {
   flex: 1;
   min-width: 200px;

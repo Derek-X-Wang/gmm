@@ -155,7 +155,9 @@ it("replaces obsolete Variant choices after applying a Mod update", async () => 
     responses.list_mod_updates = [];
   };
   renderApp();
-  expect(await screen.findByRole("radio", { name: "Old Red" })).toBeChecked();
+  // Variants mount after the startup and Mod queries, with no separate loading indicator.
+  // Allow startup headroom only here; keep the update assertions on their normal budget.
+  expect(await screen.findByRole("radio", { name: "Old Red" }, { timeout: 10_000 })).toBeChecked();
   await userEvent.click(await screen.findByRole("button", { name: "Update → 2.0" }));
   const newVariant = await screen.findByRole("radio", { name: "New Blue" });
   expect(screen.queryByRole("radio", { name: "Old Red" })).not.toBeInTheDocument();
