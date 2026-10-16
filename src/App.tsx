@@ -3,6 +3,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { GameHeader } from "./GameHeader";
 import { GlobalHeaderLine } from "./GlobalHeaderLine";
 import { ModList } from "./ModList";
+import { SessionCheckNotice, useSessionCheck } from "./SessionCheckNotice";
+import { useRecoveryOutcomes } from "./RecoveryOutcome";
 import { GameTabs } from "./GameTabs";
 import { GameStatusStrip } from "./GameStatusStrip";
 import { GameRecoveryNotice } from "./GameRecoveryNotice";
@@ -172,7 +174,7 @@ function MainApp({
   // visit must not evict it and clamp the return scroll to an empty screen.
   useQuery({ queryKey: ["mods", activeGame], queryFn: () => listMods(activeGame) });
   const { staleSession, dismissStaleSession } = useSessionLifecycle();
-  const sessionSurface = useSessionPresentation({ staleSession, onDismiss: dismissStaleSession });
+  const sessionSurface = useSessionPresentation({ games: list, staleSession, onDismiss: dismissStaleSession });
   const launchSurface = useLaunchGame({ game: activeGame, displayName: active.displayName });
   // An available GMM update is a reading in the status bar, not a card
   // floating over it (#357). The bar carries it, so the bar exists while
@@ -476,7 +478,8 @@ function useSessionLifecycle() {
   return { staleSession, dismissStaleSession: () => setStaleSession(null) };
 }
 
-function useSessionPresentation({ staleSession, onDismiss }: {
+function useSessionPresentation({ games, staleSession, onDismiss }: {
+  games: GameSummary[];
   staleSession: SessionInfo | null;
   onDismiss: () => void;
 }) {
@@ -491,9 +494,15 @@ function useSessionPresentation({ staleSession, onDismiss }: {
     queryFn: interruptedSessionLaunches,
     refetchOnWindowFocus: true,
   });
+  const retirement = useRecoveryOutcomes();
   const retireLaunch = useMutation({
-    mutationFn: retireInterruptedSessionLaunch,
-    onSuccess: () => {
+    mutationFn: ({ id }: { id: string; game: ApiGameCode }) => retireInterruptedSessionLaunch(id),
+    onMutate: ({ game }) => retirement.start(game, `Retiring the ${game.toUpperCase()} launch reservation…`),
+    onSuccess: (_, { game }) => retirement.finish(game,
+      `${game.toUpperCase()} launch reservation retired or already absent. GMM did not verify process identity.`),
+    onError: (error, { game }) => retirement.finish(game,
+      `Could not retire the launch reservation: ${commandFailureMessage(error)}`, true),
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["interruptedSessionLaunches"] });
       queryClient.invalidateQueries({ queryKey: ["session"] });
     },
@@ -501,17 +510,13 @@ function useSessionPresentation({ staleSession, onDismiss }: {
 
   return {
     notices: <>
+      {games.map(({ code, displayName }) => retirement.region(code, `${displayName} launch recovery outcome`))}
       {(interruptedLaunches.data ?? []).map((launch) => (
         <InterruptedSessionLaunchWarning
           key={launch.id}
           launch={launch}
-          pending={retireLaunch.isPending && retireLaunch.variables === launch.id}
-          error={
-            retireLaunch.isError && retireLaunch.variables === launch.id
-              ? commandFailureMessage(retireLaunch.error)
-              : undefined
-          }
-          onRetire={() => retireLaunch.mutate(launch.id)}
+          pending={retireLaunch.isPending && retireLaunch.variables?.id === launch.id}
+          onRetire={() => retireLaunch.mutate({ id: launch.id, game: launch.game })}
         />
       ))}
     </>,
@@ -525,7 +530,7 @@ function useSessionPresentation({ staleSession, onDismiss }: {
           <button onClick={onDismiss}>Dismiss</button>
         </section>
       ) : null}
-      {session.data ? (
+      {session.isSuccess && session.data ? (
         <section className="card session-banner session-banner--active" role="status">
           <strong>{session.data.game.toUpperCase()} is running</strong>
           <span className="muted">
@@ -537,16 +542,7 @@ function useSessionPresentation({ staleSession, onDismiss }: {
   };
 }
 
-/** Hook surfaces whether a session is currently active. */
-function useSessionActive(): boolean {
-  const session = useQuery({
-    queryKey: ["session"],
-    queryFn: currentSession,
-  });
-  return !!session.data;
-}
-
-/** Per-game Launch button. Disabled while a session is already active. */
+/** Per-game Launch button. Available only after a verified inactive session check. */
 function useLaunchGame({
   game,
   displayName,
@@ -555,7 +551,9 @@ function useLaunchGame({
   displayName: string;
 }) {
   const queryClient = useQueryClient();
-  const sessionActive = useSessionActive();
+  const check = useSessionCheck();
+  const { session } = check;
+  const sessionBlocked = !session.isSuccess || !!session.data;
 
   // Lazy-load the structured AV / SmartScreen guidance only when we
   // need it (i.e. a launch failed with an AV-pattern error). The
@@ -589,11 +587,12 @@ function useLaunchGame({
     action: <button
       className="game-header__launch"
       onClick={() => launch.mutate()}
-      disabled={sessionActive || launch.isPending}
+      disabled={sessionBlocked || launch.isPending}
     >
-      {sessionActive ? "Game running…" : launch.isPending ? "Launching…" : `Launch ${displayName}`}
+      {session.isSuccess && session.data ? "Game running…" : launch.isPending ? "Launching…" : `Launch ${displayName}`}
     </button>,
     notice: <>
+      <SessionCheckNotice check={check} />
       {partitioned && partitioned.isAvPattern && guidance.data ? (
         <AvGuidanceCallout
           guidance={guidance.data}

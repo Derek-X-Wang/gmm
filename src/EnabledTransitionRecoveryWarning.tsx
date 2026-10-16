@@ -5,13 +5,11 @@ export function EnabledTransitionRecoveryWarning({
   modName,
   recovery,
   pending,
-  error,
   onRetire,
 }: {
   modName: string;
   recovery: EnabledTransitionRecovery;
   pending: boolean;
-  error?: string;
   onRetire: () => void;
 }) {
   return (
@@ -43,9 +41,6 @@ export function EnabledTransitionRecoveryWarning({
               ? "Retiring producer…"
               : "I confirmed no other GMM is changing this Mod — retire producer"}
           </button>
-          {error ? (
-            <span className="error">Could not retire the transition producer: {error}</span>
-          ) : null}
         </>
       ) : null}
       <details>
