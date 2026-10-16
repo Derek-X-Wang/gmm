@@ -11,6 +11,8 @@ const createUpdateController = (check: Parameters<typeof createController>[0], s
 
 const { relaunch } = vi.hoisted(() => ({ relaunch: vi.fn() }));
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: vi.fn() }));
+// Keep the npm process plugin while frontend tests mock it;
+// update those mocks before removing the dependency (#380).
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch }));
 const openSettings = vi.fn();
 beforeEach(() => {
