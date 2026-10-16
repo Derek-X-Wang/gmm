@@ -205,7 +205,7 @@ function renderImportApp() {
       case "get_game_path_status": return {
         game: args!.game, savedPath: paths[args!.game] || null,
         gamePath: { status: paths[args!.game] ? "readable" : "noSavedPath" },
-        modelImporter: { status: "unverified", path: null, error: "Not checked" },
+        modelImporter: { status: "unverified", record: null, path: null, error: "Not checked" },
       };
       case "attention_status": return {
         safeToProceed: true, reinstalls: [], enabledTransitions: [], importerEvacuations: [],

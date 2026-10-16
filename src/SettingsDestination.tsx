@@ -1,3 +1,4 @@
+import { modelImporterDetails } from "./api";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -246,7 +247,9 @@ export function gamePathLine(status: GamePathStatus): string {
     case "readable":
       switch (status.modelImporter.status) {
         case "installed": return `${status.game.toUpperCase()} installed · Game readable`;
-        case "requiredEntriesNotFound": return "Game readable · Model Importer not installed";
+        case "damaged": return "Game readable · Model Importer damaged";
+        case "noImporterEntriesFound": return "Cannot tell — no GMM install recorded; no Model Importer entries found";
+        case "unrecordedImporterPresent": return "Cannot tell — Model Importer files found; no GMM install recorded";
         case "unverified": return "Game readable · Cannot verify Model Importer";
       }
   }
@@ -261,8 +264,7 @@ function GamePathExplanation({ game }: { game: GameCode }) {
     if ((path.status === "savedPathNotFound" || path.status === "requiredEntriesNotFound")) details = path.status === "requiredEntriesNotFound"
       ? `Missing Game entries: ${path.paths.join(", ")}` : path.paths.join(", ");
     else if (path.status === "invalid" || path.status === "unreadable") details = path.error;
-    else if (value.modelImporter.status === "unverified") details = value.modelImporter.error;
-    else if (value.modelImporter.status === "requiredEntriesNotFound") details = value.modelImporter.paths.join(", ");
+    else details = modelImporterDetails(value.modelImporter);
   }
   return <div role="status">
     <p>{status.isPending ? "Checking Game and Model Importer…" : status.isError

@@ -59,7 +59,7 @@ beforeEach(() => {
   invoke.mockImplementation(async (command: string, args: { game?: string; path: string | null }) => {
     if (command === "get_library_paths") return read();
     if (command === "set_library_root" || command === "set_library_path_for_game") return move(command, args);
-    if (command === "get_game_path_status") return { game: args.game, savedPath: null, gamePath: { status: "noSavedPath" }, modelImporter: { status: "unverified", path: null, error: "Not checked" } };
+    if (command === "get_game_path_status") return { game: args.game, savedPath: null, gamePath: { status: "noSavedPath" }, modelImporter: { status: "unverified", record: null, path: null, error: "Not checked" } };
     if (command === "audit_library") return { unreferenced: [], duplicates: [], totalBytes: 0 };
     if (command === "get_proxy_config") return { url: null, username: null, passwordSet: false };
     return null;

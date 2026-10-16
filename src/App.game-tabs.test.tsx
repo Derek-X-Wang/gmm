@@ -48,8 +48,8 @@ beforeEach(() => {
         game: args!.game, savedPath: paths[args!.game] ?? null,
         gamePath: { status: paths[args!.game] ? "readable" : "noSavedPath" },
         modelImporter: paths[args!.game]
-          ? { status: "requiredEntriesNotFound", paths: ["d3dx.ini"] }
-          : { status: "unverified", path: null, error: "No saved path" },
+          ? { status: "noImporterEntriesFound", paths: ["d3dx.ini"] }
+          : { status: "unverified", record: null, path: null, error: "No saved path" },
       };
       case "attention_status": return {
         safeToProceed: true, reinstalls: [], enabledTransitions: [], importerEvacuations: [],
@@ -266,15 +266,15 @@ it.each(["unreadable", "savedPathNotFound", "requiredEntriesNotFound", "importer
       gamePath: state === "unreadable" ? { status: "unreadable", path: "C:/StarRail", error: "Access denied" }
         : state === "savedPathNotFound" ? { status: "savedPathNotFound", paths: ["C:/StarRail"] }
         : state === "requiredEntriesNotFound" ? { status: "requiredEntriesNotFound", paths: ["C:/StarRail/StarRail.exe"] } : { status: "readable" },
-      modelImporter: state === "importerAbsent" ? { status: "requiredEntriesNotFound", paths: ["C:/StarRail/d3dx.ini"] }
-        : { status: "unverified", path: null, error: "Cannot inspect files" },
+      modelImporter: state === "importerAbsent" ? { status: "noImporterEntriesFound", paths: ["C:/StarRail/d3dx.ini"] }
+        : { status: "unverified", record: null, path: null, error: "Cannot inspect files" },
     };
     return implementation(command, args);
   });
   renderWithQuery(<App />);
   const line = state === "unreadable" ? "Cannot tell — install path unreadable · Model Importer unverified"
     : state === "savedPathNotFound" ? "Saved installation cannot be found · Model Importer unverified"
-    : state === "requiredEntriesNotFound" ? "Required Game files or directories not found · Model Importer unverified" : "Game readable · Model Importer not installed";
+    : state === "requiredEntriesNotFound" ? "Required Game files or directories not found · Model Importer unverified" : "Cannot tell — no GMM install recorded; no Model Importer entries found";
   const strip = await screen.findByRole("region", { name: "Honkai: Star Rail status" });
   expect(await within(strip).findByText(`Game: ${line}`)).toBeVisible();
   expect(tabNames()).toEqual(["Honkai: Star Rail"]);
@@ -439,7 +439,7 @@ it.each([
     expect(gameRow).toHaveTextContent("Absent · no saved path");
     expect(screen.getByLabelText("Onboarding Genshin path")).toHaveTextContent("No saved path");
   } else {
-    await waitFor(() => expect(gameRow).toHaveTextContent("Game readable · Model Importer not installed"));
+    await waitFor(() => expect(gameRow).toHaveTextContent("Cannot tell — no GMM install recorded; no Model Importer entries found"));
     expect(screen.getByRole("textbox", { name: "Genshin Impact install path" })).toHaveValue("C:/Genshin");
     expect(screen.getByLabelText("Onboarding Genshin path")).toHaveTextContent("C:/Genshin");
   }

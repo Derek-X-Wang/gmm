@@ -146,7 +146,8 @@ export async function getGameInstallPath(game: GameCode): Promise<string | null>
  * an existing saved directory. Both retain the saved path/configured tab;
  * neither is the prototype `missing` row (which concerns the Model Importer).
  * readable + installed Model Importer -> `healthy`.
- * readable + requiredEntriesNotFound Model Importer -> prototype `missing`.
+ * readable + damaged Model Importer -> recorded install with missing/unreadable entries.
+ * No receipt remains uncertainty, including when no required entries were found.
  * readable + unverified Model Importer keeps the verified Game fact; it must
  * not render as prototype `missing`. invalid has no named prototype row.
  */
@@ -158,18 +159,52 @@ export type GamePathState =
   | { status: "invalid"; error: string }
   | { status: "unreadable"; path: string; error: string };
 
+/** Local SQLite install evidence. Unknown origin is never filled from defaults. */
+export interface ImporterInstallRecord {
+  installedVersion: string | null;
+  origin: InstalledOrigin;
+}
+
 export type ModelImporterState =
-  | { status: "installed" }
-  /** With a readable Game, this maps to the prototype `missing` row. */
-  | { status: "requiredEntriesNotFound"; paths: string[] }
-  | { status: "unverified"; path: string | null; error: string };
+  | { status: "installed"; record: ImporterInstallRecord }
+  | { status: "damaged"; record: ImporterInstallRecord; paths: string[]; error: string | null }
+  /** No receipt and no required entries found; never proof of never installed. */
+  | { status: "noImporterEntriesFound"; paths: string[] }
+  /** Some required entries exist, possibly incomplete; no GMM receipt. */
+  | { status: "unrecordedImporterPresent"; paths: string[] }
+  | { status: "unverified"; path: string | null; error: string; record: ImporterInstallRecord | null };
+
+/** Exhaustive local-only explanation; no release/update query is needed. */
+export function modelImporterDetails(value: ModelImporterState): string | undefined {
+  switch (value.status) {
+    case "installed": return undefined;
+    case "damaged": return [value.paths.join(", "), value.error].filter(Boolean).join(" · ");
+    case "noImporterEntriesFound":
+    case "unrecordedImporterPresent": return value.paths.length ? `Missing Model Importer entries: ${value.paths.join(", ")}` : undefined;
+    case "unverified": return value.error;
+  }
+  const exhaustive: never = value;
+  throw new Error(`Unhandled Model Importer state: ${exhaustive}`);
+}
+
+/** Explicit user actions, independent of whether GMM performed the install. */
+export function modelImporterAction(value: ModelImporterState | undefined): "reinstall" | "install" | "unavailable" {
+  if (!value) return "unavailable";
+  switch (value.status) {
+    case "installed":
+    case "damaged":
+    case "unrecordedImporterPresent": return "reinstall";
+    case "noImporterEntriesFound": return "install";
+    case "unverified": return "unavailable";
+  }
+}
 
 export interface GamePathStatus {
   game: GameCode;
   /** Saved configuration, retained under absence or uncertainty. */
   savedPath: string | null;
   gamePath: GamePathState;
-  /** Filesystem layout evidence; never proof of a version or launchability. */
+  /** Local install receipt plus filesystem evidence; never proof of launchability. */
   modelImporter: ModelImporterState;
 }
 

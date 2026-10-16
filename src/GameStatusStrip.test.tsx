@@ -9,18 +9,17 @@ import { ImporterPanel } from "./ImporterPanel";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const savedPath = "C:/StarRail";
-const readable: GamePathStatus = { game: "srmi", savedPath, gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
-// All required entries from core/importer.rs are absent. A partial install is
-// currently indistinguishable at the API level; its wording is open in #341.
+const readable: GamePathStatus = { game: "srmi", savedPath, gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
+// No required entries were found, and no GMM install receipt exists.
 const missingImporterEntries = ["d3dx.ini", "Core", "ShaderFixes"].map((entry) => `${savedPath}/${entry}`);
-const absent: GamePathStatus = { ...readable, modelImporter: { status: "requiredEntriesNotFound", paths: missingImporterEntries } };
+const absent: GamePathStatus = { ...readable, modelImporter: { status: "noImporterEntriesFound", paths: missingImporterEntries } };
 const props = { game: "srmi" as const, displayName: "Honkai: Star Rail", savedPath, pathReadError: null, pathReadPending: false, onSettings: vi.fn() };
 
 function expectNotInstalledStrip(strip: HTMLElement) {
   const heading = "Game and Model Importer (SRMI)";
-  const line = "Game: Game readable · Model Importer not installed";
+  const line = "Game: Cannot tell — no GMM install recorded; no Model Importer entries found";
   const pathLine = `Saved Game path: ${savedPath}`;
-  const detail = missingImporterEntries.join(", ");
+  const detail = `Missing Model Importer entries: ${missingImporterEntries.join(", ")}`;
   // Allow only the specified content and its elements, including the Settings
   // route. Any added badge or icon fails even if it adds no visible text.
   expect(Array.from(strip.querySelectorAll("*"), (element) => [element.tagName, element.textContent])).toEqual([
@@ -45,13 +44,13 @@ beforeEach(() => {
   props.onSettings.mockClear();
 });
 
-it("renders only the specified content for a never-installed Model Importer", async () => {
+it("renders uncertainty when no install record or required entries were found", async () => {
   pathStatus = absent;
   // Stale recorded metadata must not upgrade confirmed filesystem absence.
   updateStatus.pinned = true;
   const { client } = renderWithQuery(<GameStatusStrip {...props} />);
   const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
-  expect(await within(strip).findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
+  expect(await within(strip).findByText("Game: Cannot tell — no GMM install recorded; no Model Importer entries found")).toBeVisible();
   await waitFor(() => expect(client.getQueryData(["importer", "update", "srmi"])).toEqual(updateStatus));
   expectNotInstalledStrip(strip);
   const settings = within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" });
@@ -62,7 +61,7 @@ it("renders only the specified content for a never-installed Model Importer", as
 
 it("keeps an existing wrong-type Model Importer entry distinct from absence", async () => {
   const error = "Model Importer entry C:/StarRail/Core must be a directory.";
-  pathStatus = { ...readable, modelImporter: { status: "unverified", path: "C:/StarRail/Core", error } };
+  pathStatus = { ...readable, modelImporter: { status: "unverified", record: null, path: "C:/StarRail/Core", error } };
   // Recorded install metadata cannot upgrade failed filesystem evidence.
   updateStatus.pinned = true;
   renderWithQuery(<GameStatusStrip {...props} />);
@@ -76,8 +75,8 @@ it("keeps an existing wrong-type Model Importer entry distinct from absence", as
 
 it.each([
   [{ ...readable, gamePath: { status: "unreadable", path: savedPath, error: "Access denied" } }, "Game: Cannot tell — install path unreadable · Model Importer unverified", "Access denied"],
-  [absent, "Game: Game readable · Model Importer not installed", missingImporterEntries.join(", ")],
-  [{ ...readable, modelImporter: { status: "unverified", path: "C:/StarRail/Core", error: "Sharing violation" } }, "Game: Game readable · Model Importer unverified", "Sharing violation"],
+  [absent, "Game: Cannot tell — no GMM install recorded; no Model Importer entries found", missingImporterEntries.join(", ")],
+  [{ ...readable, modelImporter: { status: "unverified", record: null, path: "C:/StarRail/Core", error: "Sharing violation" } }, "Game: Game readable · Model Importer unverified", "Sharing violation"],
   [{ ...readable, gamePath: { status: "invalid", error: "Invalid layout" } }, "Game: Cannot verify Game layout · Model Importer unverified", "Invalid layout"],
 ])("reports verified path evidence without inferring an installed version: %s", async (value, line, detail) => {
   pathStatus = value as GamePathStatus;
@@ -91,7 +90,7 @@ it.each([
   expect(strip).not.toHaveTextContent("Unhealthy");
   expect(strip).not.toHaveTextContent("Pinned");
   expect(within(strip).getByText(savedPath, { selector: "code" })).toBeVisible();
-  if (line !== "Game: Game readable · Model Importer not installed") expect(strip).not.toHaveTextContent(/not installed|no saved/i);
+  if (line !== "Game: Cannot tell — no GMM install recorded; no Model Importer entries found") expect(strip).not.toHaveTextContent(/not installed|no saved/i);
   expect(strip).not.toHaveTextContent(/version|v1\./i);
   const settings = within(strip).getByRole("button", { name: "Settings for Honkai: Star Rail" });
   expect(settings).toHaveAttribute("data-settings-arrival", "game");
@@ -104,7 +103,7 @@ it.each([
   { state: "savedPathNotFound" as const, paths: [savedPath], message: "Saved installation cannot be found", other: "Required Game files or directories not found" },
   { state: "requiredEntriesNotFound" as const, paths: [`${savedPath}/StarRail.exe`, `${savedPath}/StarRail_Data`], message: "Required Game files or directories not found", other: "Saved installation cannot be found" },
 ])("distinguishes missing saved directory from missing Game entries: $state", async ({ state, paths, message, other }) => {
-  pathStatus = { ...readable, gamePath: { status: state, paths }, modelImporter: { status: "unverified", path: null, error: "Game layout unverified" } };
+  pathStatus = { ...readable, gamePath: { status: state, paths }, modelImporter: { status: "unverified", record: null, path: null, error: "Game layout unverified" } };
   updateStatus.pinned = true;
   renderWithQuery(<GameStatusStrip {...props} />);
   const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
@@ -261,7 +260,7 @@ it("refreshes path evidence and version and pin through existing query keys", as
   await screen.findByText("Installed version:");
   pathStatus = absent;
   await act(() => client.invalidateQueries({ queryKey: ["gamePathStatus", "srmi"] }));
-  expect(await screen.findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
+  expect(await screen.findByText("Game: Cannot tell — no GMM install recorded; no Model Importer entries found")).toBeVisible();
   expect(screen.getByRole("status")).not.toHaveTextContent("Installed version:");
   pathStatus = readable;
   updateStatus = { ...updateStatus, installedVersion: "1.1", pinned: true };
@@ -304,7 +303,7 @@ it("refreshes the strip when the Settings importer install settles", async () =>
   });
   renderWithQuery(<><GameStatusStrip {...props} /><ImporterPanel game="srmi" displayName={props.displayName} /></>);
   const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
-  expect(await within(strip).findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
+  expect(await within(strip).findByText("Game: Cannot tell — no GMM install recorded; no Model Importer entries found")).toBeVisible();
   await userEvent.click(await screen.findByRole("button", { name: "Install importer" }));
   expect(await within(strip).findByText("Game: Game readable · Model Importer healthy")).toBeVisible();
   expect(await within(strip).findByText("Installed version:")).toHaveTextContent("1.1");
@@ -313,7 +312,7 @@ it("refreshes the strip when the Settings importer install settles", async () =>
 it("reports no saved path without claiming filesystem absence", async () => {
   updateStatus.pinned = true;
   pathStatus = { ...readable, savedPath: null, gamePath: { status: "noSavedPath" },
-    modelImporter: { status: "unverified", path: null, error: "No saved path" } };
+    modelImporter: { status: "unverified", record: null, path: null, error: "No saved path" } };
   renderWithQuery(<GameStatusStrip {...props} savedPath={null} />);
   expect(await screen.findByText("Game: No saved install path · Model Importer unverified")).toBeVisible();
   expect(screen.getByRole("status")).not.toHaveTextContent(/not installed|healthy|1\.0|current|Pinned|Unhealthy/);
@@ -396,7 +395,7 @@ it.each([
   pathStatus = absent;
   updateStatus.pinned = true;
   const { rerender } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game: Game readable · Model Importer not installed");
+  await screen.findByText("Game: Cannot tell — no GMM install recorded; no Model Importer entries found");
   expectNotInstalledStrip(screen.getByRole("region", { name: "Honkai: Star Rail status" }));
   rerender(<GameStatusStrip {...props} {...pathProps} />);
   expect(screen.getByRole("status")).toHaveTextContent("Model Importer unverified");
@@ -407,7 +406,7 @@ it("withdraws cached absence while the status refresh is checking", async () => 
   pathStatus = absent;
   updateStatus.pinned = true;
   const { client } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game: Game readable · Model Importer not installed");
+  await screen.findByText("Game: Cannot tell — no GMM install recorded; no Model Importer entries found");
   let resolve!: (value: GamePathStatus) => void;
   invoke.mockImplementation(async (command) => command === "get_game_path_status"
     ? new Promise<GamePathStatus>((yes) => { resolve = yes; }) : updateStatus);
@@ -416,7 +415,7 @@ it("withdraws cached absence while the status refresh is checking", async () => 
   expect(await screen.findByText("Game: Checking Game install path · Model Importer unverified")).toBeVisible();
   expect(screen.getByRole("status")).not.toHaveTextContent(/Unhealthy|not installed|Pinned|Installed version:/);
   await act(async () => { resolve(pathStatus); await refresh; });
-  expect(await screen.findByText("Game: Game readable · Model Importer not installed")).toBeVisible();
+  expect(await screen.findByText("Game: Cannot tell — no GMM install recorded; no Model Importer entries found")).toBeVisible();
   expectNotInstalledStrip(screen.getByRole("region", { name: "Honkai: Star Rail status" }));
 });
 
@@ -424,7 +423,7 @@ it("keeps a failed status check ahead of a held recheck without reusing cached a
   pathStatus = absent;
   updateStatus.pinned = true;
   const { client } = renderWithQuery(<GameStatusStrip {...props} />);
-  await screen.findByText("Game: Game readable · Model Importer not installed");
+  await screen.findByText("Game: Cannot tell — no GMM install recorded; no Model Importer entries found");
   invoke.mockImplementation(async (command) => {
     if (command === "get_game_path_status") throw new Error("Storage unavailable");
     return updateStatus;
@@ -443,4 +442,17 @@ it("keeps a failed status check ahead of a held recheck without reusing cached a
   expect(screen.getByRole("status")).not.toHaveTextContent(/Checking Game install path|Unhealthy|not installed|Pinned|Installed version:/);
   await act(async () => { resolve(readable); await refresh; });
   expect(await screen.findByText("Game: Game readable · Model Importer healthy")).toBeVisible();
+});
+
+it.each([
+  [{ status: "installed", record: { installedVersion: "v1", origin: { state: "unknown" } } }, "Game readable · Model Importer healthy"],
+  [{ status: "damaged", record: { installedVersion: "v1", origin: { state: "unknown" } }, paths: ["C:/StarRail/Core"], error: null }, "Game readable · Model Importer damaged"],
+  [{ status: "noImporterEntriesFound", paths: missingImporterEntries }, "Cannot tell — no GMM install recorded; no Model Importer entries found"],
+  [{ status: "unrecordedImporterPresent", paths: [] }, "Cannot tell — Model Importer files found; no GMM install recorded"],
+] as const)("renders local install state %s while the network check has no result", async (modelImporter, line) => {
+  pathStatus = { ...readable, modelImporter } as GamePathStatus;
+  invoke.mockImplementation((command) => command === "get_game_path_status" ? Promise.resolve(pathStatus) : new Promise(() => {}));
+  renderWithQuery(<GameStatusStrip {...props} />);
+  expect(await screen.findByText(`Game: ${line}`)).toBeVisible();
+  expect(screen.getByRole("status")).not.toHaveTextContent(/not installed|never installed|GMM installed this/i);
 });

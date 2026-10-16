@@ -7,6 +7,8 @@ import {
   dismissImporterOrigin,
   importerOriginStatus,
   getGamePathStatus,
+  modelImporterAction,
+  type ModelImporterState,
   originSlug,
   restoreImporterOrigin,
   setImporterOriginOverride,
@@ -38,6 +40,17 @@ function describeInstalled(installed: InstalledOrigin): string {
       return "whatever Model Importer files are already in your game folder";
     case "unreadable":
       return "an importer whose origin GMM can no longer read";
+  }
+}
+
+function filesystemDescription(value: ModelImporterState | undefined): string {
+  if (!value) return "Model Importer files unverified.";
+  switch (value.status) {
+    case "installed": return "Model Importer entries readable.";
+    case "damaged": return "Model Importer damaged.";
+    case "noImporterEntriesFound": return "Cannot tell — no GMM install recorded; no Model Importer entries found.";
+    case "unrecordedImporterPresent": return "Cannot tell — Model Importer files found; no GMM install recorded.";
+    case "unverified": return "Model Importer files unverified.";
   }
 }
 
@@ -76,12 +89,11 @@ export function ImporterOriginPanel({
     queryFn: () => getGamePathStatus(game),
     retry: false,
   });
-  const canInstall = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable"
-    && (path.data.modelImporter.status === "installed" || path.data.modelImporter.status === "requiredEntriesNotFound");
-  const filesInstalled = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable"
-    && path.data.modelImporter.status === "installed";
-  const filesAbsent = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable"
-    && path.data.modelImporter.status === "requiredEntriesNotFound";
+  const filesystem = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable"
+    ? path.data.modelImporter : undefined;
+  const canInstall = modelImporterAction(filesystem) !== "unavailable";
+  const filesInstalled = filesystem?.status === "installed";
+  const filesDescription = filesystemDescription(filesystem);
   const status = useQuery({
     queryKey: ["importerOrigin", game],
     queryFn: () => importerOriginStatus(game),
@@ -155,7 +167,7 @@ export function ImporterOriginPanel({
           <p className="muted small">
             {!filesInstalled ? <>Recorded origin: {data.installed.state === "known" ? <code>{originSlug(data.installed)}</code>
               : data.installed.state === "unknown" ? "unknown (not recorded)"
-              : <>unreadable: {data.installed.error}. Recorded as <code>{data.installed.raw}</code></>}. {filesAbsent ? "Model Importer files not installed." : "Model Importer files unverified."}</>
+              : <>unreadable: {data.installed.error}. Recorded as <code>{data.installed.raw}</code></>}. {filesDescription}</>
               : data.installed.state === "known" ? <>Installed origin: <code>{originSlug(data.installed)}</code>.</>
               : data.installed.state === "unknown" ? "Installed origin: unknown (not recorded)."
               : <>Installed origin unreadable: {data.installed.error}. Recorded as <code>{data.installed.raw}</code>.</>}

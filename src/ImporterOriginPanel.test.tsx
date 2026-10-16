@@ -17,6 +17,7 @@ vi.mock("./api", async () => {
   return {
     getGamePathStatus: (...a: unknown[]) => getGamePathStatus(...a),
     originSlug: actual.originSlug,
+    modelImporterAction: actual.modelImporterAction,
     toOriginInput: actual.toOriginInput,
     importerOriginStatus: (...a: unknown[]) => importerOriginStatus(...a),
     setImporterOriginOverride: (...a: unknown[]) => setImporterOriginOverride(...a),
@@ -67,7 +68,7 @@ function render() {
 
 beforeEach(() => {
   importerOriginStatus.mockReset();
-  getGamePathStatus.mockReset().mockResolvedValue({ game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } });
+  getGamePathStatus.mockReset().mockResolvedValue({ game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } });
   setImporterOriginOverride.mockReset().mockResolvedValue(undefined);
   acceptImporterOriginProposal.mockReset().mockResolvedValue({
     backup_dir: "C:/backups/1",
@@ -442,7 +443,7 @@ it.each(["checking", "error", "unreadable", "noSavedPath", "unverified importer"
   else getGamePathStatus.mockResolvedValue({
     game: "gimi", savedPath: "C:/Game",
     gamePath: { status: state === "unverified importer" ? "readable" : state },
-    modelImporter: { status: "unverified", path: "C:/Game", error: "Cannot tell" },
+    modelImporter: { status: "unverified", record: null, path: "C:/Game", error: "Cannot tell" },
   });
   render();
   expect(await screen.findByRole("button", { name: "Switch and install" })).toBeDisabled();
@@ -456,15 +457,15 @@ it.each(["absent", "checking", "failed", "unverified"])("qualifies recorded Orig
   else if (state === "failed") getGamePathStatus.mockRejectedValue(new Error("Path check failed"));
   else getGamePathStatus.mockResolvedValue({
     game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" },
-    modelImporter: state === "absent" ? { status: "requiredEntriesNotFound", paths: ["C:/Game/Core"] }
-      : { status: "unverified", path: "C:/Game/Core", error: "Access denied" },
+    modelImporter: state === "absent" ? { status: "noImporterEntriesFound", paths: ["C:/Game/Core"] }
+      : { status: "unverified", record: null, path: "C:/Game/Core", error: "Access denied" },
   });
   const { client } = render();
   await screen.findByRole("button", { name: "Save origin" });
   if (state !== "checking") await waitFor(() => expect(client.isFetching()).toBe(0));
   expect(screen.queryByText(/^Installed origin:/)).not.toBeInTheDocument();
   expect(screen.getByText(/Recorded origin:/)).toHaveTextContent("SilentNightSound/GIMI-Package");
-  expect(screen.getByText(/Recorded origin:/)).toHaveTextContent(state === "absent" ? "Model Importer files not installed" : "Model Importer files unverified");
+  expect(screen.getByText(/Recorded origin:/)).toHaveTextContent(state === "absent" ? "Cannot tell — no GMM install recorded; no Model Importer entries found" : "Model Importer files unverified");
 });
 
 function deferredOriginCheck() {
@@ -559,7 +560,7 @@ it("holds Origin install while retained readable path data is rechecked", async 
   await userEvent.click(screen.getByRole("button", { name: "Switch and install" }));
   expect(acceptImporterOriginProposal).not.toHaveBeenCalled();
   await act(async () => {
-    pending.resolve({ game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } });
+    pending.resolve({ game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } });
     await refresh;
   });
   await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled());
@@ -602,4 +603,20 @@ it("explains the disabled recommendation layer without claiming proposals or dis
   );
   await userEvent.click(screen.getByRole("button", { name: "View GMM importer recommendations" }));
   expect(onRecommendationsPage).toHaveBeenCalledOnce();
+});
+
+it.each([
+  [{ status: "installed", record: { installedVersion: "v1", origin: { state: "unknown" } } }, "Installed origin: unknown (not recorded)."],
+  [{ status: "damaged", record: { installedVersion: "v1", origin: { state: "unknown" } }, paths: ["C:/Game/Core"], error: null }, "Model Importer damaged."],
+  [{ status: "noImporterEntriesFound", paths: ["C:/Game/Core"] }, "Cannot tell — no GMM install recorded; no Model Importer entries found."],
+  [{ status: "unrecordedImporterPresent", paths: [] }, "Cannot tell — Model Importer files found; no GMM install recorded."],
+] as const)("qualifies Origin and permits an explicit install for local state %s", async (modelImporter, description) => {
+  importerOriginStatus.mockResolvedValue(status({ installed: { state: "unknown" }, proposal: {
+    origin: theFork, reason: null, replaces: { state: "unknown" },
+  } }));
+  getGamePathStatus.mockResolvedValue({ game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter });
+  render();
+  expect(await screen.findByText(new RegExp(description.replace(/[().]/g, "\\$&")))).toBeVisible();
+  expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled();
+  expect(screen.queryByText(/files not installed|never installed|GMM installed this/i)).not.toBeInTheDocument();
 });
