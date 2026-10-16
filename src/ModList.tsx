@@ -179,24 +179,25 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
         </h2>
         {confirmedEmpty ? <p className="muted">Your Library has no Mods for {displayName}. Choose how to add your first Mod.</p> : null}
         <div className={confirmedEmpty ? "mod-import-routes" : "row"}>
+          {/* Discard each import draft on a Game change, keeping ModList's own lifetime. */}
           <div className="mod-import-route">
             {confirmedEmpty ? <h3>Adopt for {displayName}</h3> : null}
             {confirmedEmpty ? <p className="muted small">Bring an existing Mod folder into your Library.</p> : null}
-            <AdoptButton key="adopt" game={game} onAdopted={invalidate} />
+            <AdoptButton key={`adopt:${game}`} game={game} onAdopted={invalidate} />
           </div>
           <div className="mod-import-route">
             {confirmedEmpty ? <h3>Import ZIP for {displayName}</h3> : null}
             {confirmedEmpty ? <p className="muted small">Choose a downloaded Mod archive.</p> : null}
-            <ImportZipButton key="zip" game={game} onImported={invalidate} />
+            <ImportZipButton key={`zip:${game}`} game={game} onImported={invalidate} />
           </div>
           <div className="mod-import-route">
             {confirmedEmpty ? <h3>GameBanana for {displayName}</h3> : null}
             {confirmedEmpty ? <p className="muted small">Paste a Mod URL or submission ID.</p> : null}
-            <GameBananaImport key="gamebanana" game={game} onImported={invalidate} />
+            <GameBananaImport key={`gamebanana:${game}`} game={game} onImported={invalidate} />
           </div>
         </div>
       </div>
-      <ZipDropZone game={game} displayName={displayName} onImported={invalidate} />
+      <ZipDropZone key={`drop:${game}`} game={game} displayName={displayName} onImported={invalidate} />
 
       {mods.isLoading ? <p>Loading…</p> : null}
       <CommandErrorNotice error={mods.error} />
@@ -573,11 +574,8 @@ function ImportZipButton({
 }
 
 /**
- * Drop-zone for ZIP import. Tauri's webview does NOT pass real filesystem
- * paths via the HTML5 drag-and-drop `dataTransfer` (security). The
- * `onDragDrop` event from the underlying `WebviewWindow` does — that's
- * the surface this component listens to. Falls back to a visible affordance
- * when no drop hovers.
+ * Drop-zone for ZIP import when HTML drag-and-drop exposes a filesystem path.
+ * Webviews that omit that path can use the Import ZIP picker above.
  */
 function ZipDropZone({
   game,
@@ -604,9 +602,7 @@ function ZipDropZone({
     onSettled: onImported,
   });
 
-  // Browser-level drag events let us toggle the hover highlight; the
-  // actual path lands via the Tauri `onDragDrop` listener wired in the
-  // effect below.
+  // Browser-level drag events toggle the hover highlight.
   const onDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     setHover(true);
@@ -615,11 +611,7 @@ function ZipDropZone({
   const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setHover(false);
-    // In Tauri v2 the webview-level drop event exposes file paths via
-    // `dataTransfer.files[i].path` only when the `tauri.conf.json` allows
-    // it; for now grab the first item's name as a default mod name and
-    // wait for the Tauri listener to populate the path. If a path comes
-    // through the HTML layer (Linux/dev-server), use it.
+    // Accept a ZIP only when the HTML layer supplies its filesystem path.
     const file = e.dataTransfer?.files?.[0];
     if (file) {
       const path = (file as File & { path?: string }).path;

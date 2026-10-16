@@ -2,11 +2,24 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
+import type { GameCode, GameSummary } from "./api";
 
 const { invoke, openDialog } = vi.hoisted(() => ({ invoke: vi.fn(), openDialog: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openDialog }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
+vi.mock("./diagnostics", () => ({ diagnosticsLogDir: vi.fn().mockResolvedValue("C:/GMM/logs"), exportDiagnosticsBundle: vi.fn() }));
+vi.mock("./updater", () => {
+  const idle = { kind: "idle" };
+  return { updater: {
+    getSnapshot: () => idle, subscribe: () => () => {}, checkForUpdates: vi.fn(),
+    install: vi.fn(), decline: vi.fn(),
+  } };
+});
+vi.mock("./LoaderVersionNote", () => ({ LoaderVersionNote: () => null }));
 const { ModList } = await import("./ModList");
+const { default: App } = await import("./App");
 
 const outfit = {
   id: "mod-outfit", game: "srmi", name: "March Outfit", source: "local",
@@ -125,14 +138,16 @@ it("keeps rows, Variants and both recovery warnings visible when the Conflict qu
 });
 
 const routes = ["adopt", "zip", "gamebanana", "drop"] as const;
-async function openRoute(entry: typeof routes[number], container: HTMLElement) {
+async function openRoute(entry: typeof routes[number], container: HTMLElement, filePath = "C:/Downloads/outfit.zip") {
   if (entry === "drop") {
-    fireEvent.drop(container.querySelector(".dropzone")!, { dataTransfer: { files: [Object.assign(new File(["zip"], "outfit.zip"), { path: "C:/Downloads/outfit.zip" })] } });
+    fireEvent.drop(container.querySelector(".dropzone")!, { dataTransfer: { files: [Object.assign(new File(["zip"], filePath.split("/").pop()!), { path: filePath })] } });
   } else {
     await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt folder…" : entry === "zip" ? "Import ZIP…" : "Paste GameBanana URL…" }));
     if (entry !== "gamebanana") await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Pick mod folder" : "Pick .zip file" }));
   }
-  await userEvent.type(screen.getByPlaceholderText(entry === "gamebanana" ? "https://gamebanana.com/mods/1234567 or a bare ID" : entry === "drop" ? "Display name" : "Display name (e.g. Hu Tao Skin)"), entry === "gamebanana" ? "123" : "March Outfit");
+  const input = screen.getByPlaceholderText(entry === "gamebanana" ? "https://gamebanana.com/mods/1234567 or a bare ID" : entry === "drop" ? "Display name" : "Display name (e.g. Hu Tao Skin)");
+  await userEvent.clear(input);
+  await userEvent.type(input, entry === "gamebanana" ? "123" : "March Outfit");
 }
 
 it.each(routes)("keeps %s confirmation, pending state and failure visible through the first-Mod layout switch", async (entry) => {
@@ -170,4 +185,144 @@ it.each(["adopt", "zip"] as const)("a cancelled %s picker does not import or ena
   expect(container.querySelector("[data-command-failure-kind]")).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(invoke.mock.calls.some(([command]) => command === "adopt_folder" || command === "import_zip")).toBe(false);
+});
+
+// Exercise the production App selection paths and real ModList children. Only
+// the desktop boundary is mocked, so a parent remount cannot hide a missing reset.
+function renderImportApp() {
+  const games: GameSummary[] = [
+    { code: "gimi", displayName: "Genshin Impact" },
+    { code: "srmi", displayName: "Honkai: Star Rail" },
+  ];
+  const paths: Partial<Record<GameCode, string>> = { gimi: "C:/Genshin", srmi: "C:/StarRail" };
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command: string, args?: { game: GameCode; path: string }) => {
+    switch (command) {
+      case "is_onboarding_complete": return { complete: true, skipped: false };
+      case "list_supported_games": return games;
+      case "get_game_install_path": return paths[args!.game] || null;
+      case "set_game_install_path": paths[args!.game] = args!.path; return null;
+      case "get_game_path_status": return {
+        game: args!.game, savedPath: paths[args!.game] || null,
+        gamePath: { status: paths[args!.game] ? "readable" : "noSavedPath" },
+        modelImporter: { status: "unverified", path: null, error: "Not checked" },
+      };
+      case "attention_status": return {
+        safeToProceed: true, reinstalls: [], enabledTransitions: [], importerEvacuations: [],
+        stagedLibraryOperations: [], sessionLaunches: [], activeSession: null,
+        libraryAudits: [], libraryRootOverlaps: [], modPathOverlaps: [],
+      };
+      case "get_startup_reconcile_status": return { finished: true, failures: [] };
+      case "check_importer_update": return { available: false, installedVersion: null, pinned: false };
+      case "get_proxy_config": return { url: null, username: null, passwordSet: false };
+      case "get_library_paths": return {
+        defaultRoot: "C:/GMM/library", effectiveRoot: "C:/GMM/library",
+        rootOverride: null, perGameOverrides: {}, perGameEffective: {},
+      };
+      case "mod_updates_globally_enabled": return true;
+      case "adopt_folder":
+      case "import_zip":
+      case "import_gamebanana": return outfit;
+      case "interrupted_session_launches": return [];
+      default: return implementation(command, args);
+    }
+  });
+  const client = makeQueryClient();
+  client.setDefaultOptions({ queries: { retry: false, staleTime: 30_000 }, mutations: { retry: false } });
+  return renderWithQuery(<App />, { client });
+}
+
+const gameChanges = ["tab click", "Settings path clear"] as const;
+it.each(routes.flatMap((entry) => gameChanges.map((change) => ({ entry, change }))))(
+  "discards the $entry draft on $change before accepting a new Game's import",
+  async ({ entry, change }) => {
+    const command = entry === "adopt" ? "adopt_folder" : entry === "gamebanana" ? "import_gamebanana" : "import_zip";
+    const { container } = renderImportApp();
+    await userEvent.click(await screen.findByRole("tab", { name: "Honkai: Star Rail" }));
+    await screen.findByRole("heading", { name: "Add Mods for Honkai: Star Rail" });
+    await openRoute(entry, container);
+    expect(screen.getByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" })).toBeEnabled();
+
+    if (change === "tab click") {
+      await userEvent.click(screen.getByRole("tab", { name: "Genshin Impact" }));
+    } else {
+      await userEvent.click(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+      await userEvent.clear(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" }));
+      await userEvent.click(screen.getByRole("button", { name: "Apply Honkai: Star Rail install path" }));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_game_install_path", { game: "srmi", path: "" }));
+      await userEvent.click(screen.getByRole("button", { name: "Close" }));
+      await waitFor(() => expect(screen.queryByRole("tab", { name: "Honkai: Star Rail" })).not.toBeInTheDocument());
+    }
+    expect(screen.getByRole("tab", { name: "Genshin Impact" })).toHaveAttribute("aria-selected", "true");
+    await screen.findByRole("heading", { name: "Add Mods for Genshin Impact" });
+    expect(screen.queryByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" })).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(entry === "gamebanana" ? "123" : "March Outfit")).not.toBeInTheDocument();
+    expect(screen.queryByText("C:/Downloads/outfit.zip")).not.toBeInTheDocument();
+    expect(invoke.mock.calls.filter(([name]) => name === command)).toEqual([]);
+
+    // Reopening must reveal a truly empty draft, not just hide a stale file.
+    if (entry !== "drop") {
+      await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt folder…" : entry === "zip" ? "Import ZIP…" : "Paste GameBanana URL…" }));
+      expect(screen.getByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" })).toBeDisabled();
+      expect(screen.getByPlaceholderText(entry === "gamebanana" ? "https://gamebanana.com/mods/1234567 or a bare ID" : "Display name (e.g. Hu Tao Skin)")).toHaveValue("");
+      if (entry !== "gamebanana") expect(screen.getByRole("button", { name: entry === "adopt" ? "Pick mod folder" : "Pick .zip file" })).toBeVisible();
+      await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    }
+    openDialog.mockResolvedValue("C:/Downloads/genshin.zip");
+    await openRoute(entry, container, "C:/Downloads/genshin.zip");
+    await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" }));
+    await waitFor(() => expect(invoke.mock.calls.filter(([name]) => name === command)).toHaveLength(1));
+    expect(invoke).toHaveBeenCalledWith(command, { args: entry === "gamebanana"
+      ? { game: "gimi", urlOrId: "123" }
+      : entry === "adopt" ? { game: "gimi", sourcePath: "C:/Downloads/genshin.zip", name: "March Outfit" }
+        : { game: "gimi", zipPath: "C:/Downloads/genshin.zip", name: "March Outfit" } });
+  },
+);
+
+it.each(["adopt", "zip"] as const)("discards a late %s picker result after the Game changes", async (entry) => {
+  let resolve!: (path: string) => void;
+  openDialog.mockReturnValue(new Promise<string>((finish) => { resolve = finish; }));
+  renderImportApp();
+  await userEvent.click(await screen.findByRole("tab", { name: "Honkai: Star Rail" }));
+  await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt folder…" : "Import ZIP…" }));
+  await userEvent.type(screen.getByPlaceholderText("Display name (e.g. Hu Tao Skin)"), "Star Rail draft");
+  await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Pick mod folder" : "Pick .zip file" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Genshin Impact" }));
+  await act(async () => resolve("C:/Downloads/star-rail.zip"));
+  await userEvent.click(screen.getByRole("button", { name: entry === "adopt" ? "Adopt folder…" : "Import ZIP…" }));
+  expect(screen.getByPlaceholderText("Display name (e.g. Hu Tao Skin)")).toHaveValue("");
+  await userEvent.type(screen.getByPlaceholderText("Display name (e.g. Hu Tao Skin)"), "Genshin draft");
+  expect(screen.getByRole("button", { name: entry === "adopt" ? "Adopt" : "Import" })).toBeDisabled();
+  expect(screen.queryByText("C:/Downloads/star-rail.zip")).not.toBeInTheDocument();
+  expect(invoke.mock.calls.filter(([name]) => name === "adopt_folder" || name === "import_zip")).toEqual([]);
+});
+
+it("retains recovery feedback during same-Game imports and clears it on a Game change", async () => {
+  const recovery = {
+    reason: "Original deployment is locked", attemptedAt: "2026-10-07T12:00:00Z", attempts: 1,
+    libraryPath: outfit.library_path, stagedPath: "C:/Library/srmi/.gmm-reinstall-stage",
+    quarantinePath: "C:/Library/srmi/.gmm-delete-old", junctionWithdrawn: true,
+    junctionWithdrawalError: null,
+  };
+  mods = [{ ...outfit, reinstall_recovery: recovery }];
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => {
+    if (command === "retry_reinstall_recovery") {
+      mods = [outfit];
+      return Promise.resolve({ status: "recovered" });
+    }
+    return implementation(command, args);
+  });
+  const view = renderMods();
+  await userEvent.click(await screen.findByRole("button", { name: "Retry recovery" }));
+  const message = "Recovered the interrupted reinstall for March Outfit. The Mod is usable again.";
+  expect(await screen.findByText(message)).toBeVisible();
+  await openRoute("zip", view.container);
+  expect(screen.getByText(message)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.getByText(message)).toBeVisible();
+  view.rerender(<ModList game="gimi" displayName="Genshin Impact" />);
+  expect(screen.queryByText(message)).not.toBeInTheDocument();
+  view.rerender(<ModList game="srmi" displayName="Honkai: Star Rail" />);
+  expect(screen.queryByText(message)).not.toBeInTheDocument();
 });
