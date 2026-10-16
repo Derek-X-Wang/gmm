@@ -247,6 +247,26 @@ it("keeps Settings surfaces and inline code inheriting dark-palette text", () =>
     expect(authoredDeclarations(selector), selector).not.toHaveProperty("color");
 });
 
+it("styles the masked proxy password like its neighbouring text inputs", async () => {
+  renderApp();
+  await clickMenuItem(listen, "settings");
+  const password = await screen.findByPlaceholderText("password");
+  expect(password).toHaveAttribute("type", "password");
+  await userEvent.type(password, "proxy-secret");
+  expect(password).toHaveValue("proxy-secret");
+  expect(password).toHaveAttribute("type", "password");
+
+  const expected = {
+    background: "#1b1b1f", color: "inherit", border: "1px solid #2e2e36",
+    padding: "0.5rem 0.75rem", "border-radius": "4px", font: "inherit",
+  };
+  // Read the authored palette: jsdom's computed inheritance can conceal a
+  // missing foreground. The rendered password must match the styled selector.
+  expect(password.matches('input[type="password"]')).toBe(true);
+  for (const selector of ['input[type="password"]', 'input[type="text"]', "input:not([type])"])
+    expect(authoredDeclarations(selector), selector).toMatchObject(expected);
+});
+
 it.each(["global", "game"])("keeps the main screen inert behind the dialog and preserves independent selection by %s arrival", async (arrival) => {
   renderApp();
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });
