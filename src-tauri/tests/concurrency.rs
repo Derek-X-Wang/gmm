@@ -65,6 +65,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+// Fixture helpers live at <manifest>/target/debug; this lookup ignores
+// CARGO_TARGET_DIR. Keep Cargo's default target path (see CLAUDE.md).
 fn probe_bin() -> PathBuf {
     let name = if cfg!(windows) {
         "concurrency-probe.exe"

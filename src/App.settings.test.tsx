@@ -212,7 +212,7 @@ it.each(["before a Settings visit", "after Back"])("hides the Settings root itse
 
 // Read authored declarations, including `inherit`: computed colours in jsdom
 // can hide a broken foreground by resolving inheritance against body.
-function paletteDeclarations(selector: string): Record<string, string> {
+function authoredDeclarations(selector: string): Record<string, string> {
   const authored: string = readFileSync("src/App.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const rules = [...authored.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
     .filter(([, selectors]) => selectors.split(",").some((raw) => raw.trim() === selector));
@@ -236,7 +236,7 @@ it.each([
   ['.settings-navigation button[aria-current="page"]', { "border-color": "#3b82f6" }],
   [".settings-navigation button span", { color: "#9a9aa3" }],
 ] as const)("retains the authored dark palette for %s in Settings", (selector, expected) => {
-  expect(paletteDeclarations(selector)).toMatchObject(expected);
+  expect(authoredDeclarations(selector)).toMatchObject(expected);
 });
 
 it("keeps Settings surfaces and inline code inheriting dark-palette text", () => {
@@ -244,7 +244,7 @@ it("keeps Settings surfaces and inline code inheriting dark-palette text", () =>
   // with the root and control checks above, this protects the inheritance
   // that makes both ordinary buttons and inline code readable (#368, #378).
   for (const selector of [".settings-screen", ".settings-dialog", ".settings-content", ".card", "code"])
-    expect(paletteDeclarations(selector), selector).not.toHaveProperty("color");
+    expect(authoredDeclarations(selector), selector).not.toHaveProperty("color");
 });
 
 it.each(["global", "game"])("keeps the main screen inert behind the dialog and preserves independent selection by %s arrival", async (arrival) => {
@@ -1148,7 +1148,7 @@ it("holds Tab inside the dialog instead of letting it reach the window behind", 
 
   // Backwards too: Shift+Tab off the dialog's first control wraps inside it
   // rather than stepping out into the screen behind.
-  for (let press = 0; press < 12; press++) {
+  for (let press = 0; press < 30; press++) {
     await userEvent.tab({ shift: true });
     expect(dialog()).toContainElement(document.activeElement as HTMLElement);
   }
@@ -1400,7 +1400,7 @@ it("keeps the status bar on screen behind the dialog and live again on Close", a
  * `max-height`, and `getBoundingClientRect` returns zeros. Nothing here proves
  * the dialog's rendered size, or that the main screen is visible around it.
  * What it does prove is that the authored stylesheet bounds the dialog inside
- * the window with an inset and gives it its own scroll, instead of letting it
+ * the window with an inset and bounds its content scroll, instead of letting it
  * fill the window like the destination it replaced. The rendered result at
  * 1100x760 and at the 900x600 minimum (#351) is a Windows check, named in the
  * PR.
@@ -1426,12 +1426,61 @@ it("bounds the dialog inside an inset scrim instead of filling the window", asyn
     expect([over.overflow, over.overscrollBehavior]).toEqual(["auto", "contain"]);
 
     const sized = getComputedStyle(dialog());
-    // Bounded by the window rather than given a fixed size, and scrolling
-    // inside itself so a long Settings page cannot push it past the edge.
+    // Bounded by the window rather than given a fixed size. Only the inner
+    // regions scroll, so a long page cannot carry Close off the top (#379).
     expect(sized.width).toBe("min(1120px, 100%)");
     expect(sized.maxHeight).toBe("100%");
-    expect(sized.overflow).toBe("auto");
+    expect(sized.overflow).toBe("hidden");
     // Not resizable (#353). Adding a resize affordance fails here.
     expect(sized.resize).toBe("none");
   });
+});
+
+// jsdom has no geometry or scroll layout. These authored declarations and
+// parent relationships pin the scroll ownership at 900x600 and above; they
+// do not claim that controls are visually reachable in a Windows WebView.
+it.each(["Honkai: Star Rail", "GMM settings"])("keeps Close and navigation outside the %s content scroller at the window minimum", async (page) => {
+  // All six Games can make the navigation taller than the available space.
+  for (const game of games) paths[game.code] = `C:\\${game.code}`;
+  renderApp();
+  await openGlobal();
+  await userEvent.click(pageButton(page));
+
+  const panel = dialog();
+  const header = panel.querySelector("header")!;
+  const layout = panel.querySelector(".settings-layout")!;
+  const content = panel.querySelector(".settings-content")!;
+  const navigation = within(panel).getByRole("navigation", { name: "Settings pages" });
+  expect(header.parentElement).toBe(panel);
+  expect(header).toContainElement(within(panel).getByRole("button", { name: "Close" }));
+  expect(layout.parentElement).toBe(panel);
+  expect(navigation.parentElement).toBe(layout);
+  expect(content.parentElement).toBe(layout);
+  // Parent checks alone allow both region selectors to name the same node.
+  expect(content).not.toBe(navigation);
+  for (const name of [...games.map((game) => game.displayName), "GMM settings"])
+    expect(pageButton(name)).toBeInTheDocument();
+  expect(content).toContainElement(screen.getByRole("heading", { name: page, level: 2 }));
+
+  // The second row can shrink below its contents. Both nested grid items
+  // must also shrink, or their intrinsic height expands the dialog instead
+  // of leaving the page's lowest controls inside its own scroll area.
+  expect(authoredDeclarations(".settings-dialog")).toMatchObject({
+    "max-height": "100%", overflow: "hidden", display: "grid",
+    "grid-template-rows": "auto minmax(0, 1fr)",
+  });
+  expect(authoredDeclarations(".settings-layout")).toMatchObject({
+    display: "grid", "min-height": "0", "grid-template-rows": "minmax(0, 1fr)",
+  });
+  expect(authoredDeclarations(".settings-content")).toMatchObject({
+    "min-height": "0", overflow: "auto", "overscroll-behavior": "contain",
+  });
+  // Navigation has its own scroll when needed; page scrolling never moves
+  // it, and its links must not shrink to fit all six Games at minimum height.
+  expect(authoredDeclarations(".settings-navigation")).toMatchObject({
+    display: "flex", "flex-direction": "column",
+    "min-height": "0", "align-self": "stretch", "overflow-y": "auto",
+    "overscroll-behavior": "contain",
+  });
+  expect(authoredDeclarations(".settings-navigation > *")).toMatchObject({ "flex-shrink": "0" });
 });

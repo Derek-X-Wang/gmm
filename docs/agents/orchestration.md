@@ -57,10 +57,10 @@ dispatch over a current issue wastes a round.
 restore, watch it go green. Report the exact mutation and the exact assertion that
 fired. A test you cannot make fail is not coverage.
 
-**Rebuild everything the tests actually run.** In this repo the concurrency tests spawn
-a separately built `concurrency-probe` binary, so `cargo test` alone leaves a source
-mutation unseen and every test wrongly green. Run `cargo build --workspace` after any
-mutation. This single omission cost eight separate cycles.
+**Rebuild everything the tests actually run.** Follow the
+[verification prerequisites](../../CLAUDE.md#verification-prerequisites), including
+the plain workspace rebuild after any mutation. `cargo test` alone can leave helper
+binaries unchanged and a source mutation unseen, with tests wrongly green.
 
 **Read the whole test output.** A failure at the bottom of `cargo test --workspace` is
 easy to miss; a red CI has been shipped from reading only the first screen.
