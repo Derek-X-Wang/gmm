@@ -397,24 +397,30 @@ it("keeps loud and quiet controls equally compact without a heavy fill", async (
     await screen.findByRole("button", { name: /Needs attention/ });
     const loud = getComputedStyle(indicator);
     expect([loud.padding, loud.fontSize, loud.fontWeight, loud.borderWidth]).toEqual(size);
-    expect(loud.backgroundColor).toBe("rgba(0, 0, 0, 0)");
-    expect(loud.borderColor).not.toBe(quiet.borderColor);
     expect(indicator).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("img", { name: "Warning" })).toBeInTheDocument();
 
     // jsdom can return transparent/no image on repeated computed-style reads.
     // Read the authored rules matching the real control;
-    // include both theme blocks because jsdom does not evaluate color-scheme.
+    // the single dark palette applies regardless of the OS theme.
     const quietControl = document.createElement("button");
     quietControl.className = "attention-indicator__toggle";
     const authoredRules = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    const controls = authoredRules.match(/\.attention-indicator__refresh\s*\{([^{}]*)\}/)![1];
+    expect(controls).toMatch(/(?:^|;)\s*background:\s*transparent\s*;/);
+    expect(controls).toMatch(/(?:^|;)\s*color:\s*inherit\s*;/);
+    expect(controls).toMatch(/(?:^|;)\s*border:\s*1px solid #71717a\s*;/);
     const loudRules = [...authoredRules.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, selectors]) =>
       selectors.split(",").some((selector) => indicator.matches(selector.trim()) && !quietControl.matches(selector.trim())));
-    expect(loudRules).toHaveLength(2);
+    expect(loudRules).toHaveLength(1);
+    expect(loudRules[0][2]).toMatch(/border-color:\s*#fbbf24\s*;/);
+    expect(loudRules[0][2]).toMatch(/(?:^|;)\s*color:\s*#fbbf24\s*;/);
+    const scope = authoredRules.match(/\.attention-indicator__scope\s*\{([^{}]*)\}/)![1];
+    expect(scope).toMatch(/(?:^|;)\s*color:\s*#a1a1aa\s*;/);
     for (const [, , declarations] of loudRules) {
       const properties = declarations.split(";").map((declaration) => declaration.trim()).filter(Boolean)
         .map((declaration) => declaration.split(":")[0].trim()).sort();
-      expect(properties, "Loud changes only warning tint; both themes retain the quiet footprint and no fill")
+      expect(properties, "Loud changes only warning tint; the dark palette retains the quiet footprint and no fill")
         .toEqual(["border-color", "color"]);
     }
   } finally { style.remove(); }

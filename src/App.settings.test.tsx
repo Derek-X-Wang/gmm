@@ -200,7 +200,7 @@ it.each(["before a Settings visit", "after Back"])("hides the Settings root itse
     // and `.settings-screen` has one — so `[hidden]`'s `!important` is what
     // keeps the surface and its retained pages hidden, and nothing about its
     // presence is observable from the rendered tree. Read the authored text
-    // instead, the way `App.test.tsx` reads the status bar's light-mode rules.
+    // instead, the way `App.test.tsx` reads the status bar's authored rules.
     expect(
       readFileSync("src/App.css", "utf8"),
       "`[hidden]` must outrank `.settings-screen`'s own display, or the retired surface reappears",
@@ -210,63 +210,41 @@ it.each(["before a Settings visit", "after Back"])("hides the Settings root itse
   }
 });
 
-/**
- * The body of the `prefers-color-scheme: light` block that repaints the
- * Settings panel, with comments stripped. jsdom evaluates no media query, so
- * the block is unreachable through `getComputedStyle` on a rendered control;
- * reading the authored rules is the same route `App.test.tsx` takes for the
- * status bar's light-mode rules.
- */
-function lightPanelRules(): string {
+// Read authored declarations, including `inherit`: computed colours in jsdom
+// can hide a broken foreground by resolving inheritance against body.
+function paletteDeclarations(selector: string): Record<string, string> {
   const authored: string = readFileSync("src/App.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-  const block = authored.indexOf("@media (prefers-color-scheme: light)", authored.indexOf(".settings-dialog {"));
-  const open = authored.indexOf("{", block);
-  let depth = 0;
-  for (let index = open; index < authored.length; index += 1) {
-    if (authored[index] === "{") depth += 1;
-    if (authored[index] === "}" && (depth -= 1) === 0) return authored.slice(open + 1, index);
-  }
-  throw new Error("the Settings panel's light-mode block is never closed");
+  const rules = [...authored.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selectors]) => selectors.split(",").some((raw) => raw.trim() === selector));
+  return Object.fromEntries(rules.flatMap(([, , declarations]) => declarations.split(";")
+    .filter((declaration) => declaration.includes(":"))
+    .map((declaration) => declaration.split(":").map((part) => part.trim()))));
 }
 
-it("repaints every control in the light Settings panel, not only the navigation", () => {
-  // The panel is the one light surface in the application: `:root` keeps the
-  // main screen dark in both schemes, so this is the only place a control is
-  // painted on a light background. The base `button` is a neutral fill with
-  // `color: inherit`, and `inherit` inside the panel is its own `#18181b` —
-  // dark text on a dark fill, about 1.14:1 against WCAG's 4.5:1. A light rule
-  // that names only `.settings-navigation button` leaves Close, Apply,
-  // Change…, Re-detect, Rebuild junctions and Export diagnostics bundle
-  // unreadable, so the panel has to repaint the control itself (#367).
-  //
-  // The probe's only ancestor is the panel, so a rule scoped to the
-  // navigation cannot satisfy this test.
-  const panel = document.createElement("div");
-  panel.className = "settings-dialog";
-  const control = document.createElement("button");
-  panel.append(control);
+it.each([
+  [":root", { background: "#18181b", color: "#e5e5e5" }],
+  [".settings-dialog", { background: "#18181b", border: "1px solid #2e2e36" }],
+  [".card", { background: "#23232a", border: "1px solid #2e2e36" }],
+  ["code", { background: "#1b1b1f" }],
+  [".muted", { color: "#9a9aa3" }],
+  ["input.path", { background: "#1b1b1f", color: "inherit", border: "1px solid #2e2e36" }],
+  ['input[type="text"]', { background: "#1b1b1f", color: "inherit", border: "1px solid #2e2e36" }],
+  ["input:not([type])", { background: "#1b1b1f", color: "inherit", border: "1px solid #2e2e36" }],
+  ["button", { background: "#23232a", color: "inherit", border: "1px solid #3f3f46" }],
+  ["button:disabled", { background: "#1f1f24", color: "#71717a", "border-color": "#2e2e36" }],
+  [".settings-navigation button", { background: "#23232a", color: "inherit", border: "1px solid #2e2e36" }],
+  ['.settings-navigation button[aria-current="page"]', { "border-color": "#3b82f6" }],
+  [".settings-navigation button span", { color: "#9a9aa3" }],
+] as const)("retains the authored dark palette for %s in Settings", (selector, expected) => {
+  expect(paletteDeclarations(selector)).toMatchObject(expected);
+});
 
-  const repaints = [...lightPanelRules().matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-    .filter(([, selectors]) => selectors.split(",").some((raw) => control.matches(raw.trim())))
-    .map(([, , declarations]) => declarations);
-  expect(
-    repaints,
-    "an ordinary control in the panel needs a light-mode rule of its own",
-  ).not.toHaveLength(0);
-
-  // A stated foreground, not an inherited one: the control paints a fill, so
-  // its text colour cannot be left to whatever the panel sets. This reads the
-  // declaration rather than the computed value on purpose — jsdom resolves
-  // `color: inherit` against `<body>`, so it would report a perfectly
-  // readable black and hide the exact shape of the defect.
-  const declarations = repaints.join(";");
-  expect(
-    {
-      foreground: /(^|;)\s*color\s*:\s*(?!inherit\b)\S/.test(declarations),
-      fill: /(^|;)\s*background(-color)?\s*:\s*(?!inherit\b)\S/.test(declarations),
-    },
-    "a painted fill with an inherited foreground is dark text on a dark button here",
-  ).toEqual({ foreground: true, fill: true });
+it("keeps Settings surfaces and inline code inheriting dark-palette text", () => {
+  // These surfaces paint dark fills without setting a foreground. Together
+  // with the root and control checks above, this protects the inheritance
+  // that makes both ordinary buttons and inline code readable (#368, #378).
+  for (const selector of [".settings-screen", ".settings-dialog", ".settings-content", ".card", "code"])
+    expect(paletteDeclarations(selector), selector).not.toHaveProperty("color");
 });
 
 it.each(["global", "game"])("keeps the main screen inert behind the dialog and preserves independent selection by %s arrival", async (arrival) => {
