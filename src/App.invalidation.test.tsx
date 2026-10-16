@@ -578,6 +578,96 @@ it("keeps row recovery, Variants, Conflict disclosures and Mod updates under sep
   expect(invoke).toHaveBeenCalledWith("retry_reinstall_recovery", { modId: "broken-mod" });
 });
 
+it.each(["quarantine", "session"])("keeps navigation, Settings, diagnostics and another Game usable with %s attention", async (kind) => {
+  responses.list_supported_games = [
+    { code: "gimi", displayName: "Genshin Impact" },
+    { code: "srmi", displayName: "Honkai: Star Rail" },
+  ];
+  const session = { game: "gimi", pid: 321, started_at: "2026-10-16" };
+  responses.current_session = kind === "session" ? session : null;
+  responses.list_mods = [modFixture(), {
+    ...modFixture(), id: "broken-mod", name: "Broken Outfit",
+    reinstall_recovery: recoveryFixture,
+  }];
+  mutations.list_mods = ({ game }) => game === "gimi" ? responses.list_mods : [{
+    ...modFixture(), game: "srmi", id: "other-game-mod", name: "Other Game Outfit",
+  }];
+  responses.attention_status = {
+    ...(responses.attention_status as object), safeToProceed: false,
+    activeSession: kind === "session" ? { ...session, startedAt: session.started_at } : null,
+    reinstalls: kind === "quarantine" ? [{ game: "gimi", modId: "broken-mod", libraryPath: recoveryFixture.libraryPath, recovery: recoveryFixture }] : [],
+  };
+  const { container } = renderApp();
+  await screen.findByRole("button", { name: /Needs attention/ });
+  const healthy = container.querySelector<HTMLElement>('[data-mod-id="mod-outfit"]')!;
+  const broken = container.querySelector<HTMLElement>('[data-mod-id="broken-mod"]')!;
+  expect(within(broken).getByRole("checkbox", { name: "Unavailable" })).toBeDisabled();
+  const toggle = within(healthy).getByRole("checkbox", { name: "Disabled" });
+  if (kind === "session") {
+    expect(toggle).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Game running…" })).toBeDisabled();
+  } else {
+    expect(toggle).toBeEnabled();
+    // A clean sibling still reaches its backend gate despite the loud aggregate.
+    mutations.set_mod_enabled = () => { throw new Error("Sibling backend refusal"); };
+    await userEvent.click(toggle);
+    expect(await screen.findByText("Sibling backend refusal")).toBeVisible();
+  }
+  const otherGame = screen.getByRole("tab", { name: "Honkai: Star Rail" });
+  expect(otherGame).toBeEnabled();
+  await userEvent.click(otherGame);
+  expect(await screen.findByRole("heading", { name: "Honkai: Star Rail", level: 1 })).toBeVisible();
+  await screen.findByText("Other Game Outfit");
+  const otherMod = within(container.querySelector<HTMLElement>('[data-mod-id="other-game-mod"]')!)
+    .getByRole("checkbox", { name: "Disabled" });
+  if (kind === "session") expect(otherMod).toBeDisabled();
+  else {
+    expect(otherMod).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Launch Honkai: Star Rail" })).toBeEnabled();
+  }
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" }));
+  const settings = screen.getByRole("dialog", { name: "Settings" });
+  expect(await within(settings).findByRole("textbox", { name: "Honkai: Star Rail install path" })).toBeEnabled();
+  await userEvent.click(within(settings).getByRole("button", { name: /GMM settings/ }));
+  expect(await within(settings).findByRole("textbox", { name: "Global Library root" })).toBeEnabled();
+  const diagnostics = await within(settings).findByRole("button", { name: "Export diagnostics bundle" });
+  expect(diagnostics).toBeEnabled();
+  await userEvent.click(diagnostics);
+  expect(await within(settings).findByText("Export cancelled.")).toBeVisible();
+  await userEvent.click(within(settings).getByRole("button", { name: "Close" }));
+  expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("button", { name: "Settings for Honkai: Star Rail" })).toHaveFocus();
+});
+
+it("retains recovery feedback, focus and mounted announcements after a row clears, refreshes and a Settings visit", async () => {
+  responses.list_mods = [{ ...modFixture(), reinstall_recovery: recoveryFixture }];
+  mutations.retry_reinstall_recovery = () => {
+    responses.list_mods = [modFixture()];
+    throw new Error("Recovery completed only partially");
+  };
+  const { container, client } = renderApp();
+  const warning = await screen.findByRole("region", { name: "Interrupted reinstall recovery for Test Outfit" });
+  const section = warning.closest<HTMLElement>("section.card")!;
+  const live = section.querySelector<HTMLElement>('[role="alert"].reinstall-action-notice')!;
+  expect(live).toBeInTheDocument();
+  await userEvent.click(within(warning).getByRole("button", { name: /Retry/ }));
+  const feedback = "Recovery still needs intervention for Test Outfit: Recovery completed only partially";
+  expect(await screen.findByText(feedback)).toBeVisible();
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Interrupted reinstall recovery for Test Outfit" })).not.toBeInTheDocument());
+  expect(section).toHaveFocus();
+  expect(live).toHaveTextContent(feedback);
+  await client.refetchQueries({ queryKey: ["mods", "gimi"] });
+  expect(live).toHaveTextContent(feedback);
+  await userEvent.click(screen.getByRole("button", { name: "Settings for Genshin Impact" }));
+  const settings = screen.getByRole("dialog", { name: "Settings" });
+  await userEvent.click(within(settings).getByRole("button", { name: /GMM settings/ }));
+  await userEvent.click(within(settings).getByRole("button", { name: "Close" }));
+  expect(screen.getByRole("button", { name: "Settings for Genshin Impact" })).toHaveFocus();
+  expect(container).toContainElement(live);
+  expect(live).toHaveTextContent(feedback);
+  expect(screen.getByText(feedback)).toBeVisible();
+});
+
 
 it("refreshes Game Session context after Launch succeeds", async () => {
   mutations.launch_game = () => {

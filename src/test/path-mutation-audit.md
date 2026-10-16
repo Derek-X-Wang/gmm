@@ -24,6 +24,15 @@ invalidation. The reported 46 text occurrences were 41 calls, four imports, and
 one mention in this document. The three intentional no-refresh sites now carry
 literal `meta.noInvalidationReason` values matching their existing decisions.
 
+The #301 finished-layout sweep reconciled all 41 sites in 10 files against the
+table below. No missing, duplicated or stale rows were found. MainApp's Launch
+and session hooks, retained Settings pages, extracted Library editors and the
+shared import settlement callbacks still map to their recorded owners and query
+keys. The gate and rendered invalidation suite remain complementary: the gate
+checks declarations and inventory, while rendered tests check the affected
+cached reads and surviving feedback. The known pin/recommendations path-state
+over-refresh from #301's scope comment remains conservative and unchanged.
+
 ## Complete mutation inventory
 
 `Settled` means invalidation runs after either success or rejection. Existing
