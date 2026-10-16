@@ -1,16 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { updater, type UpdateController, type UpdateState } from "./updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 
 function UpdateStatus({ controller }: { controller: UpdateController }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
-  const onRestart = async () => {
-    try {
-      await relaunch();
-    } catch (error) {
-      controller.reportRestartError(error);
-    }
-  };
 
   return <>
     {state.kind === "up-to-date" ? <p className="muted">You're on the latest release.</p> : null}
@@ -29,11 +21,6 @@ function UpdateStatus({ controller }: { controller: UpdateController }) {
     {state.kind === "downloading" ? <p className="muted">
       Downloading{state.total ? ` (${Math.round((100 * state.downloaded) / state.total)}%)` : "…"}
     </p> : null}
-    {state.kind === "installed" ? <>
-      <p>Update installed. Click <strong>Restart to apply</strong> to load it.</p>
-      <button onClick={() => void onRestart()}>Restart to apply</button>
-      {state.restartError ? <p role="alert" className="error">{state.restartError}</p> : null}
-    </> : null}
     {state.kind === "error" ? <p role="alert" className="error">{state.message}</p> : null}
   </>;
 }
@@ -50,7 +37,7 @@ export function UpdatesPanel({ controller = updater }: { controller?: UpdateCont
       the project maintainer install. You choose whether to install each update.
     </p>
     <button onClick={() => void controller.checkForUpdates()}
-      disabled={state.kind === "checking" || state.kind === "downloading" || state.kind === "installed"}>
+      disabled={state.kind === "checking" || state.kind === "downloading"}>
       {state.kind === "checking" ? "Checking…" : "Check for updates"}
     </button>
     <UpdateStatus controller={controller} />
@@ -64,14 +51,13 @@ export function UpdatesPanel({ controller = updater }: { controller?: UpdateCont
  * that stay true until someone acts on them and leaves the rest to the GMM
  * updates group in Settings (#357):
  *
- * - An offer, a download in flight and an installed build waiting for a
- *   restart are all facts that outlive the surface that started them. The
+ * - An offer and a download in flight outlive the surface that started them. The
  *   download percentage is not in the bar: Settings is where the install was
  *   started and where the progress is, and the bar is a reading, not a meter.
  * - A failed check is the one failure that can happen with no surface open at
  *   all, so the bar names it rather than letting a launch that could not check
  *   look like a launch that found nothing. A failed installation is named for
- *   the same reason — it leaves the build un-installed.
+ *   the same reason — it leaves the build unapplied.
  * - `idle`, `checking` and `up-to-date` have nothing to act on, and a decline
  *   has been answered. A reading for any of them would be the bar nagging
  *   about an answered question; Settings keeps the declined outcome visible
@@ -81,7 +67,6 @@ function updateReading(state: UpdateState): string | null {
   switch (state.kind) {
     case "available": return `GMM update available: ${state.version}`;
     case "downloading": return "GMM update downloading…";
-    case "installed": return "GMM update installed · restart to apply";
     case "error": return state.failure === "check" ? "GMM update check unavailable"
       : state.failure === "install" ? "GMM update installation failed"
       : null;
