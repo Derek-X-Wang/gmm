@@ -32,7 +32,6 @@ describe("update consent", () => {
     expect(controller.getSnapshot()).toMatchObject({ kind: "available", version: "0.5.0" });
     await controller.install();
     expect(update.downloadAndInstall).toHaveBeenCalledOnce();
-    expect(controller.getSnapshot()).toEqual({ kind: "installed" });
   });
 
   it("declining persists the version and never installs, including a stale install action", async () => {

@@ -177,8 +177,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Process plugin dependencies stay while frontend tests mock the module;
+        // update those mocks before removing the npm and Cargo dependencies (#380).
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .manage(core)
         .manage(startup_reconcile_state)
         .manage(crate::runtime::SessionRuntime::new())

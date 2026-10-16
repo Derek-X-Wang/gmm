@@ -52,11 +52,11 @@ it("checks on demand and distinguishes idle, checking and current", async () => 
   expect(screen.queryByRole("button", { name: "Restart to apply" })).not.toBeInTheDocument();
 });
 
-it("requires consent before the install command, then explicit restart, with the bar only reading", async () => {
+it("requires consent before the install command, with the bar only reading", async () => {
   let progress!: (event: unknown) => void;
-  let finish!: () => void;
+  // Windows exits during installer handoff; this process only observes progress.
   const downloadAndInstall = vi.fn((callback: typeof progress) => {
-    progress = callback; return new Promise<void>((yes) => { finish = yes; });
+    progress = callback; return new Promise<void>(() => {});
   });
   const controller = createUpdateController(vi.fn().mockResolvedValue({ version: "0.5.0", rawJson: signedMetadata("0.5.0"), downloadAndInstall }));
   renderSurfaces(controller);
@@ -86,14 +86,6 @@ it("requires consent before the install command, then explicit restart, with the
   await act(() => progress({ event: "Finished" }));
   expect(screen.queryByRole("button", { name: "Restart to apply" })).not.toBeInTheDocument();
   expect(relaunch).not.toHaveBeenCalled();
-  await act(async () => finish());
-  expect(screen.getByText(/Update installed/)).toBeVisible();
-  expect(relaunch).not.toHaveBeenCalled();
-  // Still a reading: the restart is an explicit click in Settings as well.
-  expect(bar()).toHaveTextContent("GMM update installed · restart to apply");
-  expect(barControls()).toEqual(["Review GMM updates in Settings"]);
-  await userEvent.click(screen.getByRole("button", { name: "Restart to apply" }));
-  expect(relaunch).toHaveBeenCalledOnce();
 });
 
 it("skipping the offer silences the bar, survives a fresh launch, and a new version reads again", async () => {
@@ -178,22 +170,6 @@ it("shows download failure without a current-release claim or restart", async ()
   // silent on a failure that left the update unapplied.
   expect(bar()).toHaveTextContent("GMM update installation failed");
   expect(bar()).not.toHaveTextContent("signature mismatch");
-});
-
-it("a failed restart keeps the explicit restart action without offering another install", async () => {
-  const downloadAndInstall = vi.fn().mockResolvedValue(undefined);
-  const controller = createUpdateController(vi.fn().mockResolvedValue({ version: "0.5.0", rawJson: signedMetadata("0.5.0"), downloadAndInstall }));
-  renderSurfaces(controller);
-  await act(() => controller.checkForUpdates(true));
-  await userEvent.click(screen.getByRole("button", { name: "Install update" }));
-  relaunch.mockRejectedValueOnce(new Error("process unavailable"));
-  await userEvent.click(screen.getByRole("button", { name: "Restart to apply" }));
-  expect(screen.getByRole("alert")).toHaveTextContent("Restart failed: process unavailable");
-  expect(screen.queryByRole("button", { name: "Install update" })).not.toBeInTheDocument();
-  expect(bar()).toHaveTextContent("GMM update installed · restart to apply");
-  await userEvent.click(screen.getByRole("button", { name: "Restart to apply" }));
-  expect(relaunch).toHaveBeenCalledTimes(2);
-  expect(downloadAndInstall).toHaveBeenCalledOnce();
 });
 
 afterEach(() => vi.useRealTimers());
