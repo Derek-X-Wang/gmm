@@ -16,14 +16,15 @@ actual signing output and process behavior, but makes the environment part of
 the test contract. From the repository root, run these steps in order:
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 cd src-tauri
 cargo build --workspace
 cargo test --workspace
 ```
 
-- `pnpm install` supplies `node_modules`: `tests/updater_signature.rs` is the
-  only Rust test file that invokes the Tauri CLI through pnpm. Without it, five
+- `pnpm install --frozen-lockfile` supplies `node_modules` without changing the
+  locked dependency set, matching CI. `tests/updater_signature.rs` is the only
+  Rust test file that invokes the Tauri CLI through pnpm. Without it, five
   signature tests fail even though the problem is outside Rust.
 - Plain `cargo build --workspace` compiles the helper binaries that tests use
   as fixtures, including `concurrency-probe`. Do not substitute

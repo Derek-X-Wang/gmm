@@ -571,7 +571,7 @@ From the repository root, run the prerequisite sequence before testing. See
 each step and the Cargo target-directory constraint matter.
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 cd src-tauri
 cargo build --workspace       # builds the helper-binary fixtures
 cargo test --workspace

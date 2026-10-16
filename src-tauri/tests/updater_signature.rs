@@ -1,5 +1,5 @@
 //! The signature half of the updater round trip (issue #56).
-//! Requires `node_modules`: run `pnpm install` at the repo root first,
+//! Requires `node_modules`: run `pnpm install --frozen-lockfile` at the repo root first,
 //! because this file invokes the real Tauri CLI through pnpm.
 //!
 //! `tests/updater_config.rs` asserts the shipped `tauri.conf.json` has a
