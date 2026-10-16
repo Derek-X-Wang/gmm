@@ -154,9 +154,12 @@ function Get-IpcMarkerCount([hashtable]$state) {
     $count = 0
     foreach ($file in Get-ChildItem $logs -Filter *.log -File) {
         $key = $file.FullName
-        if (-not $state.ContainsKey($key) -or $file.Length -lt $state[$key].Offset -or
-            $file.CreationTimeUtc -ne $state[$key].Created) {
-            $state[$key] = @{ Offset = 0L; Tail = ""; Count = 0; Created = $file.CreationTimeUtc }
+        # New paths (including rotated logs) and shrinkage below the saved offset
+        # reset the scan. CreationTimeUtc can change on ordinary Unix writes.
+        # Known limit: a same-path replacement at least as long as the saved
+        # offset is not detected; this reader assumes append-only logs otherwise.
+        if (-not $state.ContainsKey($key) -or $file.Length -lt $state[$key].Offset) {
+            $state[$key] = @{ Offset = 0L; Tail = ""; Count = 0 }
         }
         $entry = $state[$key]
         # Scan historical bytes once per launch, then only appended bytes. Keep
