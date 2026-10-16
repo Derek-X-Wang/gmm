@@ -44,6 +44,9 @@ jobs:
       - name: Test updater server readiness
         run: pwsh -NoProfile -File .github/scripts/test-updater-server-readiness.ps1
 
+      - name: Test application startup and resource release
+        run: pwsh -NoProfile -File .github/scripts/test-app-starts.ps1
+
       - name: Test release notes and digest preservation
         run: pwsh -NoProfile -File .github/scripts/test-release-notes.ps1
 

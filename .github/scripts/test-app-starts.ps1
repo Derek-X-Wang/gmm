@@ -1,0 +1,210 @@
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '',
+    Justification = 'Test-local clock and process commands exercise unchanged production functions deterministically.')]
+param([string]$Case = '*')
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+# Each source copy and its command mocks live in a distinct module scope.
+# Only function definitions are extracted; installer top-level code never runs.
+$contract = {
+    param($scriptName, $RepoRoot, $Case)
+    $ErrorActionPreference = 'Stop'
+    Set-StrictMode -Version Latest
+    $script:Checks = 0
+    function Assert-That($condition, $message) { if (-not $condition) { throw $message } }
+    function Check($name, [scriptblock]$test) {
+        if ($name -notlike "*/$Case") { return }
+        try { & $test } catch { throw "${name}: $_" }
+        $script:Checks++
+        Write-Host "PASS $name"
+    }
+    function Get-Date { $script:Now }
+    function Start-Sleep {
+        param($Milliseconds, $Seconds)
+        $script:Sleeps++
+        $script:Now = $script:Now.AddSeconds(10)
+        if ($null -ne $script:OnSleep) { & $script:OnSleep }
+        if ($script:Sleeps -gt 20) { throw 'poll was not bounded' }
+    }
+    function Start-Process { param($FilePath, [switch]$PassThru) return $script:Proc }
+    function Stop-Process { param($Id, [switch]$Force, $ErrorAction) $script:Stopped = $true }
+    function Write-Warning { param($Message) $script:Warnings += $Message }
+    function Reset-Clock {
+        $script:Now = [datetime]'2026-10-16T00:00:00Z'
+        $script:Sleeps = 0
+        $script:OnSleep = $null
+        $script:Stopped = $false
+        $script:Warnings = @()
+        $script:BusyPaths = @{}
+        $script:Probe = { param($path) return -not $script:BusyPaths.ContainsKey($path) }
+        $script:Proc = [pscustomobject]@{ Id = 12345; HasExited = $true; ExitCode = 17; Disposed = $false }
+        $script:Proc | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Disposed = $true }
+    }
+    function Assert-Failure([scriptblock]$operation, $pattern) {
+        $failure = $null
+        try { & $operation } catch { $failure = $_.ToString() }
+        Assert-That ($null -ne $failure -and $failure -match $pattern) "expected '$pattern', got '$failure'"
+    }
+    # Mock clock/process commands and inject the file-release predicate. These
+    # tests prove control flow, not Windows mapped-image sharing or MSI behavior.
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('gmm-331-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $root | Out-Null
+    try {
+        $file = Join-Path $RepoRoot ".github/scripts/$scriptName.ps1"
+        $tokens = $null; $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors)
+        Assert-That ($parseErrors.Count -eq 0) 'parse errors'
+        foreach ($name in @('Get-IpcMarkerCount', 'Test-AppFileReleased', 'Wait-AppResourcesReleased', 'Assert-AppStarts')) {
+            $fn = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+            Assert-That ($null -ne $fn) "missing $name"
+            . ([scriptblock]::Create($fn.Extent.Text))
+        }
+        # AST guards cover ordinary literal budget edits and direct sleep calls.
+        # They do not prove arbitrary program semantics (aliases, computed command
+        # names or dynamic invocation). Runtime tests below cover actual polling,
+        # count increases, expiry, and cleanup on both extracted production paths.
+        Check "$scriptName/MeasuredLaunchBudget" {
+            $writes = @($fn.Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+                    ($node.Left.VariablePath.UserPath -replace '^[^:]+:', '') -eq 'deadline'
+            }, $true))
+            Assert-That ($writes.Count -eq 1) 'launch deadline must be assigned once'
+            $budget = $writes[0].Right.Find({
+                param($node)
+                $node -is [Management.Automation.Language.InvokeMemberExpressionAst] -and
+                    $node.Member.Value -eq 'AddSeconds'
+            }, $true)
+            Assert-That ($null -ne $budget -and $budget.Arguments.Count -eq 1 -and
+                $budget.Arguments[0].SafeGetValue() -eq 90) 'measured launch ceiling must stay 90 seconds'
+        }
+        Check "$scriptName/NoFinallySleep" {
+            $cleanup = @($fn.Body.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.TryStatementAst] -and $null -ne $node.Finally
+            }, $true))
+            Assert-That ($cleanup.Count -gt 0) 'missing launch cleanup'
+            foreach ($block in $cleanup) {
+                $sleeps = @($block.Finally.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.CommandAst] -and
+                        $node.GetCommandName() -eq 'Start-Sleep'
+                }, $true))
+                Assert-That ($sleeps.Count -eq 0) 'finally must wait on resources, never a fixed sleep'
+            }
+        }
+        $AppData = Join-Path $root $scriptName
+        $logDir = Join-Path $AppData 'logs'
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        $IpcReadyMarker = 'gmm-ipc-ready'
+        $log = Join-Path $logDir 'current.log'
+        [IO.File]::WriteAllText($log, "old $IpcReadyMarker" + [Environment]::NewLine)
+        Check "$scriptName/IncrementalMarkerCount" {
+            [IO.File]::WriteAllText($log, "old GMM-IPC-READY twice GMM-IPC-READY`nnoise`ngmm-ipc-")
+            $state = @{}
+            Assert-That ((Get-IpcMarkerCount $state) -eq 1) 'count lines rather than occurrences'
+            $offset = $state[$log].Offset
+            Assert-That ((Get-IpcMarkerCount $state) -eq 1 -and $state[$log].Offset -eq $offset) 'unchanged poll'
+            # A prior line can no longer be read: only appended bytes may be scanned.
+            [IO.File]::WriteAllText($log, ('x' * $offset))
+            [IO.File]::AppendAllText($log, "ready`ngmm-ipc-ready")
+            Assert-That ((Get-IpcMarkerCount $state) -eq 3) 'append-only scan and split marker'
+            [IO.File]::AppendAllText($log, " more`n")
+            Assert-That ((Get-IpcMarkerCount $state) -eq 3) 'partial line counted twice'
+            [IO.File]::WriteAllText($log, "gmm-ipc-ready`n")
+            Assert-That ((Get-IpcMarkerCount $state) -eq 1) 'truncation not reset'
+            Move-Item $log (Join-Path $logDir 'rotated.log')
+            [IO.File]::WriteAllText($log, "gmm-ipc-ready`n")
+            Assert-That ((Get-IpcMarkerCount $state) -eq 2) 'rolling files not counted'
+            Remove-Item (Join-Path $logDir 'rotated.log')
+            Assert-That ((Get-IpcMarkerCount $state) -eq 1) 'deleted file still counted'
+        }
+        $exe = Join-Path $AppData 'GMM.exe'
+        $dll = Join-Path $AppData 'WebView2Loader.dll'
+        $db = Join-Path $AppData 'gmm.db'
+        foreach ($path in @($exe, $dll, $db)) { [IO.File]::WriteAllText($path, 'fixture') }
+        Check "$scriptName/TeardownImmediate" {
+            Reset-Clock
+            Wait-AppResourcesReleased $script:Proc $exe -database $db -FileReleased $script:Probe
+            Assert-That ($script:Sleeps -eq 0) 'healthy teardown added a fixed delay'
+        }
+        foreach ($resource in @('exe', 'dll', 'database', 'process')) {
+            $lockedPath = switch ($resource) { exe { $exe }; dll { $dll }; database { $db }; process { $null } }
+            Check "$scriptName/TeardownWaitsForProbe-$resource" {
+                Reset-Clock
+                    if ($lockedPath) { $script:BusyPaths[$lockedPath] = $true }
+                else { $script:Proc.HasExited = $false }
+                try {
+                    $script:OnSleep = { if ($script:Sleeps -eq 2) { $script:BusyPaths.Clear(); $script:Proc.HasExited = $true } }
+                    Wait-AppResourcesReleased $script:Proc $exe -database $db -FileReleased $script:Probe
+                    Assert-That ($script:Sleeps -eq 2) 'did not poll until actual resource release'
+                } finally { $script:BusyPaths.Clear() }
+            }
+            Check "$scriptName/TeardownProbeExpiry-$resource" {
+                Reset-Clock
+                    if ($lockedPath) { $script:BusyPaths[$lockedPath] = $true }
+                else { $script:Proc.HasExited = $false }
+                try {
+                    Assert-Failure { Wait-AppResourcesReleased $script:Proc $exe -database $db -FileReleased $script:Probe } 'timed out waiting for GMM teardown.*still held:'
+                    Assert-That ($script:Sleeps -eq 3) 'teardown ceiling not enforced'
+                } finally { $script:BusyPaths.Clear() }
+            }
+        }
+        Check "$scriptName/TeardownProbeFailureIsNotExpiry" {
+            Reset-Clock
+            Assert-Failure {
+                Wait-AppResourcesReleased $script:Proc $exe -FileReleased { param($path) throw "probe failure: $path" }
+            } '^probe failure:'
+            Assert-That ($script:Sleeps -eq 0) 'unexpected probe error retried as expiry'
+        }
+        Check "$scriptName/StaleMarkerDoesNotPassExitedLaunch" {
+            Reset-Clock
+            Assert-Failure { Assert-AppStarts $exe -FileReleased $script:Probe } 'GMM exited with code 17 before reaching a working state'
+            Assert-That ($script:Stopped -and $script:Proc.Disposed) 'cleanup did not complete'
+        }
+        Check "$scriptName/StartupExpiryPreserved" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            # Parent exits only once cleanup calls Stop-Process.
+            $script:OnSleep = { if ($script:Stopped) { $script:Proc.HasExited = $true } }
+            Assert-Failure { Assert-AppStarts $exe -FileReleased $script:Probe } '^timed out waiting for GMM to reach a working state$'
+            Assert-That ($script:Stopped -and $script:Proc.Disposed) 'expiry skipped cleanup'
+        }
+        Check "$scriptName/StartupAndCleanupFailurePreserved" {
+            Reset-Clock
+            $script:BusyPaths[$exe] = $true
+            try {
+                Assert-Failure { Assert-AppStarts $exe -FileReleased $script:Probe } 'GMM exited with code 17 before reaching a working state'
+                Assert-That ($script:Warnings.Count -eq 1 -and $script:Warnings[0] -match 'timed out waiting for GMM teardown') 'secondary failure not visible'
+                Assert-That $script:Proc.Disposed 'secondary failure skipped dispose'
+            } finally { $script:BusyPaths.Clear() }
+        }
+        Check "$scriptName/StartupNewMarkerAndCleanup" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            $script:OnSleep = {
+                if ($script:Stopped) { $script:Proc.HasExited = $true }
+                else { [IO.File]::AppendAllText($log, "gmm-ipc-ready`n") }
+            }
+            Assert-AppStarts $exe -FileReleased $script:Probe
+            Assert-That ($script:Stopped -and $script:Proc.Disposed -and $script:Sleeps -eq 2) 'stale marker passed or cleanup not polled'
+        }
+        Check "$scriptName/StartupCleanupExpiryFails" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            $script:OnSleep = { [IO.File]::AppendAllText($log, "gmm-ipc-ready`n") }
+            Assert-Failure { Assert-AppStarts $exe -FileReleased $script:Probe } 'timed out waiting for GMM teardown'
+            Assert-That $script:Proc.Disposed 'cleanup expiry skipped dispose'
+        }
+        Assert-That ($script:Checks -gt 0) "no tests matched '$Case'"
+        Write-Host "$scriptName TOTAL $script:Checks passed"
+    } finally { Remove-Item -LiteralPath $root -Force -Recurse }
+    Export-ModuleMember -Function @()
+}
+foreach ($scriptName in @('updater-e2e', 'installer-lifecycle')) {
+    $module = New-Module -Name "$scriptName-startup-contract" -ScriptBlock $contract -ArgumentList $scriptName, $RepoRoot, $Case
+    Remove-Module $module -ErrorAction SilentlyContinue
+}
+Write-Host "NOT-RUN: Windows mapped-image sharing, WebView2 lifetime and MSI behavior require the native installer/updater CI jobs."
