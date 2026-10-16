@@ -676,38 +676,33 @@ it("keeps #348's warning sign and wording for missing Game entries in the bar", 
   expect(await screen.findByRole("textbox", { name: "Genshin Impact install path" })).toBeVisible();
 });
 
-it("gives the status bar an opaque surface in light mode as well as dark", () => {
-  // jsdom does not evaluate `prefers-color-scheme`, so the light block is
-  // unreachable through `getComputedStyle` on the real bar. Read the authored
-  // rules that match it instead, the way `AttentionView.test.tsx` does.
+it("declares only the dark colour scheme for native widgets", () => {
+  const authored: string = readFileSync("src/App.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const root = authored.match(/:root\s*\{([^{}]*)\}/)![1];
+  expect(root.match(/(?:^|;)\s*color-scheme\s*:\s*([^;]+)/)?.[1].trim()).toBe("dark");
+});
+
+it("forbids OS colour-scheme overrides throughout the stylesheet", () => {
+  const authored: string = readFileSync("src/App.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  expect(authored, "GMM uses one dark palette regardless of the OS theme").not.toMatch(/prefers-color-scheme/i);
+});
+
+it("gives the status bar one opaque dark surface and readable inherited text", () => {
+  // Read authored colours: jsdom does not evaluate theme media queries and
+  // can resolve `inherit` against body instead of the actual parent.
   const authored: string = readFileSync("src/App.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const bar = document.createElement("footer");
   bar.className = "status-bar";
-  // An unclassed `<footer>` excludes the rules that reach every element, such
-  // as the `*` box-sizing rule, leaving the bar's own two.
   const other = document.createElement("footer");
   const rules = [...authored.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
     .filter(([, selectors]) => selectors.split(",").some((raw) => {
       const selector = raw.trim();
       return bar.matches(selector) && !other.matches(selector);
     }));
-  expect(rules, "the bar needs a dark rule and a prefers-color-scheme: light rule").toHaveLength(2);
-
-  for (const [, , declarations] of rules) {
-    const probe = document.createElement("footer");
-    probe.setAttribute("style", declarations);
-    document.body.appendChild(probe);
-    try {
-      expect(
-        getComputedStyle(probe).backgroundColor,
-        "a fixed bar with a see-through surface renders the page through its text",
-      ).toMatch(/^rgb\([^)]*\)$/);
-    } finally {
-      probe.remove();
-    }
-  }
-  // The light rule has to state the text colour too. The bar inherits no
-  // light-mode treatment: the only other light-mode surface is
-  // `.settings-screen`, which the bar is never inside.
-  expect(rules[1][2]).toMatch(/(^|;)\s*color\s*:/);
+  expect(rules, "one unconditional dark rule owns the bar's surface").toHaveLength(1);
+  expect(rules[0][2]).toMatch(/(?:^|;)\s*background\s*:\s*#18181b\s*;/);
+  expect(rules[0][2]).toMatch(/(?:^|;)\s*border-top\s*:\s*1px solid #2e2e36\s*;/);
+  expect(rules[0][2]).not.toMatch(/(?:^|;)\s*color\s*:/);
+  const root = authored.match(/:root\s*\{([^{}]*)\}/)![1];
+  expect(root).toMatch(/(?:^|;)\s*color\s*:\s*#e5e5e5\s*;/);
 });
