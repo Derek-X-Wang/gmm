@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
@@ -36,7 +36,9 @@ function renderMods() {
 
 it("leads confirmed-empty content with three named import routes then the ZIP drop zone", async () => {
   const { container } = renderMods();
-  const heading = await screen.findByRole("heading", { name: "Add Mods for Honkai: Star Rail" });
+  // Wait for the Library result; a missing empty-state heading should then fail immediately.
+  await waitFor(() => expect(screen.queryByText("Loading…")).not.toBeInTheDocument(), { timeout: 10_000 });
+  const heading = screen.getByRole("heading", { name: "Add Mods for Honkai: Star Rail" });
   const section = heading.closest("section")!;
   expect(within(section).getAllByRole("heading", { level: 3 }).map((entry) => entry.textContent)).toEqual([
     "Adopt for Honkai: Star Rail", "Import ZIP for Honkai: Star Rail", "GameBanana for Honkai: Star Rail",

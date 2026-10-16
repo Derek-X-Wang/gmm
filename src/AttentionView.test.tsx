@@ -39,7 +39,10 @@ it("names a staged Library operation, its path, and its recovery obstruction", a
   });
   renderWithQuery(<AttentionView />);
 
-  await screen.findByRole("button", { name: /Needs attention/ });
+  // Budget the initial report fetch, then fail immediately if its settled label is wrong.
+  await waitFor(() => expect(screen.getByRole("region", { name: "Attention across all Games" }))
+    .toHaveAttribute("aria-busy", "false"), { timeout: 10_000 });
+  expect(screen.getByRole("button", { name: /Needs attention/ })).toBeInTheDocument();
   await expand();
   await waitFor(() => expect(
     screen.queryByText("Staged Library operations (1)"),
