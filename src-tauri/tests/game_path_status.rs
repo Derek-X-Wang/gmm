@@ -189,7 +189,7 @@ async fn every_game_uses_its_existing_validator_and_importer_layout() {
         assert_eq!(status.game_path, GamePathState::Readable);
         assert_eq!(
             status.model_importer,
-            ModelImporterState::RequiredEntriesNotFound {
+            ModelImporterState::NoImporterEntriesFound {
                 paths: vec![
                     game.join("d3dx.ini"),
                     game.join("Core"),
@@ -200,14 +200,17 @@ async fn every_game_uses_its_existing_validator_and_importer_layout() {
         importer(&game);
         let status = core.game_path_status(profile.code).await.unwrap();
         assert_eq!(status.game_path, GamePathState::Readable);
-        assert_eq!(status.model_importer, ModelImporterState::Installed);
+        assert_eq!(
+            status.model_importer,
+            ModelImporterState::UnrecordedImporterPresent { paths: vec![] }
+        );
         // No Mods directory, ShaderCache, DLL, recorded version, or Origin
         // is necessary to establish the existing package layout.
     }
 }
 
 #[tokio::test]
-async fn importer_bookkeeping_is_never_filesystem_evidence() {
+async fn recorded_install_with_missing_entries_is_damaged() {
     let (tmp, core, db) = fixture().await;
     let game = tmp.path().join("game");
     support::seed_game_install(GameCode::Gimi, &game);
@@ -234,9 +237,15 @@ async fn importer_bookkeeping_is_never_filesystem_evidence() {
     assert_eq!(status.game_path, GamePathState::Readable);
     assert!(matches!(
         status.model_importer,
-        ModelImporterState::RequiredEntriesNotFound { .. }
+        ModelImporterState::Damaged { .. }
     ));
-    assert!(!serde_json::to_string(&status).unwrap().contains("v9.9.9"));
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["modelImporter"]["status"], "damaged");
+    assert_eq!(
+        json["modelImporter"]["record"]["installedVersion"],
+        "v9.9.9"
+    );
+    assert_eq!(json["modelImporter"]["record"]["origin"]["state"], "known");
 }
 
 #[tokio::test]
@@ -253,7 +262,7 @@ async fn importer_names_follow_existing_case_insensitive_conventions() {
             .await
             .unwrap()
             .model_importer,
-        ModelImporterState::Installed
+        ModelImporterState::UnrecordedImporterPresent { paths: vec![] }
     );
 }
 
@@ -327,7 +336,7 @@ async fn importer_read_failure_keeps_the_readable_game_fact() {
         let status = result.unwrap();
         assert_eq!(status.game_path, GamePathState::Readable);
         assert!(
-            matches!(status.model_importer, ModelImporterState::Unverified { path: Some(ref failed), ref error }
+            matches!(status.model_importer, ModelImporterState::Unverified { path: Some(ref failed), ref error, .. }
             if failed == &entry && error.contains(&entry.display().to_string())),
             "{status:?}"
         );
@@ -536,7 +545,7 @@ async fn each_missing_importer_requirement_is_identified() {
         assert_eq!(status.game_path, GamePathState::Readable);
         assert_eq!(
             status.model_importer,
-            ModelImporterState::RequiredEntriesNotFound {
+            ModelImporterState::UnrecordedImporterPresent {
                 paths: vec![path.clone()]
             }
         );
@@ -599,7 +608,7 @@ async fn tauri_read_command_serializes_the_separate_facts() {
     assert_eq!(json["game"], "gimi");
     assert_eq!(json["savedPath"], game.to_str().unwrap());
     assert_eq!(json["gamePath"]["status"], "readable");
-    assert_eq!(json["modelImporter"]["status"], "requiredEntriesNotFound");
+    assert_eq!(json["modelImporter"]["status"], "noImporterEntriesFound");
     assert_eq!(
         json["modelImporter"]["paths"][0],
         game.join("d3dx.ini").to_str().unwrap()
@@ -654,14 +663,17 @@ async fn check_never_persists_settings_or_recovery_records() {
     }
     let status = core.game_path_status(GameCode::Gimi).await.unwrap();
     assert_eq!(status.game_path, GamePathState::Readable);
-    assert_eq!(status.model_importer, ModelImporterState::Installed);
+    assert!(matches!(
+        status.model_importer,
+        ModelImporterState::Installed { .. }
+    ));
     fs::remove_file(game.join("d3dx.ini")).unwrap();
     assert!(matches!(
         core.game_path_status(GameCode::Gimi)
             .await
             .unwrap()
             .model_importer,
-        ModelImporterState::RequiredEntriesNotFound { .. }
+        ModelImporterState::Damaged { .. }
     ));
     fs::remove_dir_all(&game).unwrap();
     assert!(matches!(
@@ -675,5 +687,217 @@ async fn check_never_persists_settings_or_recovery_records() {
         database_snapshot(&db).await,
         before,
         "all settings and recovery rows must remain byte-for-byte equivalent"
+    );
+}
+
+#[tokio::test]
+async fn recorded_healthy_install_exposes_local_version_and_origin() {
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    importer(&game);
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    gmm_lib::core::updates::set_importer_installed(&db, GameCode::Gimi, "v3.4.1")
+        .await
+        .unwrap();
+    let origin =
+        gmm_lib::core::importer_origin::ImporterOrigin::github("Example", "Package", "Package.zip");
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('importer.gimi.installed_origin', ?)")
+        .bind(serde_json::to_string(&origin).unwrap())
+        .execute(&db)
+        .await
+        .unwrap();
+    let state = core
+        .game_path_status(GameCode::Gimi)
+        .await
+        .unwrap()
+        .model_importer;
+    let ModelImporterState::Installed { record } = &state else {
+        panic!("{state:?}")
+    };
+    assert_eq!(record.installed_version.as_deref(), Some("v3.4.1"));
+    assert_eq!(
+        record.origin,
+        gmm_lib::core::importer_origin::InstalledOrigin::Known(origin)
+    );
+    assert_eq!(serde_json::to_value(&state).unwrap()["status"], "installed");
+}
+
+#[tokio::test]
+async fn hand_installed_files_are_unrecorded_not_absent_and_pin_is_not_a_receipt() {
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    core.set_importer_pinned(GameCode::Gimi, Some("v9"))
+        .await
+        .unwrap();
+    let before = database_snapshot(&db).await;
+    let state = core
+        .game_path_status(GameCode::Gimi)
+        .await
+        .unwrap()
+        .model_importer;
+    assert!(
+        matches!(state, ModelImporterState::NoImporterEntriesFound { .. }),
+        "{state:?}"
+    );
+    assert_eq!(
+        serde_json::to_value(&state).unwrap()["status"],
+        "noImporterEntriesFound"
+    );
+    importer(&game);
+    let state = core
+        .game_path_status(GameCode::Gimi)
+        .await
+        .unwrap()
+        .model_importer;
+    assert_eq!(
+        state,
+        ModelImporterState::UnrecordedImporterPresent { paths: vec![] }
+    );
+    assert_eq!(
+        serde_json::to_value(&state).unwrap()["status"],
+        "unrecordedImporterPresent"
+    );
+    fs::remove_file(game.join("d3dx.ini")).unwrap();
+    assert_eq!(
+        core.game_path_status(GameCode::Gimi)
+            .await
+            .unwrap()
+            .model_importer,
+        ModelImporterState::UnrecordedImporterPresent {
+            paths: vec![game.join("d3dx.ini")]
+        }
+    );
+    assert_eq!(
+        database_snapshot(&db).await,
+        before,
+        "hand installs never gain receipts"
+    );
+}
+
+#[tokio::test]
+async fn version_only_receipt_keeps_unknown_origin_without_backfilling() {
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    importer(&game);
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    gmm_lib::core::updates::set_importer_installed(&db, GameCode::Gimi, "v1")
+        .await
+        .unwrap();
+    let before = database_snapshot(&db).await;
+    let state = core
+        .game_path_status(GameCode::Gimi)
+        .await
+        .unwrap()
+        .model_importer;
+    let ModelImporterState::Installed { record } = state else {
+        panic!("{state:?}")
+    };
+    assert_eq!(
+        record.origin,
+        gmm_lib::core::importer_origin::InstalledOrigin::Unknown
+    );
+    assert_eq!(database_snapshot(&db).await, before);
+}
+
+#[tokio::test]
+async fn origin_only_and_unreadable_receipts_still_establish_recorded_damage() {
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    for raw in [
+        r#"{"kind":"gitHubRelease","owner":"Example","repo":"Package","asset_pattern":"Package.zip"}"#,
+        "invalid origin",
+    ] {
+        sqlx::query("INSERT OR REPLACE INTO settings (key, value) VALUES ('importer.gimi.installed_origin', ?)")
+            .bind(raw).execute(&db).await.unwrap();
+        let state = core
+            .game_path_status(GameCode::Gimi)
+            .await
+            .unwrap()
+            .model_importer;
+        let ModelImporterState::Damaged { record, .. } = state else {
+            panic!("{state:?}")
+        };
+        assert_eq!(record.installed_version, None);
+        assert_ne!(
+            record.origin,
+            gmm_lib::core::importer_origin::InstalledOrigin::Unknown
+        );
+    }
+}
+
+#[tokio::test]
+async fn origin_change_clears_receipt_and_reports_uncertainty_for_both_layouts() {
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    importer(&game);
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    gmm_lib::core::updates::set_importer_installed(&db, GameCode::Gimi, "v1")
+        .await
+        .unwrap();
+    let old =
+        gmm_lib::core::importer_origin::ImporterOrigin::github("Example", "Old", "Package.zip");
+    sqlx::query("INSERT INTO settings (key, value) VALUES ('importer.gimi.installed_origin', ?)")
+        .bind(serde_json::to_string(&old).unwrap())
+        .execute(&db)
+        .await
+        .unwrap();
+    let origin =
+        gmm_lib::core::importer_origin::ImporterOrigin::github("Example", "New", "Package.zip");
+    core.set_importer_origin_override(GameCode::Gimi, Some(&origin))
+        .await
+        .unwrap();
+    assert_eq!(
+        core.game_path_status(GameCode::Gimi)
+            .await
+            .unwrap()
+            .model_importer,
+        ModelImporterState::UnrecordedImporterPresent { paths: vec![] }
+    );
+    fs::remove_file(game.join("d3dx.ini")).unwrap();
+    fs::remove_dir(game.join("Core")).unwrap();
+    fs::remove_dir(game.join("ShaderFixes")).unwrap();
+    assert!(matches!(
+        core.game_path_status(GameCode::Gimi)
+            .await
+            .unwrap()
+            .model_importer,
+        ModelImporterState::NoImporterEntriesFound { .. }
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recorded_unreadable_entry_is_damaged_and_wrong_type_stays_unverified() {
+    use std::os::unix::fs::PermissionsExt;
+    let (tmp, core, db) = fixture().await;
+    let game = tmp.path().join("game");
+    support::seed_game_install(GameCode::Gimi, &game);
+    importer(&game);
+    save_fixture_path(&db, GameCode::Gimi, &game).await;
+    gmm_lib::core::updates::set_importer_installed(&db, GameCode::Gimi, "v1")
+        .await
+        .unwrap();
+    let entry = game.join("d3dx.ini");
+    fs::set_permissions(&entry, fs::Permissions::from_mode(0o000)).unwrap();
+    let result = core.game_path_status(GameCode::Gimi).await;
+    fs::set_permissions(&entry, fs::Permissions::from_mode(0o600)).unwrap();
+    let state = result.unwrap().model_importer;
+    assert!(
+        matches!(state, ModelImporterState::Damaged { ref paths, error: Some(ref error), .. }
+        if paths == &vec![entry.clone()] && error.contains(&entry.display().to_string())),
+        "{state:?}"
+    );
+    fs::remove_file(&entry).unwrap();
+    fs::create_dir(&entry).unwrap();
+    assert!(
+        matches!(core.game_path_status(GameCode::Gimi).await.unwrap().model_importer,
+        ModelImporterState::Unverified { ref error, record: Some(_), .. } if error.contains("must be a file"))
     );
 }

@@ -85,8 +85,8 @@ beforeEach(() => {
           ? { status: "unreadable", path: paths[args!.game], error: unreadable }
           : { status: paths[args!.game] ? "readable" : "noSavedPath" },
         modelImporter: paths[args!.game] && unreadable === null
-          ? { status: "installed" }
-          : { status: "unverified", path: null, error: "Not checked" },
+          ? { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } }
+          : { status: "unverified", record: null, path: null, error: "Not checked" },
       };
       case "get_proxy_config": return { url: null, username: null, passwordSet: false };
       case "attention_status": return { safeToProceed: true, reinstalls: [], enabledTransitions: [], importerEvacuations: [], stagedLibraryOperations: [], sessionLaunches: [], activeSession: null, libraryAudits: [], libraryRootOverlaps: [], modPathOverlaps: [] };

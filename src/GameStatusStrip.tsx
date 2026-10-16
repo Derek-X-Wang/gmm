@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { checkImporterUpdate, getGamePathStatus, type GameCode, type GamePathStatus } from "./api";
+import { checkImporterUpdate, getGamePathStatus, modelImporterDetails, type GameCode, type GamePathStatus } from "./api";
 import { commandFailureMessage } from "./commandError";
 
 function pathSummary(value: GamePathStatus): { line: string; detail?: ReactNode } {
@@ -12,13 +12,13 @@ function pathSummary(value: GamePathStatus): { line: string; detail?: ReactNode 
     case "invalid": return { line: "Cannot verify Game layout · Model Importer unverified", detail: path.error };
     case "noSavedPath": return { line: "No saved install path · Model Importer unverified" };
     case "readable":
-      if (value.modelImporter.status === "requiredEntriesNotFound") {
-        return { line: "Game readable · Model Importer not installed", detail: value.modelImporter.paths.join(", ") };
+      switch (value.modelImporter.status) {
+        case "installed": return { line: "Game readable · Model Importer healthy" };
+        case "damaged": return { line: "Game readable · Model Importer damaged", detail: modelImporterDetails(value.modelImporter) };
+        case "noImporterEntriesFound": return { line: "Cannot tell — no GMM install recorded; no Model Importer entries found", detail: modelImporterDetails(value.modelImporter) };
+        case "unrecordedImporterPresent": return { line: "Cannot tell — Model Importer files found; no GMM install recorded", detail: modelImporterDetails(value.modelImporter) };
+        case "unverified": return { line: "Game readable · Model Importer unverified", detail: modelImporterDetails(value.modelImporter) };
       }
-      if (value.modelImporter.status === "unverified") {
-        return { line: "Game readable · Model Importer unverified", detail: value.modelImporter.error };
-      }
-      return { line: "Game readable · Model Importer healthy" };
   }
 }
 

@@ -3,7 +3,7 @@ import {
   checkImporterUpdate, fetchLatestImporterRelease, getImporterEvacuationRecovery,
   installImporter, rollbackImporter, setImporterPinned,
   retryImporterEvacuationRecovery, retireInterruptedImporterEvacuation,
-  getGamePathStatus, type GameCode, type GamePathStatus,
+  getGamePathStatus, modelImporterAction, modelImporterDetails, type GameCode, type GamePathStatus,
 } from "./api";
 import { ImporterEvacuationRecoveryWarning } from "./ImporterEvacuationRecoveryWarning";
 import { LoaderVersionNote } from "./LoaderVersionNote";
@@ -19,7 +19,9 @@ function importerPathLine(value: GamePathStatus): string {
     case "readable":
       switch (value.modelImporter.status) {
         case "installed": return `${value.game.toUpperCase()} installed · Game readable`;
-        case "requiredEntriesNotFound": return "Game readable · Model Importer not installed";
+        case "damaged": return "Game readable · Model Importer damaged";
+        case "noImporterEntriesFound": return "Cannot tell — no GMM install recorded; no Model Importer entries found";
+        case "unrecordedImporterPresent": return "Cannot tell — Model Importer files found; no GMM install recorded";
         case "unverified": return "Cannot tell · Model Importer filesystem unverified";
       }
   }
@@ -85,15 +87,16 @@ export function ImporterPanel({
   const importerLabel = game.toUpperCase();
   const readable = !path.isError && !path.isFetching && path.data?.gamePath.status === "readable";
   const installed = readable && path.data?.modelImporter.status === "installed";
-  const absent = readable && path.data?.modelImporter.status === "requiredEntriesNotFound";
+  const action = readable ? modelImporterAction(path.data?.modelImporter) : "unavailable";
   const available = !update.isError && !update.isFetching && !update.data?.checkError && update.data?.available && !update.data.pinned;
   const changing = install.isPending || rollback.isPending || pin.isPending || retireEvacuation.isPending || retryEvacuation.isPending;
-  const blocked = changing || (!installed && !absent) || evacuation.isError || evacuation.isFetching || evacuation.data !== null;
+  const blocked = changing || action === "unavailable" || evacuation.isError || evacuation.isFetching || evacuation.data !== null;
   const verifiedVersion = installed && !update.isError && !update.isFetching ? update.data?.installedVersion : null;
   const pathState = path.isPending || path.isFetching ? "Checking Game and Model Importer…"
     : path.isError || !path.data ? "Cannot tell · Model Importer filesystem unverified"
     : importerPathLine(path.data);
   const filesystem = path.data?.modelImporter;
+  const detail = filesystem ? modelImporterDetails(filesystem) : undefined;
 
   return (
     <section className="card">
@@ -109,7 +112,7 @@ export function ImporterPanel({
         explicit click here.
       </p>
       <p role="status">{pathState}</p>
-      {filesystem?.status === "unverified" ? <p className="muted small">{filesystem.error}</p> : null}
+      {detail ? <p className="muted small">{detail}</p> : null}
       <CommandErrorNotice error={path.error} />
       <div className="row">
         <span className="muted small">
@@ -148,7 +151,7 @@ export function ImporterPanel({
           onClick={() => install.mutate()}
           disabled={blocked}
         >
-          {install.isPending ? "Installing…" : installed ? available ? "Apply update" : "Reinstall importer" : absent ? "Install importer" : "Importer installation unavailable"}
+          {install.isPending ? "Installing…" : action === "reinstall" ? installed && available ? "Apply update" : "Reinstall importer" : action === "install" ? "Install importer" : "Importer installation unavailable"}
         </button>
         <button
           onClick={() => rollback.mutate()}

@@ -48,7 +48,7 @@ beforeEach(() => {
       case "is_onboarding_complete": return { complete: true, skipped: false };
       case "list_supported_games": return [{ code: "gimi", displayName: "Genshin Impact" }];
       case "get_game_install_path": return "C:/Game";
-      case "get_game_path_status": return { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+      case "get_game_path_status": return { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
       case "current_session": return sessionRead();
       case "interrupted_session_launches": return launchVisible ? [reservation] : [];
       case "retire_interrupted_session_launch":

@@ -49,6 +49,8 @@ impl<'ast> Visit<'ast> for InspectionBoundary {
             } else {
                 self.errors.push("inline inspection on async worker".into());
             }
+        } else if path == ["updates", "importer_install_record"] {
+            self.database_reads += 1;
         } else if path != ["Error", "PathInspectionTask"] {
             self.errors
                 .push(format!("unreviewed call: {}", path.join("::")));
@@ -127,7 +129,10 @@ fn settings_path_status_inspection_runs_inside_spawn_blocking() {
         "unsafe path-state boundary: {:?}",
         boundary.errors
     );
-    assert_eq!(boundary.database_reads, 1, "read the saved path once");
+    assert_eq!(
+        boundary.database_reads, 2,
+        "read the saved path and local receipt once each"
+    );
     assert_eq!(
         boundary.blocking_calls, 1,
         "path check must use one blocking worker"
@@ -300,4 +305,61 @@ fn private_path_inspector_has_one_source_call_site_crate_wide() {
         1,
         "private inspection belongs only in Core's blocking worker"
     );
+}
+
+#[test]
+fn install_receipt_reader_is_only_a_local_sqlite_read_and_decode() {
+    struct ReceiptBoundary;
+    impl<'ast> Visit<'ast> for ReceiptBoundary {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            let path = path_name(&call.func).join("::");
+            assert!(
+                [
+                    "sqlx::query_as",
+                    "keys::importer_installed",
+                    "super::importer_origin::keys::installed_origin",
+                    "super::importer_origin::InstalledOrigin::decode",
+                    "Ok",
+                    "Some",
+                ]
+                .contains(&path.as_str()),
+                "unreviewed receipt call: {path}"
+            );
+            if path == "sqlx::query_as" {
+                let Some(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(sql),
+                    ..
+                })) = call.args.first()
+                else {
+                    panic!("receipt query must be a fixed read");
+                };
+                assert_eq!(sql.value().split_whitespace().collect::<Vec<_>>().join(" "),
+                    "SELECT (SELECT value FROM settings WHERE key = ?), (SELECT value FROM settings WHERE key = ?)");
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            assert!(
+                ["bind", "fetch_one", "is_none"].contains(&call.method.to_string().as_str()),
+                "unreviewed receipt method: {}",
+                call.method
+            );
+            syn::visit::visit_expr_method_call(self, call);
+        }
+        fn visit_macro(&mut self, _: &'ast syn::Macro) {
+            panic!("unreviewed receipt macro");
+        }
+    }
+    let file = syn::parse_file(include_str!("../src/core/updates.rs")).unwrap();
+    let reader = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "importer_install_record" => {
+                Some(function)
+            }
+            _ => None,
+        })
+        .unwrap();
+    ReceiptBoundary.visit_block(&reader.block);
 }

@@ -28,7 +28,7 @@ beforeEach(() => {
       case "set_importer_recommendations_enabled": enabled = args.enabled; return;
       case "get_game_path_status": return {
         game: args.game, savedPath: "C:/Game", gamePath: { status: "readable" },
-        modelImporter: enabled ? { status: "installed" } : { status: "unverified", path: "C:/Game/Core", error: "Path re-read after preference change" },
+        modelImporter: enabled ? { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } : { status: "unverified", record: null, path: "C:/Game/Core", error: "Path re-read after preference change" },
       };
       case "importer_origin_status": return {
         game: args.game, displayName: args.game, resolved: { state: "inEffect", origin: enabled ? curated : fallback, layer: enabled ? "recommendedManifest" : "compiledInDefault" },
@@ -151,7 +151,7 @@ it("refreshes latest release, update status and evacuation checks for both Games
   invoke.mockImplementation((command, args) => {
     // Keep the filesystem readable so the update result remains visible.
     if (command === "get_game_path_status") return Promise.resolve({
-      game: args.game, savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" },
+      game: args.game, savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } },
     });
     if (command === "check_importer_update") return Promise.resolve({
       available: enabled, installedVersion: "1.0", pinned: false,

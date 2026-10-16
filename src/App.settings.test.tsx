@@ -143,7 +143,7 @@ beforeEach(() => {
       case "get_game_path_status": return states[args!.game] ?? {
         game: args!.game, savedPath: paths[args!.game] ?? null,
         gamePath: { status: paths[args!.game] ? "readable" : "noSavedPath" },
-        modelImporter: { status: "unverified", path: null, error: "Not checked" },
+        modelImporter: { status: "unverified", record: null, path: null, error: "Not checked" },
       };
       case "set_game_install_path": paths[args!.game] = args!.path; return;
       case "get_proxy_config": return { url: null, username: null, passwordSet: false };
@@ -325,21 +325,23 @@ it("names missing Game entries in the Settings path details", async () => {
   const missing = ["C:\\StarRail\\StarRail.exe", "C:\\StarRail\\StarRail_Data"];
   states.srmi = { game: "srmi", savedPath: "C:\\StarRail",
     gamePath: { status: "requiredEntriesNotFound", paths: missing },
-    modelImporter: { status: "unverified", path: null, error: "Game layout unverified" } };
+    modelImporter: { status: "unverified", record: null, path: null, error: "Game layout unverified" } };
   renderApp();
   await openGame();
   expect(await screen.findByText(`Missing Game entries: ${missing.join(", ")}`, { selector: "p" })).toBeVisible();
 });
 
 const outcomes: { gamePath: GamePathStatus["gamePath"]; modelImporter: GamePathStatus["modelImporter"]; line: string }[] = [
-  { gamePath: { status: "noSavedPath" }, modelImporter: { status: "unverified", path: null, error: "no setting" }, line: "Absent · no saved path" },
-  { gamePath: { status: "readable" }, modelImporter: { status: "installed" }, line: "SRMI installed · Game readable" },
-  { gamePath: { status: "readable" }, modelImporter: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] }, line: "Game readable · Model Importer not installed" },
-  { gamePath: { status: "savedPathNotFound", paths: ["C:\\StarRail"] }, modelImporter: { status: "unverified", path: null, error: "Missing Game" }, line: "Saved Game installation cannot be found · Model Importer unverified" },
-  { gamePath: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\StarRail.exe"] }, modelImporter: { status: "unverified", path: null, error: "Missing executable" }, line: "Required Game files or directories not found · Model Importer unverified" },
-  { gamePath: { status: "unreadable", path: "C:\\StarRail", error: "Access denied" }, modelImporter: { status: "unverified", path: null, error: "Access denied" }, line: "Cannot tell · path unreadable; Model Importer unverified" },
-  { gamePath: { status: "invalid", error: "Wrong path type" }, modelImporter: { status: "unverified", path: null, error: "Wrong layout" }, line: "Cannot verify Game layout · Model Importer unverified" },
-  { gamePath: { status: "readable" }, modelImporter: { status: "unverified", path: "C:\\StarRail\\Core", error: "Sharing violation" }, line: "Game readable · Cannot verify Model Importer" },
+  { gamePath: { status: "noSavedPath" }, modelImporter: { status: "unverified", record: null, path: null, error: "no setting" }, line: "Absent · no saved path" },
+  { gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } }, line: "SRMI installed · Game readable" },
+  { gamePath: { status: "readable" }, modelImporter: { status: "noImporterEntriesFound", paths: ["C:\\StarRail\\d3dx.ini"] }, line: "Cannot tell — no GMM install recorded; no Model Importer entries found" },
+  { gamePath: { status: "savedPathNotFound", paths: ["C:\\StarRail"] }, modelImporter: { status: "unverified", record: null, path: null, error: "Missing Game" }, line: "Saved Game installation cannot be found · Model Importer unverified" },
+  { gamePath: { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\StarRail.exe"] }, modelImporter: { status: "unverified", record: null, path: null, error: "Missing executable" }, line: "Required Game files or directories not found · Model Importer unverified" },
+  { gamePath: { status: "unreadable", path: "C:\\StarRail", error: "Access denied" }, modelImporter: { status: "unverified", record: null, path: null, error: "Access denied" }, line: "Cannot tell · path unreadable; Model Importer unverified" },
+  { gamePath: { status: "invalid", error: "Wrong path type" }, modelImporter: { status: "unverified", record: null, path: null, error: "Wrong layout" }, line: "Cannot verify Game layout · Model Importer unverified" },
+  { gamePath: { status: "readable" }, modelImporter: { status: "unverified", record: null, path: "C:\\StarRail\\Core", error: "Sharing violation" }, line: "Game readable · Cannot verify Model Importer" },
+  { gamePath: { status: "readable" }, modelImporter: { status: "damaged", record: { installedVersion: "v1", origin: { state: "unknown" } }, paths: ["C:/StarRail/Core"], error: null }, line: "Game readable · Model Importer damaged" },
+  { gamePath: { status: "readable" }, modelImporter: { status: "unrecordedImporterPresent", paths: [] }, line: "Cannot tell — Model Importer files found; no GMM install recorded" },
 ];
 it.each(outcomes)("renders the separate path-state row: $line", async ({ gamePath, modelImporter, line }) => {
   states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath, modelImporter };
@@ -506,7 +508,7 @@ it.each([
   const original = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (name, args) => {
     if (name === command) {
-      states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+      states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
       if (failed) throw new Error("Path operation rejected");
       return command === "detect_game_install_path" ? "C:\\StarRail" : null;
     }
@@ -600,7 +602,7 @@ it.each([
 ])("refreshes cached Settings path-state after %s", async (writer, button) => {
   const original = invoke.getMockImplementation()!;
   states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" },
-    modelImporter: writer === "set_importer_pinned" ? { status: "installed" } : { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] } };
+    modelImporter: writer === "set_importer_pinned" ? { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } : { status: "noImporterEntriesFound", paths: ["C:\\StarRail\\d3dx.ini"] } };
   let changed = false;
   invoke.mockImplementation(async (command, args) => {
     if (command === "check_importer_update") return { available: false, installedVersion: "1.0", pinned: false };
@@ -614,20 +616,21 @@ it.each([
       // For pin, simulate files removed externally while the cached page is open.
       // The setting write must refresh what Settings can verify about the files.
       states.srmi = { ...states.srmi!, modelImporter: writer === "set_importer_pinned"
-        ? { status: "requiredEntriesNotFound", paths: ["C:\\StarRail\\d3dx.ini"] } : { status: "installed" } };
+        ? { status: "damaged", record: { installedVersion: "1.0", origin: { state: "unknown" } }, paths: ["C:\\StarRail\\d3dx.ini"], error: null }
+        : { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
       return command === "rollback_importer" ? "C:\\backup" : command === "install_importer" ? { sha256: "abc123", backup_dir: null, rewrote_files: [] } : null;
     }
     return original(command, args);
   });
   renderApp();
   await openGame();
-  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent(writer === "set_importer_pinned" ? "SRMI installed" : "Model Importer not installed"));
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent(writer === "set_importer_pinned" ? "SRMI installed" : "Cannot tell — no GMM install recorded; no Model Importer entries found"));
   await userEvent.click(await screen.findByRole("button", { name: new RegExp(button) }));
   await waitFor(() => expect(changed).toBe(true));
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent(writer === "set_importer_pinned"
-    ? "Game readable · Model Importer not installed" : "SRMI installed · Game readable"));
+    ? "Game readable · Model Importer damaged" : "SRMI installed · Game readable"));
   expect(pageButton("Honkai: Star Rail")).not.toHaveTextContent(writer === "set_importer_pinned"
-    ? "SRMI installed" : "Model Importer not installed");
+    ? "SRMI installed" : "Cannot tell — no GMM install recorded; no Model Importer entries found");
 });
 
 it.each(["delete", "recover"])("Escape cancels the Library %s prompt before leaving Settings", async (action) => {
@@ -659,14 +662,14 @@ it("keeps keyboard focus on the Game navigation button after changing pages", as
 });
 
 it("refreshes cached Settings path-state when setup finishes", async () => {
-  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "requiredEntriesNotFound", paths: ["d3dx.ini"] } };
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "noImporterEntriesFound", paths: ["d3dx.ini"] } };
   renderApp();
   await openGame();
-  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Model Importer not installed"));
+  await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("Cannot tell — no GMM install recorded; no Model Importer entries found"));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await clickMenuItem(listen, "run-setup");
   await screen.findByRole("heading", { name: "First-run setup" });
-  states.srmi = { ...states.srmi, modelImporter: { status: "installed" } };
+  states.srmi = { ...states.srmi, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
   await userEvent.click(screen.getByRole("button", { name: "Skip setup" }));
   await openGame();
   await waitFor(() => expect(pageButton("Honkai: Star Rail")).toHaveTextContent("SRMI installed · Game readable"));
@@ -674,10 +677,10 @@ it("refreshes cached Settings path-state when setup finishes", async () => {
 
 it("refreshes cached Settings uncertainty after importer installation rejects", async () => {
   const original = invoke.getMockImplementation()!;
-  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+  states.srmi = { game: "srmi", savedPath: "C:\\StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
   invoke.mockImplementation(async (command, args) => {
     if (command === "install_importer") {
-      states.srmi = { ...states.srmi!, modelImporter: { status: "unverified", path: "C:\\StarRail\\Core", error: "Restoration incomplete" } };
+      states.srmi = { ...states.srmi!, modelImporter: { status: "unverified", record: null, path: "C:\\StarRail\\Core", error: "Restoration incomplete" } };
       throw new Error("Install rollback failed");
     }
     return original(command, args);
@@ -703,7 +706,7 @@ it("keeps importer groups only on each visited Game page, in order, while preser
     if (command === "check_importer_update") return { available: false, installedVersion: "1.0", pinned: true, latestVersion: "2.0", upstreamAhead: true, checkError: null };
     return original(command, args);
   });
-  states.srmi = { game: "srmi", savedPath: "C:/StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+  states.srmi = { game: "srmi", savedPath: "C:/StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
   renderApp();
   await screen.findByRole("tab", { name: "Honkai: Star Rail" });
   expect(screen.queryByRole("heading", { name: /Model Importer \(/ })).not.toBeInTheDocument();
@@ -733,7 +736,7 @@ it.each(["retry_importer_evacuation_recovery", "accept_importer_origin_proposal"
   const origin = { kind: "gitHubRelease", owner: "Example", repo: "Package", asset_pattern: "Package.zip" };
   let changed = false;
   let reject!: (error: Error) => void;
-  states.srmi = { game: "srmi", savedPath: "C:/StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+  states.srmi = { game: "srmi", savedPath: "C:/StarRail", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
   invoke.mockImplementation(async (command, args) => {
     if (command === writer) return new Promise((_, no) => { reject = no; });
     if (command === "get_importer_evacuation_recovery") return writer.includes("evacuation") && !changed ? {

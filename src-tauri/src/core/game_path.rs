@@ -12,6 +12,7 @@ use super::error::{Error, Result};
 use super::filesystem::symlink_metadata_if_exists;
 use super::games::{GameCode, ValidateFn};
 use super::importer::{IMPORTER_REQUIRED_DIRS, IMPORTER_REQUIRED_FILE};
+use super::updates::ImporterInstallRecord;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,21 +53,34 @@ pub enum GamePathState {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum ModelImporterState {
-    /// The existing package's required file and directories are readable.
-    /// This asserts layout presence, not authenticity, version, or launchability.
-    Installed,
-    /// Required entries returned NotFound. No version is inferred.
-    RequiredEntriesNotFound { paths: Vec<PathBuf> },
-    /// Inspection failed, the layout has a wrong type, or no readable Game
-    /// installation is available. The Game fact remains independent.
+    /// GMM recorded this install and the required entries are readable.
+    /// Presence is not proof of authenticity or launchability.
+    Installed { record: ImporterInstallRecord },
+    /// A recorded install has missing or unreadable required entries.
+    Damaged {
+        record: ImporterInstallRecord,
+        paths: Vec<PathBuf>,
+        error: Option<String>,
+    },
+    /// No receipt and no required entries found. This cannot establish that
+    /// an importer was never installed (or was not damaged/removed by hand).
+    NoImporterEntriesFound { paths: Vec<PathBuf> },
+    /// At least one required entry exists, but GMM has no install receipt.
+    /// Missing entries remain explicit; no origin or version is inferred.
+    UnrecordedImporterPresent { paths: Vec<PathBuf> },
+    /// Inspection was not possible or a required entry has the wrong type.
     Unverified {
-        /// Failed inspection path; None when inspection was not attempted.
         path: Option<PathBuf>,
         error: String,
+        record: Option<ImporterInstallRecord>,
     },
 }
 
-pub(super) fn inspect(game: GameCode, saved_path: Option<PathBuf>) -> GamePathStatus {
+pub(super) fn inspect(
+    game: GameCode,
+    saved_path: Option<PathBuf>,
+    record: Option<ImporterInstallRecord>,
+) -> GamePathStatus {
     let game_path = match saved_path.as_deref() {
         None => GamePathState::NoSavedPath,
         Some(path) => match inspect_game(game, path, game.profile().validate) {
@@ -84,20 +98,15 @@ pub(super) fn inspect(game: GameCode, saved_path: Option<PathBuf>) -> GamePathSt
         },
     };
     let model_importer = match (&game_path, saved_path.as_deref()) {
-        (GamePathState::Readable, Some(path)) => match inspect_importer(path) {
+        (GamePathState::Readable, Some(path)) => match inspect_importer(path, record.clone()) {
             Ok(state) => state,
-            Err(error) => ModelImporterState::Unverified {
-                path: match &error {
-                    Error::Io { path, .. } => Some(path.clone()),
-                    _ => None,
-                },
-                error: error.to_string(),
-            },
+            Err(error) => importer_inspection_failure(error, record),
         },
         _ => ModelImporterState::Unverified {
             path: None,
             error: "Model Importer inspection requires a verified readable Game installation."
                 .into(),
+            record,
         },
     };
     GamePathStatus {
@@ -105,6 +114,31 @@ pub(super) fn inspect(game: GameCode, saved_path: Option<PathBuf>) -> GamePathSt
         saved_path,
         game_path,
         model_importer,
+    }
+}
+
+fn importer_inspection_failure(
+    error: Error,
+    record: Option<ImporterInstallRecord>,
+) -> ModelImporterState {
+    let path = match &error {
+        Error::Io { path, .. } => Some(path.clone()),
+        _ => None,
+    };
+    // Wrong types keep the existing concrete layout error and unverified state.
+    if matches!(&error, Error::Io { .. }) {
+        if let Some(record) = record {
+            return ModelImporterState::Damaged {
+                record,
+                paths: path.into_iter().collect(),
+                error: Some(error.to_string()),
+            };
+        }
+    }
+    ModelImporterState::Unverified {
+        path,
+        error: error.to_string(),
+        record,
     }
 }
 
@@ -262,7 +296,10 @@ fn consume_entries(
         .collect()
 }
 
-fn inspect_importer(path: &Path) -> Result<ModelImporterState> {
+fn inspect_importer(
+    path: &Path,
+    record: Option<ImporterInstallRecord>,
+) -> Result<ModelImporterState> {
     // Package entry names are case-insensitive, as in find_d3dx_ini and the
     // archive validator. Enumeration must finish before making any claim.
     let entries = directory_entries(path)?;
@@ -285,18 +322,28 @@ fn inspect_importer(path: &Path) -> Result<ModelImporterState> {
             Err(error) => match missing_after_failure(error) {
                 Ok(path) => missing.push(path),
                 Err(error) => {
-                    return Ok(ModelImporterState::Unverified {
-                        path: Some(entry),
-                        error: error.to_string(),
-                    })
+                    let mut state = importer_inspection_failure(error, record);
+                    match &mut state {
+                        ModelImporterState::Damaged { paths, .. } => paths.extend(missing),
+                        ModelImporterState::Unverified { path, .. } => *path = Some(entry),
+                        _ => unreachable!("inspection failure is damaged or unverified"),
+                    }
+                    return Ok(state);
                 }
             },
         }
     }
-    Ok(if missing.is_empty() {
-        ModelImporterState::Installed
-    } else {
-        ModelImporterState::RequiredEntriesNotFound { paths: missing }
+    Ok(match record {
+        Some(record) if missing.is_empty() => ModelImporterState::Installed { record },
+        Some(record) => ModelImporterState::Damaged {
+            record,
+            paths: missing,
+            error: None,
+        },
+        None if missing.len() == 1 + IMPORTER_REQUIRED_DIRS.len() => {
+            ModelImporterState::NoImporterEntriesFound { paths: missing }
+        }
+        None => ModelImporterState::UnrecordedImporterPresent { paths: missing },
     })
 }
 

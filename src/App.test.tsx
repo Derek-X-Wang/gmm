@@ -128,7 +128,7 @@ function ipcResult(command: string) {
     case "get_game_install_path":
       return "C:/Game";
     case "get_game_path_status":
-      return { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed" } };
+      return { game: "gimi", savedPath: "C:/Game", gamePath: { status: "readable" }, modelImporter: { status: "installed", record: { installedVersion: "1.0", origin: { state: "unknown" } } } };
     case "check_importer_update":
       if (importerUpdateError) throw importerUpdateError;
       return importerUpdate;
@@ -654,7 +654,7 @@ it("keeps #348's warning sign and wording for missing Game entries in the bar", 
       game: "gimi",
       savedPath: "C:/Game",
       gamePath: { status: "requiredEntriesNotFound", paths: missing },
-      modelImporter: { status: "unverified", path: null, error: "Game layout unverified" },
+      modelImporter: { status: "unverified", record: null, path: null, error: "Game layout unverified" },
     };
     return implementation(command, args);
   });

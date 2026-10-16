@@ -59,6 +59,38 @@ pub mod keys {
     // constant ([`super::SHIPPED_LOADER_VERSION`]), not user state.
 }
 
+/// The surviving local receipt for an install GMM performed. Either row is
+/// evidence; a missing origin stays Unknown and is never backfilled (#99).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImporterInstallRecord {
+    pub installed_version: Option<String>,
+    pub origin: super::importer_origin::InstalledOrigin,
+}
+
+/// Read both receipt rows in one SQLite snapshot. No pin, filesystem write,
+/// origin resolution, or network fetch belongs in this local observation.
+pub(super) async fn importer_install_record(
+    pool: &sqlx::SqlitePool,
+    game: GameCode,
+) -> Result<Option<ImporterInstallRecord>> {
+    let (version, origin): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT value FROM settings WHERE key = ?), \
+                (SELECT value FROM settings WHERE key = ?)",
+    )
+    .bind(keys::importer_installed(game))
+    .bind(super::importer_origin::keys::installed_origin(game))
+    .fetch_one(pool)
+    .await?;
+    if version.is_none() && origin.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ImporterInstallRecord {
+        installed_version: version,
+        origin: super::importer_origin::InstalledOrigin::decode(origin),
+    }))
+}
+
 /// What [`compute_status`] decided. Travels through the Tauri command
 /// boundary so the UI can render the badge + dialog directly off the
 /// returned shape.
