@@ -8,7 +8,7 @@
    * the Windows 10 fallback, `system-ui` the generic one; GMM is a
    * Windows-only application, so no macOS family leads the stack (#367). */
   font-family: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  color-scheme: light dark;
+  color-scheme: dark;
   color: #e5e5e5;
   background: #18181b;
 }
@@ -657,30 +657,6 @@ code {
   .settings-content .row { align-items: stretch; }
   .settings-content input { min-width: 0; width: 100%; }
 }
-@media (prefers-color-scheme: light) {
-  /* The light palette belongs to the panel, not the scrim: the scrim is a
-   * dim over the main screen in both schemes. */
-  .settings-dialog { background: #f4f4f5; color: #18181b; border-color: #d4d4d8; }
-  .settings-dialog .card { background: #fff; border-color: #d4d4d8; }
-  .settings-dialog .muted { color: #52525b; }
-  .settings-dialog input { background: #fafafa; color: #18181b; border-color: #d4d4d8; }
-  /* Every control in the panel, not only the navigation. The base `button` is
-   * a neutral fill with `color: inherit` (#367), and `inherit` here is the
-   * panel's own `#18181b` — dark text on a dark fill, about 1.14:1 against
-   * WCAG's 4.5:1. Close, Apply, Change…, Re-detect, Rebuild junctions and
-   * Export diagnostics bundle all sit outside `.settings-navigation`, so the
-   * panel repaints the control itself rather than naming them one at a time.
-   * The three values are the navigation rule's own: Fluent's neutral button in
-   * the light theme is `colorNeutralBackground1`, which is white. */
-  .settings-dialog button { background: #fff; color: #18181b; border-color: #d4d4d8; }
-  /* Disabled has to be named here too. `.settings-dialog button` and
-   * `button:disabled` have equal specificity and this block is later, so
-   * without this rule the panel's light fill would outrank the disabled one
-   * and a disabled control would read as enabled. */
-  .settings-dialog button:disabled { background: #e4e4e7; color: #71717a; border-color: #d4d4d8; }
-  .settings-navigation button { background: #fff; color: #18181b; border-color: #d4d4d8; }
-  .settings-navigation button span { color: #52525b; }
-}
 
 /* Main: Game action, global facts, navigation, then the Library. */
 .game-header h1 {
@@ -753,21 +729,6 @@ code {
   gap: 0.5rem;
 }
 
-@media (prefers-color-scheme: light) {
-  /* The bar still needs an opaque surface here: it is fixed over scrolling
-   * content, so anything transparent renders the page through its text. It
-   * keeps the dark surface rather than borrowing `.settings-screen`'s light
-   * palette because `:root` sets `background: #18181b` in both schemes, so
-   * the main screen this bar borders is dark under a light OS theme too. A
-   * light bar would be a light band across a dark page. If the main screen
-   * ever gains a light theme, this block is where the bar follows it. */
-  .status-bar {
-    background: #18181b;
-    color: #e5e5e5;
-    border-top-color: #2e2e36;
-  }
-}
-
 .game-status-strip {
   display: flex;
   align-items: center;
@@ -821,10 +782,6 @@ code {
 .attention-indicator__toggle--loud { border-color: #fbbf24; color: #fbbf24; }
 .attention-indicator__report { border: 1px solid #71717a; border-radius: 8px; padding: 0.75rem; }
 .attention-indicator__report h2 { margin: 0; font-size: 16px; line-height: 22px; }
-@media (prefers-color-scheme: light) {
-  .attention-indicator__scope { color: #52525b; }
-  .attention-indicator__toggle--loud { border-color: #92400e; color: #92400e; }
-}
 
 /* The first Mod routes occupy the content area; existing collections use the toolbar. */
 .mod-import-landing > h2 { margin-bottom: 0.5rem; }
