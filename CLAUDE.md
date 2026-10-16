@@ -9,6 +9,43 @@ GMM is GPLv3 and embeds `3dmloader.dll` via Rust FFI. See `docs/adr/0001-gplv3-a
 - `CONTEXT.md` — domain glossary (Model Importer, Library, Mod, Variant, Junction, Loader, Source, Importer Pin, Game Session, Conflict).
 - `docs/adr/` — past architectural decisions. Always check before contradicting them.
 
+## Verification prerequisites
+
+The suite shells out to real tooling instead of mocking it. That verifies the
+actual signing output and process behavior, but makes the environment part of
+the test contract. From the repository root, run these steps in order:
+
+```bash
+pnpm install --frozen-lockfile
+cd src-tauri
+cargo build --workspace
+cargo test --workspace
+```
+
+- `pnpm install --frozen-lockfile` supplies `node_modules` without changing the
+  locked dependency set, matching CI. `tests/updater_signature.rs` is the only
+  Rust test file that invokes the Tauri CLI through pnpm. Without it, five
+  signature tests fail even though the problem is outside Rust.
+- Plain `cargo build --workspace` compiles the helper binaries that tests use
+  as fixtures, including `concurrency-probe`. Do not substitute
+  `cargo build --tests`; it does not produce the standalone fixtures. Rebuild
+  after changing or mutating any code those helpers run.
+- `cargo test --workspace` then runs the Rust suite against those fixtures.
+
+**Do not relocate the Cargo target directory.** Fixture tests resolve helper
+binaries at `src-tauri/target/debug` relative to their manifest and ignore
+`CARGO_TARGET_DIR`. Leave that variable unset and do not override the target
+path with `--target-dir` or Cargo configuration: a redirected build can succeed
+while tests fail to find a helper or consume a stale one.
+
+When testing a lockfile-reading guard by editing `Cargo.lock`, run the
+already-built test binary directly to demonstrate failure. Running `cargo test`
+instead re-resolves the lockfile and can revert the edit before the guard reads
+it, producing a misleading pass.
+
+See [docs/testing.md](docs/testing.md#running-the-suite) for frontend and other
+verification commands.
+
 ## Commits
 
 This repository is public. Do not put session links, local absolute paths, or any
