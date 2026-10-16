@@ -206,6 +206,8 @@ export interface GamePathStatus {
   gamePath: GamePathState;
   /** Local install receipt plus filesystem evidence; never proof of launchability. */
   modelImporter: ModelImporterState;
+  /** User intent, independent of the install receipt and filesystem evidence. */
+  pinnedVersion: string | null;
 }
 
 export async function getGamePathStatus(game: GameCode): Promise<GamePathStatus> {

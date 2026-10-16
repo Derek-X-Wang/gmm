@@ -49,7 +49,9 @@ impl<'ast> Visit<'ast> for InspectionBoundary {
             } else {
                 self.errors.push("inline inspection on async worker".into());
             }
-        } else if path == ["updates", "importer_install_record"] {
+        } else if path == ["updates", "importer_install_record"]
+            || path == ["updates", "importer_pinned"]
+        {
             self.database_reads += 1;
         } else if path != ["Error", "PathInspectionTask"] {
             self.errors
@@ -130,8 +132,8 @@ fn settings_path_status_inspection_runs_inside_spawn_blocking() {
         boundary.errors
     );
     assert_eq!(
-        boundary.database_reads, 2,
-        "read the saved path and local receipt once each"
+        boundary.database_reads, 3,
+        "read the saved path, local receipt and pin once each"
     );
     assert_eq!(
         boundary.blocking_calls, 1,

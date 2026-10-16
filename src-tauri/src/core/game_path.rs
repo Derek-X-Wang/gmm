@@ -22,6 +22,8 @@ pub struct GamePathStatus {
     pub saved_path: Option<PathBuf>,
     pub game_path: GamePathState,
     pub model_importer: ModelImporterState,
+    /// User intent, not install evidence. A pin is never a receipt.
+    pub pinned_version: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -80,6 +82,7 @@ pub(super) fn inspect(
     game: GameCode,
     saved_path: Option<PathBuf>,
     record: Option<ImporterInstallRecord>,
+    pinned_version: Option<String>,
 ) -> GamePathStatus {
     let game_path = match saved_path.as_deref() {
         None => GamePathState::NoSavedPath,
@@ -114,6 +117,7 @@ pub(super) fn inspect(
         saved_path,
         game_path,
         model_importer,
+        pinned_version,
     }
 }
 

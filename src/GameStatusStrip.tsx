@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { checkImporterUpdate, getGamePathStatus, modelImporterDetails, type GameCode, type GamePathStatus } from "./api";
+import { getGamePathStatus, modelImporterDetails, type GameCode, type GamePathStatus } from "./api";
 import { commandFailureMessage } from "./commandError";
 
 function pathSummary(value: GamePathStatus): { line: string; detail?: ReactNode } {
@@ -31,14 +31,6 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
   onSettings: () => void;
 }) {
   const status = useQuery({ queryKey: ["gamePathStatus", game], queryFn: () => getGamePathStatus(game) });
-  const update = useQuery({
-    queryKey: ["importer", "update", game],
-    queryFn: () => checkImporterUpdate(game),
-    // Each upstream attempt can take ten seconds; retries would delay the unavailable state.
-    retry: false,
-    // Avoid a network refetch on ordinary tab/Settings returns; invalidation still refreshes.
-    staleTime: 5 * 60_000,
-  });
   const error = pathReadError ?? status.error;
   const pending = pathReadPending || status.isFetching;
   const summary = error ? { line: pathReadError != null
@@ -49,22 +41,17 @@ export function GameStatusStrip({ game, displayName, savedPath, pathReadError, p
   const path = savedPath ?? status.data?.savedPath;
   const installed = !error && !pending && status.data?.gamePath.status === "readable"
     && status.data.modelImporter.status === "installed";
-  const metadataVerified = !update.isError && update.data != null;
-  const previousMetadata = metadataVerified && update.isFetching;
-  const metadataPending = update.isPending || update.isFetching;
-  const version = installed && metadataVerified ? update.data?.installedVersion : null;
+  const importer = status.data?.modelImporter;
+  const record = importer && "record" in importer ? importer.record : null;
+  const version = installed ? record?.installedVersion : null;
   return <section className="game-status-strip" aria-label={`${displayName} status`} aria-busy={pending}>
     <div className="game-status-strip__summary" role="status">
       <div className="row">
       <strong>Game and Model Importer ({game.toUpperCase()})</strong>
       <span>Game: {summary.line}</span>
-      {version ? <span className="muted small">{previousMetadata ? "Previous: Installed version: " : "Installed version: "}<code>{version}</code></span> : null}
-      {installed && metadataVerified && update.data?.pinned ? <span className="muted small" aria-label="Importer Pin applies">{previousMetadata ? "Previous: Pinned" : "Pinned"}</span> : null}
-      {installed && !version ? <span className="muted small">{update.isError
-        ? `Installed version check unavailable: ${commandFailureMessage(update.error)}`
-        : metadataVerified ? `${previousMetadata ? "Previous: " : ""}Installed version unknown (not recorded).`
-        : metadataPending ? "Checking installed version and Importer Pin…"
-        : "Installed version check unavailable."}</span> : null}
+      {version ? <span className="muted small">Installed version: <code>{version}</code></span> : null}
+      {installed && status.data?.pinnedVersion != null ? <span className="muted small" aria-label="Importer Pin applies">Pinned</span> : null}
+      {installed && !version ? <span className="muted small">Installed version unknown (not recorded).</span> : null}
       </div>
       {path ? <span className="muted small">{pending || error ? "Last saved Game path: " : "Saved Game path: "}<code>{path}</code></span> : null}
       {summary.detail ? <span className="muted small">{summary.detail}</span> : null}
