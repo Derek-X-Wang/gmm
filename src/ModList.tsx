@@ -4,7 +4,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   adoptFolder,
   applyModUpdate,
-  currentSession,
   detectConflicts,
   importGamebanana,
   importZip,
@@ -19,6 +18,8 @@ import {
   type Conflict,
   type GameCode as ApiGameCode,
 } from "./api";
+import { SessionCheckNotice, useSessionCheck } from "./SessionCheckNotice";
+import { useRecoveryOutcomes } from "./RecoveryOutcome";
 import { EnabledTransitionRecoveryWarning } from "./EnabledTransitionRecoveryWarning";
 import {
   ReinstallRecoveryNotices,
@@ -105,8 +106,9 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
     queryKey: ["conflicts", game],
     queryFn: () => detectConflicts(game),
   });
-  const session = useQuery({ queryKey: ["session"], queryFn: currentSession });
-  const sessionActive = !!session.data;
+  const check = useSessionCheck();
+  const { session } = check;
+  const sessionBlocked = !session.isSuccess || !!session.data;
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
@@ -150,10 +152,16 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
     },
   });
 
+  const retirement = useRecoveryOutcomes();
   const retireEnabledTransition = useMutation({
-    mutationFn: ({ id }: { id: string; name: string }) =>
+    mutationFn: ({ id }: { id: string; name: string; game: ApiGameCode }) =>
       retireInterruptedEnabledTransition(id),
-    onSettled: () => {
+    onMutate: ({ name, game }) => retirement.start(game, `Retiring the transition producer for ${name}…`),
+    onSuccess: (_, { name, game }) => retirement.finish(game,
+      `Transition producer retired or already absent for ${name}. GMM did not verify process identity; refreshed Mod status shows whether deployment recovery is still pending.`),
+    onError: (error, { game }) => retirement.finish(game,
+      `Could not retire the transition producer: ${commandFailureMessage(error)}`, true),
+    onSettled: (_, __, { game }) => {
       queryClient.invalidateQueries({ queryKey: ["mods", game] });
       queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
     },
@@ -170,6 +178,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
   return (
     <section ref={sectionRef} className="card" tabIndex={-1}>
       <ReinstallRecoveryNotices feedback={recoveryFeedback} />
+      {retirement.region(game, `${displayName} deployment recovery outcome`)}
       <div className={confirmedEmpty ? "mod-import-landing" : "row row--between"}>
         <h2>
           {confirmedEmpty ? `Add Mods for ${displayName}` : `Mods (${mods.data?.length ?? 0})`}
@@ -207,6 +216,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
         detail="Conflict information is unavailable; this is not a “no conflicts” result."
       />
 
+      <SessionCheckNotice check={check} />
       {!confirmedEmpty ? <ul className="mods">
         {mods.data?.map((m) => (
           <li
@@ -250,7 +260,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                   modName={m.name}
                   recovery={m.reinstallRecovery}
                   pending={retryRecovery.isPending}
-                  disabled={sessionActive}
+                  disabled={sessionBlocked}
                   onRetry={() => retryRecovery.mutate({ id: m.id, name: m.name })}
                 />
               ) : null}
@@ -262,14 +272,8 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                     retireEnabledTransition.isPending &&
                     retireEnabledTransition.variables?.id === m.id
                   }
-                  error={
-                    retireEnabledTransition.isError &&
-                    retireEnabledTransition.variables?.id === m.id
-                      ? commandFailureMessage(retireEnabledTransition.error)
-                      : undefined
-                  }
                   onRetire={() =>
-                    retireEnabledTransition.mutate({ id: m.id, name: m.name })
+                    retireEnabledTransition.mutate({ id: m.id, name: m.name, game })
                   }
                 />
               ) : null}
@@ -280,7 +284,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                 checked={m.enabled}
                 disabled={
                   toggle.isPending ||
-                  sessionActive ||
+                  sessionBlocked ||
                   m.reinstallRecovery !== null ||
                   m.enabledTransitionRecovery !== null
                 }

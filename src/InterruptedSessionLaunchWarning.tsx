@@ -3,12 +3,10 @@ import type { InterruptedSessionLaunch } from "./api";
 export function InterruptedSessionLaunchWarning({
   launch,
   pending,
-  error,
   onRetire,
 }: {
   launch: InterruptedSessionLaunch;
   pending: boolean;
-  error?: string;
   onRetire: () => void;
 }) {
   return (
@@ -31,7 +29,6 @@ export function InterruptedSessionLaunchWarning({
       <button type="button" onClick={onRetire} disabled={pending}>
         {pending ? "Retiring reservation…" : "I confirmed the game is closed — retire reservation"}
       </button>
-      {error ? <span className="error">Could not retire the launch reservation: {error}</span> : null}
     </section>
   );
 }
