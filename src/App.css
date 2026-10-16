@@ -521,7 +521,7 @@ code {
 }
 
 .game-tabs__tab--active {
-  background: #3b82f6;
+  background: #2563eb;
   color: white;
   border-color: #3b82f6;
 }
@@ -694,7 +694,7 @@ code {
  * screen (#367). 8px/16px padding with 16/22 type and the 1px contour is
  * Fluent's large button: 40px tall. */
 .game-header__launch {
-  background: #3b82f6;
+  background: #2563eb;
   color: white;
   border-color: #3b82f6;
   padding: 8px 16px;
