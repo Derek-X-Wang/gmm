@@ -275,7 +275,7 @@ fn msi_refuses_to_install_over_a_newer_version() {
 }
 
 #[test]
-fn updater_and_process_permissions_are_granted_to_the_main_window() {
+fn updater_permission_is_granted_without_unused_process_permissions() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
     let raw = std::fs::read_to_string(&path).expect("read capabilities/default.json");
     let caps: Value = serde_json::from_str(&raw).expect("capabilities must be valid JSON");
@@ -288,14 +288,18 @@ fn updater_and_process_permissions_are_granted_to_the_main_window() {
         .filter_map(Value::as_str)
         .collect();
 
-    // Without these the frontend's check()/relaunch() calls fail at
-    // runtime with an ACL error that no compile-time check would catch.
-    for required in ["updater:default", "process:default"] {
-        assert!(
-            perms.contains(&required),
-            "capability {required} missing — the updater UI would fail at runtime; got {perms:?}",
-        );
-    }
+    // check()/downloadAndInstall() still need updater access. The only process
+    // plugin caller was the unreachable restart action removed in #380.
+    assert!(
+        perms.contains(&"updater:default"),
+        "updater:default missing — the updater UI would fail at runtime; got {perms:?}",
+    );
+    assert!(
+        !perms
+            .iter()
+            .any(|permission| permission.starts_with("process:")),
+        "process permissions have no frontend caller after #380; got {perms:?}",
+    );
 }
 
 #[test]
@@ -331,5 +335,30 @@ fn the_app_package_ships_exactly_one_binary() {
         !manifest.contains("[[bin]]"),
         "the app package must declare no explicit [[bin]] targets; \
          `src/main.rs` is the single binary the bundler ships",
+    );
+}
+
+#[test]
+fn updater_version_requires_review_of_windows_process_exit() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.lock");
+    let lock = std::fs::read_to_string(path).expect("read Cargo.lock");
+    let versions: Vec<_> = lock
+        .split("[[package]]")
+        .filter(|package| {
+            package
+                .lines()
+                .any(|line| line == "name = \"tauri-plugin-updater\"")
+        })
+        .map(|package| {
+            package
+                .lines()
+                .find_map(|line| line.strip_prefix("version = "))
+                .map(str::trim)
+        })
+        .collect();
+    assert_eq!(
+        versions,
+        vec![Some("\"2.10.1\"")],
+        "#380: re-read tauri-plugin-updater's Windows install_inner to confirm it still exits the process, then update this reviewed-version pin; macOS and Linux AppImage can return successfully",
     );
 }

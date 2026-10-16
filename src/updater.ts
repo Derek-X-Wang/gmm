@@ -8,7 +8,6 @@ export type UpdateState =
   | { kind: "available"; version: string; notes?: string }
   | { kind: "declined"; version: string; remembered?: boolean }
   | { kind: "downloading"; downloaded: number; total: number | null }
-  | { kind: "installed"; restartError?: string }
   | { kind: "error"; failure: UpdateFailure; message: string };
 
 /**
@@ -75,7 +74,7 @@ export function createUpdateController(
   };
 
   const checkForUpdates = async (background = false) => {
-    if (savingSkip || state.kind === "checking" || state.kind === "downloading" || state.kind === "installed") return;
+    if (savingSkip || state.kind === "checking" || state.kind === "downloading") return;
     offered = null;
     publish({ kind: "checking" });
     try {
@@ -107,13 +106,13 @@ export function createUpdateController(
     let total: number | null = null;
     publish({ kind: "downloading", downloaded, total });
     try {
+      // tauri-plugin-updater 2.10.1, src/updater.rs:865 exits on Windows (#380).
       await update.downloadAndInstall((event) => {
         if (event.event === "Started") total = event.data.contentLength ?? null;
         if (event.event === "Progress") downloaded += event.data.chunkLength;
         // Finished means download finished; installation can still fail.
         publish({ kind: "downloading", downloaded, total });
       });
-      publish({ kind: "installed" });
     } catch (error) {
       fail("install", error);
     }
@@ -135,10 +134,6 @@ export function createUpdateController(
     }
   };
 
-  const reportRestartError = (error: unknown) => {
-    lastError = `Restart failed: ${error instanceof Error ? error.message : String(error)}`;
-    publish({ kind: "installed", restartError: lastError });
-  };
   return {
     getSnapshot: () => state,
     getLastError: () => lastError,
@@ -149,7 +144,6 @@ export function createUpdateController(
     checkForUpdates,
     install,
     decline,
-    reportRestartError,
   };
 }
 

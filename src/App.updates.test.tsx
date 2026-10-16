@@ -40,7 +40,6 @@ vi.mock("./updater", async (importOriginal) => {
     checkForUpdates: (background?: boolean) => live.checkForUpdates(background),
     install: () => live.install(),
     decline: () => live.decline(),
-    reportRestartError: (error: unknown) => live.reportRestartError(error),
   } satisfies UpdateController };
 });
 vi.mock("./LoaderVersionNote", () => ({ LoaderVersionNote: () => null }));
