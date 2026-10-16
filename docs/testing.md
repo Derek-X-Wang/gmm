@@ -277,8 +277,9 @@ end-to-end injection test is possible without shipping a gacha game to
 a CI runner.
 
 **These need `cargo build --workspace` first** — they shell out to
-`target/debug/victim.exe` and `noop_dll.dll`. CI orders the steps
-accordingly.
+`target/debug/victim.exe` and `noop_dll.dll`. Follow the shared
+[verification prerequisites](../CLAUDE.md#verification-prerequisites), including
+the manifest-relative fixture-path constraint. CI orders the steps accordingly.
 
 ### Checking Windows code from a non-Windows host
 
@@ -565,19 +566,28 @@ crate. Test helpers live in their own crates under `crates/`.
 
 ## Running the suite
 
+From the repository root, run the prerequisite sequence before testing. See
+[Verification prerequisites](../CLAUDE.md#verification-prerequisites) for why
+each step and the Cargo target-directory constraint matter.
+
 ```bash
+pnpm install
 cd src-tauri
+cargo build --workspace       # builds the helper-binary fixtures
+cargo test --workspace
+```
+
+Additional Rust checks, from `src-tauri/`:
+
+```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --no-deps -- -D warnings
-cargo build --workspace       # required before the Windows-gated tests
-cargo test --workspace
 cargo test --test conflicts   # one file at a time when iterating
 ```
 
-Frontend:
+Frontend, from the repository root after the dependency installation above:
 
 ```bash
-pnpm install --frozen-lockfile
 pnpm tsc --noEmit
 pnpm test                     # vitest
 pnpm build
