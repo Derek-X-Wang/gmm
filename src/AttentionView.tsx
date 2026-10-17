@@ -86,7 +86,7 @@ function findingCount(report: AttentionReport): number {
   return report.reinstalls.length + report.enabledTransitions.length + report.importerEvacuations.length
     + report.stagedLibraryOperations.length + report.sessionLaunches.length + (report.activeSession ? 1 : 0)
     + report.libraryAudits.reduce((count, audit) => count + audit.unreferenced.length + audit.duplicates.length, 0)
-    + report.libraryRootOverlaps.length + report.modPathOverlaps.length;
+    + new Set(report.libraryRootOverlaps.map((overlap) => overlap.cause)).size + report.modPathOverlaps.length;
 }
 
 function AttentionGroup({ title, guidance, items }: {

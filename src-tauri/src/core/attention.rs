@@ -7,6 +7,7 @@ use super::{
     Core, Error, GameCode, InterruptedSessionLaunch, LibraryAuditReport, Result, SessionInfo,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize)]
@@ -55,6 +56,8 @@ pub struct ImporterEvacuationAttention {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryRootOverlap {
+    /// Identity of the exact (path, backups) pair, independent of the affected Game.
+    pub cause: String,
     pub game: Option<GameCode>,
     pub path: PathBuf,
     pub backups: PathBuf,
@@ -125,7 +128,16 @@ fn record_overlap(
 ) -> Result<()> {
     match error {
         Error::LibraryRootOverlapsBackups { path, backups } => {
+            // Different override or derived child paths remain separate causes, even
+            // when they share ancestry: each different path is a separate repair.
+            let mut identity = Sha256::new();
+            for part in [&path, &backups] {
+                let bytes = part.as_os_str().as_encoded_bytes();
+                identity.update((bytes.len() as u64).to_le_bytes());
+                identity.update(bytes);
+            }
             overlaps.push(LibraryRootOverlap {
+                cause: format!("{:x}", identity.finalize()),
                 game,
                 path,
                 backups,
@@ -133,5 +145,42 @@ fn record_overlap(
             Ok(())
         }
         error => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cause(path: &str, backups: &str) -> String {
+        let mut overlaps = Vec::new();
+        record_overlap(
+            Error::LibraryRootOverlapsBackups {
+                path: path.into(),
+                backups: backups.into(),
+            },
+            None,
+            &mut overlaps,
+        )
+        .unwrap();
+        overlaps.remove(0).cause
+    }
+
+    #[test]
+    fn overlap_cause_includes_backups() {
+        assert_ne!(
+            cause("/example/library", "/example/backups-a"),
+            cause("/example/library", "/example/backups-b"),
+            "the same Library path with different backups needs separate causes"
+        );
+    }
+
+    #[test]
+    fn overlap_cause_includes_library_path() {
+        assert_ne!(
+            cause("/example/library-a", "/example/backups"),
+            cause("/example/library-b", "/example/backups"),
+            "different Library paths need separate causes"
+        );
     }
 }
