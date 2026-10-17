@@ -155,6 +155,7 @@ it.each([
         url: "http://127.0.0.1:8080",
         username: "alice",
         password: null,
+        clearPassword: false,
       }),
     "set_proxy_config",
     {
@@ -162,6 +163,7 @@ it.each([
         url: "http://127.0.0.1:8080",
         username: "alice",
         password: null,
+        clearPassword: false,
       },
     },
   ],

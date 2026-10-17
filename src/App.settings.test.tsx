@@ -825,10 +825,10 @@ it("preserves Network saved credentials, edits, pending actions and successful p
   await userEvent.type(screen.getByPlaceholderText("proxy URL"), "http://edited:8080");
   await userEvent.clear(screen.getByPlaceholderText("username (optional)"));
   await userEvent.type(screen.getByPlaceholderText("username (optional)"), "edited-user");
-  await userEvent.type(password, "new-secret");
+  await userEvent.type(password, "PLACEHOLDER_REPLACEMENT_PASSWORD");
   await userEvent.click(screen.getByRole("button", { name: "Save" }));
   expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
-  expect(invoke).toHaveBeenCalledWith("set_proxy_config", { args: { url: "http://edited:8080", username: "edited-user", password: "new-secret" } });
+  expect(invoke).toHaveBeenCalledWith("set_proxy_config", { args: { url: "http://edited:8080", username: "edited-user", password: "PLACEHOLDER_REPLACEMENT_PASSWORD", clearPassword: false } });
   await act(async () => completeSave());
   await waitFor(() => expect(password).toHaveValue(""));
   expect(screen.getByPlaceholderText("proxy URL")).toHaveValue("http://edited:8080");
@@ -837,6 +837,77 @@ it("preserves Network saved credentials, edits, pending actions and successful p
   await act(async () => completeTest());
   expect(await screen.findByText("Proxy reachable.")).toBeVisible();
   expect(invoke).toHaveBeenCalledWith("test_proxy_connection", undefined);
+});
+
+it("saves a Network URL edit with blank password as keep", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_proxy_config") return { url: "http://previous.invalid:8080", username: null, passwordSet: true };
+    if (command === "set_proxy_config") return { url: args.args.url, username: null, passwordSet: true };
+    return original(command, args);
+  });
+  renderApp();
+  await clickMenuItem(listen, "settings");
+  const password = await screen.findByPlaceholderText("(set — leave blank to keep)");
+  expect(password).toHaveValue("");
+  const url = screen.getByPlaceholderText("proxy URL");
+  await userEvent.clear(url);
+  await userEvent.type(url, "http://replacement.invalid:8080");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_proxy_config", { args: {
+    url: "http://replacement.invalid:8080", username: null, password: null, clearPassword: false,
+  } }));
+});
+
+it("removes a saved Network password only through the explicit control", async () => {
+  const original = invoke.getMockImplementation()!;
+  let passwordSet = true;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_proxy_config") return { url: null, username: null, passwordSet };
+    if (command === "set_proxy_config") {
+      passwordSet = !args.args.clearPassword;
+      return { url: null, username: null, passwordSet };
+    }
+    return original(command, args);
+  });
+  renderApp();
+  await clickMenuItem(listen, "settings");
+  const password = await screen.findByPlaceholderText("(set — leave blank to keep)");
+  await userEvent.type(password, "PLACEHOLDER_PROXY_PASSWORD");
+  await userEvent.click(screen.getByRole("checkbox", { name: "Remove saved password" }));
+  expect(password).toHaveValue("");
+  expect(password).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_proxy_config", { args: {
+    url: null, username: null, password: null, clearPassword: true,
+  } }));
+  await screen.findByPlaceholderText("password");
+  expect(screen.queryByRole("checkbox", { name: "Remove saved password" })).not.toBeInTheDocument();
+});
+
+it("clears the Network password draft when save succeeds and refetch fails", async () => {
+  const original = invoke.getMockImplementation()!;
+  let saved = false;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_proxy_config") {
+      if (saved) throw new Error("Network refetch failed after save");
+      return { url: "http://previous.invalid:8080", username: null, passwordSet: true };
+    }
+    if (command === "set_proxy_config") {
+      saved = true;
+      return { url: args.args.url, username: args.args.username, passwordSet: true };
+    }
+    return original(command, args);
+  });
+  renderApp();
+  await clickMenuItem(listen, "settings");
+  const password = await screen.findByPlaceholderText("(set — leave blank to keep)");
+  await userEvent.type(password, "PLACEHOLDER_PROXY_PASSWORD");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(await screen.findByText("Network refetch failed after save")).toBeVisible();
+  expect(password).toHaveValue("");
+  expect(screen.getByPlaceholderText("proxy URL")).toHaveValue("http://previous.invalid:8080");
+  expect(screen.queryByRole("button", { name: "Saving…" })).not.toBeInTheDocument();
 });
 
 it("keeps Network loading, unset and unavailable states distinct", async () => {

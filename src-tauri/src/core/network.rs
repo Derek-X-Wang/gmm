@@ -33,6 +33,14 @@ pub mod keys {
     pub const PROXY_PASSWORD: &str = "network.proxy.password";
 }
 
+/// Password intent for an update, separate from the stored record.
+/// Keep never reads a secret supplied by the frontend.
+pub enum PasswordUpdate {
+    Keep,
+    Clear,
+    Set(String),
+}
+
 /// Full proxy configuration as stored in the settings table. The
 /// password field is included; this struct never leaves the Core via
 /// a Tauri command (the UI variant is [`ProxyConfigPublic`]).
@@ -88,6 +96,28 @@ pub async fn save(pool: &sqlx::SqlitePool, cfg: &ProxyConfig) -> Result<()> {
     put_setting(&mut *tx, keys::PROXY_URL, cfg.url.as_deref()).await?;
     put_setting(&mut *tx, keys::PROXY_USERNAME, cfg.username.as_deref()).await?;
     put_setting(&mut *tx, keys::PROXY_PASSWORD, cfg.password.as_deref()).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Update the proxy atomically, leaving the password key untouched for Keep.
+/// This intent-based path does not change `save`'s stored-record semantics.
+pub async fn update(
+    pool: &sqlx::SqlitePool,
+    url: Option<&str>,
+    username: Option<&str>,
+    password: PasswordUpdate,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    put_setting(&mut *tx, keys::PROXY_URL, url).await?;
+    put_setting(&mut *tx, keys::PROXY_USERNAME, username).await?;
+    match password {
+        PasswordUpdate::Keep => {}
+        PasswordUpdate::Clear => put_setting(&mut *tx, keys::PROXY_PASSWORD, None).await?,
+        PasswordUpdate::Set(value) => {
+            put_setting(&mut *tx, keys::PROXY_PASSWORD, Some(&value)).await?;
+        }
+    }
     tx.commit().await?;
     Ok(())
 }
