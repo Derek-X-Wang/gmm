@@ -7,10 +7,10 @@ import { makeQueryClient, renderWithQuery } from "./test/harness";
 import { clickMenuItem, clickMenuItemsInOneTick } from "./test/menu";
 import type { GameCode, GamePathStatus, GameSummary, SessionInfo } from "./api";
 
-const { invoke, listen, unlisten } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn(), unlisten: vi.fn() }));
+const { invoke, listen, unlisten, pickFolder } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn(), unlisten: vi.fn(), pickFolder: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: pickFolder, save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: vi.fn() }));
 vi.mock("./diagnostics", () => ({ diagnosticsLogDir: vi.fn().mockResolvedValue("C:\\GMM\\logs"), exportDiagnosticsBundle: vi.fn() }));
 vi.mock("./updater", () => {
@@ -128,6 +128,7 @@ function mainScreenBehindDialogIsInert() {
 }
 
 beforeEach(() => {
+  pickFolder.mockReset();
   paths = { srmi: "C:\\StarRail", zzmi: "C:\\ZZZ", wwmi: "C:\\Waves" };
   states = {};
   session = null;
@@ -513,6 +514,59 @@ it("keeps unavailable checks distinct from absence and preserves the saved-path 
   expect(screen.getByRole("textbox", { name: "Honkai: Star Rail install path" })).toHaveValue("C:\\StarRail");
   expect((await screen.findAllByText("Path inspection failed"))[0]).toBeVisible();
   expect(await screen.findByText("Audit inspection failed")).toBeInTheDocument();
+});
+
+it.each([false, true].flatMap((retained) =>
+  ["Enter", "Apply", "folder picker", "auto-detect"].map((action) => ({
+    retained, action, readState: retained ? "after prior success" : "without prior success",
+  })),
+))("blocks $action when the saved path read fails $readState", async ({ retained, action }) => {
+  const original = invoke.getMockImplementation()!;
+  let readFails = !retained;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_game_install_path" && args.game === "srmi" && readFails) {
+      throw new Error("Saved path read failed");
+    }
+    if (command === "detect_game_install_path") return "C:\\DetectedGame";
+    return original(command, args);
+  });
+  pickFolder.mockResolvedValue("C:\\PickedGame");
+  const { client } = renderApp();
+  await screen.findByRole("tab", { name: "Zenless Zone Zero" });
+  await clickMenuItem(listen, "settings");
+  await userEvent.click(pageButton("Honkai: Star Rail"));
+  const input = screen.getByRole("textbox", { name: "Honkai: Star Rail install path" });
+  if (retained) {
+    expect(input).toHaveValue("C:\\StarRail");
+    readFails = true;
+    await act(async () => { await client.invalidateQueries({ queryKey: ["installPath", "srmi"] }); });
+  }
+  const editor = within(input.closest("section")!);
+  expect(await editor.findByText("Saved path read failed")).toBeVisible();
+  expect(client.getQueryState(["installPath", "srmi"])).toMatchObject({
+    status: "error", data: retained ? "C:\\StarRail" : undefined,
+  });
+  expect(input).toHaveValue(retained ? "C:\\StarRail" : "");
+  expect(editor.getByText("Saved path unavailable")).toBeVisible();
+  expect(editor.getByText("Path changes are unavailable until GMM can read the saved path.")).toBeVisible();
+  const apply = editor.getByRole("button", { name: "Apply Honkai: Star Rail install path" });
+  const picker = editor.getByRole("button", { name: retained ? "Change…" : "Pick folder" });
+  const detect = editor.getByRole("button", { name: retained ? "Re-detect" : "Auto-detect" });
+
+  if (action === "Enter" || action === "Apply") {
+    // Inject a changed draft even on the disabled input to exercise both commit guards.
+    fireEvent.change(input, { target: { value: retained ? "" : "C:\\ReplacementGame" } });
+    if (action === "Enter") fireEvent.keyDown(input, { key: "Enter" });
+    else await userEvent.click(apply);
+  } else {
+    await userEvent.click(action === "folder picker" ? picker : detect);
+  }
+  await act(async () => {});
+  expect(invoke.mock.calls.filter(([command]) =>
+    command === "set_game_install_path" || command === "detect_game_install_path",
+  )).toEqual([]);
+  expect(pickFolder).not.toHaveBeenCalled();
+  for (const control of [input, apply, picker, detect]) expect(control).toBeDisabled();
 });
 
 it.each([
