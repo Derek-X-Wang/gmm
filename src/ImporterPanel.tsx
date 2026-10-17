@@ -12,6 +12,7 @@ import { CommandErrorNotice } from "./CommandErrorNotice";
 function importerPathLine(value: GamePathStatus): string {
   switch (value.gamePath.status) {
     case "noSavedPath": return "Set a readable Game install path before installing a Model Importer.";
+    case "savedPathAtWrongLevel": return `Saved Game path is at the wrong level · Choose the Game folder ending in ${value.gamePath.expectedSuffix}. · Model Importer unverified`;
     case "savedPathNotFound": return "Saved Game installation cannot be found · Model Importer unverified";
     case "requiredEntriesNotFound": return `Required Game files or directories not found · Missing Game entries: ${value.gamePath.paths.join(", ")} · Model Importer unverified`;
     case "unreadable":

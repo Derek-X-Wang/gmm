@@ -261,3 +261,15 @@ it("allows explicit installation after a local no-receipt no-entries observation
   expect(await screen.findByText("Cannot tell — no GMM install recorded; no Model Importer entries found")).toBeVisible();
   expect(screen.getByRole("button", { name: "Install importer" })).toBeEnabled();
 });
+
+it.each(["wwmi", "efmi"] as const)("blocks importer writes and explains the expected level for %s", async (game) => {
+  const shallow = "C:/FictionalGames/Waves";
+  path = { ...path, game, savedPath: shallow, pinnedVersion: "1.0",
+    gamePath: { status: "savedPathAtWrongLevel", path: shallow, expectedSuffix: "Binaries/Win64" },
+    modelImporter: { status: "unverified", record: null, path: null, error: "Wrong level" } };
+  renderWithQuery(<ImporterPanel game={game} displayName="Fictional Game" />);
+  expect(await screen.findByText("Saved Game path is at the wrong level · Choose the Game folder ending in Binaries/Win64. · Model Importer unverified")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Importer installation unavailable" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Pin to current" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Content|Shipping\.exe|Missing Game entries|Required Game files|· Installed/)).not.toBeInTheDocument();
+});

@@ -14,6 +14,29 @@ use super::games::{GameCode, ValidateFn};
 use super::importer::{IMPORTER_REQUIRED_DIRS, IMPORTER_REQUIRED_FILE};
 use super::updates::ImporterInstallRecord;
 
+const WWMI_EXPECTED_SUFFIX: &str = "Binaries/Win64";
+const EFMI_EXPECTED_SUFFIX: &str = "Binaries/Win64";
+
+fn expected_path_suffix(game: GameCode) -> Option<&'static str> {
+    match game {
+        GameCode::Wwmi => Some(WWMI_EXPECTED_SUFFIX),
+        GameCode::Efmi => Some(EFMI_EXPECTED_SUFFIX),
+        _ => None,
+    }
+}
+
+fn has_expected_suffix(path: &Path, expected: &str) -> bool {
+    let mut components = path.components().rev();
+    expected.split('/').rev().all(|expected| {
+        components.next().is_some_and(|actual| {
+            actual
+                .as_os_str()
+                .to_str()
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+        })
+    })
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GamePathStatus {
@@ -27,11 +50,21 @@ pub struct GamePathStatus {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum GamePathState {
     NoSavedPath,
     /// The existing fallible GameProfile validator verified the Game layout.
     Readable,
+    /// The saved path does not have the shape required for ancestor derivation.
+    SavedPathAtWrongLevel {
+        path: PathBuf,
+        /// Relative directory layout to pick, not a guessed absolute path.
+        expected_suffix: String,
+    },
     /// The saved Game directory itself returned NotFound.
     SavedPathNotFound {
         paths: Vec<PathBuf>,
@@ -160,6 +193,16 @@ fn inspect_game_with_metadata(
     validate: Option<ValidateFn>,
     mut metadata_at: impl FnMut(&Path) -> Result<Option<fs::Metadata>>,
 ) -> Result<GamePathState> {
+    // Establish the shape before any validator, filesystem lookup, or derived
+    // requirement. Both executable names and Content assume this directory.
+    if let Some(expected_suffix) = expected_path_suffix(game) {
+        if !has_expected_suffix(path, expected_suffix) {
+            return Ok(GamePathState::SavedPathAtWrongLevel {
+                path: path.to_path_buf(),
+                expected_suffix: expected_suffix.into(),
+            });
+        }
+    }
     let profile = game.profile();
     let mut validation_failure = None;
     if let Some(validate) = validate {
@@ -376,6 +419,98 @@ fn inspect_importer_entry(path: &Path, directory: bool) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_wrong_level(game: GameCode, path: &Path, expected_content: &Path) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let directory = fs::metadata(tmp.path()).unwrap();
+        let mut reads = Vec::new();
+        let state = inspect_game_with_metadata(game, path, None, |entry| {
+            reads.push(entry.to_path_buf());
+            Ok((entry == path).then(|| directory.clone()))
+        })
+        .unwrap();
+        assert_eq!(
+            state,
+            GamePathState::SavedPathAtWrongLevel {
+                path: path.into(),
+                expected_suffix: "Binaries/Win64".into(),
+            },
+            "must not name {} or invented executable paths as requirements",
+            expected_content.display()
+        );
+        assert!(
+            reads.is_empty(),
+            "shape checking must precede filesystem access"
+        );
+    }
+
+    #[test]
+    fn drive_root_content_is_never_named_as_a_game_requirement() {
+        // On Windows this is the issue's drive-root derivation, not a string
+        // pretending to have Windows path semantics on a Unix test host.
+        #[cfg(windows)]
+        let path = Path::new(r"C:\FictionalGames\Waves");
+        #[cfg(not(windows))]
+        let path = Path::new("/FictionalGames/Waves");
+        let content = path.parent().unwrap().parent().unwrap().join("Content");
+        assert_eq!(content.parent(), path.ancestors().last());
+        for game in [GameCode::Wwmi, GameCode::Efmi] {
+            assert_wrong_level(game, path, &content);
+        }
+    }
+
+    #[test]
+    fn two_ancestors_do_not_establish_the_expected_game_level() {
+        let path = Path::new("FictionalGames/Waves/Client");
+        let content = path.parent().unwrap().parent().unwrap().join("Content");
+        for game in [GameCode::Wwmi, GameCode::Efmi] {
+            assert_wrong_level(game, path, &content);
+        }
+    }
+
+    #[test]
+    fn wrong_level_precedes_even_a_successful_validator() {
+        fn must_not_validate(_: &Path) -> Result<bool> {
+            panic!("wrong-level input must be rejected before validation")
+        }
+        for game in [GameCode::Wwmi, GameCode::Efmi] {
+            for path in [
+                "/",
+                "Win64",
+                "Binaries",
+                "Win64/Binaries",
+                "Other/Win64",
+                "Binaries/Other",
+            ] {
+                let state = inspect_game_with_metadata(
+                    game,
+                    Path::new(path),
+                    Some(must_not_validate),
+                    |_| panic!("wrong-level input must not inspect the filesystem"),
+                )
+                .unwrap();
+                assert!(matches!(state, GamePathState::SavedPathAtWrongLevel { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn expected_level_is_case_insensitive_and_accepts_trailing_separators() {
+        fn valid(_: &Path) -> Result<bool> {
+            Ok(true)
+        }
+        for game in [GameCode::Wwmi, GameCode::Efmi] {
+            for path in [
+                "FictionalGame/Binaries/Win64",
+                "FictionalGame/bInArIeS/wIN64/",
+            ] {
+                assert_eq!(
+                    inspect_game(game, Path::new(path), Some(valid)).unwrap(),
+                    GamePathState::Readable
+                );
+            }
+        }
+    }
 
     #[test]
     fn enumeration_failure_after_a_successful_entry_remains_uncertainty() {

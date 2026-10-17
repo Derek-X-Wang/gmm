@@ -141,6 +141,7 @@ export async function getGameInstallPath(game: GameCode): Promise<string | null>
  * Prototype mapping (docs/design/main-screen.md):
  * noSavedPath -> `absent` (configuration only, never a disk absence claim).
  * unreadable -> `unreadable`; retain the saved path and configured tab.
+ * savedPathAtWrongLevel -> saved path lacks the expected relative layout.
  * savedPathNotFound -> the saved Game directory itself was not found.
  * requiredEntriesNotFound -> named Game files/directories were not found in
  * an existing saved directory. Both retain the saved path/configured tab;
@@ -154,6 +155,7 @@ export async function getGameInstallPath(game: GameCode): Promise<string | null>
 export type GamePathState =
   | { status: "noSavedPath" }
   | { status: "readable" }
+  | { status: "savedPathAtWrongLevel"; path: string; expectedSuffix: string }
   | { status: "savedPathNotFound"; paths: string[] }
   | { status: "requiredEntriesNotFound"; paths: string[] }
   | { status: "invalid"; error: string }

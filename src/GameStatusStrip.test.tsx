@@ -419,3 +419,18 @@ it.each([
   expect(await screen.findByText(`Game: ${line}`)).toBeVisible();
   expect(screen.getByRole("status")).not.toHaveTextContent(/not installed|never installed|GMM installed this/i);
 });
+
+it.each(["wwmi", "efmi"] as const)("explains the wrong saved level without guessed requirements for %s", async (game) => {
+  const shallow = "C:/FictionalGames/Waves";
+  pathStatus = { ...readable, game, savedPath: shallow, pinnedVersion: "1.0",
+    gamePath: { status: "savedPathAtWrongLevel", path: shallow, expectedSuffix: "Binaries/Win64" },
+    modelImporter: { status: "unverified", record: null, path: null, error: "Wrong level" } };
+  renderWithQuery(<GameStatusStrip {...props} game={game} savedPath={shallow} />);
+  const strip = screen.getByRole("region", { name: "Honkai: Star Rail status" });
+  expect(await within(strip).findByText("Game: Saved Game path is at the wrong level · Model Importer unverified")).toBeVisible();
+  expect(strip).toHaveTextContent("Choose the Game folder ending in Binaries/Win64.");
+  expect(within(strip).getByText(shallow, { selector: "code" })).toBeVisible();
+  expect(strip).not.toHaveTextContent(/Content|Shipping\.exe|Missing Game entries|Required Game files|Installed version|Pinned/);
+  await userEvent.click(within(strip).getByRole("button"));
+  expect(props.onSettings).toHaveBeenCalledTimes(1);
+});
