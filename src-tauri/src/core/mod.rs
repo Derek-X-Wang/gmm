@@ -464,6 +464,16 @@ impl Core {
         network::save(&self.pool, cfg).await
     }
 
+    /// Update URL and username with an explicit password intent in one transaction.
+    pub async fn update_proxy_config(
+        &self,
+        url: Option<&str>,
+        username: Option<&str>,
+        password: network::PasswordUpdate,
+    ) -> Result<()> {
+        network::update(&self.pool, url, username, password).await
+    }
+
     /// Build a reqwest `ClientBuilder` honouring the persisted proxy
     /// config. Use this instead of `reqwest::Client::builder()` so
     /// every outbound HTTP path routes through the user's proxy.

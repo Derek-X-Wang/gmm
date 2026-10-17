@@ -291,12 +291,14 @@ function NetworkPanel() {
   const [url, setUrl] = useState<string>("");
   const [username, setUsername] = useState<string>("");
   const [password, setPassword] = useState<string>("");
+  const [clearPassword, setClearPassword] = useState(false);
 
   React.useEffect(() => {
     if (cfg.data) {
       setUrl(cfg.data.url ?? "");
       setUsername(cfg.data.username ?? "");
       setPassword(""); // never seeded
+      setClearPassword(false);
     }
   }, [cfg.data]);
 
@@ -306,8 +308,12 @@ function NetworkPanel() {
         url: url || null,
         username: username || null,
         password: password ? password : null,
+        clearPassword,
       }),
-    onSuccess: () => setPassword(""),
+    onSuccess: () => {
+      setPassword("");
+      setClearPassword(false);
+    },
     onSettled: () => qc.invalidateQueries({ queryKey: ["proxyConfig"] }),
   });
   const test = useMutation({
@@ -342,8 +348,22 @@ function NetworkPanel() {
           type="password"
           placeholder={cfg.data?.passwordSet ? "(set — leave blank to keep)" : "password"}
           value={password}
+          disabled={clearPassword}
           onChange={(e) => setPassword(e.currentTarget.value)}
         />
+        {cfg.data?.passwordSet ? (
+          <label>
+            <input
+              type="checkbox"
+              checked={clearPassword}
+              onChange={(e) => {
+                setClearPassword(e.currentTarget.checked);
+                if (e.currentTarget.checked) setPassword("");
+              }}
+            />
+            Remove saved password
+          </label>
+        ) : null}
       </div>
       <div className="row">
         <button onClick={() => save.mutate()} disabled={save.isPending}>

@@ -544,7 +544,9 @@ export async function getProxyConfig(): Promise<ProxyConfigPublic> {
 export async function setProxyConfig(args: {
   url: string | null;
   username: string | null;
+  /** Blank keeps the saved password unless clearPassword is true. */
   password: string | null;
+  clearPassword: boolean;
 }): Promise<ProxyConfigPublic> {
   return invoke<ProxyConfigPublic>("set_proxy_config", { args });
 }
