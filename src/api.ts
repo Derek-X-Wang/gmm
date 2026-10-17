@@ -1010,6 +1010,11 @@ export function toOriginInput(origin: ImporterOriginRef): ImporterOriginInput {
   };
 }
 
+export interface AttentionLibraryRootOverlap extends LibraryRootOverlap {
+  /** Backend identity of the exact Library path and backups pair. */
+  cause: string;
+}
+
 /** The Core aggregate; advisory in the app, never a global control gate. */
 export interface AttentionReport {
   safeToProceed: boolean;
@@ -1042,7 +1047,7 @@ export interface AttentionReport {
   sessionLaunches: InterruptedSessionLaunch[];
   activeSession: SessionInfo | null;
   libraryAudits: LibraryAuditReport[];
-  libraryRootOverlaps: LibraryRootOverlap[];
+  libraryRootOverlaps: AttentionLibraryRootOverlap[];
   modPathOverlaps: LibraryModPathOverlap[];
 }
 

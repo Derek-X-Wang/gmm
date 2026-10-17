@@ -5,7 +5,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
-import type { AttentionReport } from "./api";
+import type { AttentionReport, GameCode } from "./api";
 
 const { attentionStatus, invoke } = vi.hoisted(() => ({ attentionStatus: vi.fn(), invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -94,7 +94,7 @@ it("shows all ten outstanding surfaces together across Games", async () => {
       unreferenced: [{ directoryName: "orphan", path: "C:\\Library\\orphan", sizeBytes: 1 }],
       duplicates: [{ path: "C:\\Library\\duplicate", mods: [] }],
     }],
-    libraryRootOverlaps: [{ game: null, path: "C:\\Backup\\Library", backups: "C:\\Backup" }],
+    libraryRootOverlaps: [{ cause: "global-overlap", game: null, path: "C:\\Backup\\Library", backups: "C:\\Backup" }],
     modPathOverlaps: [{ game: "srmi", modId: "01STRANDED", modName: "Stranded Mod", path: "C:\\Backup\\mod", backups: "C:\\Backup" }],
   };
   attentionStatus.mockResolvedValue(report);
@@ -130,6 +130,46 @@ it("shows all ten outstanding surfaces together across Games", async () => {
   expect(screen.getByRole("button", { name: "Refresh attention" })).toBeEnabled();
   expect(screen.getByRole("region", { name: "Attention across all Games" })).toHaveTextContent("Stranded Mod");
   expect(screen.queryByText("Nothing needs attention in this report.")).not.toBeInTheDocument();
+});
+
+const overlappingGames: Array<GameCode | null> = [null, "gimi", "srmi", "zzmi", "wwmi", "himi", "efmi"];
+const globalOverlaps = overlappingGames.map((game) => ({
+  cause: "same-global-cause", game, path: "C:/Example/Backups", backups: "C:/Example/Backups",
+}));
+
+it("counts a global Library overlap as one finding and still renders every row", async () => {
+  attentionStatus.mockResolvedValue({ ...clean, safeToProceed: false, libraryRootOverlaps: globalOverlaps });
+  renderWithQuery(<AttentionView />);
+  const indicator = await screen.findByRole("button", { name: /Needs attention/ });
+  expect(indicator.querySelector(".attention-indicator__scope")).toHaveTextContent("All Games · 1 finding");
+  expect(indicator).not.toHaveTextContent(/broken|Mods/);
+  const region = await expand();
+  const heading = within(region).getByRole("heading", { name: "Library root overlaps (7)" });
+  const rows = within(heading.parentElement!).getAllByRole("listitem");
+  expect(rows).toHaveLength(7);
+  overlappingGames.forEach((game, index) => {
+    expect(rows[index].querySelector("strong")).toHaveTextContent(game?.toUpperCase() ?? "Global Library");
+    expect(within(rows[index]).getAllByText("C:/Example/Backups", { selector: "code" })).toHaveLength(2);
+  });
+});
+
+it("counts distinct backend causes even when the displayed paths are identical", async () => {
+  attentionStatus.mockResolvedValue({ ...clean, safeToProceed: false, libraryRootOverlaps: [
+    ...globalOverlaps, { ...globalOverlaps[0], game: "gimi", cause: "another-backend-cause" },
+  ] });
+  renderWithQuery(<AttentionView />);
+  const indicator = await screen.findByRole("button", { name: /Needs attention/ });
+  expect(indicator).toHaveTextContent("All Games · 2 findings");
+});
+
+it("keeps backend safety authoritative when overlap findings are reported as safe", async () => {
+  attentionStatus.mockResolvedValue({ ...clean, safeToProceed: true, libraryRootOverlaps: globalOverlaps });
+  renderWithQuery(<AttentionView />);
+  const indicator = await screen.findByRole("button", { name: /No attention needed/ });
+  expect(indicator).toHaveTextContent("All Games · 1 finding");
+  expect(screen.queryByRole("img", { name: "Warning" })).not.toBeInTheDocument();
+  const region = await expand();
+  expect(within(region).getByRole("heading", { name: "Library root overlaps (7)" })).toBeInTheDocument();
 });
 
 it("shows an unavailable sub-report as an error even after a clean check", async () => {
