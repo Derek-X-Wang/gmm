@@ -91,8 +91,30 @@ try {
     Add-TestTag "v2.0.1" ""
     Assert-Rejected "empty annotation fails" "v2.0.1" "empty annotation"
     git -c tag.gpgsign=false tag v2.0.2
-    Assert-Rejected "lightweight tag fails" "v2.0.2" "must exist and have an annotation"
-    Assert-Rejected "missing tag fails" "v2.0.3" "must exist and have an annotation"
+    & {
+        # Recovery must report its own diagnostic even when native failures throw.
+        $PSNativeCommandUseErrorActionPreference = $true
+        Assert-Rejected "overwritten ref without origin fails cleanly" "v2.0.2" "resolved to 'commit'; recovery from origin did not produce an annotated tag object"
+    }
+    Assert-Rejected "missing tag fails" "v2.0.3" "ref 'refs/tags/v2.0.3' does not exist"
+
+    # A local origin proves recovery restores the annotation, without network access.
+    $origin = Join-Path $temp "origin.git"
+    git init --bare --quiet $origin
+    git remote add origin $origin
+    $recoveredAnnotation = "GMM v3.0.0`n`nRecovered release notes.`nWrapped summary.`n`nFull details."
+    Add-TestTag "v3.0.0" $recoveredAnnotation
+    git push --quiet origin refs/tags/v3.0.0
+    git update-ref refs/tags/v3.0.0 HEAD
+    if ($LASTEXITCODE -ne 0) { throw "Could not overwrite fixture tag ref" }
+    Assert-Equal "checkout fixture points directly at a commit" (git cat-file -t refs/tags/v3.0.0) "commit"
+    $recoveryFailure = $null
+    $recoveredNotes = $null
+    try { $recoveredNotes = Read-Notes "v3.0.0" } catch { $recoveryFailure = $_.Exception.Message }
+    Assert-Equal "overwritten ref recovery succeeds" $recoveryFailure $null
+    Assert-Equal "overwritten ref recovers summary from origin" $recoveredNotes.summary "Recovered release notes. Wrapped summary."
+    Assert-Equal "overwritten ref recovers full annotation from origin" $recoveredNotes.annotation $recoveredAnnotation
+    Assert-Equal "recovery restores the annotated tag object" (git cat-file -t refs/tags/v3.0.0) "tag"
 
     Assert-Equal "tauri-action receives summary before manifest creation" ($workflow -match 'releaseBody: \$\{\{ steps\.release-notes\.outputs\.summary \}\}') $true
     Assert-Equal "release workflow runs the guarded extractor" ($workflow -match 'run: \.github/scripts/prepare-release-notes\.ps1 -Tag \$env:RELEASE_TAG -OutputPath \$env:GITHUB_OUTPUT') $true
