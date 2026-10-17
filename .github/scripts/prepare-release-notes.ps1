@@ -7,6 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+# Inspect Git exit codes ourselves so a failed recovery gets our diagnostic.
+$PSNativeCommandUseErrorActionPreference = $false
 
 git check-ref-format "refs/tags/$Tag"
 if ($LASTEXITCODE -ne 0) {
@@ -14,8 +16,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $objectType = git cat-file -t "refs/tags/$Tag" 2>$null
-if ($LASTEXITCODE -ne 0 -or $objectType -ne "tag") {
-    throw "Release tag '$Tag' must exist and have an annotation (lightweight tags are not supported)"
+if ($LASTEXITCODE -ne 0) {
+    throw "Release tag ref 'refs/tags/$Tag' does not exist"
+}
+if ($objectType -ne "tag") {
+    # Checkout can overwrite an annotated tag ref with the commit it targets.
+    git fetch --force --no-recurse-submodules origin "refs/tags/${Tag}:refs/tags/$Tag" 2>$null | Out-Null
+    $objectType = git cat-file -t "refs/tags/$Tag" 2>$null
+    if ($LASTEXITCODE -ne 0 -or $objectType -ne "tag") {
+        throw "Release tag ref 'refs/tags/$Tag' resolved to '$objectType'; recovery from origin did not produce an annotated tag object"
+    }
 }
 
 $annotationLines = @(git tag -l --format='%(contents)' -- $Tag)
