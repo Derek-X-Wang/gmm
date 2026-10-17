@@ -19,7 +19,7 @@ use crate::core::diagnostics;
 use crate::core::importer::{InstallReport, LatestRelease};
 use crate::core::importer_origin::{ImporterOrigin, OriginStatus};
 use crate::core::mod_updates::ModUpdateRow;
-use crate::core::network::{ProxyConfig, ProxyConfigPublic};
+use crate::core::network::{PasswordUpdate, ProxyConfigPublic};
 use crate::core::reconcile::{ReconcileResult, StartupReconcileState, StartupReconcileStatus};
 use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
 use crate::core::variants::Variant;
@@ -840,6 +840,33 @@ pub struct ProxyArgs {
     pub url: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Blank password keeps the saved value unless removal is explicit.
+    #[serde(default)]
+    pub clear_password: bool,
+}
+
+impl ProxyArgs {
+    /// Production command body, also callable without a Tauri runtime.
+    pub async fn save(self, core: &Core) -> CommandResult<ProxyConfigPublic> {
+        let password = match (self.password.filter(|s| !s.is_empty()), self.clear_password) {
+            (Some(_), true) => {
+                return Err(CommandError::other(
+                    "Cannot set and remove a proxy password in the same save.",
+                ));
+            }
+            (Some(value), false) => PasswordUpdate::Set(value),
+            (None, true) => PasswordUpdate::Clear,
+            (None, false) => PasswordUpdate::Keep,
+        };
+        core.update_proxy_config(
+            self.url.filter(|s| !s.is_empty()).as_deref(),
+            self.username.filter(|s| !s.is_empty()).as_deref(),
+            password,
+        )
+        .await
+        .map_err(CommandError::from)?;
+        core.proxy_config_public().await.map_err(CommandError::from)
+    }
 }
 
 #[tauri::command]
@@ -852,15 +879,7 @@ pub async fn set_proxy_config(
     core: State<'_, Core>,
     args: ProxyArgs,
 ) -> CommandResult<ProxyConfigPublic> {
-    let cfg = ProxyConfig {
-        url: args.url.filter(|s| !s.is_empty()),
-        username: args.username.filter(|s| !s.is_empty()),
-        password: args.password.filter(|s| !s.is_empty()),
-    };
-    core.set_proxy_config(&cfg)
-        .await
-        .map_err(CommandError::from)?;
-    core.proxy_config_public().await.map_err(CommandError::from)
+    args.save(&core).await
 }
 
 #[tauri::command]
