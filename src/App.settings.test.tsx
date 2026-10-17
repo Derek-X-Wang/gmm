@@ -321,6 +321,22 @@ it("adds an absent Game only on accepted save and returns to the original Game",
   expect(screen.getByRole("tab", { name: "Honkai: Star Rail" })).toHaveAttribute("aria-selected", "true");
 });
 
+it.each(["wwmi", "efmi"] as const)("explains the wrong saved level in Settings for %s", async (game) => {
+  const shallow = "C:/FictionalGames/Waves";
+  const name = games.find((entry) => entry.code === game)!.displayName;
+  paths[game] = shallow;
+  states[game] = { pinnedVersion: null, game, savedPath: shallow,
+    gamePath: { status: "savedPathAtWrongLevel", path: shallow, expectedSuffix: "Binaries/Win64" },
+    modelImporter: { status: "unverified", record: null, path: null, error: "Wrong level" } };
+  renderApp();
+  await openGame();
+  await userEvent.click(pageButton(name));
+  await waitFor(() => expect(pageButton(name)).toHaveTextContent("Saved Game path is at the wrong level · Model Importer unverified"));
+  expect(await within(dialog()).findByText("Choose the Game folder ending in Binaries/Win64.", { selector: "p" })).toBeVisible();
+  expect(screen.getByRole("textbox", { name: `${name} install path` })).toHaveValue(shallow);
+  expect(within(dialog()).queryByText(/Content|Shipping\.exe|Missing Game entries|Required Game files/)).not.toBeInTheDocument();
+});
+
 it("names missing Game entries in the Settings path details", async () => {
   const missing = ["C:\\StarRail\\StarRail.exe", "C:\\StarRail\\StarRail_Data"];
   states.srmi = { pinnedVersion: null, game: "srmi", savedPath: "C:\\StarRail",

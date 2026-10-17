@@ -240,6 +240,7 @@ function ApplicationVersion() {
 export function gamePathLine(status: GamePathStatus): string {
   switch (status.gamePath.status) {
     case "noSavedPath": return "Absent · no saved path";
+    case "savedPathAtWrongLevel": return "Saved Game path is at the wrong level · Model Importer unverified";
     case "savedPathNotFound": return "Saved Game installation cannot be found · Model Importer unverified";
     case "requiredEntriesNotFound": return "Required Game files or directories not found · Model Importer unverified";
     case "unreadable": return "Cannot tell · path unreadable; Model Importer unverified";
@@ -263,6 +264,7 @@ function GamePathExplanation({ game }: { game: GameCode }) {
     const path = value.gamePath;
     if ((path.status === "savedPathNotFound" || path.status === "requiredEntriesNotFound")) details = path.status === "requiredEntriesNotFound"
       ? `Missing Game entries: ${path.paths.join(", ")}` : path.paths.join(", ");
+    else if (path.status === "savedPathAtWrongLevel") details = `Choose the Game folder ending in ${path.expectedSuffix}.`;
     else if (path.status === "invalid" || path.status === "unreadable") details = path.error;
     else details = modelImporterDetails(value.modelImporter);
   }

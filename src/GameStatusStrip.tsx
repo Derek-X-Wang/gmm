@@ -7,6 +7,7 @@ function pathSummary(value: GamePathStatus): { line: string; detail?: ReactNode 
   const path = value.gamePath;
   switch (path.status) {
     case "unreadable": return { line: "Cannot tell — install path unreadable · Model Importer unverified", detail: `${path.path}: ${path.error}` };
+    case "savedPathAtWrongLevel": return { line: "Saved Game path is at the wrong level · Model Importer unverified", detail: `Choose the Game folder ending in ${path.expectedSuffix}.` };
     case "savedPathNotFound": return { line: "Saved installation cannot be found · Model Importer unverified", detail: path.paths.join(", ") };
     case "requiredEntriesNotFound": return { line: "Required Game files or directories not found · Model Importer unverified", detail: <><span role="img" aria-label="Warning">⚠</span> Missing Game entries</> };
     case "invalid": return { line: "Cannot verify Game layout · Model Importer unverified", detail: path.error };

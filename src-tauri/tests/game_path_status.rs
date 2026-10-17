@@ -151,6 +151,85 @@ async fn missing_game_files_are_named_without_claiming_an_absent_importer() {
 }
 
 #[tokio::test]
+async fn wrong_level_wire_state_contains_no_fabricated_requirements() {
+    let (tmp, core, db) = fixture().await;
+    for game in [GameCode::Wwmi, GameCode::Efmi] {
+        let path = tmp.path().join(game.as_str()).join("Client");
+        support::seed_game_install(game, &path);
+        // Cover both absent executables and a renamed executable that the
+        // detector would accept. Neither establishes the required path shape.
+        for executable_present in [false, true] {
+            let executable = path.join(game.profile().executable_candidates[0]);
+            if executable_present {
+                fs::write(&executable, b"fixture game").unwrap();
+            } else {
+                fs::remove_file(&executable).unwrap();
+            }
+            save_fixture_path(&db, game, &path).await;
+            let status = core.game_path_status(game).await.unwrap();
+            assert_eq!(status.saved_path.as_deref(), Some(path.as_path()));
+            assert!(matches!(
+                status.model_importer,
+                ModelImporterState::Unverified { .. }
+            ));
+            let wire = serde_json::to_value(&status).unwrap();
+            assert_eq!(
+                wire["gamePath"],
+                serde_json::json!({
+                    "status": "savedPathAtWrongLevel",
+                    "path": path,
+                    "expectedSuffix": "Binaries/Win64",
+                }),
+                "wrong-level state must not list invented executable or Content requirements"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn correct_binary_level_still_names_genuinely_missing_content() {
+    let (tmp, core, db) = fixture().await;
+    for game in [GameCode::Wwmi, GameCode::Efmi] {
+        let path = tmp.path().join(game.as_str()).join("Binaries/Win64");
+        support::seed_game_install(game, &path);
+        let content = path.parent().unwrap().parent().unwrap().join("Content");
+        fs::remove_dir(&content).unwrap();
+        save_fixture_path(&db, game, &path).await;
+        let status = core.game_path_status(game).await.unwrap();
+        assert_eq!(
+            status.game_path,
+            GamePathState::RequiredEntriesNotFound {
+                paths: vec![content]
+            }
+        );
+        assert!(matches!(
+            status.model_importer,
+            ModelImporterState::Unverified { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn non_unreal_games_do_not_require_a_binary_directory_suffix() {
+    let (tmp, core, db) = fixture().await;
+    for game in [
+        GameCode::Gimi,
+        GameCode::Srmi,
+        GameCode::Zzmi,
+        GameCode::Himi,
+    ] {
+        let path = tmp.path().join(game.as_str());
+        support::seed_game_install(game, &path);
+        save_fixture_path(&db, game, &path).await;
+        assert_eq!(
+            core.game_path_status(game).await.unwrap().game_path,
+            GamePathState::Readable,
+            "{game:?} must retain its existing layout"
+        );
+    }
+}
+
+#[tokio::test]
 async fn wrong_types_are_invalid_not_confirmed_missing_files() {
     let (tmp, core, db) = fixture().await;
     let game = tmp.path().join("game");
