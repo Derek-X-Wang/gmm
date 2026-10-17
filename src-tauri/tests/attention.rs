@@ -57,6 +57,36 @@ async fn backup_overlap_is_reported_instead_of_hiding_status() {
 }
 
 #[tokio::test]
+async fn global_overlap_has_one_cause_for_all_seven_rows() {
+    let (tmp, core, pool) = fixture().await;
+    let backups = tmp.path().join("backups");
+    sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?)")
+        .bind(gmm_lib::core::settings::keys::library_root())
+        .bind(backups.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let status = core.attention_status().await.unwrap();
+    assert!(!status.safe_to_proceed, "an overlap must remain unsafe");
+    let rows = &status.library_root_overlaps;
+    assert_eq!(rows.len(), 7, "keep global and all six affected Game rows");
+    assert_eq!(rows.iter().filter(|row| row.game.is_none()).count(), 1);
+    let games: std::collections::HashSet<_> = rows.iter().filter_map(|row| row.game).collect();
+    assert_eq!(games.len(), 6);
+    let causes: std::collections::HashSet<_> = rows.iter().map(|row| &row.cause).collect();
+    assert_eq!(causes.len(), 1, "propagated overlaps share one cause");
+    assert!(!rows[0].cause.is_empty());
+    for row in rows {
+        assert_eq!(row.path, backups);
+        assert_eq!(row.backups, backups);
+    }
+    let again = core.attention_status().await.unwrap();
+    assert_eq!(rows[0].cause, again.library_root_overlaps[0].cause);
+    let encoded = serde_json::to_value(&status).unwrap();
+    assert_eq!(encoded["libraryRootOverlaps"][0]["cause"], rows[0].cause);
+}
+
+#[tokio::test]
 async fn unreleased_session_claim_needs_attention() {
     let (_tmp, core, pool) = fixture().await;
     sqlx::query("INSERT INTO session_launch_claims (token, game_code, owner_pid, owner_started_at, child_pid, child_started_at, started_at) VALUES ('claim', 'gimi', 0, NULL, NULL, NULL, '2026-08-24T00:00:00Z')")
