@@ -238,6 +238,7 @@ export function ImporterOriginPanel({
                 existing files first and the install can be rolled back.
               </p>
               {!canInstall ? <p className="muted small">A verified readable Game and Model Importer check is needed before switching and installing. See the install-path group above.</p> : null}
+              {!originVerified ? <p className="muted small">GMM could not re-check this recommendation. Switching and declining are unavailable until the check succeeds.</p> : null}
               <div className="row">
                 <button
                   onClick={() => accept.mutate()}
@@ -247,7 +248,7 @@ export function ImporterOriginPanel({
                 </button>
                 <button
                   onClick={() => decline.mutate(proposalOrigin)}
-                  disabled={decline.isPending}
+                  disabled={decline.isPending || !originVerified}
                 >
                   {decline.isPending ? "Declining…" : "Not now"}
                 </button>

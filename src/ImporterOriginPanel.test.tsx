@@ -449,6 +449,7 @@ it.each(["checking", "error", "unreadable", "noSavedPath", "unverified importer"
   expect(await screen.findByRole("button", { name: "Switch and install" })).toBeDisabled();
   expect(acceptImporterOriginProposal).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "Save origin" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Not now" })).toBeEnabled();
 });
 
 it.each(["absent", "checking", "failed", "unverified"])("qualifies recorded Origin when importer files are %s", async (state) => {
@@ -475,6 +476,68 @@ function deferredOriginCheck() {
   return { promise, resolve, reject };
 }
 
+const staleProposalNotice = "GMM could not re-check this recommendation. Switching and declining are unavailable until the check succeeds.";
+
+it.each(["refetching", "failed refresh"])("disables both proposal actions during a %s Origin check", async (state) => {
+  const proposal = { origin: theFork, reason: null, replaces: { state: "unknown" as const } };
+  importerOriginStatus.mockResolvedValue(status({ proposal }));
+  const { client } = render();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled());
+  const pending = deferredOriginCheck();
+  importerOriginStatus.mockReturnValue(pending.promise);
+  let refresh!: Promise<void>;
+  act(() => { refresh = client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }); });
+  await screen.findByText("The Origin details below are from the previous check.");
+  if (state === "failed refresh") {
+    await act(async () => { pending.reject(new Error("Origin refresh failed")); await refresh; });
+    expect(await screen.findByText("Origin refresh failed")).toBeVisible();
+  }
+  expect(screen.getByRole("button", { name: "Switch and install" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Not now" })).toBeDisabled();
+  expect(screen.getByText(staleProposalNotice)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Switch and install" }));
+  await userEvent.click(screen.getByRole("button", { name: "Not now" }));
+  expect(acceptImporterOriginProposal).not.toHaveBeenCalled();
+  expect(dismissImporterOrigin).not.toHaveBeenCalled();
+
+  if (state === "refetching") {
+    await act(async () => { pending.resolve(status({ proposal })); await refresh; });
+  } else {
+    importerOriginStatus.mockResolvedValue(status({ proposal }));
+    await act(() => client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }));
+  }
+  await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled());
+  expect(screen.getByRole("button", { name: "Not now" })).toBeEnabled();
+  expect(screen.queryByText(staleProposalNotice)).not.toBeInTheDocument();
+});
+
+it("enables both verified proposal actions without a stale recommendation notice", async () => {
+  importerOriginStatus.mockResolvedValue(status({ proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } } }));
+  render();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Switch and install" })).toBeEnabled());
+  expect(screen.getByRole("button", { name: "Not now" })).toBeEnabled();
+  expect(screen.queryByText(staleProposalNotice)).not.toBeInTheDocument();
+});
+
+it("keeps dismissed recommendations and Undo usable after a failed Origin refresh", async () => {
+  importerOriginStatus.mockResolvedValue(status({
+    proposal: { origin: theFork, reason: null, replaces: { state: "unknown" } },
+    dismissed: [gimiPackage],
+  }));
+  const { client } = render();
+  await screen.findByRole("button", { name: "Undo" });
+  importerOriginStatus.mockRejectedValue(new Error("Origin refresh failed"));
+  await act(() => client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }));
+  expect(await screen.findByText("Origin refresh failed")).toBeVisible();
+  expect(screen.getByRole("group", { name: "Dismissed recommendations" })).toHaveTextContent("SilentNightSound/GIMI-Package");
+  expect(screen.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: "Undo" }));
+  await waitFor(() => expect(restoreImporterOrigin).toHaveBeenCalledWith("gimi", {
+    owner: "SilentNightSound", repo: "GIMI-Package", assetPattern: "GIMI-PACKAGE-v\\d+\\.zip",
+  }));
+  expect(await screen.findByText("Recommendation restored.")).toBeVisible();
+});
+
 it("suppresses all confident empty Origin claims during and after a failed refresh", async () => {
   importerOriginStatus.mockResolvedValue(status());
   const { client } = render();
@@ -486,6 +549,7 @@ it("suppresses all confident empty Origin claims during and after a failed refre
   let refresh!: Promise<void>;
   act(() => { refresh = client.invalidateQueries({ queryKey: ["importerOrigin", "gimi"] }); });
   await screen.findByText("The Origin details below are from the previous check.");
+  expect(screen.queryByText(staleProposalNotice)).not.toBeInTheDocument();
   for (const label of ["No Origin Proposal.", "No dismissed recommendations.", "No override set."]) {
     expect(screen.queryByText(label)).not.toBeInTheDocument();
   }
