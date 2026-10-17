@@ -451,6 +451,7 @@ function GamePathPage({
       <GamePathExplanation game={game} />
       {pathQuery.isPending ? <p>Reading saved install path…</p> : null}
       <CommandErrorNotice error={pathQuery.error} />
+      {pathQuery.isError ? <p className="muted small">Path changes are unavailable until GMM can read the saved path.</p> : null}
       <p className="muted">
         GMM looks for the {displayName} executable and required Game files. Use <strong>Auto-detect</strong> to scan
         known install locations, or type or pick the folder manually.
@@ -461,14 +462,14 @@ function GamePathPage({
           label={`${displayName} install path`}
           value={installPath ?? ""}
           placeholder={pathQuery.isPending ? "Reading saved path…" : pathQuery.isError ? "Saved path unavailable" : "No install path set"}
-          disabled={pathQuery.isPending || setPath.isPending || detect.isPending}
+          disabled={pathQuery.isPending || pathQuery.isError || setPath.isPending || detect.isPending}
           pickerLabel={installPath ? "Change…" : "Pick folder"}
           onApply={(path) => setPath.mutate(path)}
         />
         <span className="muted small">{label}</span>
       </div>
       <div className="row">
-        <button onClick={() => detect.mutate()} disabled={detect.isPending || setPath.isPending}>
+        <button onClick={() => detect.mutate()} disabled={detect.isPending || setPath.isPending || pathQuery.isError}>
           {detect.isPending ? "Scanning…" : installPath ? "Re-detect" : "Auto-detect"}
         </button>
       </div>
