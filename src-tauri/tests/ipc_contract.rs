@@ -698,21 +698,39 @@ mod ipc_readiness_marker {
         // in the logs" is satisfied instantly by the *previous*
         // launch's line — an app that crashed on startup would pass.
         //
-        // Both multi-launch scripts must therefore compare a count
-        // taken before starting the process against one taken after,
-        // rather than testing for mere presence. `installer-smoke.ps1`
-        // is exempt: it launches exactly once, from a data directory it
-        // has just deleted.
+        // The shared launch helper must therefore define the counter
+        // and compare a count taken before starting the process against
+        // one taken after, rather than testing for mere presence. Both
+        // multi-launch scripts must dot-source that implementation;
+        // checking only the shared file would miss a disconnected caller.
+        // `installer-smoke.ps1` is exempt: it launches exactly once,
+        // from a data directory it has just deleted.
+        let shared = read(".github/scripts/app-starts.ps1");
+        assert!(
+            shared.contains("function Get-IpcMarkerCount("),
+            "app-starts.ps1 must define Get-IpcMarkerCount to count readiness markers",
+        );
+        assert!(
+            shared.contains("$before = Get-IpcMarkerCount $markerState"),
+            "app-starts.ps1 must call Get-IpcMarkerCount before launching the app \
+             to reject stale markers",
+        );
+        assert!(
+            shared.contains("(Get-IpcMarkerCount $markerState) -gt $before"),
+            "app-starts.ps1 must require Get-IpcMarkerCount to increase after launch \
+             rather than accept a previous launch's marker",
+        );
         for script_path in [
             ".github/scripts/updater-e2e.ps1",
             ".github/scripts/installer-lifecycle.ps1",
         ] {
             let script = read(script_path);
             assert!(
-                script.contains("Get-IpcMarkerCount"),
+                script
+                    .lines()
+                    .any(|line| line.trim() == r#". (Join-Path $PSScriptRoot "app-starts.ps1")"#),
                 "{script_path} launches the app more than once, so it must \
-                 require a *new* marker rather than any marker — see \
-                 Get-IpcMarkerCount",
+                 dot-source app-starts.ps1 to require a *new* marker rather than any marker",
             );
         }
     }
