@@ -5,8 +5,8 @@ param([string]$Case = '*')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-# Each source copy and its command mocks live in a distinct module scope.
-# Only function definitions are extracted; installer top-level code never runs.
+# The shared helpers and command mocks live in an isolated module scope.
+# Consumer launch calls are exercised without running installer top-level code.
 $contract = {
     param($scriptName, $RepoRoot, $Case)
     $ErrorActionPreference = 'Stop'
@@ -37,7 +37,8 @@ $contract = {
         $script:Stopped = $false
         $script:Warnings = @()
         $script:BusyPaths = @{}
-        $script:Probe = { param($path) return -not $script:BusyPaths.ContainsKey($path) }
+        $script:ProbedPaths = @()
+        $script:Probe = { param($path) $script:ProbedPaths += $path; return -not $script:BusyPaths.ContainsKey($path) }
         $script:Proc = [pscustomobject]@{ Id = 12345; HasExited = $true; ExitCode = 17; Disposed = $false }
         $script:Proc | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Disposed = $true }
     }
@@ -48,22 +49,59 @@ $contract = {
     }
     # Mock clock/process commands and inject the file-release predicate. These
     # tests prove control flow, not Windows mapped-image sharing or MSI behavior.
-    $root = Join-Path ([IO.Path]::GetTempPath()) ('gmm-331-' + [guid]::NewGuid().ToString('N'))
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('gmm-app-starts-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $root | Out-Null
     try {
         $file = Join-Path $RepoRoot ".github/scripts/$scriptName.ps1"
         $tokens = $null; $parseErrors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors)
         Assert-That ($parseErrors.Count -eq 0) 'parse errors'
-        foreach ($name in @('Get-IpcMarkerCount', 'Test-AppFileReleased', 'Wait-AppResourcesReleased', 'Assert-AppStarts')) {
-            $fn = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
-            Assert-That ($null -ne $fn) "missing $name"
-            . ([scriptblock]::Create($fn.Extent.Text))
+        $helperNames = @('Get-IpcMarkerCount', 'Test-AppFileReleased', 'Wait-AppResourcesReleased', 'Assert-AppStarts')
+        Check "$scriptName/SharedDefinitionsOnly" {
+            $statements = @($ast.EndBlock.Statements)
+            Assert-That ($statements.Count -eq $helperNames.Count) 'shared file must contain only the four helper definitions'
+            foreach ($name in $helperNames) {
+                $definitions = @($statements | Where-Object {
+                    $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq $name
+                })
+                Assert-That ($definitions.Count -eq 1) "shared file must define $name exactly once"
+            }
+        }
+        . $file
+        $fn = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-AppStarts' }, $true)
+        $consumerCalls = @{}
+        foreach ($consumer in @('installer-lifecycle', 'updater-e2e')) {
+            $consumerFile = Join-Path $RepoRoot ".github/scripts/$consumer.ps1"
+            $consumerAst = [Management.Automation.Language.Parser]::ParseFile($consumerFile, [ref]$tokens, [ref]$parseErrors)
+            Assert-That ($parseErrors.Count -eq 0) "$consumer parse errors"
+            Check "$consumer/NoLocalLaunchHelpers" {
+                $localHelpers = @($consumerAst.FindAll({
+                    param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $helperNames
+                }, $true))
+                Assert-That ($localHelpers.Count -eq 0) "$consumer must not redefine shared app-launch helpers locally"
+            }
+            Check "$consumer/SharedHelpersDotSourced" {
+                # Require the established literal top-level dot-source form;
+                # comments and unused nested imports cannot satisfy this guard.
+                $imports = @($consumerAst.EndBlock.Statements | Where-Object {
+                    $_ -is [Management.Automation.Language.PipelineAst] -and
+                        $_.PipelineElements.Count -eq 1 -and
+                        $_.PipelineElements[0] -is [Management.Automation.Language.CommandAst] -and
+                        $_.PipelineElements[0].InvocationOperator -eq [Management.Automation.Language.TokenKind]::Dot -and
+                        ($_.Extent.Text -replace '\s+', ' ') -eq '. (Join-Path $PSScriptRoot "app-starts.ps1")'
+                })
+                Assert-That ($imports.Count -eq 1) "$consumer must dot-source app-starts.ps1 exactly once at top level"
+            }
+            $consumerCalls[$consumer] = @($consumerAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Assert-AppStarts'
+            }, $true))
         }
         # AST guards cover ordinary literal budget edits and direct sleep calls.
         # They do not prove arbitrary program semantics (aliases, computed command
         # names or dynamic invocation). Runtime tests below cover actual polling,
-        # count increases, expiry, and cleanup on both extracted production paths.
+        # count increases, expiry, cleanup, and the consumer database arguments.
         Check "$scriptName/MeasuredLaunchBudget" {
             $writes = @($fn.Body.FindAll({
                 param($node)
@@ -198,13 +236,34 @@ $contract = {
             Assert-Failure { Assert-AppStarts $exe -FileReleased $script:Probe } 'timed out waiting for GMM teardown'
             Assert-That $script:Proc.Disposed 'cleanup expiry skipped dispose'
         }
+        foreach ($consumer in $consumerCalls.Keys) {
+            Check "$consumer/DatabaseTeardownArgument" {
+                Assert-That ($consumerCalls[$consumer].Count -gt 0) 'missing consumer launch calls'
+                foreach ($call in $consumerCalls[$consumer]) {
+                    Reset-Clock
+                    $script:Proc.HasExited = $false
+                    $script:BusyPaths[$db] = $true
+                    $script:OnSleep = {
+                        if ($script:Stopped) { $script:Proc.HasExited = $true }
+                        else { [IO.File]::AppendAllText($log, "gmm-ipc-ready`n") }
+                        if ($script:Sleeps -eq 3) { $script:BusyPaths.Clear() }
+                    }
+                    # Execute each shipped call's actual arguments against the
+                    # shared helper, injecting only the portable release probe.
+                    & ([scriptblock]::Create($call.Extent.Text + ' -FileReleased $script:Probe'))
+                    $expectsDatabase = $consumer -eq 'installer-lifecycle'
+                    Assert-That (($db -in $script:ProbedPaths) -eq $expectsDatabase) "$consumer database probe must match its teardown policy"
+                    $expectedSleeps = if ($expectsDatabase) { 3 } else { 2 }
+                    Assert-That ($script:Sleeps -eq $expectedSleeps) "$consumer must wait only for its own resources"
+                    Assert-That ($script:Stopped -and $script:Proc.Disposed) "$consumer cleanup did not complete"
+                }
+            }
+        }
         Assert-That ($script:Checks -gt 0) "no tests matched '$Case'"
         Write-Host "$scriptName TOTAL $script:Checks passed"
     } finally { Remove-Item -LiteralPath $root -Force -Recurse }
     Export-ModuleMember -Function @()
 }
-foreach ($scriptName in @('updater-e2e', 'installer-lifecycle')) {
-    $module = New-Module -Name "$scriptName-startup-contract" -ScriptBlock $contract -ArgumentList $scriptName, $RepoRoot, $Case
-    Remove-Module $module -ErrorAction SilentlyContinue
-}
+$module = New-Module -Name 'app-starts-contract' -ScriptBlock $contract -ArgumentList 'app-starts', $RepoRoot, $Case
+Remove-Module $module -ErrorAction SilentlyContinue
 Write-Host "NOT-RUN: Windows mapped-image sharing, WebView2 lifetime and MSI behavior require the native installer/updater CI jobs."
