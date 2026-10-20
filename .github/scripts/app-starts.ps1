@@ -64,6 +64,31 @@ function Test-AppFileReleased($path) {
     }
 }
 
+# The smoke's fresh data directory and this launch's IPC/refresh markers tie
+# this lock observation to the sole app launched there. A stale file alone
+# is not liveness: Windows releases its exclusive handle when GMM dies.
+function Wait-AppLiveInstanceLock($proc, $lockPath, [datetime]$deadline,
+    [scriptblock]$FileReleased = ${function:Test-AppFileReleased}) {
+    do {
+        if ($proc.HasExited) {
+            throw "GMM exited with code $($proc.ExitCode) before post-startup liveness: $lockPath"
+        }
+        $held = (Test-Path -LiteralPath $lockPath -PathType Leaf) -and -not (& $FileReleased $lockPath)
+        # Check again after the probe so an exit during it cannot pass.
+        if ($proc.HasExited) {
+            throw "GMM exited with code $($proc.ExitCode) during post-startup liveness: $lockPath"
+        }
+        if ($held) {
+            Write-Host "post-startup liveness confirmed: running GMM holds $lockPath"
+            return
+        }
+        if ((Get-Date) -ge $deadline) {
+            throw "timed out waiting for post-startup liveness: running GMM must hold $lockPath"
+        }
+        Start-Sleep -Milliseconds 100
+    } while ($true)
+}
+
 function Wait-AppResourcesReleased($proc, $exe, [string]$database = "",
     [scriptblock]$FileReleased = ${function:Test-AppFileReleased}) {
     # msiexec needs the installed exe and DLLs released. WebView2 children can

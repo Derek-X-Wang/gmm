@@ -29,6 +29,11 @@ $contract = {
     }
     function Start-Process { param($FilePath, [switch]$PassThru) return $script:Proc }
     function Stop-Process { param($Id, [switch]$Force, $ErrorAction) $script:Stopped = $true }
+    function Stop-StartupAttempt {
+        $script:Stopped = $true
+        $script:AppProc.HasExited = $true
+        $script:AppProc = $null
+    }
     function Write-Warning { param($Message) $script:Warnings += $Message }
     function Reset-Clock {
         $script:Now = [datetime]'2026-10-16T00:00:00Z'
@@ -56,10 +61,10 @@ $contract = {
         $tokens = $null; $parseErrors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors)
         Assert-That ($parseErrors.Count -eq 0) 'parse errors'
-        $helperNames = @('Get-IpcMarkerCount', 'Test-AppFileReleased', 'Wait-AppResourcesReleased', 'Assert-AppStarts')
+        $helperNames = @('Get-IpcMarkerCount', 'Test-AppFileReleased', 'Wait-AppLiveInstanceLock', 'Wait-AppResourcesReleased', 'Assert-AppStarts')
         Check "$scriptName/SharedDefinitionsOnly" {
             $statements = @($ast.EndBlock.Statements)
-            Assert-That ($statements.Count -eq $helperNames.Count) 'shared file must contain only the four helper definitions'
+            Assert-That ($statements.Count -eq $helperNames.Count) 'shared file must contain only the expected helper definitions'
             foreach ($name in $helperNames) {
                 $definitions = @($statements | Where-Object {
                     $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq $name
@@ -70,7 +75,7 @@ $contract = {
         . $file
         $fn = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-AppStarts' }, $true)
         $consumerCalls = @{}
-        foreach ($consumer in @('installer-lifecycle', 'updater-e2e')) {
+        foreach ($consumer in @('installer-lifecycle', 'updater-e2e', 'installer-smoke')) {
             $consumerFile = Join-Path $RepoRoot ".github/scripts/$consumer.ps1"
             $consumerAst = [Management.Automation.Language.Parser]::ParseFile($consumerFile, [ref]$tokens, [ref]$parseErrors)
             Assert-That ($parseErrors.Count -eq 0) "$consumer parse errors"
@@ -93,6 +98,7 @@ $contract = {
                 })
                 Assert-That ($imports.Count -eq 1) "$consumer must dot-source app-starts.ps1 exactly once at top level"
             }
+            if ($consumer -eq 'installer-smoke') { $smokeAst = $consumerAst; continue }
             $consumerCalls[$consumer] = @($consumerAst.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Assert-AppStarts'
@@ -163,6 +169,88 @@ $contract = {
         $dll = Join-Path $AppData 'WebView2Loader.dll'
         $db = Join-Path $AppData 'gmm.db'
         foreach ($path in @($exe, $dll, $db)) { [IO.File]::WriteAllText($path, 'fixture') }
+        $lock = Join-Path $AppData 'instance.lock'
+        [IO.File]::WriteAllText($lock, 'stale files are not evidence')
+        Check "$scriptName/LivenessImmediate" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            $script:BusyPaths[$lock] = $true
+            Wait-AppLiveInstanceLock $script:Proc $lock -deadline $script:Now.AddSeconds(30) -FileReleased $script:Probe
+            Assert-That ($script:Sleeps -eq 0) 'healthy liveness added a fixed delay'
+        }
+        Check "$scriptName/LivenessWaitsForHeldLock" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            $script:OnSleep = { if ($script:Sleeps -eq 2) { $script:BusyPaths[$lock] = $true } }
+            Wait-AppLiveInstanceLock $script:Proc $lock -deadline $script:Now.AddSeconds(30) -FileReleased $script:Probe
+            Assert-That ($script:Sleeps -eq 2) 'must observe the held lock'
+        }
+        Check "$scriptName/LivenessExitedBeforeCheck" {
+            Reset-Clock
+            $script:BusyPaths[$lock] = $true
+            Assert-Failure {
+                Wait-AppLiveInstanceLock $script:Proc $lock -deadline $script:Now.AddSeconds(30) -FileReleased $script:Probe
+            } '^GMM exited with code 17 before post-startup liveness:'
+            Assert-That ($script:Sleeps -eq 0) 'dead process must fail immediately'
+        }
+        Check "$scriptName/LivenessExitDuringProbe" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            Assert-Failure {
+                Wait-AppLiveInstanceLock $script:Proc $lock -deadline $script:Now.AddSeconds(30) -FileReleased {
+                    param($path)
+                    $script:Proc.HasExited = $true
+                    return $false
+                }
+            } '^GMM exited with code 17 during post-startup liveness:'
+        }
+        foreach ($signal in @('released', 'missing')) {
+            Check "$scriptName/LivenessExpiry-$signal" {
+                Reset-Clock
+                $script:Proc.HasExited = $false
+                $lockPath = if ($signal -eq 'missing') { Join-Path $AppData 'missing.lock' } else { $lock }
+                Assert-Failure {
+                    Wait-AppLiveInstanceLock $script:Proc $lockPath -deadline $script:Now.AddSeconds(30) -FileReleased $script:Probe
+                } (('^timed out waiting for post-startup liveness: running GMM must hold ') + [regex]::Escape($lockPath))
+                Assert-That ($script:Sleeps -eq 3) 'liveness ceiling not enforced'
+            }
+        }
+        # Run the shipped smoke completion statements, including the handle
+        # saved before Stop-StartupAttempt clears AppProc. Inject only the
+        # portable file-release predicate, as for the other consumers below.
+        $smokeFn = $smokeAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-StartupSmoke' }, $true)
+        $completion = @($smokeFn.Body.EndBlock.Statements | Select-Object -Last 3)
+        $completionText = ($completion | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
+        Check 'installer-smoke/MeasuredCompletionOnly' {
+            Assert-That ($completion[0].Extent.Text -eq 'Wait-AppLiveInstanceLock $script:AppProc (Join-Path $AppData "instance.lock") -deadline $refreshDeadline') 'smoke must assert live lock after refresh'
+            Assert-That ($completionText.Contains('Wait-AppResourcesReleased $appToStop $exe -database $dbPath')) 'smoke must wait for its database'
+            $sleeps = @($smokeFn.Body.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Start-Sleep' }, $true))
+            foreach ($sleep in $sleeps) {
+                Assert-That ($sleep.Extent.Text -eq 'Start-Sleep -Milliseconds 500') 'startup may only sleep inside observable polls'
+            }
+        }
+        foreach ($heldDatabase in @($false, $true)) {
+            $caseName = if ($heldDatabase) { 'CompletionDatabaseHeld' } else { 'CompletionImmediate' }
+            Check "installer-smoke/$caseName" {
+                Reset-Clock
+                $script:Proc.HasExited = $false
+                $script:AppProc = $script:Proc
+                $script:BusyPaths[$lock] = $true
+                $dbPath = $db
+                $refreshDeadline = $script:Now.AddSeconds(30)
+                if ($heldDatabase) { $script:BusyPaths[$db] = $true }
+                $operation = [scriptblock]::Create('param($dbPath, $refreshDeadline)' + [Environment]::NewLine + $completionText.Replace('-deadline $refreshDeadline', '-deadline $refreshDeadline -FileReleased $script:Probe').Replace('-database $dbPath', '-database $dbPath -FileReleased $script:Probe'))
+                if ($heldDatabase) {
+                    Assert-Failure { & $operation $dbPath $refreshDeadline } (('timed out waiting for GMM teardown:.*still held: ') + [regex]::Escape($db))
+                    Assert-That ($script:Sleeps -eq 3) 'database hold must expire'
+                } else {
+                    & $operation $dbPath $refreshDeadline
+                    Assert-That ($script:Sleeps -eq 0) 'healthy completion added a fixed delay'
+                }
+                Assert-That ($script:Stopped -and $script:Proc.Disposed -and $null -eq $script:AppProc) 'smoke must stop, wait and dispose the saved handle'
+                Assert-That ($db -in $script:ProbedPaths) 'smoke did not probe its database'
+            }
+        }
         Check "$scriptName/TeardownImmediate" {
             Reset-Clock
             Wait-AppResourcesReleased $script:Proc $exe -database $db -FileReleased $script:Probe
