@@ -239,12 +239,12 @@ $contract = {
                 $dbPath = $db
                 $refreshDeadline = $script:Now.AddSeconds(30)
                 if ($heldDatabase) { $script:BusyPaths[$db] = $true }
-                $operation = [scriptblock]::Create('param($dbPath, $refreshDeadline)' + [Environment]::NewLine + $completionText.Replace('-deadline $refreshDeadline', '-deadline $refreshDeadline -FileReleased $script:Probe').Replace('-database $dbPath', '-database $dbPath -FileReleased $script:Probe'))
+                $completionOperation = [scriptblock]::Create('param($dbPath, $refreshDeadline)' + [Environment]::NewLine + $completionText.Replace('-deadline $refreshDeadline', '-deadline $refreshDeadline -FileReleased $script:Probe').Replace('-database $dbPath', '-database $dbPath -FileReleased $script:Probe'))
                 if ($heldDatabase) {
-                    Assert-Failure { & $operation $dbPath $refreshDeadline } (('timed out waiting for GMM teardown:.*still held: ') + [regex]::Escape($db))
+                    Assert-Failure { & $completionOperation $dbPath $refreshDeadline } (('timed out waiting for GMM teardown:.*still held: ') + [regex]::Escape($db))
                     Assert-That ($script:Sleeps -eq 3) 'database hold must expire'
                 } else {
-                    & $operation $dbPath $refreshDeadline
+                    & $completionOperation $dbPath $refreshDeadline
                     Assert-That ($script:Sleeps -eq 0) 'healthy completion added a fixed delay'
                 }
                 Assert-That ($script:Stopped -and $script:Proc.Disposed -and $null -eq $script:AppProc) 'smoke must stop, wait and dispose the saved handle'
