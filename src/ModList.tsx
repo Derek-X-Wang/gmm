@@ -181,7 +181,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       {retirement.region(game, `${displayName} deployment recovery outcome`)}
       <div className={confirmedEmpty ? "mod-import-landing" : "row row--between"}>
         <h2>
-          {confirmedEmpty ? `Add Mods for ${displayName}` : `Mods (${mods.data?.length ?? 0})`}
+          {confirmedEmpty ? `Add Mods for ${displayName}` : mods.data === undefined ? "Mods" : `Mods (${mods.data.length})`}
           {conflicts.data && conflicts.data.conflicts.length > 0 ? (
             <span className="conflict-badge"> · {conflicts.data.conflicts.length} conflict{conflicts.data.conflicts.length === 1 ? "" : "s"}</span>
           ) : null}

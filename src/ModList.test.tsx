@@ -63,6 +63,25 @@ it("leads confirmed-empty content with three named import routes then the ZIP dr
   expect(routes[2].compareDocumentPosition(container.querySelector(".dropzone")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 });
 
+it("omits the Mod count while the Mod query is unresolved", async () => {
+  let finish!: (value: unknown[]) => void;
+  modRead = () => new Promise((resolve) => { finish = resolve; });
+  renderMods();
+  await screen.findByText("Loading…");
+  expect(screen.queryByRole("heading", { name: /Mods \(/ })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Mods" })).toBeVisible();
+  await act(async () => finish([outfit]));
+  expect(await screen.findByRole("heading", { name: "Mods (1)" })).toBeVisible();
+});
+
+it("omits the Mod count after the first Mod query fails", async () => {
+  modRead = () => { throw new Error("Library unavailable"); };
+  renderMods();
+  expect(await screen.findByText("Library unavailable")).toBeVisible();
+  expect(screen.queryByRole("heading", { name: /Mods \(/ })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Mods" })).toBeVisible();
+});
+
 it("never claims an empty Library while the Mod query is pending", async () => {
   let finish!: (value: unknown[]) => void;
   modRead = () => new Promise((resolve) => { finish = resolve; });
