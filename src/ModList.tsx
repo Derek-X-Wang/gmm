@@ -261,7 +261,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
             role="row"
             aria-label={m.name}
             aria-selected={selectedId === m.id}
-            tabIndex={selectedId === m.id || (selectedId === null && mods.data?.[0]?.id === m.id) ? 0 : -1}
+            tabIndex={0}
             onClick={(event) => {
               selectRow(event.currentTarget);
               // A background click focuses the row; controls retain focus and

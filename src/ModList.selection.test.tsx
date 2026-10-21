@@ -76,11 +76,21 @@ it("moves focus and selection between rows with arrows without entering their co
   expect(second).toHaveAttribute("aria-selected", "true");
   expect(first).toHaveAttribute("aria-selected", "false");
   expect(second).toHaveAttribute("tabindex", "0");
-  expect(first).toHaveAttribute("tabindex", "-1");
+  expect(first).toHaveAttribute("tabindex", "0");
   await user.keyboard("{ArrowUp}");
   expect(first).toHaveFocus();
   expect(first).toHaveAttribute("aria-selected", "true");
   expect(invoke.mock.calls.filter(([command]) => command === "set_mod_enabled")).toHaveLength(0);
+});
+
+it("keeps keyboard re-entry on a row when a later Mod remains selected", async () => {
+  const user = userEvent.setup();
+  await renderMods();
+  await user.click(screen.getByText("Himeko Outfit"));
+  screen.getByRole("button", { name: "Paste GameBanana URL…" }).focus();
+  await user.tab();
+  expect(screen.getByRole("row", { name: "March Outfit" })).toHaveFocus();
+  expect(screen.getByRole("row", { selected: true })).toHaveAccessibleName("Himeko Outfit");
 });
 
 it("supports Home and End and keeps focus within list boundaries", async () => {
