@@ -254,6 +254,7 @@ pub fn run() {
             commands::set_mod_updates_globally_enabled,
             commands::mod_updates_globally_enabled,
             commands::apply_mod_update,
+            commands::apply_all_mod_updates,
             commands::launch_game,
             commands::current_session,
             commands::clean_stale_session,
