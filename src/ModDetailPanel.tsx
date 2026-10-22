@@ -4,6 +4,7 @@ import { getModPanelWidth, listModUpdates, setModPanelWidth, type Mod } from "./
 import { CommandErrorNotice } from "./CommandErrorNotice";
 
 const widthKey = ["modPanelWidth"];
+const WIDTH_SAVE_DELAY_MS = 250;
 
 export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: {
   id: string;
@@ -31,6 +32,19 @@ export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: 
     meta: { noInvalidationReason: "Only panel width changes; success writes its cached preference directly from bounded input." },
     onSuccess: (_, value) => client.setQueryData(widthKey, value),
   });
+  const pendingWidth = useRef<number | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const commitWidth = () => {
+    if (saveTimer.current !== null) clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    if (pendingWidth.current !== null) {
+      save.mutate(pendingWidth.current);
+      pendingWidth.current = null;
+    }
+  };
+  useEffect(() => () => {
+    if (saveTimer.current !== null) clearTimeout(saveTimer.current);
+  }, []);
   const updates = useQuery({
     queryKey: ["modUpdates", mod?.game],
     queryFn: () => listModUpdates(mod!.game),
@@ -44,11 +58,11 @@ export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: 
   if (!open) return <div id={id} hidden />;
 
   return (
-    <aside id={id} className="mod-detail-panel" hidden={!open} aria-labelledby={`${id}-heading`}
+    <aside id={id} className="mod-detail-panel" aria-labelledby={`${id}-heading`}
       style={{ flexBasis: `${width}px` }}>
       <div className="row row--between">
         <h2 id={`${id}-heading`}>{mod ? mod.name : "Mod details"}</h2>
-        <button ref={closeRef} type="button" onClick={onClose} aria-label="Close Mod details">Close</button>
+        <button ref={closeRef} type="button" onClick={() => { commitWidth(); onClose(); }} aria-label="Close Mod details">Close</button>
       </div>
       {mod ? <>
         {/* Same definition-list convention and shared styling as DuplicateModDetails.
@@ -65,8 +79,6 @@ export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: 
               {submissionUrl ? <> <a href={submissionUrl} target="_blank" rel="noreferrer">View submission</a></> : null}
             </dd></div> : null}
         </dl>
-        {mod.screenshotUrl?.trim() ? <img className="mod-detail-panel__screenshot"
-          src={mod.screenshotUrl} alt={`Screenshot of ${mod.name}`} loading="lazy" referrerPolicy="no-referrer" /> : null}
       </> : <p>Select a Mod to view its details.</p>}
       <label className="mod-detail-panel__width">
         Panel width
@@ -75,9 +87,14 @@ export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: 
           onChange={(event) => {
             const next = Number(event.currentTarget.value);
             setRequestedWidth(next);
-            save.mutate(next);
-          }} />
+            pendingWidth.current = next;
+            if (saveTimer.current !== null) clearTimeout(saveTimer.current);
+            saveTimer.current = setTimeout(commitWidth, WIDTH_SAVE_DELAY_MS);
+          }} onBlur={commitWidth} />
       </label>
+      <CommandErrorNotice error={updates.error}
+        heading="GMM could not read this Mod's upstream version."
+        detail="Upstream information is unavailable; this is not an “up to date” result. Any last seen upstream version is from an earlier reading." />
       <CommandErrorNotice error={remembered.error} heading="GMM could not read the remembered panel width." />
       <CommandErrorNotice error={save.error} heading="GMM could not remember the panel width." />
     </aside>

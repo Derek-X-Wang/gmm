@@ -266,7 +266,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       <p id={selectionHintId} className="visually-hidden">
         Select a Mod to show its details. Use Up and Down to move between Mods, or Enter or Space to select.
       </p>
-      {renderedMods.length > 0 ? <ul className="mods">
+      {renderedMods.length > 0 ? <ul className="mods" aria-describedby={selectionHintId}>
         {renderedMods.map((m) => (
           <li
             key={m.id}
@@ -278,7 +278,6 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
             aria-label={m.name}
             aria-current={selectedId === m.id ? "true" : undefined}
             aria-controls={inspectorId}
-            aria-describedby={selectionHintId}
             tabIndex={0}
             onClick={(event) => {
               selectRow(m.id);

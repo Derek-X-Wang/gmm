@@ -877,11 +877,6 @@ code {
   gap: 0.125rem;
 }
 
-.mod-detail-panel__screenshot {
-  max-width: 100%;
-  height: auto;
-}
-
 .mod-detail-panel__width {
   display: grid;
   min-width: 0;

@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ModDetailPanel } from "./ModDetailPanel";
 import { ModList } from "./ModList";
 import { makeQueryClient, renderWithQuery } from "./test/harness";
@@ -66,7 +66,7 @@ it("shows recorded metadata using the Library-audit definition-list convention",
   }
   expect(await within(panel).findByText("2.0")).toBeVisible();
   expect(within(panel).getByRole("link", { name: "View submission" })).toHaveAttribute("href", outfit.sourceUrl);
-  expect(within(panel).getByRole("img", { name: "Screenshot of March Outfit" })).toHaveAttribute("src", outfit.screenshotUrl);
+  expect(within(panel).queryByRole("img")).not.toBeInTheDocument();
   expect(within(panel).queryByRole("checkbox")).not.toBeInTheDocument();
   expect(within(panel).queryByRole("radio")).not.toBeInTheDocument();
   expect(panel).not.toHaveTextContent(/Variant|Conflict|recovery/);
@@ -109,7 +109,7 @@ it("restores remembered width after closing and reopening in a fresh mount", asy
   const first = renderPanel();
   await waitFor(() => expect(first.client.isFetching()).toBe(0));
   fireEvent.change(screen.getByRole("slider", { name: "Panel width" }), { target: { value: "460" } });
-  await waitFor(() => expect(first.client.isMutating()).toBe(0));
+  await waitFor(() => expect(storedWidth).toBe(460));
   first.unmount();
   const reopened = renderPanel();
   await waitFor(() => expect(reopened.client.isFetching()).toBe(0));
@@ -127,13 +127,60 @@ it("reports width read and write failures without claiming persistence", async (
   expect(storedWidth).toBeNull();
 });
 
-it("keeps rapid width writes ordered and uses the last requested width", async () => {
-  const first = renderPanel();
-  await waitFor(() => expect(first.client.isFetching()).toBe(0));
-  fireEvent.change(screen.getByRole("slider"), { target: { value: "440" } });
-  fireEvent.change(screen.getByRole("slider"), { target: { value: "480" } });
-  await waitFor(() => expect(first.client.isMutating()).toBe(0));
+afterEach(() => { vi.useRealTimers(); });
+
+it.each(["pointer", "keyboard"])("persists many %s width changes with exactly one write after settling", async (method) => {
+  const { client } = renderPanel();
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  vi.useFakeTimers();
+  const slider = screen.getByRole("slider");
+  if (method === "pointer") fireEvent.pointerDown(slider);
+  for (let value = 440; value <= 480; value++) {
+    if (method === "keyboard") fireEvent.keyDown(slider, { key: "ArrowRight" });
+    // jsdom does not implement the range input's native arrow-key default action.
+    fireEvent.change(slider, { target: { value: String(value) } });
+    if (method === "keyboard") fireEvent.keyUp(slider, { key: "ArrowRight" });
+    expect(screen.getByRole("complementary")).toHaveStyle({ flexBasis: `${value}px` });
+  }
+  if (method === "pointer") fireEvent.pointerUp(slider);
+  await act(async () => { await vi.advanceTimersByTimeAsync(249); });
+  expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width")).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+  expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width")).toHaveLength(1);
   expect(storedWidth).toBe(480);
+});
+
+it("flushes a pending width on blur without writing again after settling", async () => {
+  const { client } = renderPanel();
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  vi.useFakeTimers();
+  const slider = screen.getByRole("slider");
+  fireEvent.change(slider, { target: { value: "420" } });
+  fireEvent.blur(slider);
+  await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+  expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width")).toHaveLength(1);
+  expect(storedWidth).toBe(420);
+});
+
+it("keeps settled width writes ordered despite out-of-order latency", async () => {
+  const { client } = renderPanel();
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command !== "set_mod_panel_width") return implementation(command, args);
+    await new Promise((resolve) => setTimeout(resolve, args.width === 440 ? 1000 : 10));
+    storedWidth = args.width;
+    return null;
+  });
+  vi.useFakeTimers();
+  fireEvent.change(screen.getByRole("slider"), { target: { value: "440" } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+  fireEvent.change(screen.getByRole("slider"), { target: { value: "480" } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+  expect(client.getQueryData(["modPanelWidth"])).toBe(480);
+  expect(storedWidth).toBe(480);
+  expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width").map(([, args]) => args.width)).toEqual([440, 480]);
 });
 
 it("opens beside the live list, follows selection, closes with row focus, and reopens at its width", async () => {
@@ -143,7 +190,8 @@ it("opens beside the live list, follows selection, closes with row focus, and re
   const first = await screen.findByRole("listitem", { name: "March Outfit" });
   const second = screen.getByRole("listitem", { name: "Other Outfit" });
   expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
-  expect(first).toHaveAccessibleDescription(/Select a Mod to show its details/);
+  expect(screen.getByRole("list")).toHaveAccessibleDescription("Select a Mod to show its details. Use Up and Down to move between Mods, or Enter or Space to select.");
+  for (const row of [first, second]) expect(row).not.toHaveAttribute("aria-describedby");
   await user.click(first);
   let panel = screen.getByRole("complementary", { name: "March Outfit" });
   expect(first).toHaveAttribute("aria-controls", panel.id);
@@ -192,4 +240,26 @@ it("pins the forced-colors selection fallback", () => {
 it("gives the list 400 CSS pixels and makes the inspector yield first", () => {
   expect(authored()).toMatch(/\.mod-workspace__list\s*\{\s*flex:\s*1 0 400px;/);
   expect(authored()).toMatch(/\.mod-detail-panel\s*\{\s*flex:\s*0 1 320px;\s*min-width:\s*0;/);
+});
+
+it("pins slider bounds to the Rust panel width constants", () => {
+  const rust = readFileSync("src-tauri/src/core/mod_panel.rs", "utf8");
+  const tsx = readFileSync("src/ModDetailPanel.tsx", "utf8");
+  const bounds = tsx.match(/type="range" min="(\d+)" max="(\d+)"/)!;
+  expect(Number(bounds[1])).toBe(Number(rust.match(/const MIN_WIDTH: u32 = (\d+);/)![1]));
+  expect(Number(bounds[2])).toBe(Number(rust.match(/const MAX_WIDTH: u32 = (\d+);/)![1]));
+});
+
+it.each([false, true])("reports unavailable upstream readings including failed refetch with cached data (%s)", async (cached) => {
+  const implementation = invoke.getMockImplementation()!;
+  const rendered = cached ? renderPanel() : null;
+  if (cached) await screen.findByText("2.0");
+  invoke.mockImplementation((command, args) => command === "list_mod_updates"
+    ? Promise.reject(new Error("Upstream read failed")) : implementation(command, args));
+  if (rendered) {
+    await act(async () => { await rendered.client.invalidateQueries({ queryKey: ["modUpdates"] }); });
+  } else renderPanel();
+  expect(await screen.findByText("Upstream read failed")).toBeVisible();
+  expect(screen.getByText(/Upstream information is unavailable; this is not an “up to date” result/)).toBeVisible();
+  if (cached) expect(screen.getByText("2.0")).toBeVisible();
 });
