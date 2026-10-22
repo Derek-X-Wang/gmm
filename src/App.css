@@ -163,6 +163,24 @@ code {
   border: 1px solid #2e2e36;
 }
 
+/* Selection is an inset rail; keyboard focus is a separate outer outline.
+   Neither changes row geometry, and neither needs motion. */
+.mods__row--selected {
+  box-shadow: inset 4px 0 0 currentColor;
+}
+
+.mods__row:focus-visible {
+  outline: 3px solid currentColor;
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  .mods__row--selected {
+    border-inline-start: 5px double Highlight;
+    padding-inline-start: calc(1rem - 4px);
+  }
+}
+
 .mods__main strong {
   font-weight: 600;
 }
