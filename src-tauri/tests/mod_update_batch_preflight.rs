@@ -133,6 +133,16 @@ async fn quarantine_case(outdated: bool) {
         .execute(&pool)
         .await
         .unwrap();
+    // A failed witness retirement is pending recovery, but it does not itself
+    // quarantine the Mod. Move the old tree aside so the real recovery path
+    // records an unresolved identity and produces the quarantine UI state.
+    std::fs::rename(&quarantined.library_path, tmp.path().join("held-old-tree")).unwrap();
+    assert!(matches!(
+        core.retry_reinstall_recovery(&quarantined.id)
+            .await
+            .unwrap(),
+        gmm_lib::core::ReinstallRecoveryOutcome::Quarantined { .. }
+    ));
     let row = core
         .list_mods(GameCode::Gimi)
         .await
