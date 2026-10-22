@@ -166,7 +166,6 @@ code {
 /* Selection is an inset rail; keyboard focus is a separate outer outline.
    Neither changes row geometry, and neither needs motion. */
 .mods__row--selected {
-  background: #252538;
   box-shadow: inset 4px 0 0 currentColor;
 }
 

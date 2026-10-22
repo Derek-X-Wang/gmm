@@ -113,29 +113,28 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
   const selectedId = selection?.game === game
     && mods.data?.some((mod) => mod.id === selection.id) ? selection.id : null;
 
-  const selectRow = (row: HTMLElement) => {
-    const id = row.dataset.modId;
-    if (id) setSelection({ game, id });
-  };
-  const navigateRows = (event: React.KeyboardEvent<HTMLLIElement>) => {
+  const renderedMods = mods.data ?? [];
+  const rowRefs = useRef(new Map<string, HTMLLIElement>());
+  const selectRow = (id: string) => setSelection({ game, id });
+  const navigateRows = (event: React.KeyboardEvent<HTMLLIElement>, id: string) => {
     // Inner controls keep their native keys, including Variant radio arrows.
     if (event.target !== event.currentTarget || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-    const row = event.currentTarget;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      selectRow(row);
+      selectRow(id);
       return;
     }
-    const rows = Array.from(row.parentElement!.children) as HTMLElement[];
-    const index = rows.indexOf(row);
-    const next = event.key === "ArrowDown" ? Math.min(index + 1, rows.length - 1)
+    const index = renderedMods.findIndex((mod) => mod.id === id);
+    if (index < 0) return;
+    const next = event.key === "ArrowDown" ? Math.min(index + 1, renderedMods.length - 1)
       : event.key === "ArrowUp" ? Math.max(index - 1, 0)
       : event.key === "Home" ? 0
-      : event.key === "End" ? rows.length - 1 : null;
+      : event.key === "End" ? renderedMods.length - 1 : null;
     if (next === null) return;
     event.preventDefault();
-    selectRow(rows[next]);
-    rows[next].focus();
+    const nextId = renderedMods[next].id;
+    selectRow(nextId);
+    rowRefs.current.get(nextId)?.focus();
   };
 
   const conflicts = useQuery({
@@ -253,27 +252,30 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       />
 
       <SessionCheckNotice check={check} />
-      {!confirmedEmpty ? <ul className="mods" role="grid" aria-label="Mods" aria-multiselectable={false}>
-        {mods.data?.map((m) => (
+      {renderedMods.length > 0 ? <ul className="mods">
+        {renderedMods.map((m) => (
           <li
             key={m.id}
             data-mod-id={m.id}
-            role="row"
+            ref={(row) => {
+              if (row) rowRefs.current.set(m.id, row);
+              else rowRefs.current.delete(m.id);
+            }}
             aria-label={m.name}
-            aria-selected={selectedId === m.id}
+            aria-current={selectedId === m.id ? "true" : undefined}
             tabIndex={0}
             onClick={(event) => {
-              selectRow(event.currentTarget);
+              selectRow(m.id);
               // A background click focuses the row; controls retain focus and
               // their ordinary action when the click bubbles through the row.
               if (!(event.target as HTMLElement).closest("a, button, input, label, select, textarea, summary")) {
                 event.currentTarget.focus();
               }
             }}
-            onKeyDown={navigateRows}
+            onKeyDown={(event) => navigateRows(event, m.id)}
             className={`mods__row${selectedId === m.id ? " mods__row--selected" : ""}${m.reinstallRecovery || m.enabledTransitionRecovery ? " mods__row--quarantined" : ""}`}
           >
-            <div className="mods__main" role="gridcell">
+            <div className="mods__main">
               <strong>{m.name}</strong>
               <span className="muted"> · {m.source}</span>
               {m.source === "gamebanana" && m.sourceUrl ? (
@@ -327,7 +329,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                 />
               ) : null}
             </div>
-            <div role="gridcell">
+            <div>
               <label className="toggle">
                 <input
                   type="checkbox"
