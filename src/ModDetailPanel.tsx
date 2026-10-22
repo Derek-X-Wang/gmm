@@ -19,6 +19,10 @@ export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: 
   const client = useQueryClient();
   const remembered = useQuery({ queryKey: widthKey, queryFn: getModPanelWidth, enabled: open });
   const [requestedWidth, setRequestedWidth] = useState<number | null>(null);
+  // A failed save is a draft, not a remembered preference. Closing discards it.
+  useEffect(() => {
+    if (!open) setRequestedWidth(null);
+  }, [open]);
   const width = requestedWidth ?? remembered.data ?? 320;
   const save = useMutation({
     mutationFn: setModPanelWidth,
