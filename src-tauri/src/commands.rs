@@ -656,19 +656,88 @@ pub async fn mod_updates_globally_enabled(core: State<'_, Core>) -> CommandResul
         .map_err(CommandError::from)
 }
 
+// Each command owns its stop token until it returns, including on refusal/error.
+static BATCH_STOPS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, crate::core::mod_update_batch::BatchStop>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+struct RegisteredBatchStop {
+    id: String,
+    stop: crate::core::mod_update_batch::BatchStop,
+}
+
+impl RegisteredBatchStop {
+    fn new() -> Self {
+        let id = ulid::Ulid::new().to_string();
+        let stop = crate::core::mod_update_batch::BatchStop::default();
+        BATCH_STOPS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.clone(), stop.clone());
+        Self { id, stop }
+    }
+}
+
+impl Drop for RegisteredBatchStop {
+    fn drop(&mut self) {
+        BATCH_STOPS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.id);
+    }
+}
+
+#[tauri::command]
+pub fn stop_mod_update_batch(batch_id: String) -> CommandResult<()> {
+    if let Some(stop) = BATCH_STOPS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&batch_id)
+    {
+        stop.request();
+    }
+    // Repeated requests and requests after the command finished are harmless.
+    Ok(())
+}
+
+fn report_batch_progress<E>(
+    batch: &RegisteredBatchStop,
+    progress: crate::core::mod_update_batch::ModUpdateProgress,
+    mut send: impl FnMut(crate::core::mod_update_batch::ModUpdateProgress) -> std::result::Result<(), E>,
+) {
+    use crate::core::mod_update_batch::ModUpdateProgress;
+    let started = matches!(progress, ModUpdateProgress::Started { .. });
+    // Progress delivery is best-effort, independent of the explicit stop request.
+    let _ = send(progress);
+    if started {
+        let _ = send(ModUpdateProgress::StopReady {
+            batch_id: batch.id.clone(),
+        });
+    }
+}
+
 #[tauri::command]
 pub async fn apply_all_mod_updates(
     core: State<'_, Core>,
     game: GameCode,
     on_progress: tauri::ipc::Channel<crate::core::mod_update_batch::ModUpdateProgress>,
 ) -> CommandResult<crate::core::mod_update_batch::ModUpdateBatchReport> {
-    core.apply_all_mod_updates(game, |progress| {
-        // A closed view must not interrupt an in-flight filesystem swap.
-        let _ = on_progress.send(progress);
-    })
+    let batch = RegisteredBatchStop::new();
+    core.apply_all_mod_updates_with_endpoints_and_stop(
+        game,
+        &crate::core::gamebanana::Endpoints::default(),
+        &batch.stop,
+        |progress| {
+            report_batch_progress(&batch, progress, |event| on_progress.send(event));
+        },
+    )
     .await
     .map_err(CommandError::from)
 }
+
+#[cfg(test)]
+#[path = "commands_batch_stop_tests.rs"]
+mod batch_stop_tests;
 
 #[tauri::command]
 pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> CommandResult<()> {
