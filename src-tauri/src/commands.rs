@@ -667,13 +667,13 @@ struct RegisteredBatchStop {
 }
 
 impl RegisteredBatchStop {
-    fn new() -> Self {
-        let id = ulid::Ulid::new().to_string();
-        let stop = crate::core::mod_update_batch::BatchStop::default();
-        BATCH_STOPS
+    fn new(id: String) -> Self {
+        let stop = BATCH_STOPS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(id.clone(), stop.clone());
+            .entry(id.clone())
+            .or_default()
+            .clone();
         Self { id, stop }
     }
 }
@@ -689,48 +689,28 @@ impl Drop for RegisteredBatchStop {
 
 #[tauri::command]
 pub fn stop_mod_update_batch(batch_id: String) -> CommandResult<()> {
-    if let Some(stop) = BATCH_STOPS
+    BATCH_STOPS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .get(&batch_id)
-    {
-        stop.request();
-    }
-    // Repeated requests and requests after the command finished are harmless.
+        .entry(batch_id)
+        .or_default()
+        .request();
+    // Preserve a request even before the batch command is first polled.
     Ok(())
-}
-
-fn report_batch_progress<E>(
-    batch: &RegisteredBatchStop,
-    progress: crate::core::mod_update_batch::ModUpdateProgress,
-    mut send: impl FnMut(crate::core::mod_update_batch::ModUpdateProgress) -> std::result::Result<(), E>,
-) {
-    use crate::core::mod_update_batch::ModUpdateProgress;
-    let started = matches!(progress, ModUpdateProgress::Started { .. });
-    // Progress delivery is best-effort, independent of the explicit stop request.
-    let _ = send(progress);
-    if started {
-        let _ = send(ModUpdateProgress::StopReady {
-            batch_id: batch.id.clone(),
-        });
-    }
 }
 
 #[tauri::command]
 pub async fn apply_all_mod_updates(
     core: State<'_, Core>,
     game: GameCode,
+    batch_id: String,
     on_progress: tauri::ipc::Channel<crate::core::mod_update_batch::ModUpdateProgress>,
 ) -> CommandResult<crate::core::mod_update_batch::ModUpdateBatchReport> {
-    let batch = RegisteredBatchStop::new();
-    core.apply_all_mod_updates_with_endpoints_and_stop(
-        game,
-        &crate::core::gamebanana::Endpoints::default(),
-        &batch.stop,
-        |progress| {
-            report_batch_progress(&batch, progress, |event| on_progress.send(event));
-        },
-    )
+    let batch = RegisteredBatchStop::new(batch_id);
+    core.apply_all_mod_updates(game, &batch.stop, |progress| {
+        // Progress delivery is best-effort, independent of the explicit stop request.
+        let _ = on_progress.send(progress);
+    })
     .await
     .map_err(CommandError::from)
 }

@@ -52,20 +52,10 @@ pub struct BatchModResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "phase", rename_all = "camelCase")]
 pub enum ModUpdateProgress {
-    Started {
-        mods: Vec<BatchMod>,
-    },
-    Applying {
-        item: BatchMod,
-    },
-    Completed {
-        result: BatchModResult,
-    },
+    Started { mods: Vec<BatchMod> },
+    Applying { item: BatchMod },
+    Completed { result: BatchModResult },
     CheckingConflicts,
-    StopReady {
-        #[serde(rename = "batchId")]
-        batch_id: String,
-    },
 }
 
 #[derive(Debug, Serialize)]
@@ -81,10 +71,16 @@ impl Core {
     pub async fn apply_all_mod_updates(
         &self,
         game: GameCode,
+        stop: &BatchStop,
         progress: impl FnMut(ModUpdateProgress),
     ) -> Result<ModUpdateBatchReport> {
-        self.apply_all_mod_updates_with_endpoints(game, &Endpoints::default(), progress)
-            .await
+        self.apply_all_mod_updates_with_endpoints_and_stop(
+            game,
+            &Endpoints::default(),
+            stop,
+            progress,
+        )
+        .await
     }
 
     /// Existing callers run the full batch without a stop request.
@@ -141,15 +137,17 @@ impl Core {
                 stopped = true;
                 Some(STOP_REASON)
             } else {
+                let reinstall_message = "This Mod needs interrupted update recovery. Recover it in the Library before updating.";
+                let transition_message = "This Mod needs enable/disable recovery. Recover it in the Library before updating.";
                 recovery.and_then(|row| {
-                if row.reinstall_recovery.is_some() {
-                    Some("This Mod needs interrupted update recovery. Recover it in the Library before updating.")
-                } else if row.enabled_transition_recovery.is_some() {
-                    Some("This Mod needs enable/disable recovery. Recover it in the Library before updating.")
-                } else {
-                    None
-                }
-            })
+                    if row.reinstall_recovery.is_some() {
+                        Some(reinstall_message)
+                    } else if row.enabled_transition_recovery.is_some() {
+                        Some(transition_message)
+                    } else {
+                        None
+                    }
+                })
             };
             let outcome = if let Some(reason) = skip_reason {
                 ModUpdateOutcome::Skipped {
@@ -190,11 +188,12 @@ impl Core {
                     || results
                         .iter()
                         .any(|result| matches!(result.outcome, ModUpdateOutcome::Unknown { .. }));
-                (Some(report), incomplete.then(|| if stopped {
-                    "The full Conflict reading is unverified because the batch stopped with Mods not attempted.".to_string()
+                let message = if stopped {
+                    "The full Conflict reading is unverified because the batch stopped with Mods not attempted."
                 } else {
-                    "The full Conflict reading is unverified because a Mod update needs recovery.".to_string()
-                }))
+                    "The full Conflict reading is unverified because a Mod update needs recovery."
+                };
+                (Some(report), incomplete.then(|| message.to_string()))
             }
             Err(error) => (None, Some(error.to_string())),
         };

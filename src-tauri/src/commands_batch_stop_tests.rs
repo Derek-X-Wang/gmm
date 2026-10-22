@@ -2,8 +2,8 @@ use super::{stop_mod_update_batch, RegisteredBatchStop, BATCH_STOPS};
 
 #[test]
 fn explicit_stop_is_idempotent_scoped_and_retired_with_command() {
-    let batch = RegisteredBatchStop::new();
-    let other = RegisteredBatchStop::new();
+    let batch = RegisteredBatchStop::new(ulid::Ulid::new().to_string());
+    let other = RegisteredBatchStop::new(ulid::Ulid::new().to_string());
     let id = batch.id.clone();
     stop_mod_update_batch(id.clone()).unwrap();
     stop_mod_update_batch(id.clone()).unwrap();
@@ -17,41 +17,32 @@ fn explicit_stop_is_idempotent_scoped_and_retired_with_command() {
     stop_mod_update_batch(id).unwrap();
 }
 
-#[test]
-fn dropped_progress_receiver_never_requests_stop() {
-    use crate::core::mod_update_batch::ModUpdateProgress;
-    let batch = RegisteredBatchStop::new();
+#[tokio::test]
+async fn dropped_progress_receiver_never_requests_stop() {
+    use tauri::Manager;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let core = crate::core::Core::new(tmp.path().join("library"), "sqlite::memory:")
+        .await
+        .unwrap();
+    let app = tauri::test::mock_app();
+    app.manage(core);
+    let batch = RegisteredBatchStop::new(ulid::Ulid::new().to_string());
     let (tx, rx) = std::sync::mpsc::channel();
     drop(rx);
-    super::report_batch_progress(
-        &batch,
-        ModUpdateProgress::Started { mods: vec![] },
-        |event| tx.send(event),
-    );
-    super::report_batch_progress(&batch, ModUpdateProgress::CheckingConflicts, |event| {
+    let channel = tauri::ipc::Channel::new(move |event| {
         tx.send(event)
+            .map_err(|error| std::io::Error::other(error.to_string()).into())
     });
+    super::apply_all_mod_updates(
+        app.state(),
+        crate::core::GameCode::Gimi,
+        batch.id.clone(),
+        channel,
+    )
+    .await
+    .unwrap();
     assert!(
         !batch.stop.is_requested(),
         "a dropped progress channel must not request a stop"
-    );
-}
-
-#[test]
-fn readiness_event_has_the_frontend_stop_token_shape() {
-    use crate::core::mod_update_batch::ModUpdateProgress;
-    let batch = RegisteredBatchStop::new();
-    let mut events = Vec::new();
-    super::report_batch_progress(
-        &batch,
-        ModUpdateProgress::Started { mods: vec![] },
-        |event| {
-            events.push(event);
-            Ok::<_, ()>(())
-        },
-    );
-    assert_eq!(
-        serde_json::to_value(&events[1]).unwrap(),
-        serde_json::json!({"phase":"stopReady", "batchId":batch.id})
     );
 }

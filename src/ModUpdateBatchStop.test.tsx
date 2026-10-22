@@ -30,7 +30,6 @@ const start = async () => {
   await waitFor(() => expect(progress).toBeTypeOf("function"));
   act(() => {
     progress({ phase: "started", mods: rows });
-    progress({ phase: "stopReady", batchId: "batch-token" });
     progress({ phase: "completed", result: { ...rows[0], status: "updated" } });
     progress({ phase: "applying", item: rows[1] });
   });
@@ -46,10 +45,10 @@ it("offers an explicit boundary stop, names the waiting Mod, and sends only once
   fireEvent.click(stop);
   await waitFor(() => expect(stop).toBeDisabled());
   expect(screen.getByText("Stop requested. Waiting for Current to finish; later Mods will not start.")).toBeVisible();
-  expect(invoke.mock.calls.filter(([command]) => command === "stop_mod_update_batch")).toEqual([["stop_mod_update_batch", { batchId: "batch-token" }]]);
+  expect(invoke.mock.calls.filter(([command]) => command === "stop_mod_update_batch")).toEqual([["stop_mod_update_batch", { batchId: invoke.mock.calls.find(([command]) => command === "apply_all_mod_updates")![1].batchId }]]);
   expect(screen.getByText("First: Updated")).toBeVisible();
   act(() => progress({ phase: "checkingConflicts" }));
-  expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Stop after this Mod" })).toBeDisabled();
   const report: ModUpdateBatchReport = {
     stopped: true,
     results: [{ ...rows[0], status: "updated" }, { ...rows[1], status: "updated" }, { ...rows[2], status: "skipped", reason: "Not started because you stopped the batch. The Library was not touched." }],

@@ -57,7 +57,7 @@ it.each(["incomplete report", "IPC loss"])("refreshes the mounted Conflict readi
   act(() => progress({ phase: "started", mods: rows }));
   await act(async () => {
     if (failure === "IPC loss") reject(new Error("connection lost"));
-    else resolve({ results: [], conflicts: { conflicts: [], per_mod_count: {} }, conflictError: "recovery pending" });
+    else resolve({ stopped: false, results: [], conflicts: { conflicts: [], per_mod_count: {} }, conflictError: "recovery pending" });
   });
   await waitFor(() => expect(read, "the mounted Conflict query must refetch after every batch outcome").toHaveBeenCalledTimes(1));
   expect(await screen.findByText("Shared Conflict count: 0")).toBeVisible();
@@ -83,6 +83,7 @@ it("displays skipped recovery separately from failures and keeps incomplete Conf
   renderWithQuery(view);
   await start();
   await act(async () => resolve({
+    stopped: false,
     results: [{ ...rows[0], status: "skipped", reason: "Interrupted update recovery required" }, { ...rows[1], status: "updated" }],
     conflicts: { conflicts: [], per_mod_count: {} }, conflictError: "An enabled Mod is quarantined",
   }));

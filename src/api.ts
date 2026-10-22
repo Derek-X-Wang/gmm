@@ -1083,21 +1083,21 @@ export type ModUpdateProgress =
   | { phase: "started"; mods: BatchMod[] }
   | { phase: "applying"; item: BatchMod }
   | { phase: "completed"; result: BatchModResult }
-  | { phase: "checkingConflicts" }
-  | { phase: "stopReady"; batchId: string };
+  | { phase: "checkingConflicts" };
 export interface ModUpdateBatchReport {
-  stopped?: boolean;
+  stopped: boolean;
   results: BatchModResult[];
   conflicts: ConflictReport | null;
   conflictError: string | null;
 }
 export function applyAllModUpdates(
   game: GameCode,
+  batchId: string,
   progress: (event: ModUpdateProgress) => void,
 ): Promise<ModUpdateBatchReport> {
   const onProgress = new Channel<ModUpdateProgress>();
   onProgress.onmessage = progress;
-  return invoke<ModUpdateBatchReport>("apply_all_mod_updates", { game, onProgress });
+  return invoke<ModUpdateBatchReport>("apply_all_mod_updates", { game, batchId, onProgress });
 }
 
 /** Requests a boundary stop; it never interrupts the current Mod. */

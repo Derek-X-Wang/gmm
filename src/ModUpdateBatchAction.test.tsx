@@ -43,7 +43,7 @@ it("names in-flight Mods, displays partial outcomes, and publishes the single ba
     progress({ phase: "applying", item: rows[0] });
   });
   expect(screen.getByRole("status")).toHaveTextContent("Updating First… 0 of 3 completed.");
-  expect(screen.getByRole("button")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Applying Mod updates…" })).toBeDisabled();
   act(() => {
     progress({ phase: "completed", result: { ...rows[0], status: "updated" } });
     progress({ phase: "applying", item: rows[1] });
@@ -51,6 +51,7 @@ it("names in-flight Mods, displays partial outcomes, and publishes the single ba
   expect(screen.getByText("First: Updated")).toBeVisible();
   expect(screen.getByRole("status")).toHaveTextContent("Updating Broken… 1 of 3 completed.");
   const report: ModUpdateBatchReport = {
+    stopped: false,
     results: [
       { ...rows[0], status: "updated" },
       { ...rows[1], status: "failed", reason: "download unavailable" },
@@ -85,7 +86,7 @@ it("preserves established outcomes and labels unreceived results unknown after I
 it("keeps rollback uncertainty and failed Conflict detection visible", async () => {
   renderWithQuery(view());
   await start();
-  await act(async () => resolve({ results: [{ ...rows[0], status: "unknown", reason: "rollback unresolved" }], conflicts: null, conflictError: "quarantine pending" }));
+  await act(async () => resolve({ stopped: false, results: [{ ...rows[0], status: "unknown", reason: "rollback unresolved" }], conflicts: null, conflictError: "quarantine pending" }));
   expect(await screen.findByText("First: Unknown — rollback unresolved")).toBeVisible();
   expect(screen.getByRole("alert")).toHaveTextContent("Conflicts unverified: quarantine pending");
   expect(screen.queryByText("0 Conflicts found after the batch.")).not.toBeInTheDocument();
@@ -116,7 +117,7 @@ it("keeps the running Game's results separate when switching Games", async () =>
   expect(screen.getByText("Mod updates are running for gimi.")).toBeVisible();
   act(() => progress({ phase: "completed", result: { ...rows[0], status: "updated" } }));
   expect(screen.queryByText("First: Updated")).not.toBeInTheDocument();
-  await act(async () => resolve({ results: [{ ...rows[0], status: "updated" }], conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null }));
+  await act(async () => resolve({ stopped: false, results: [{ ...rows[0], status: "updated" }], conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null }));
   rerender(view());
   expect(screen.getByText("First: Updated")).toBeVisible();
 });
