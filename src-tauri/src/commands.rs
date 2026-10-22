@@ -657,6 +657,20 @@ pub async fn mod_updates_globally_enabled(core: State<'_, Core>) -> CommandResul
 }
 
 #[tauri::command]
+pub async fn apply_all_mod_updates(
+    core: State<'_, Core>,
+    game: GameCode,
+    on_progress: tauri::ipc::Channel<crate::core::mod_update_batch::ModUpdateProgress>,
+) -> CommandResult<crate::core::mod_update_batch::ModUpdateBatchReport> {
+    core.apply_all_mod_updates(game, |progress| {
+        // A closed view must not interrupt an in-flight filesystem swap.
+        let _ = on_progress.send(progress);
+    })
+    .await
+    .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> CommandResult<()> {
     core.reinstall_gamebanana_mod(&mod_id)
         .await

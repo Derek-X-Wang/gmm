@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { GameHeader } from "./GameHeader";
 import { GlobalHeaderLine } from "./GlobalHeaderLine";
 import { ModList } from "./ModList";
+import { ModUpdateBatchAction } from "./ModUpdateBatchAction";
 import { SessionCheckNotice, useSessionCheck } from "./SessionCheckNotice";
 import { useRecoveryOutcomes } from "./RecoveryOutcome";
 import { GameTabs } from "./GameTabs";
@@ -696,6 +697,7 @@ function ModUpdatesPanel({ game }: { game: ApiGameCode }) {
           <span>Weekly check enabled</span>
         </label>
       </div>
+      <ModUpdateBatchAction game={game} rows={rows.data ?? []} verified={rows.isSuccess} checking={check.isPending} />
       <CommandErrorNotice error={check.error} />
     </section>
   );
