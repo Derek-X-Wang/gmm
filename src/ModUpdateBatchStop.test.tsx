@@ -88,3 +88,16 @@ it("does not expose a stale stop token on another Game and a late stop leaves a 
   expect(screen.getByRole("status")).toHaveTextContent("Batch finished.");
   expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
 });
+
+it("ignores a delayed stop error after the batch has already finished", async () => {
+  renderWithQuery(view);
+  await start();
+  let rejectStop!: (error: Error) => void;
+  invoke.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectStop = reject; }));
+  fireEvent.click(screen.getByRole("button", { name: "Stop after this Mod" }));
+  await act(async () => resolve({ stopped: false, results: rows.map((item) => ({ ...item, status: "updated" })), conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null }));
+  await act(async () => rejectStop(new Error("late connection failure")));
+  expect(screen.getByRole("status")).toHaveTextContent("Batch finished.");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
+});

@@ -51,7 +51,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
       });
     }),
     onSuccess: (report, selected) => {
-      change(selected, (old) => ({ ...old, current: undefined, results: report.results, report, reading: report.stopped ? "Batch stopped." : "Batch finished." }));
+      change(selected, (old) => ({ ...old, current: undefined, stopError: undefined, results: report.results, report, reading: report.stopped ? "Batch stopped." : "Batch finished." }));
       if (report.conflicts && !report.conflictError) {
         qc.setQueryData(["conflicts", selected], report.conflicts);
       }
@@ -84,7 +84,10 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
       await stopModUpdateBatch(batchId);
     } catch (error) {
       requestedStops.current.delete(batchId);
-      change(selected, (old) => ({ ...old, stopRequested: false, stopError: `Stop request unverified: ${commandFailureMessage(error)} The batch may continue. Try again.` }));
+      change(selected, (old) => old.batchId !== batchId || old.report || old.error ? old : ({
+        ...old, stopRequested: false,
+        stopError: `Stop request unverified: ${commandFailureMessage(error)} The batch may continue. Try again.`,
+      }));
     }
   };
   const ahead = rows.filter((row) => row.upstreamAhead);
