@@ -1,3 +1,4 @@
+import { Channel } from "@tauri-apps/api/core";
 import {
   CommandFailure,
   commandFailureFrom,
@@ -1080,4 +1081,28 @@ export async function attentionStatus(): Promise<AttentionReport> {
       startedAt: row.started_at,
     })),
   };
+}
+
+export interface BatchMod { modId: string; name: string }
+export type BatchModResult = BatchMod & (
+  | { status: "updated" }
+  | { status: "failed" | "unknown" | "skipped"; reason: string }
+);
+export type ModUpdateProgress =
+  | { phase: "started"; mods: BatchMod[] }
+  | { phase: "applying"; item: BatchMod }
+  | { phase: "completed"; result: BatchModResult }
+  | { phase: "checkingConflicts" };
+export interface ModUpdateBatchReport {
+  results: BatchModResult[];
+  conflicts: ConflictReport | null;
+  conflictError: string | null;
+}
+export function applyAllModUpdates(
+  game: GameCode,
+  progress: (event: ModUpdateProgress) => void,
+): Promise<ModUpdateBatchReport> {
+  const onProgress = new Channel<ModUpdateProgress>();
+  onProgress.onmessage = progress;
+  return invoke<ModUpdateBatchReport>("apply_all_mod_updates", { game, onProgress });
 }

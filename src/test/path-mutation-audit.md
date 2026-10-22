@@ -8,7 +8,7 @@ a completed folder pick. Each route invokes the same existing backend mutation;
 there is no frontend path validation, trimming, or implicit reset to default.
 The diagnostics log directory stays read-only.
 
-The inventory contains **42 `useMutation` call sites in 11 files** and is now
+The inventory contains **43 `useMutation` call sites in 12 files** and is now
 enforced by `mutation-invalidation-boundary.test.ts` under `pnpm test`. The gate
 parses production TypeScript/TSX under `src/`, including new files, and requires
 exactly one row per call site and no stale rows. The original audit traced each
@@ -62,6 +62,7 @@ from the production inventory.
 | App / ModUpdatesPanel | check | Changed: settles `modUpdates/game`; a multi-Mod batch can persist earlier upstream versions before rejecting. |
 | App / ModUpdatesPanel | toggleGlobal | Unchanged: one setting write already refreshes `modUpdates/globalEnabled` on success. |
 | ModDetailPanel | save | Atomic panel-width setting write; serial requests preserve input order, and success updates `modPanelWidth` directly from the bounded input. Literal `meta.noInvalidationReason` records why no query invalidation is needed. |
+| ModUpdateBatchAction | apply | Settles Mods/update rows/Conflicts/Variants/attention/audit after success or rejection; publishes a complete backend Conflict scan and unconditionally refreshes mounted Conflict observers. Unknown results and errors survive refreshed update rows; preflight refusals do not invent Unknown outcomes. |
 | ModList / ModUpdateBadge | apply | Unchanged: already settles `mods/game`, `modUpdates/game`, `variants/modId`, and `conflicts/game`; error remains outside the disappearing badge. |
 | ModList / ModUpdateBadge | toggle | Unchanged: one Mod setting write already refreshes `modUpdates/game` on success. |
 | SettingsDestination / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. |
