@@ -15,6 +15,7 @@ pub struct BatchMod {
 pub enum ModUpdateOutcome {
     Updated,
     Failed { reason: String },
+    Skipped { reason: String },
     Unknown { reason: String },
 }
 
@@ -64,6 +65,14 @@ impl Core {
         mut progress: impl FnMut(ModUpdateProgress),
     ) -> Result<ModUpdateBatchReport> {
         self.ensure_no_active_session().await?;
+        self.ensure_no_pending_enabled_transition().await?;
+        // Match the per-Mod action's recovery gate before spending bandwidth.
+        // Include all Sources, including Mods without an available update:
+        // the Conflict scanner can omit those quarantined Mods too.
+        let library_mods = self.list_mods(game).await?;
+        let preexisting_incomplete = library_mods
+            .iter()
+            .any(|item| item.enabled && item.reinstall_recovery.is_some());
         let mods: Vec<_> = self
             .list_mod_updates(game)
             .await?
@@ -77,20 +86,38 @@ impl Core {
         progress(ModUpdateProgress::Started { mods: mods.clone() });
         let mut results = Vec::with_capacity(mods.len());
         for item in mods {
-            progress(ModUpdateProgress::Applying { item: item.clone() });
-            // This is exactly the path used by apply_mod_update, including
-            // session fences, durable swap witnesses, rollback and quarantine.
-            let outcome = match self
-                .reinstall_gamebanana_mod_with_endpoints(&item.mod_id, endpoints)
-                .await
-            {
-                Ok(()) => ModUpdateOutcome::Updated,
-                Err(error @ Error::ReinstallRollbackFailed { .. }) => ModUpdateOutcome::Unknown {
-                    reason: error.to_string(),
-                },
-                Err(error) => ModUpdateOutcome::Failed {
-                    reason: error.to_string(),
-                },
+            let recovery = library_mods.iter().find(|row| row.id == item.mod_id);
+            let skip_reason = recovery.and_then(|row| {
+                if row.reinstall_recovery.is_some() {
+                    Some("This Mod needs interrupted update recovery. Recover it in the Library before updating.")
+                } else if row.enabled_transition_recovery.is_some() {
+                    Some("This Mod needs enable/disable recovery. Recover it in the Library before updating.")
+                } else {
+                    None
+                }
+            });
+            let outcome = if let Some(reason) = skip_reason {
+                ModUpdateOutcome::Skipped {
+                    reason: reason.to_string(),
+                }
+            } else {
+                progress(ModUpdateProgress::Applying { item: item.clone() });
+                // This is exactly the path used by apply_mod_update, including
+                // session fences, durable swap witnesses, rollback and quarantine.
+                match self
+                    .reinstall_gamebanana_mod_with_endpoints(&item.mod_id, endpoints)
+                    .await
+                {
+                    Ok(()) => ModUpdateOutcome::Updated,
+                    Err(error @ Error::ReinstallRollbackFailed { .. }) => {
+                        ModUpdateOutcome::Unknown {
+                            reason: error.to_string(),
+                        }
+                    }
+                    Err(error) => ModUpdateOutcome::Failed {
+                        reason: error.to_string(),
+                    },
+                }
             };
             let result = BatchModResult { item, outcome };
             progress(ModUpdateProgress::Completed {
@@ -103,9 +130,10 @@ impl Core {
             Ok(report) => {
                 // The scanner omits quarantined Mods. Preserve the known
                 // findings without presenting that partial scan as complete.
-                let incomplete = results
-                    .iter()
-                    .any(|result| matches!(result.outcome, ModUpdateOutcome::Unknown { .. }));
+                let incomplete = preexisting_incomplete
+                    || results
+                        .iter()
+                        .any(|result| matches!(result.outcome, ModUpdateOutcome::Unknown { .. }));
                 (Some(report), incomplete.then(|| "The full Conflict reading is unverified because a Mod update needs recovery.".to_string()))
             }
             Err(error) => (None, Some(error.to_string())),

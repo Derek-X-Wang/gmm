@@ -61,7 +61,7 @@ from the production inventory.
 | App / useLaunchGame | launch | Unchanged: already settles `session` and `interruptedSessionLaunches`. |
 | App / ModUpdatesPanel | check | Changed: settles `modUpdates/game`; a multi-Mod batch can persist earlier upstream versions before rejecting. |
 | App / ModUpdatesPanel | toggleGlobal | Unchanged: one setting write already refreshes `modUpdates/globalEnabled` on success. |
-| ModUpdateBatchAction | apply | Added: settles Mods/update rows/Variants/attention/audit after partial success or rejection; publishes the one backend Conflict scan to the shared cache without requesting another scan. Unknown results and errors survive refreshed update rows. |
+| ModUpdateBatchAction | apply | Settles Mods/update rows/Conflicts/Variants/attention/audit after success or rejection; publishes a complete backend Conflict scan and unconditionally refreshes mounted Conflict observers. Unknown results and errors survive refreshed update rows; preflight refusals do not invent Unknown outcomes. |
 | ModList / ModUpdateBadge | apply | Unchanged: already settles `mods/game`, `modUpdates/game`, `variants/modId`, and `conflicts/game`; error remains outside the disappearing badge. |
 | ModList / ModUpdateBadge | toggle | Unchanged: one Mod setting write already refreshes `modUpdates/game` on success. |
 | SettingsDestination / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. |

@@ -1350,6 +1350,20 @@ impl Core {
         load_reinstall_swap_witnesses(&mut connection).await
     }
 
+    /// Read-only batch preflight. The writer fence still checks this again
+    /// for each Mod, including transitions created after this snapshot.
+    pub(super) async fn ensure_no_pending_enabled_transition(&self) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        if let Some(mod_id) = LibraryOwnershipSnapshot::enabled_transition_mod_ids(&mut connection)
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Err(Error::EnabledTransitionPending { mod_id });
+        }
+        Ok(())
+    }
+
     pub(super) async fn begin_library_mutation(
         &self,
         mutation: LibraryMutation,

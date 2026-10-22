@@ -1077,7 +1077,7 @@ export async function attentionStatus(): Promise<AttentionReport> {
 export interface BatchMod { modId: string; name: string }
 export type BatchModResult = BatchMod & (
   | { status: "updated" }
-  | { status: "failed" | "unknown"; reason: string }
+  | { status: "failed" | "unknown" | "skipped"; reason: string }
 );
 export type ModUpdateProgress =
   | { phase: "started"; mods: BatchMod[] }

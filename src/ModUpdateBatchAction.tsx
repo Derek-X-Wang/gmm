@@ -11,6 +11,7 @@ type BatchView = {
   mods: BatchMod[];
   results: BatchModResult[];
   reading: string;
+  started?: boolean;
   report?: ModUpdateBatchReport;
   error?: string;
 };
@@ -31,7 +32,10 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
   };
   const apply = useMutation({
     mutationFn: (selected: GameCode) => applyAllModUpdates(selected, (event: ModUpdateProgress) => {
-      change(selected, (old) => {
+      change(selected, (previous) => {
+        // Any progress proves the backend passed its preflight, even if the
+        // initial started message was not received.
+        const old = { ...previous, started: true };
         switch (event.phase) {
           case "started": return { ...old, mods: event.mods };
           case "applying": return { ...old, reading: `Updating ${event.item.name}…` };
@@ -44,21 +48,21 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
       change(selected, (old) => ({ ...old, results: report.results, report, reading: "Batch finished." }));
       if (report.conflicts && !report.conflictError) {
         qc.setQueryData(["conflicts", selected], report.conflicts);
-      } else {
-        void qc.invalidateQueries({ queryKey: ["conflicts", selected], refetchType: "none" });
       }
     },
     onError: (error, selected) => {
       change(selected, (old) => ({
-        ...old, reading: "Batch result unavailable.", error: commandFailureMessage(error),
-        results: old.mods.map((item) => old.results.find((result) => result.modId === item.modId) ?? {
+        ...old,
+        reading: old.started ? "Batch result unavailable." : "Batch refused before updates started.",
+        error: commandFailureMessage(error),
+        results: !old.started ? [] : old.mods.map((item) => old.results.find((result) => result.modId === item.modId) ?? {
           ...item, status: "unknown", reason: "No result received. Check the Library before retrying.",
         }),
       }));
     },
     onSettled: (_report, _error, selected) => {
       // A rejected command can still leave recovery state. Refresh on either outcome.
-      for (const key of ["mods", "modUpdates"]) {
+      for (const key of ["mods", "modUpdates", "conflicts"]) {
         void qc.invalidateQueries({ queryKey: [key, selected] });
       }
       for (const key of ["variants", "attentionStatus", "libraryAudit"]) {
@@ -90,9 +94,9 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
       <p role="status">{batch.reading} {apply.isPending && apply.variables === game ? `${batch.results.length} of ${batch.mods.length} completed.` : null}</p>
       <ul>{batch.results.map((result) => <li key={result.modId}>
         {result.name}: {result.status === "updated" ? "Updated" :
-          `${result.status === "failed" ? "Failed" : "Unknown"} — ${result.reason}`}
+          `${result.status === "failed" ? "Failed" : result.status === "skipped" ? "Skipped" : "Unknown"} — ${result.reason}`}
       </li>)}</ul>
-      {batch.error && <p role="alert">{batch.error} Conflict check result unavailable.</p>}
+      {batch.error && <p role="alert">{batch.error}{batch.started ? " Conflict check result unavailable." : ""}</p>}
       {batch.report?.conflictError && <p role="alert">Conflicts unverified: {batch.report.conflictError}</p>}
       {batch.report?.conflicts && <div>
         {!batch.report.conflictError && <p>{batch.report.conflicts.conflicts.length} Conflicts found after the batch.</p>}
