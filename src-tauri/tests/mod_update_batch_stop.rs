@@ -166,7 +166,18 @@ async fn stop_mid_swap_finishes_current_preserves_prior_and_skips_untouched_mods
             "only completed Mods may have replacement bytes"
         );
         assert_eq!(
-            std::fs::read(game.join("Mods").join(&item.name).join("merged.ini")).unwrap(),
+            std::fs::read(
+                game.join("Mods")
+                    .join(
+                        &seeded
+                            .iter()
+                            .find(|original| original.id == item.id)
+                            .unwrap()
+                            .name
+                    )
+                    .join("merged.ini")
+            )
+            .unwrap(),
             bytes,
             "the enabled Junction must still resolve to coherent Library bytes"
         );
