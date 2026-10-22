@@ -24,6 +24,7 @@ mod library_identity;
 mod library_mutation;
 mod library_ownership;
 pub mod library_recovery;
+mod mod_panel;
 pub mod mod_updates;
 pub mod mods;
 pub mod network;

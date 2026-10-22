@@ -650,6 +650,15 @@ export async function setImporterPinned(
   await invoke("set_importer_pinned", { game, version });
 }
 
+/** Mod inspector width in CSS pixels; independent of native window geometry. */
+export async function getModPanelWidth(): Promise<number | null> {
+  return invoke<number | null>("get_mod_panel_width");
+}
+
+export async function setModPanelWidth(width: number): Promise<void> {
+  await invoke("set_mod_panel_width", { width });
+}
+
 export interface ModUpdateRow {
   modId: string;
   name: string;

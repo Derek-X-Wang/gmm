@@ -28,6 +28,7 @@ import {
 } from "./ReinstallRecoveryWarning";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { commandFailureMessage } from "./commandError";
+import { ModDetailPanel } from "./ModDetailPanel";
 
 /**
  * Per-mod badge that surfaces an available upstream version + Apply
@@ -115,7 +116,15 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
 
   const renderedMods = mods.data ?? [];
   const rowRefs = useRef(new Map<string, HTMLLIElement>());
-  const selectRow = (id: string) => setSelection({ game, id });
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [focusInspector, setFocusInspector] = useState(false);
+  const inspectorId = React.useId();
+  const selectionHintId = React.useId();
+  const selectRow = (id: string) => {
+    setSelection({ game, id });
+    setFocusInspector(false);
+    setInspectorOpen(true);
+  };
   const navigateRows = (event: React.KeyboardEvent<HTMLLIElement>, id: string) => {
     // Inner controls keep their native keys, including Variant radio arrows.
     if (event.target !== event.currentTarget || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -252,6 +261,11 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       />
 
       <SessionCheckNotice check={check} />
+      <div className="mod-workspace">
+      <div className="mod-workspace__list">
+      <p id={selectionHintId} className="visually-hidden">
+        Select a Mod to show its details. Use Up and Down to move between Mods, or Enter or Space to select.
+      </p>
       {renderedMods.length > 0 ? <ul className="mods">
         {renderedMods.map((m) => (
           <li
@@ -263,6 +277,8 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
             }}
             aria-label={m.name}
             aria-current={selectedId === m.id ? "true" : undefined}
+            aria-controls={inspectorId}
+            aria-describedby={selectionHintId}
             tabIndex={0}
             onClick={(event) => {
               selectRow(m.id);
@@ -361,6 +377,20 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
         ))}
       </ul> : null}
       <CommandErrorNotice error={toggle.error} />
+      </div>
+      <ModDetailPanel
+        id={inspectorId}
+        open={inspectorOpen}
+        focusOnOpen={focusInspector}
+        mod={renderedMods.find((mod) => mod.id === selectedId) ?? null}
+        onClose={() => {
+          setInspectorOpen(false);
+          (selectedId ? rowRefs.current.get(selectedId) : sectionRef.current)?.focus();
+        }}
+      />
+      </div>
+      {!inspectorOpen && renderedMods.length > 0 ? <button type="button" className="mod-details-open" aria-controls={inspectorId}
+        onClick={() => { setFocusInspector(true); setInspectorOpen(true); }}>Show Mod details</button> : null}
     </section>
   );
 }

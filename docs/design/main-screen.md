@@ -260,8 +260,21 @@ The docked panel was a candidate for Settings in #326 and lost to the modal
 dialog. It is not discarded. It is reassigned to the selected Mod's detail in
 [#327](https://github.com/Derek-X-Wang/gmm/issues/327). The split is the
 ordinary desktop one: a dialog configures the application; a panel follows the
-selection (#326). This document does not specify that panel. Do not reopen
-the Settings presentation to reclaim it.
+selection (#326). #327 specifies a dismissible, selection-driven inspector beside
+an otherwise live Mod list. It carries no navigation and occupies no space by
+default. Selecting a Mod opens it; closing it returns focus to the selected row.
+An opened inspector with no selected Mod states that explicitly. Its read-only
+detail uses the Library-audit definition-list convention. No row controls move
+or acquire copies here; those moves belong to #418.
+
+The no-sidebar/no-dock rule in #282 and #283 prohibits **permanent navigation
+chrome**, not this temporary inspector. Its requested width is remembered in
+`settings` under `mods.panelWidthCssPx`, in CSS pixels, independently of native
+window geometry. The list keeps a 400 CSS-pixel minimum for names and quick
+actions; the inspector yields first and can be closed when space is tight.
+#414 check 8 will validate usable list width at the 900x600 window minimum;
+any need for an overlay is a follow-up. Do not reopen the Settings presentation
+to reclaim this panel.
 
 ### Open shell decisions
 
@@ -280,8 +293,8 @@ decision. Resolved items are retained here as **DECIDED**.
 | Menu keyboard accelerators and Alt mnemonics on Windows — **KNOWN LIMITATION, not an oversight** | Neither works reliably: WebView2 receives the key press before the host window does, so the menu never sees it ([tauri-apps/wry#451](https://github.com/tauri-apps/wry/issues/451), open; [tauri-apps/tauri#4085](https://github.com/tauri-apps/tauri/issues/4085)). Clicking works. The labels keep `&` mnemonics so Windows underlines a letter if a future runtime delivers the key, no accelerator is declared, and no JavaScript keyboard workaround exists — a declared shortcut would label behaviour that does not happen. Do not reopen this as a bug against the menu; it is upstream. | #351 |
 | Dialog size and behavior in a small window — **DECIDED** | The dialog is bounded by the window, not given a fixed size: at most 1120px wide and as tall as the window allows, inset 2rem from every edge, which is 836x536 at the 900x600 minimum (#351) and settles at the 1120px content width from 1100x760 up. The panel scrolls inside itself, so a long Settings page never pushes it past the window edge. It is **not resizable**: a resize handle would add window-management state that #326 left undecided, and there is nothing for it to reveal — the dialog shows one page at a time and its two-column layout already reflows at 600px. | #353 |
 | Status bar presentation of long content — **DECIDED** | For missing required Game entries, the bar shows a warning sign and **Missing Game entries**, without the missing paths. The requirement to carry the list in the bar is withdrawn. No fact disappears without a route to it: the bar's Settings link opens that Game's page, where the missing paths remain visible. | #348 |
-| Windows 11 look: fill the window and adopt the published proportions — **DECIDED** | The window no longer centres a column. `.app` and `.onboarding` fill it and align left on a 1.5rem inline gutter, the status bar's inline padding is that same gutter instead of a gutter computed from a page width, and the line-length cap moved onto paragraph text (Microsoft caps the line, not the page). The control vocabulary moved onto Microsoft's published metrics: three corner radii (8px containers, 4px in-page elements, 2px under 32px), the Windows 11 type ramp with nothing below 12px, Segoe UI Variable named ahead of Segoe UI with nothing bundled, and a neutral 32px button with a 1px contour so the accent fill belongs to Launch alone. Nothing the application says or does changed. **A Fluent component library is rejected**: it covers the control vocabulary only, at the cost of every surface and of handing the dialog's three mutation-proved guarantees to a third party's focus manager, and its own `fontFamilyBase` is `'Segoe UI'`, so it does not even deliver the font. **Mica and Acrylic are deferred, not rejected**: they decorate a layout rather than fix one and need a transparent window, which fights the native decorations #326 gained. Reconsidered only after Windows screenshots of this result. No two-pane layout: the no-sidebar rule stands and #327 owns the panel. Specified in `docs/research/windows-native-look.md` §6.2, bounded by §6.3. | #365, #366, #367 |
-| Mod inspector and the main-screen no-sidebar rule | #327 adds a docked panel beside the Mod list. This document says the main screen has no sidebar or dock (#282, #283). #327 must reconcile the two when it is specified. | #327, *needed for coherence* |
+| Windows 11 look: fill the window and adopt the published proportions — **DECIDED** | The window no longer centres a column. `.app` and `.onboarding` fill it and align left on a 1.5rem inline gutter, the status bar's inline padding is that same gutter instead of a gutter computed from a page width, and the line-length cap moved onto paragraph text (Microsoft caps the line, not the page). The control vocabulary moved onto Microsoft's published metrics: three corner radii (8px containers, 4px in-page elements, 2px under 32px), the Windows 11 type ramp with nothing below 12px, Segoe UI Variable named ahead of Segoe UI with nothing bundled, and a neutral 32px button with a 1px contour so the accent fill belongs to Launch alone. Nothing the application says or does changed. **A Fluent component library is rejected**: it covers the control vocabulary only, at the cost of every surface and of handing the dialog's three mutation-proved guarantees to a third party's focus manager, and its own `fontFamilyBase` is `'Segoe UI'`, so it does not even deliver the font. **Mica and Acrylic are deferred, not rejected**: they decorate a layout rather than fix one and need a transparent window, which fights the native decorations #326 gained. Reconsidered only after Windows screenshots of this result. No permanent navigation pane: the no-sidebar rule stands; the selection-driven inspector in #327 is the explicit exception below. Specified in `docs/research/windows-native-look.md` §6.2, bounded by §6.3. | #365, #366, #367 |
+| Mod inspector and the main-screen no-sidebar rule — **DECIDED** | The no-sidebar/no-dock rule prohibits permanent navigation chrome. #327 adds a dismissible, selection-driven inspector beside the live Mod list, with no navigation and no space occupied by default. See [The docked panel goes to the selected Mod](#the-docked-panel-goes-to-the-selected-mod). | #327, reconciles #282 and #283 |
 | An available GMM update in the window — **DECIDED** | An available update is a **reading in the bottom status bar**, after the Game and Model Importer facts, routing to the **GMM updates** group on the Settings GMM page. The fixed-position startup notice is removed, not relocated: it covered the bar's Settings link, drew undimmed over the modal Settings dialog, and stayed mouse-clickable while the screen behind the dialog was inert although the dialog's focus cycle made it keyboard-unreachable. The bar reads an offer, a download in flight, an installed build awaiting restart, a failed check and a failed installation, and says nothing when idle, checking, current, or after a decline. It is **not a second notification system and not a new consent surface**: Install update, Skip this build and Restart to apply stay in Settings behind their own explicit click, and declining, remembering a decline and re-offering are unchanged (#346, ADR 0004). The reading adds a row, so the bar's `max-height` and its own scroll keep it from growing over the page. | #357 |
 
 A visual pass (how the application looks, as opposed to how native it feels)
@@ -291,8 +304,9 @@ is a separate axis and is not part of #326 (#326).
 
 The main screen manages Mods for one Game: browse the Library, enable/disable,
 review Conflicts, and launch (#282). Candidate A gives the Mod list the first
-large content area. There is no main-screen sidebar, session dock, or collapsible
-setup disclosure (#282, #283).
+large content area. There is no permanent main-screen navigation sidebar, session
+dock, or collapsible setup disclosure (#282, #283). The selection-driven Mod
+inspector is the explicit exception described above (#327).
 
 Use this hierarchy from candidate A (#283), as revised by #326:
 

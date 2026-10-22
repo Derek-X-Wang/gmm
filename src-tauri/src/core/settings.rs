@@ -78,6 +78,11 @@ pub mod keys {
         "onboarding.complete"
     }
 
+    /// #327: requested Mod inspector width, in CSS pixels, not window geometry.
+    pub fn mod_panel_width() -> &'static str {
+        "mods.panelWidthCssPx"
+    }
+
     /// #369 — the main window's remembered geometry, as the JSON of a
     /// [`crate::core::window_state::SavedWindowState`]. One row rather
     /// than four: the numbers are only ever meaningful together, and a
