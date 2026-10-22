@@ -35,6 +35,8 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot "app-starts.ps1")
+
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $BundleDir = Join-Path $RepoRoot "src-tauri\target\release\bundle\msi"
 $AppData = Join-Path $env:APPDATA "GMM"
@@ -598,17 +600,21 @@ function Invoke-StartupSmoke {
         throw "timed out waiting for manifest refresh completion after fixture response"
     }
 
-    # A crash-on-idle would show up here.
-    Start-Sleep -Seconds 5
-    if ($script:AppProc.HasExited) {
-        throw "GMM exited with code $($script:AppProc.ExitCode) shortly after startup"
-    }
-    Write-Host "process still alive after startup — no crash loop"
+    # Observe the kernel-held instance lock after IPC and refresh completion.
+    # Reuse the remaining refresh-completion ceiling (30s above): the lock
+    # predates IPC, so it needs no additional startup allowance or idle delay.
+    Wait-AppLiveInstanceLock $script:AppProc (Join-Path $AppData "instance.lock") -deadline $refreshDeadline
 
     # Must happen before reading gmm.db: the running app holds the SQLite
     # file open, and a read while it is locked fails with a sharing violation.
-    Stop-StartupAttempt
-    Start-Sleep -Seconds 3
+    # Stop-StartupAttempt clears AppProc; retain its handle for the shared wait.
+    $appToStop = $script:AppProc
+    try {
+        Stop-StartupAttempt
+        Wait-AppResourcesReleased $appToStop $exe -database $dbPath
+    } finally {
+        $appToStop.Dispose()
+    }
 }
 
 Write-Section "Startup"

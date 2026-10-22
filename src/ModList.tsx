@@ -102,6 +102,41 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
     queryKey: ["mods", game],
     queryFn: () => listMods(game),
   });
+  const [selection, setSelection] = useState<{ game: ApiGameCode; id: string } | null>(null);
+  // Keep identity through refreshes, but never resurrect a removed Mod or a
+  // previous Game's selection. Unknown query data is not an empty Library.
+  useEffect(() => {
+    setSelection((previous) => previous && (previous.game !== game
+      || (mods.data !== undefined && !mods.data.some((mod) => mod.id === previous.id)))
+      ? null : previous);
+  }, [game, mods.data]);
+  const selectedId = selection?.game === game
+    && mods.data?.some((mod) => mod.id === selection.id) ? selection.id : null;
+
+  const renderedMods = mods.data ?? [];
+  const rowRefs = useRef(new Map<string, HTMLLIElement>());
+  const selectRow = (id: string) => setSelection({ game, id });
+  const navigateRows = (event: React.KeyboardEvent<HTMLLIElement>, id: string) => {
+    // Inner controls keep their native keys, including Variant radio arrows.
+    if (event.target !== event.currentTarget || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectRow(id);
+      return;
+    }
+    const index = renderedMods.findIndex((mod) => mod.id === id);
+    if (index < 0) return;
+    const next = event.key === "ArrowDown" ? Math.min(index + 1, renderedMods.length - 1)
+      : event.key === "ArrowUp" ? Math.max(index - 1, 0)
+      : event.key === "Home" ? 0
+      : event.key === "End" ? renderedMods.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault();
+    const nextId = renderedMods[next].id;
+    selectRow(nextId);
+    rowRefs.current.get(nextId)?.focus();
+  };
+
   const conflicts = useQuery({
     queryKey: ["conflicts", game],
     queryFn: () => detectConflicts(game),
@@ -217,12 +252,28 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       />
 
       <SessionCheckNotice check={check} />
-      {!confirmedEmpty ? <ul className="mods">
-        {mods.data?.map((m) => (
+      {renderedMods.length > 0 ? <ul className="mods">
+        {renderedMods.map((m) => (
           <li
             key={m.id}
             data-mod-id={m.id}
-            className={`mods__row${m.reinstallRecovery || m.enabledTransitionRecovery ? " mods__row--quarantined" : ""}`}
+            ref={(row) => {
+              if (row) rowRefs.current.set(m.id, row);
+              else rowRefs.current.delete(m.id);
+            }}
+            aria-label={m.name}
+            aria-current={selectedId === m.id ? "true" : undefined}
+            tabIndex={0}
+            onClick={(event) => {
+              selectRow(m.id);
+              // A background click focuses the row; controls retain focus and
+              // their ordinary action when the click bubbles through the row.
+              if (!(event.target as HTMLElement).closest("a, button, input, label, select, textarea, summary")) {
+                event.currentTarget.focus();
+              }
+            }}
+            onKeyDown={(event) => navigateRows(event, m.id)}
+            className={`mods__row${selectedId === m.id ? " mods__row--selected" : ""}${m.reinstallRecovery || m.enabledTransitionRecovery ? " mods__row--quarantined" : ""}`}
           >
             <div className="mods__main">
               <strong>{m.name}</strong>
@@ -278,32 +329,34 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                 />
               ) : null}
             </div>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={m.enabled}
-                disabled={
-                  toggle.isPending ||
-                  sessionBlocked ||
-                  m.reinstallRecovery !== null ||
-                  m.enabledTransitionRecovery !== null
-                }
-                onChange={(e) =>
-                  toggle.mutate({ id: m.id, enabled: e.currentTarget.checked })
-                }
-              />
-              <span>
-                {m.enabledTransitionRecovery
-                  ? "Unavailable · deployment recovery pending"
-                  : m.reinstallRecovery
-                  ? m.reinstallRecovery.junctionWithdrawn
-                    ? "Unavailable"
-                    : "Unavailable · may still be loading"
-                  : m.enabled
-                    ? "Enabled"
-                    : "Disabled"}
-              </span>
-            </label>
+            <div>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={m.enabled}
+                  disabled={
+                    toggle.isPending ||
+                    sessionBlocked ||
+                    m.reinstallRecovery !== null ||
+                    m.enabledTransitionRecovery !== null
+                  }
+                  onChange={(e) =>
+                    toggle.mutate({ id: m.id, enabled: e.currentTarget.checked })
+                  }
+                />
+                <span>
+                  {m.enabledTransitionRecovery
+                    ? "Unavailable · deployment recovery pending"
+                    : m.reinstallRecovery
+                    ? m.reinstallRecovery.junctionWithdrawn
+                      ? "Unavailable"
+                      : "Unavailable · may still be loading"
+                    : m.enabled
+                      ? "Enabled"
+                      : "Disabled"}
+                </span>
+              </label>
+            </div>
           </li>
         ))}
       </ul> : null}
