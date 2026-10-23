@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  applyAllModUpdates, type BatchMod, type BatchModResult, type GameCode,
+  applyAllModUpdates, stopModUpdateBatch, type BatchMod, type BatchModResult, type GameCode,
   type ModUpdateBatchReport, type ModUpdateProgress, type ModUpdateRow,
 } from "./api";
 import { SessionCheckNotice, useSessionCheck } from "./SessionCheckNotice";
@@ -12,6 +12,11 @@ type BatchView = {
   results: BatchModResult[];
   reading: string;
   started?: boolean;
+  batchId?: string;
+  current?: BatchMod;
+  scanning?: boolean;
+  stopRequested?: boolean;
+  stopError?: string;
   report?: ModUpdateBatchReport;
   error?: string;
 };
@@ -23,6 +28,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
   checking: boolean;
 }) {
   const qc = useQueryClient();
+  const requestedStops = useRef(new Set<string>());
   const sessionCheck = useSessionCheck();
   const [batches, setBatches] = useState<Partial<Record<GameCode, BatchView>>>({});
   const change = (selected: GameCode, update: (old: BatchView) => BatchView) => {
@@ -31,26 +37,26 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
     }) }));
   };
   const apply = useMutation({
-    mutationFn: (selected: GameCode) => applyAllModUpdates(selected, (event: ModUpdateProgress) => {
+    mutationFn: ({ selected, batchId }: { selected: GameCode; batchId: string }) => applyAllModUpdates(selected, batchId, (event: ModUpdateProgress) => {
       change(selected, (previous) => {
         // Any progress proves the backend passed its preflight, even if the
         // initial started message was not received.
         const old = { ...previous, started: true };
         switch (event.phase) {
           case "started": return { ...old, mods: event.mods };
-          case "applying": return { ...old, reading: `Updating ${event.item.name}…` };
+          case "applying": return { ...old, current: event.item, reading: `Updating ${event.item.name}…` };
           case "completed": return { ...old, results: [...old.results, event.result] };
-          case "checkingConflicts": return { ...old, reading: "Checking Conflicts…" };
+          case "checkingConflicts": return { ...old, current: undefined, scanning: true, reading: "Checking Conflicts…" };
         }
       });
     }),
-    onSuccess: (report, selected) => {
-      change(selected, (old) => ({ ...old, results: report.results, report, reading: "Batch finished." }));
+    onSuccess: (report, { selected }) => {
+      change(selected, (old) => ({ ...old, current: undefined, stopError: undefined, results: report.results, report, reading: report.stopped ? "Batch stopped." : "Batch finished." }));
       if (report.conflicts && !report.conflictError) {
         qc.setQueryData(["conflicts", selected], report.conflicts);
       }
     },
-    onError: (error, selected) => {
+    onError: (error, { selected }) => {
       change(selected, (old) => ({
         ...old,
         reading: old.started ? "Batch result unavailable." : "Batch refused before updates started.",
@@ -60,7 +66,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
         }),
       }));
     },
-    onSettled: (_report, _error, selected) => {
+    onSettled: (_report, _error, { selected }) => {
       // A rejected command can still leave recovery state. Refresh on either outcome.
       for (const key of ["mods", "modUpdates", "conflicts"]) {
         void qc.invalidateQueries({ queryKey: [key, selected] });
@@ -70,28 +76,50 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
       }
     },
   });
+  const stop = async (selected: GameCode, batchId: string) => {
+    if (requestedStops.current.has(batchId)) return;
+    requestedStops.current.add(batchId);
+    change(selected, (old) => ({ ...old, stopRequested: true, stopError: undefined }));
+    try {
+      await stopModUpdateBatch(batchId);
+    } catch (error) {
+      requestedStops.current.delete(batchId);
+      change(selected, (old) => old.batchId !== batchId || old.report || old.error ? old : ({
+        ...old, stopRequested: false,
+        stopError: `Stop request unverified: ${commandFailureMessage(error)} The batch may continue. Try again.`,
+      }));
+    }
+  };
   const ahead = rows.filter((row) => row.upstreamAhead);
   const batch = batches[game];
   const sessionBlocked = !sessionCheck.session.isSuccess || !!sessionCheck.session.data;
   const start = () => {
+    const batchId = crypto.randomUUID();
     setBatches((old) => ({ ...old, [game]: {
-      mods: ahead.map(({ modId, name }) => ({ modId, name })), results: [], reading: "Starting updates…",
+      batchId, mods: ahead.map(({ modId, name }) => ({ modId, name })), results: [], reading: "Starting updates…",
     } }));
-    apply.mutate(game);
+    apply.mutate({ selected: game, batchId });
   };
   return <div>
     <button onClick={start} disabled={apply.isPending || checking || !verified || !ahead.length || sessionBlocked}>
       {apply.isPending ? "Applying Mod updates…" : "Apply all Mod updates"}
     </button>
+    {apply.isPending && batch && !batch.scanning && apply.variables?.selected === game &&
+      <button onClick={() => void stop(game, apply.variables!.batchId)} disabled={batch.stopRequested}>
+        Stop after this Mod
+      </button>}
     <SessionCheckNotice check={sessionCheck} />
     {sessionCheck.session.isSuccess && sessionCheck.session.data &&
       <p className="muted small">End the Game Session before applying Mod updates.</p>}
     {!verified && <p className="muted small">Available Mod updates are unverified.</p>}
-    <p className="muted small">Updates run one at a time. Cancellation is unavailable; keep GMM open until the batch finishes.</p>
-    {apply.isPending && apply.variables !== game &&
-      <p role="status">Mod updates are running for {apply.variables}.</p>}
+    <p className="muted small">Updates run one at a time. Stop after this Mod lets the current Mod finish its metadata fetch, download, and swap. Keep GMM open until it finishes.</p>
+    {apply.isPending && apply.variables?.selected !== game &&
+      <p role="status">Mod updates are running for {apply.variables?.selected}.</p>}
     {batch && <div>
-      <p role="status">{batch.reading} {apply.isPending && apply.variables === game ? `${batch.results.length} of ${batch.mods.length} completed.` : null}</p>
+      <p role="status">{batch.reading} {apply.isPending && apply.variables?.selected === game ? `${batch.results.length} of ${batch.mods.length} completed.` : null}</p>
+      {apply.isPending && apply.variables?.selected === game && batch.stopRequested && batch.current &&
+        <p>Stop requested. Waiting for {batch.current.name} to finish; later Mods will not start.</p>}
+      {batch.stopError && <p role="alert">{batch.stopError}</p>}
       <ul>{batch.results.map((result) => <li key={result.modId}>
         {result.name}: {result.status === "updated" ? "Updated" :
           `${result.status === "failed" ? "Failed" : result.status === "skipped" ? "Skipped" : "Unknown"} — ${result.reason}`}

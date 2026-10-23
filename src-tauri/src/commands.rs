@@ -669,19 +669,70 @@ pub async fn mod_updates_globally_enabled(core: State<'_, Core>) -> CommandResul
         .map_err(CommandError::from)
 }
 
+// Registered commands remove their stop tokens on return, including refusal/error.
+// A stop with no command to adopt it retains one small entry for that batch ID.
+// Frontend v4 UUIDs are never reused, so retained requests cannot stop later batches.
+static BATCH_STOPS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, crate::core::mod_update_batch::BatchStop>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+struct RegisteredBatchStop {
+    id: String,
+    stop: crate::core::mod_update_batch::BatchStop,
+}
+
+impl RegisteredBatchStop {
+    fn new(id: String) -> Self {
+        let stop = BATCH_STOPS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(id.clone())
+            .or_default()
+            .clone();
+        Self { id, stop }
+    }
+}
+
+impl Drop for RegisteredBatchStop {
+    fn drop(&mut self) {
+        BATCH_STOPS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.id);
+    }
+}
+
+#[tauri::command]
+pub fn stop_mod_update_batch(batch_id: String) -> CommandResult<()> {
+    BATCH_STOPS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(batch_id)
+        .or_default()
+        .request();
+    // Preserve a request even before the batch command is first polled.
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn apply_all_mod_updates(
     core: State<'_, Core>,
     game: GameCode,
+    batch_id: String,
     on_progress: tauri::ipc::Channel<crate::core::mod_update_batch::ModUpdateProgress>,
 ) -> CommandResult<crate::core::mod_update_batch::ModUpdateBatchReport> {
-    core.apply_all_mod_updates(game, |progress| {
-        // A closed view must not interrupt an in-flight filesystem swap.
+    let batch = RegisteredBatchStop::new(batch_id);
+    core.apply_all_mod_updates(game, &batch.stop, |progress| {
+        // Progress delivery is best-effort, independent of the explicit stop request.
         let _ = on_progress.send(progress);
     })
     .await
     .map_err(CommandError::from)
 }
+
+#[cfg(test)]
+#[path = "commands_batch_stop_tests.rs"]
+mod batch_stop_tests;
 
 #[tauri::command]
 pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> CommandResult<()> {

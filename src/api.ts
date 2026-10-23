@@ -1094,15 +1094,22 @@ export type ModUpdateProgress =
   | { phase: "completed"; result: BatchModResult }
   | { phase: "checkingConflicts" };
 export interface ModUpdateBatchReport {
+  stopped: boolean;
   results: BatchModResult[];
   conflicts: ConflictReport | null;
   conflictError: string | null;
 }
 export function applyAllModUpdates(
   game: GameCode,
+  batchId: string,
   progress: (event: ModUpdateProgress) => void,
 ): Promise<ModUpdateBatchReport> {
   const onProgress = new Channel<ModUpdateProgress>();
   onProgress.onmessage = progress;
-  return invoke<ModUpdateBatchReport>("apply_all_mod_updates", { game, onProgress });
+  return invoke<ModUpdateBatchReport>("apply_all_mod_updates", { game, batchId, onProgress });
+}
+
+/** Requests a boundary stop; it never interrupts the current Mod. */
+export function stopModUpdateBatch(batchId: string): Promise<void> {
+  return invoke("stop_mod_update_batch", { batchId });
 }
