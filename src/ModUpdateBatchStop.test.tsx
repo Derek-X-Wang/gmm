@@ -48,7 +48,7 @@ it("offers an explicit boundary stop, names the waiting Mod, and sends only once
   expect(invoke.mock.calls.filter(([command]) => command === "stop_mod_update_batch")).toEqual([["stop_mod_update_batch", { batchId: invoke.mock.calls.find(([command]) => command === "apply_all_mod_updates")![1].batchId }]]);
   expect(screen.getByText("First: Updated")).toBeVisible();
   act(() => progress({ phase: "checkingConflicts" }));
-  expect(screen.getByRole("button", { name: "Stop after this Mod" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
   const report: ModUpdateBatchReport = {
     stopped: true,
     results: [{ ...rows[0], status: "updated" }, { ...rows[1], status: "updated" }, { ...rows[2], status: "skipped", reason: "Not started because you stopped the batch. The Library was not touched." }],
@@ -63,6 +63,26 @@ it("offers an explicit boundary stop, names the waiting Mod, and sends only once
   expect(screen.queryByText("0 Conflicts found after the batch.")).not.toBeInTheDocument();
   expect(invalidate).toHaveBeenCalledWith({ queryKey: ["conflicts", "gimi"] });
   expect(setData).not.toHaveBeenCalledWith(["conflicts", "gimi"], report.conflicts);
+});
+it("withdraws Stop during the final Conflict scan and offers it again for the next batch", async () => {
+  renderWithQuery(view);
+  await start();
+  act(() => {
+    progress({ phase: "completed", result: { ...rows[1], status: "updated" } });
+    progress({ phase: "applying", item: rows[2] });
+    progress({ phase: "completed", result: { ...rows[2], status: "updated" } });
+    progress({ phase: "checkingConflicts" });
+  });
+  expect(screen.getByRole("status")).toHaveTextContent("Checking Conflicts… 3 of 3 completed.");
+  expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
+  expect(invoke.mock.calls.filter(([command]) => command === "stop_mod_update_batch")).toHaveLength(0);
+  await act(async () => resolve({ stopped: false, results: rows.map((item) => ({ ...item, status: "updated" })), conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null }));
+  const apply = screen.getByRole("button", { name: "Apply all Mod updates" });
+  await waitFor(() => expect(apply).toBeEnabled());
+  fireEvent.click(apply);
+  await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "apply_all_mod_updates")).toHaveLength(2));
+  expect(screen.getByRole("button", { name: "Stop after this Mod" })).toBeEnabled();
+  expect(screen.getByRole("status")).toHaveTextContent("Starting updates… 0 of 3 completed.");
 });
 it("keeps stop delivery failure visible and allows a retry", async () => {
   renderWithQuery(view);

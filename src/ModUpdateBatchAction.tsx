@@ -14,6 +14,7 @@ type BatchView = {
   started?: boolean;
   batchId?: string;
   current?: BatchMod;
+  scanning?: boolean;
   stopRequested?: boolean;
   stopError?: string;
   report?: ModUpdateBatchReport;
@@ -45,7 +46,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
           case "started": return { ...old, mods: event.mods };
           case "applying": return { ...old, current: event.item, reading: `Updating ${event.item.name}…` };
           case "completed": return { ...old, results: [...old.results, event.result] };
-          case "checkingConflicts": return { ...old, current: undefined, reading: "Checking Conflicts…" };
+          case "checkingConflicts": return { ...old, current: undefined, scanning: true, reading: "Checking Conflicts…" };
         }
       });
     }),
@@ -103,7 +104,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
     <button onClick={start} disabled={apply.isPending || checking || !verified || !ahead.length || sessionBlocked}>
       {apply.isPending ? "Applying Mod updates…" : "Apply all Mod updates"}
     </button>
-    {apply.isPending && batch && apply.variables?.selected === game &&
+    {apply.isPending && batch && !batch.scanning && apply.variables?.selected === game &&
       <button onClick={() => void stop(game, apply.variables!.batchId)} disabled={batch.stopRequested}>
         Stop after this Mod
       </button>}

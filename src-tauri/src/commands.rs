@@ -656,7 +656,9 @@ pub async fn mod_updates_globally_enabled(core: State<'_, Core>) -> CommandResul
         .map_err(CommandError::from)
 }
 
-// Each command owns its stop token until it returns, including on refusal/error.
+// Registered commands remove their stop tokens on return, including refusal/error.
+// A stop with no command to adopt it retains one small entry for that batch ID.
+// Frontend v4 UUIDs are never reused, so retained requests cannot stop later batches.
 static BATCH_STOPS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<String, crate::core::mod_update_batch::BatchStop>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
