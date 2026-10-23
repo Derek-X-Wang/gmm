@@ -1,0 +1,15 @@
+[package]
+name = "gmm-egui-modlist-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-only"
+publish = false
+
+[workspace]
+
+[dependencies]
+egui = { version = "=0.37.0", features = ["default_fonts"] }
+
+[dev-dependencies]
+egui_kittest = "=0.37.0"
