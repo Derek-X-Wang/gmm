@@ -42,13 +42,17 @@ export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: 
       pendingWidth.current = null;
     }
   };
+  const commitWidthRef = useRef(commitWidth);
+  useEffect(() => { commitWidthRef.current = commitWidth; });
   useEffect(() => () => {
-    if (saveTimer.current !== null) clearTimeout(saveTimer.current);
+    // Flush while the app lives; window teardown can end IPC before it completes.
+    commitWidthRef.current();
   }, []);
+  const hasUpstream = open && mod?.source === "gamebanana";
   const updates = useQuery({
     queryKey: ["modUpdates", mod?.game],
     queryFn: () => listModUpdates(mod!.game),
-    enabled: open && mod?.source === "gamebanana",
+    enabled: hasUpstream,
   });
   const upstreamVersion = updates.data?.find((row) => row.modId === mod?.id)?.upstreamVersion;
 
@@ -92,9 +96,9 @@ export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: 
             saveTimer.current = setTimeout(commitWidth, WIDTH_SAVE_DELAY_MS);
           }} onBlur={commitWidth} />
       </label>
-      <CommandErrorNotice error={updates.error}
+      {hasUpstream && <CommandErrorNotice error={updates.error}
         heading="GMM could not read this Mod's upstream version."
-        detail="Upstream information is unavailable; this is not an “up to date” result. Any last seen upstream version is from an earlier reading." />
+        detail="Upstream information is unavailable; this is not an “up to date” result. Any last seen upstream version is from an earlier reading." />}
       <CommandErrorNotice error={remembered.error} heading="GMM could not read the remembered panel width." />
       <CommandErrorNotice error={save.error} heading="GMM could not remember the panel width." />
     </aside>

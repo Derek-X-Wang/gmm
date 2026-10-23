@@ -156,7 +156,9 @@ it("flushes a pending width on blur without writing again after settling", async
   vi.useFakeTimers();
   const slider = screen.getByRole("slider");
   fireEvent.change(slider, { target: { value: "420" } });
-  fireEvent.blur(slider);
+  await act(async () => { fireEvent.blur(slider); });
+  expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width")).toHaveLength(1);
+  expect(storedWidth).toBe(420);
   await act(async () => { await vi.advanceTimersByTimeAsync(250); });
   expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width")).toHaveLength(1);
   expect(storedWidth).toBe(420);
@@ -190,7 +192,11 @@ it("opens beside the live list, follows selection, closes with row focus, and re
   const first = await screen.findByRole("listitem", { name: "March Outfit" });
   const second = screen.getByRole("listitem", { name: "Other Outfit" });
   expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
-  expect(screen.getByRole("list")).toHaveAccessibleDescription("Select a Mod to show its details. Use Up and Down to move between Mods, or Enter or Space to select.");
+  const hint = screen.getByText("Select a Mod to show its details. Use Up and Down to move between Mods, or Enter or Space to select.");
+  expect(hint).toBeVisible();
+  expect(hint).toHaveClass("muted", "small");
+  expect(hint).not.toHaveClass("visually-hidden");
+  expect(screen.getByRole("list")).toHaveAccessibleDescription(hint.textContent!);
   for (const row of [first, second]) expect(row).not.toHaveAttribute("aria-describedby");
   await user.click(first);
   let panel = screen.getByRole("complementary", { name: "March Outfit" });
@@ -262,4 +268,36 @@ it.each([false, true])("reports unavailable upstream readings including failed r
   expect(await screen.findByText("Upstream read failed")).toBeVisible();
   expect(screen.getByText(/Upstream information is unavailable; this is not an “up to date” result/)).toBeVisible();
   if (cached) expect(screen.getByText("2.0")).toBeVisible();
+});
+
+
+it("removes the upstream error when selecting a local Mod in the same Game", async () => {
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "list_mod_updates"
+    ? Promise.reject(new Error("Upstream read failed")) : implementation(command, args));
+  rawMods = [{ ...rawMods[0], source: "gamebanana" }, rawMods[1]];
+  const user = userEvent.setup();
+  renderWithQuery(<ModList game="srmi" displayName="Star Rail" />);
+  await user.click(await screen.findByRole("listitem", { name: "March Outfit" }));
+  const heading = "GMM could not read this Mod's upstream version.";
+  expect(await within(screen.getByRole("complementary", { name: "March Outfit" })).findByText(heading)).toBeVisible();
+  await user.click(screen.getByRole("listitem", { name: "Other Outfit" }));
+  expect(screen.getByRole("complementary", { name: "Other Outfit" })).toBeVisible();
+  expect(screen.queryByText(heading)).not.toBeInTheDocument();
+  expect(screen.queryByText("Upstream read failed")).not.toBeInTheDocument();
+});
+
+it("flushes a pending width when the panel unmounts while the app lives", async () => {
+  const panel = renderPanel();
+  await waitFor(() => expect(panel.client.isFetching()).toBe(0));
+  vi.useFakeTimers();
+  fireEvent.change(screen.getByRole("slider"), { target: { value: "420" } });
+  fireEvent.change(screen.getByRole("slider"), { target: { value: "480" } });
+  expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width")).toHaveLength(0);
+  await act(async () => { panel.unmount(); });
+  expect(invoke).toHaveBeenCalledWith("set_mod_panel_width", { width: 480 });
+  expect(panel.client.getQueryData(["modPanelWidth"])).toBe(480);
+  expect(storedWidth).toBe(480);
+  await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+  expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width")).toHaveLength(1);
 });

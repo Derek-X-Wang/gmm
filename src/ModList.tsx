@@ -263,7 +263,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       <SessionCheckNotice check={check} />
       <div className="mod-workspace">
       <div className="mod-workspace__list">
-      <p id={selectionHintId} className="visually-hidden">
+      <p id={selectionHintId} className="muted small">
         Select a Mod to show its details. Use Up and Down to move between Mods, or Enter or Space to select.
       </p>
       {renderedMods.length > 0 ? <ul className="mods" aria-describedby={selectionHintId}>
