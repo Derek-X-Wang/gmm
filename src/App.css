@@ -841,3 +841,62 @@ code {
 .mod-import-route h3 { margin: 0 0 0.5rem; }
 .mod-import-route input { max-width: 100%; box-sizing: border-box; }
 .mod-import-route code { overflow-wrap: anywhere; }
+
+/* The list keeps room for names and quick actions; the inspector yields first. */
+.mod-workspace {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.mod-workspace__list {
+  flex: 1 0 400px;
+  min-width: min(400px, 100%);
+  /* Keep the outer keyboard outline inside the scroll viewport. */
+  padding: 5px;
+  overflow-x: auto;
+}
+
+.mod-detail-panel {
+  flex: 0 1 320px;
+  min-width: 0;
+  display: grid;
+  gap: 0.75rem;
+  border-inline-start: 1px solid #2e2e36;
+  padding-inline-start: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.mod-detail-panel > .row {
+  flex-wrap: wrap;
+}
+
+.mod-detail-panel__facts > div {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.125rem;
+}
+
+.mod-detail-panel__width {
+  display: grid;
+  min-width: 0;
+}
+
+.mod-detail-panel__width input {
+  width: 100%;
+  min-width: 0;
+}
+
+.mod-details-open {
+  justify-self: start;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

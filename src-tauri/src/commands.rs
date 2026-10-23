@@ -209,6 +209,19 @@ pub fn log_frontend_error(error: FrontendError) -> CommandResult<()> {
     Ok(())
 }
 
+/// Requested inspector width in CSS pixels; never reads window geometry.
+#[tauri::command]
+pub async fn get_mod_panel_width(core: State<'_, Core>) -> CommandResult<Option<u32>> {
+    core.mod_panel_width().await.map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn set_mod_panel_width(core: State<'_, Core>, width: u32) -> CommandResult<()> {
+    core.set_mod_panel_width(width)
+        .await
+        .map_err(CommandError::from)
+}
+
 #[tauri::command]
 pub async fn get_skipped_update(core: State<'_, Core>) -> CommandResult<Option<String>> {
     core.skipped_update().await.map_err(CommandError::from)
