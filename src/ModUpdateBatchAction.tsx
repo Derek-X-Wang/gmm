@@ -37,6 +37,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
     }) }));
   };
   const apply = useMutation({
+    scope: { id: "conflicts" },
     mutationFn: ({ selected, batchId }: { selected: GameCode; batchId: string }) => applyAllModUpdates(selected, batchId, (event: ModUpdateProgress) => {
       change(selected, (previous) => {
         // Any progress proves the backend passed its preflight, even if the
