@@ -209,6 +209,38 @@ pub fn log_frontend_error(error: FrontendError) -> CommandResult<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSignal {
+    pub online: bool,
+    pub reason: NetworkSignalReason,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkSignalReason {
+    Startup,
+    Online,
+    Offline,
+}
+
+impl NetworkSignalReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Online => "online",
+            Self::Offline => "offline",
+        }
+    }
+}
+
+/// Tauri command — forward the webview observation to the JSON-lines logger.
+#[tauri::command]
+pub fn log_network_signal(signal: NetworkSignal) -> CommandResult<()> {
+    diagnostics::record_network_signal(signal.online, signal.reason.as_str());
+    Ok(())
+}
+
 /// Requested inspector width in CSS pixels; never reads window geometry.
 #[tauri::command]
 pub async fn get_mod_panel_width(core: State<'_, Core>) -> CommandResult<Option<u32>> {

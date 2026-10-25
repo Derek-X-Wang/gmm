@@ -211,6 +211,7 @@ pub fn run() {
             commands::get_game_path_status,
             commands::set_game_install_path,
             commands::log_frontend_error,
+            commands::log_network_signal,
             commands::get_mod_panel_width,
             commands::set_mod_panel_width,
             commands::get_skipped_update,

@@ -322,6 +322,26 @@ working state:
    reinstall and staged-operation lists
 9. `msiexec /x` uninstalls cleanly, removing the CLI and install directory
 
+### The webview network signal marker
+
+Release builds record `navigator.onLine` once at startup and each subsequent
+`online` / `offline` event through the ordinary JSON-lines logger. Search for
+`gmm-network-signal` at `INFO` level in `%APPDATA%\GMM\logs\gmm-*.log`:
+
+```powershell
+Select-String -Path "$env:APPDATA\GMM\logs\gmm-*.log" -SimpleMatch 'gmm-network-signal'
+```
+
+Each line has the logger's `timestamp` and structured fields `marker`, `online`
+(a boolean), and `reason` (`startup`, `online`, or `offline`). Use the timestamp
+to isolate the current launch: logs can contain earlier sessions. Start GMM,
+disable the network adapter, restore it, and inspect the new lines. The signal
+is the webview's observation, not proof that a remote service is reachable.
+No developer tools or Rust toolchain are needed on the Windows machine.
+
+This instrumentation does not change query or mutation behavior. Issue #310
+still needs a Windows measurement before deciding how to handle this signal.
+
 ### The IPC readiness marker
 
 Steps 3, 4, 6 and 7 all pass on a build whose UI is completely broken:
