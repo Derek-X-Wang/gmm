@@ -88,8 +88,8 @@ export function hooks(source: Source, hook: "useQuery" | "useMutation"): Hook[] 
     const stem = source.path.replace(/^src\//, "").replace(/\.tsx?$/, "");
     const label = stem === (owner && nameOf(owner)) ? stem : `${stem} / ${owner && nameOf(owner) || "<unnamed>"}`;
     const declaration = node.parent;
-    const variable = ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name)
-      ? declaration.name.text : "<unnamed>";
+    const variable = ts.isVariableDeclaration(declaration)
+      ? declaration.name.getText() : "<unnamed>";
     result.push({ call: node, owner, key: `${label}::${variable}`,
       location: `${source.path}:${file.getLineAndCharacterOfPosition(node.getStart()).line + 1}`,
       options: node.arguments[0] });
@@ -105,8 +105,8 @@ export function productionSources(): Source[] {
 }
 export type Row = { rule: string; key: string; opaque: string; reason: string };
 export function inventory(audit: string): Row[] {
-  return audit.split("\n").filter((line) => /^\| [12] \|/.test(line)).map((line) => {
-    const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+  return audit.split("\n").filter((line) => /^\s*\| [12] \|/.test(line)).map((line) => {
+    const cells = line.trim().split("|").slice(1, -1).map((cell) => cell.trim());
     return { rule: cells[0], key: cells[1], opaque: cells[2], reason: cells[3] };
   });
 }
@@ -117,6 +117,15 @@ export function checkInventory(rule: string, sites: Hook[], audit: string): stri
   for (const site of sites) {
     if (site.key.includes("<unnamed>") || sites.filter((s) => s.key === site.key).length !== 1)
       errors.push(`${site.key}: require unique named owner and binding.`);
+    if (rule === "1") {
+      const allowance = property(property(site.options, "meta"), "conditionalErrorBoundaryReason");
+      const expected = allowance && ts.isStringLiteral(allowance) && allowance.text.trim()
+        ? allowance.text : "none";
+      if (allowance && expected === "none")
+        errors.push(`${site.key}: conditionalErrorBoundaryReason must be a nonempty literal reason.`);
+      if (rows.find((row) => row.key === site.key)?.opaque !== expected)
+        errors.push(`${site.key}: declare exact conditional error allowance "${expected}" with a written reason.`);
+    }
     const matches = rows.filter((row) => row.key === site.key);
     if (matches.length !== 1 || !matches[0].reason || !matches[0].opaque)
       errors.push(`${site.key}: require exactly one explained rule ${rule} inventory row.`);
