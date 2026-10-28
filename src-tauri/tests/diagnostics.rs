@@ -12,8 +12,9 @@ use std::time::{Duration, SystemTime};
 
 use gmm_lib::core::diagnostics::{
     build_bundle, build_writer, prune_old_logs, record_ipc_ready, record_manifest_refresh_started,
-    SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS, IPC_READY_COMMAND,
-    IPC_READY_MARKER, LOG_FILE_PREFIX, LOG_FILE_SUFFIX, MANIFEST_REFRESH_STARTED_MARKER,
+    record_network_signal, SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS,
+    IPC_READY_COMMAND, IPC_READY_MARKER, LOG_FILE_PREFIX, LOG_FILE_SUFFIX,
+    MANIFEST_REFRESH_STARTED_MARKER,
 };
 use tempfile::TempDir;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -276,4 +277,48 @@ fn manifest_refresh_started_marker_lands_in_the_log_file() {
         body.contains(MANIFEST_REFRESH_STARTED_MARKER),
         "log must carry the manifest refresh marker {MANIFEST_REFRESH_STARTED_MARKER}, got:\n{body}",
     );
+}
+
+/// Pin the public grep contract independently of the production constant.
+#[test]
+fn network_signal_marker_and_info_fields_land_in_the_log_file() {
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+    let (writer, guard) = build_writer(&log_dir).expect("writer");
+    let layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(writer);
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        record_network_signal(true, "startup");
+        record_network_signal(true, "online");
+        record_network_signal(false, "offline");
+    });
+    drop(guard);
+
+    let mut body = String::new();
+    for entry in fs::read_dir(&log_dir).expect("read log_dir") {
+        fs::File::open(entry.expect("entry").path())
+            .expect("open log")
+            .read_to_string(&mut body)
+            .expect("read log");
+    }
+    let events: Vec<serde_json::Value> = body
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("JSON log line"))
+        .collect();
+    assert_eq!(events.len(), 3);
+    for (event, (online, reason)) in
+        events
+            .iter()
+            .zip([(true, "startup"), (true, "online"), (false, "offline")])
+    {
+        assert_eq!(event["fields"]["marker"], "gmm-network-signal");
+        assert_eq!(event["level"], "INFO");
+        assert_eq!(event["fields"]["online"], online);
+        assert_eq!(event["fields"]["reason"], reason);
+        assert!(event["timestamp"].as_str().is_some_and(|s| !s.is_empty()));
+    }
 }

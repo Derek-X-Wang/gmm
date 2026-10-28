@@ -19,6 +19,43 @@ export async function logFrontendError(
   }
 }
 
+/** Record the webview's connectivity signal without affecting app behavior. */
+export async function logNetworkSignal(
+  online: boolean,
+  reason: "startup" | "online" | "offline",
+): Promise<void> {
+  try {
+    await invoke("log_network_signal", { signal: { online, reason } });
+  } catch {
+    // Diagnostics must never throw into the app.
+  }
+}
+
+let removeNetworkSignalListeners: (() => void) | undefined;
+
+/** Observe once per app lifetime; page teardown and HMR remove the listeners. */
+export function installNetworkSignalLogging(): () => void {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return () => {};
+  }
+  if (removeNetworkSignalListeners) return removeNetworkSignalListeners;
+
+  const onOnline = () => { void logNetworkSignal(true, "online"); };
+  const onOffline = () => { void logNetworkSignal(false, "offline"); };
+  const cleanup = () => {
+    window.removeEventListener("online", onOnline);
+    window.removeEventListener("offline", onOffline);
+    window.removeEventListener("pagehide", cleanup);
+    removeNetworkSignalListeners = undefined;
+  };
+  removeNetworkSignalListeners = cleanup;
+  window.addEventListener("online", onOnline);
+  window.addEventListener("offline", onOffline);
+  window.addEventListener("pagehide", cleanup, { once: true });
+  void logNetworkSignal(navigator.onLine, "startup");
+  return cleanup;
+}
+
 /** Returns the on-disk log directory GMM writes to. */
 export async function diagnosticsLogDir(): Promise<string> {
   return invoke<string>("diagnostics_log_dir");

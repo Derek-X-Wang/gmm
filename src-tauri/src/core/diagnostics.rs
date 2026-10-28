@@ -452,6 +452,19 @@ pub fn record_manifest_refresh_started() {
     );
 }
 
+/// Stable marker for the webview's startup reading and connectivity events.
+pub const NETWORK_SIGNAL_MARKER: &str = "gmm-network-signal";
+
+/// Record an observation, independently of query and mutation behavior.
+pub fn record_network_signal(online: bool, reason: &str) {
+    tracing::info!(
+        marker = NETWORK_SIGNAL_MARKER,
+        online,
+        reason,
+        "webview network signal",
+    );
+}
+
 /// Record a structured event sourced from the frontend. The Tauri
 /// command shell calls this; nothing else should.
 pub fn record_frontend_error(message: &str, stack: Option<&str>, route: Option<&str>) {

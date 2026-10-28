@@ -12,7 +12,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async (command, args) => 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch }));
 vi.mock("./App", () => ({ default: () => <p>Game Library</p> }));
-vi.mock("./diagnostics", () => ({ installGlobalErrorHandlers: vi.fn() }));
+vi.mock("./diagnostics", () => ({ installGlobalErrorHandlers: vi.fn(), installNetworkSignalLogging: vi.fn() }));
 vi.mock("react-dom/client", () => ({ default: { createRoot: () => ({ render: (node: ReactNode) => render(node) }) } }));
 
 beforeEach(() => {
