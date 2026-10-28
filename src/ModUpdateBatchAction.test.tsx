@@ -42,14 +42,14 @@ it("names in-flight Mods, displays partial outcomes, and publishes the single ba
     progress({ phase: "started", mods: rows });
     progress({ phase: "applying", item: rows[0] });
   });
-  expect(screen.getByRole("status")).toHaveTextContent("Updating First… 0 of 3 completed.");
+  expect(screen.getByRole("status")).toHaveTextContent("Updating First… 0 of 3 processed.");
   expect(screen.getByRole("button", { name: "Applying Mod updates…" })).toBeDisabled();
   act(() => {
     progress({ phase: "completed", result: { ...rows[0], status: "updated" } });
     progress({ phase: "applying", item: rows[1] });
   });
   expect(screen.getByText("First: Updated")).toBeVisible();
-  expect(screen.getByRole("status")).toHaveTextContent("Updating Broken… 1 of 3 completed.");
+  expect(screen.getByRole("status")).toHaveTextContent("Updating Broken… 1 of 3 processed.");
   const report: ModUpdateBatchReport = {
     stopped: false,
     results: [
@@ -57,7 +57,7 @@ it("names in-flight Mods, displays partial outcomes, and publishes the single ba
       { ...rows[1], status: "failed", reason: "download unavailable" },
       { ...rows[2], status: "updated" },
     ],
-    conflicts: { conflicts: [{ hash: "abc", mod_ids: ["First", "Last"], sections: [] }], per_mod_count: { First: 1, Last: 1 } },
+    conflicts: { conflicts: [{ hash: "abc", mod_ids: ["First", "Last"], sections: [] }], omitted: [], per_mod_count: { First: 1, Last: 1 } },
     conflictError: null,
   };
   await act(async () => resolve(report));
@@ -117,7 +117,34 @@ it("keeps the running Game's results separate when switching Games", async () =>
   expect(screen.getByText("Mod updates are running for gimi.")).toBeVisible();
   act(() => progress({ phase: "completed", result: { ...rows[0], status: "updated" } }));
   expect(screen.queryByText("First: Updated")).not.toBeInTheDocument();
-  await act(async () => resolve({ stopped: false, results: [{ ...rows[0], status: "updated" }], conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null }));
+  await act(async () => resolve({ stopped: false, results: [{ ...rows[0], status: "updated" }], conflicts: { conflicts: [], omitted: [], per_mod_count: {} }, conflictError: null }));
   rerender(view());
   expect(screen.getByText("First: Updated")).toBeVisible();
+});
+
+it.each([0, 1])("qualifies the post-batch reading when Mods were omitted (%i known Conflicts)", async (count) => {
+  renderWithQuery(view());
+  await start();
+  await act(async () => resolve({
+    stopped: false, results: [], conflictError: null,
+    conflicts: {
+      conflicts: count ? [{ hash: "shared", mod_ids: ["First", "Last"], sections: [] }] : [],
+      per_mod_count: {}, omitted: ["Broken"],
+    },
+  }));
+  expect(await screen.findByText(`${count} known Conflicts found; the full result is unverified.`)).toBeVisible();
+  expect(screen.queryByText(`${count} Conflicts found after the batch.`)).not.toBeInTheDocument();
+});
+
+it("calls skipped in-flight outcomes processed", async () => {
+  renderWithQuery(view());
+  await start();
+  act(() => {
+    progress({ phase: "started", mods: rows });
+    progress({ phase: "completed", result: { ...rows[0], status: "skipped", reason: "Recovery required" } });
+    progress({ phase: "applying", item: rows[1] });
+  });
+  expect(screen.getByRole("status")).toHaveTextContent("Updating Broken… 1 of 3 processed.");
+  expect(screen.getByRole("status")).not.toHaveTextContent("completed");
+  expect(screen.getByText("First: Skipped — Recovery required")).toBeVisible();
 });

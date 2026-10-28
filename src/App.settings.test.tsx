@@ -154,7 +154,7 @@ beforeEach(() => {
       case "get_library_paths": return { defaultRoot: "C:\\GMM\\library", effectiveRoot: "C:\\GMM\\library", rootOverride: null, perGameOverrides: {}, perGameEffective: {} };
       case "current_session": return session;
       case "clean_stale_session": return null;
-      case "detect_conflicts": return { conflicts: [], per_mod_count: {} };
+      case "detect_conflicts": return { conflicts: [], omitted: [], per_mod_count: {} };
       case "audit_library": return { unreferenced: [], duplicates: [], totalBytes: 0 };
       case "list_mods":
       case "list_mod_updates":

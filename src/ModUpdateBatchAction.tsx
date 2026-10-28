@@ -93,6 +93,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
   };
   const ahead = rows.filter((row) => row.upstreamAhead);
   const batch = batches[game];
+  const conflictReadingUnverified = !!batch?.report?.conflictError || !!batch?.report?.conflicts?.omitted.length;
   const sessionBlocked = !sessionCheck.session.isSuccess || !!sessionCheck.session.data;
   const start = () => {
     const batchId = crypto.randomUUID();
@@ -117,7 +118,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
     {apply.isPending && apply.variables?.selected !== game &&
       <p role="status">Mod updates are running for {apply.variables?.selected}.</p>}
     {batch && <div>
-      <p role="status">{batch.reading} {apply.isPending && apply.variables?.selected === game ? `${batch.results.length} of ${batch.mods.length} completed.` : null}</p>
+      <p role="status">{batch.reading} {apply.isPending && apply.variables?.selected === game ? `${batch.results.length} of ${batch.mods.length} processed.` : null}</p>
       {apply.isPending && apply.variables?.selected === game && batch.stopRequested && batch.current &&
         <p>Stop requested. Waiting for {batch.current.name} to finish; later Mods will not start.</p>}
       {batch.stopError && <p role="alert">{batch.stopError}</p>}
@@ -128,8 +129,8 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
       {batch.error && <p role="alert">{batch.error}{batch.started ? " Conflict check result unavailable." : ""}</p>}
       {batch.report?.conflictError && <p role="alert">Conflicts unverified: {batch.report.conflictError}</p>}
       {batch.report?.conflicts && <div>
-        {!batch.report.conflictError && <p>{batch.report.conflicts.conflicts.length} Conflicts found after the batch.</p>}
-        {batch.report.conflictError && batch.report.conflicts.conflicts.length > 0 &&
+        {!conflictReadingUnverified && <p>{batch.report.conflicts.conflicts.length} Conflicts found after the batch.</p>}
+        {conflictReadingUnverified &&
           <p>{batch.report.conflicts.conflicts.length} known Conflicts found; the full result is unverified.</p>}
         <ul>{batch.report.conflicts.conflicts.map((conflict) => <li key={conflict.hash}>
           Hash {conflict.hash}: {conflict.mod_ids.map((id) =>

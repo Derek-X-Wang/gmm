@@ -44,7 +44,7 @@ beforeEach(() => {
       return null;
     }
     if (command === "list_mods") return rawMods;
-    if (command === "detect_conflicts") return { conflicts: [], per_mod_count: {} };
+    if (command === "detect_conflicts") return { conflicts: [], omitted: [], per_mod_count: {} };
     if (command === "list_variants") return { variants: [], activeVariantId: null };
     if (command === "list_mod_updates") return [{ modId: "outfit", upstreamVersion: "2.0" }];
     return null;

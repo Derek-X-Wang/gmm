@@ -313,6 +313,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                 modId={m.id}
                 conflicts={conflicts.data?.conflicts ?? []}
                 count={conflicts.data?.per_mod_count[m.id] ?? 0}
+                omitted={conflicts.data?.omitted.includes(m.id) ?? false}
               />
               <VariantSelector
                 modId={m.id}
@@ -508,12 +509,15 @@ function ConflictBadge({
   modId,
   conflicts,
   count,
+  omitted,
 }: {
   modId: string;
   conflicts: Conflict[];
   count: number;
+  omitted: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  if (omitted) return <span className="muted small">Conflicts unscanned</span>;
   if (!count) return null;
   const mine = conflicts.filter((c) => c.mod_ids.includes(modId));
   return (

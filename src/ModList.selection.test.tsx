@@ -26,7 +26,7 @@ beforeEach(() => {
       if (failRefresh) throw new Error("Library unavailable");
       return mods;
     }
-    if (command === "detect_conflicts") return { conflicts: [], per_mod_count: {} };
+    if (command === "detect_conflicts") return { conflicts: [], omitted: [], per_mod_count: {} };
     if (command === "list_variants") return {
       variants: variants && args?.modId === "march" ? [
         { id: "red", mod_id: "march", name: "Red", subpath: "red" },

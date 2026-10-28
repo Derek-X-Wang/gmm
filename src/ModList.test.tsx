@@ -35,7 +35,7 @@ beforeEach(() => {
   openDialog.mockResolvedValue("C:/Downloads/outfit.zip");
   invoke.mockImplementation(async (command: string) => {
     if (command === "list_mods") return modRead();
-    if (command === "detect_conflicts") return { conflicts: [], per_mod_count: {} };
+    if (command === "detect_conflicts") return { conflicts: [], omitted: [], per_mod_count: {} };
     if (command === "list_variants") return { variants: [], activeVariantId: null };
     if (command === "list_mod_updates") return [];
     return null;
@@ -344,4 +344,24 @@ it("retains recovery feedback during same-Game imports and clears it on a Game c
   expect(screen.queryByText(message)).not.toBeInTheDocument();
   view.rerender(<ModList game="srmi" displayName="Honkai: Star Rail" />);
   expect(screen.queryByText(message)).not.toBeInTheDocument();
+});
+
+it("labels an omitted Mod Conflict badge unscanned instead of zero", async () => {
+  mods = [{ ...outfit, enabled: true, reinstall_recovery: {
+    reason: "Recovery needed", attemptedAt: "2026-10-07T12:00:00Z", attempts: 1,
+    libraryPath: outfit.library_path, stagedPath: "C:/Library/srmi/.gmm-reinstall-stage",
+    quarantinePath: "C:/Library/srmi/.gmm-delete-old", junctionWithdrawn: true,
+    junctionWithdrawalError: null,
+  } }];
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "detect_conflicts"
+    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [outfit.id] })
+    : implementation(command, args));
+  renderMods();
+  const badge = await screen.findByText("Conflicts unscanned");
+  expect(badge).toBeVisible();
+  const row = badge.closest("li")!;
+  expect(row).toHaveClass("mods__row--quarantined");
+  expect(within(row).queryByText(/^0 conflicts?$/)).not.toBeInTheDocument();
+  expect(within(row).getByRole("button", { name: "Retry recovery" })).toBeVisible();
 });

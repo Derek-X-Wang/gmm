@@ -111,12 +111,7 @@ impl Core {
         self.ensure_no_active_session().await?;
         self.ensure_no_pending_enabled_transition().await?;
         // Match the per-Mod action's recovery gate before spending bandwidth.
-        // Include all Sources, including Mods without an available update:
-        // the Conflict scanner can omit those quarantined Mods too.
         let library_mods = self.list_mods(game).await?;
-        let preexisting_incomplete = library_mods
-            .iter()
-            .any(|item| item.enabled && item.reinstall_recovery.is_some());
         let mods: Vec<_> = self
             .list_mod_updates(game)
             .await?
@@ -184,11 +179,15 @@ impl Core {
                 // The scanner omits quarantined Mods. Preserve the known
                 // findings without presenting that partial scan as complete.
                 let incomplete = stopped
-                    || preexisting_incomplete
+                    || !report.omitted.is_empty()
                     || results
                         .iter()
                         .any(|result| matches!(result.outcome, ModUpdateOutcome::Unknown { .. }));
-                let message = if stopped {
+                let message = if stopped && !report.omitted.is_empty() {
+                    "The full Conflict reading is unverified because the batch stopped with Mods not attempted and the scan omitted Mods needing recovery."
+                } else if !report.omitted.is_empty() {
+                    "The full Conflict reading is unverified because the scan omitted Mods needing recovery."
+                } else if stopped {
                     "The full Conflict reading is unverified because the batch stopped with Mods not attempted."
                 } else {
                     "The full Conflict reading is unverified because a Mod update needs recovery."

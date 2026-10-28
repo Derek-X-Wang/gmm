@@ -589,6 +589,7 @@ export interface Conflict {
 export interface ConflictReport {
   conflicts: Conflict[];
   per_mod_count: Record<string, number>;
+  omitted: string[];
 }
 
 export async function detectConflicts(game: GameCode): Promise<ConflictReport> {

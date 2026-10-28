@@ -97,7 +97,7 @@ async fn unrelated_games_pending_transition_refuses_batch_before_any_network_or_
     no_network.assert_async().await;
 }
 
-async fn quarantine_case(outdated: bool) {
+async fn quarantine_case(outdated: bool, enabled: bool) {
     let tmp = TempDir::new().unwrap();
     let url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
     let core = Core::new(tmp.path().join("library"), &url).await.unwrap();
@@ -112,9 +112,11 @@ async fn quarantine_case(outdated: bool) {
     std::fs::create_dir_all(game.join("Mods")).unwrap();
     let quarantined = seed(&core, &pool, tmp.path(), "Recovery", 1, GameCode::Gimi).await;
     let healthy = seed(&core, &pool, tmp.path(), "Healthy", 2, GameCode::Gimi).await;
-    core.set_enabled(&quarantined.id, true, &game.join("Mods"))
-        .await
-        .unwrap();
+    if enabled {
+        core.set_enabled(&quarantined.id, true, &game.join("Mods"))
+            .await
+            .unwrap();
+    }
     sqlx::query("CREATE TRIGGER reject_retirement BEFORE DELETE ON reinstall_swaps BEGIN SELECT RAISE(ABORT, 'recovery required'); END")
         .execute(&pool).await.unwrap();
     let mut first_server = mockito::Server::new_async().await;
@@ -151,8 +153,8 @@ async fn quarantine_case(outdated: bool) {
         .find(|item| item.id == quarantined.id)
         .unwrap();
     assert!(
-        row.enabled && row.reinstall_recovery.is_some(),
-        "fixture must contain a pre-existing enabled quarantined Mod"
+        row.enabled == enabled && row.reinstall_recovery.is_some(),
+        "fixture must contain a pre-existing quarantined Mod with the requested enabled state"
     );
     if !outdated {
         // Conflict completeness covers all Sources, not only available updates.
@@ -206,9 +208,19 @@ async fn quarantine_case(outdated: bool) {
     }
     assert!(!events.iter().any(|event| matches!(event, ModUpdateProgress::Applying { item } if item.mod_id == quarantined.id)), "quarantined Mods must never enter the reinstall path");
     assert!(report.conflicts.is_some(), "retain known Conflict findings");
-    assert!(
+    assert_eq!(
         report.conflict_error.is_some(),
-        "an enabled pre-existing quarantine must make the full Conflict reading unverified"
+        enabled,
+        "only enabled quarantined Mods make the full Conflict reading unverified"
+    );
+    assert_eq!(
+        report.conflicts.as_ref().unwrap().omitted,
+        if enabled {
+            vec![quarantined.id.clone()]
+        } else {
+            vec![]
+        },
+        "disabled quarantined Mods are not omissions"
     );
     assert_eq!(
         events
@@ -222,12 +234,12 @@ async fn quarantine_case(outdated: bool) {
 
 #[tokio::test]
 async fn preexisting_reinstall_recovery_is_skipped_without_download_and_qualifies_conflicts() {
-    quarantine_case(true).await;
+    quarantine_case(true, true).await;
 }
 
 #[tokio::test]
 async fn quarantined_local_mod_outside_update_set_still_makes_conflicts_unverified() {
-    quarantine_case(false).await;
+    quarantine_case(false, true).await;
 }
 
 #[tokio::test]
@@ -285,4 +297,105 @@ async fn shared_reinstall_commit_failure_restores_bytes_while_database_keeps_old
         .await
         .unwrap();
     assert_eq!(witnesses, 0, "completed rollback must retire its witness");
+}
+
+#[tokio::test]
+async fn quarantine_during_batch_is_omitted_and_makes_conflicts_unverified() {
+    use std::{cell::Cell, future::Future, task::Poll};
+
+    let tmp = TempDir::new().unwrap();
+    let url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &url).await.unwrap();
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    let game = tmp.path().join("game");
+    core.set_game_install_path(
+        GameCode::Gimi,
+        support::seed_game_install(GameCode::Gimi, &game),
+    )
+    .await
+    .unwrap();
+    std::fs::create_dir_all(game.join("Mods")).unwrap();
+    let unrelated = seed(&core, &pool, tmp.path(), "Recovery", 1, GameCode::Gimi).await;
+    core.set_enabled(&unrelated.id, true, &game.join("Mods"))
+        .await
+        .unwrap();
+    // Leave a real, non-quarantined witness after a failed retirement.
+    sqlx::query("CREATE TRIGGER reject_retirement BEFORE DELETE ON reinstall_swaps BEGIN SELECT RAISE(ABORT, 'recovery required'); END")
+        .execute(&pool).await.unwrap();
+    let mut server = mockito::Server::new_async().await;
+    upstream(&mut server, 1).await;
+    assert!(matches!(
+        core.reinstall_gamebanana_mod_with_endpoints(
+            &unrelated.id,
+            &Endpoints {
+                api_base: server.url()
+            },
+        )
+        .await
+        .unwrap_err(),
+        Error::ReinstallRollbackFailed { .. }
+    ));
+    sqlx::query("DROP TRIGGER reject_retirement")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mods SET source = 'local' WHERE id = ?")
+        .bind(&unrelated.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let healthy = seed(&core, &pool, tmp.path(), "Healthy", 2, GameCode::Gimi).await;
+    upstream(&mut server, 2).await;
+    let before = core.list_mods(GameCode::Gimi).await.unwrap();
+    let before = before.iter().find(|item| item.id == unrelated.id).unwrap();
+    assert!(
+        before.enabled && before.reinstall_recovery.is_none(),
+        "the unrelated Mod must not be quarantined when the batch starts"
+    );
+
+    let applying = Cell::new(false);
+    let endpoints = Endpoints {
+        api_base: server.url(),
+    };
+    let mut batch =
+        Box::pin(
+            core.apply_all_mod_updates_with_endpoints(GameCode::Gimi, &endpoints, |event| {
+                if let ModUpdateProgress::Applying { item } = event {
+                    assert_eq!(item.mod_id, healthy.id);
+                    applying.set(true);
+                }
+            }),
+        );
+    // Poll the production future past its pre-loop snapshot and into the first
+    // reinstall's asynchronous preflight/download. Leave it pending while the
+    // unrelated Retry recovery command runs; no timing sleeps or new seams.
+    std::future::poll_fn(|cx| match batch.as_mut().poll(cx) {
+        Poll::Pending if applying.get() => Poll::Ready(()),
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(result) => panic!("batch finished before recovery interleaving: {result:?}"),
+    })
+    .await;
+    std::fs::rename(&unrelated.library_path, tmp.path().join("held-old-tree")).unwrap();
+    assert!(matches!(
+        core.retry_reinstall_recovery(&unrelated.id).await.unwrap(),
+        gmm_lib::core::ReinstallRecoveryOutcome::Quarantined { .. }
+    ));
+    let report = batch.await.unwrap();
+    assert!(!report.stopped);
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].outcome, ModUpdateOutcome::Updated);
+    assert!(report.conflict_error.as_deref().is_some_and(|message| message.contains("omitted")),
+        "a Mod quarantined during the batch must make the Conflict reading unverified with the omission cause: {:?}", report.conflict_error);
+    let conflicts = report.conflicts.unwrap();
+    assert_eq!(
+        conflicts.omitted,
+        vec![unrelated.id.clone()],
+        "the scan must name the Mod quarantined after the batch snapshot"
+    );
+    assert!(!conflicts.per_mod_count.contains_key(&unrelated.id));
+}
+
+#[tokio::test]
+async fn disabled_quarantined_mod_is_not_omitted_and_does_not_qualify_conflicts() {
+    quarantine_case(false, false).await;
 }

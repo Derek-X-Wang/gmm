@@ -177,7 +177,7 @@ function ipcResult(command: string) {
       return [];
     case "detect_conflicts":
       if (conflictError) throw conflictError;
-      return { conflicts: [], per_mod_count: {} };
+      return { conflicts: [], omitted: [], per_mod_count: {} };
     case "set_library_root":
       return {
         relocated: ["01INTERNALMODID"],

@@ -63,7 +63,7 @@ beforeEach(() => {
         defaultRoot: "C:\\GMM\\library", effectiveRoot: "C:\\GMM\\library",
         rootOverride: null, perGameOverrides: {}, perGameEffective: {},
       };
-      case "detect_conflicts": return { conflicts: [], per_mod_count: {} };
+      case "detect_conflicts": return { conflicts: [], omitted: [], per_mod_count: {} };
       case "mod_updates_globally_enabled": return true;
       case "list_mods":
       case "list_mod_updates":
