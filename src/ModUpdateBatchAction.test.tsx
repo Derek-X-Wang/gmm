@@ -126,7 +126,8 @@ it.each([0, 1])("qualifies the post-batch reading when Mods were omitted (%i kno
   renderWithQuery(view());
   await start();
   await act(async () => resolve({
-    stopped: false, results: [], conflictError: null,
+    stopped: false, results: [],
+    conflictError: "The full Conflict reading is unverified because the scan omitted Mods needing recovery.",
     conflicts: {
       conflicts: count ? [{ hash: "shared", mod_ids: ["First", "Last"], sections: [] }] : [],
       per_mod_count: {}, omitted: ["Broken"],

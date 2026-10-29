@@ -93,7 +93,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
   };
   const ahead = rows.filter((row) => row.upstreamAhead);
   const batch = batches[game];
-  const conflictReadingUnverified = !!batch?.report?.conflictError || !!batch?.report?.conflicts?.omitted.length;
+  const conflictReadingUnverified = !!batch?.report?.conflictError;
   const sessionBlocked = !sessionCheck.session.isSuccess || !!sessionCheck.session.data;
   const start = () => {
     const batchId = crypto.randomUUID();

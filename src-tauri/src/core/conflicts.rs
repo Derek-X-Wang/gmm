@@ -237,7 +237,8 @@ pub struct ConflictReport {
     /// `mod_id -> conflict_count` so the UI doesn't have to count.
     pub per_mod_count: HashMap<String, usize>,
     /// Sorted enabled Mod ids skipped because of quarantined reinstall recovery.
-    /// Disabled Mods cannot conflict and are not omissions.
+    /// Takes `mods.enabled` at face value; enable/disable recovery can leave it
+    /// inconsistent with deployment on disk (see #442).
     pub omitted: Vec<String>,
 }
 
