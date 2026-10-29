@@ -34,6 +34,7 @@ beforeEach(() => {
   modRead = () => mods;
   openDialog.mockResolvedValue("C:/Downloads/outfit.zip");
   invoke.mockImplementation(async (command: string) => {
+    if (command === "list_presets") return [];
     if (command === "list_mods") return modRead();
     if (command === "detect_conflicts") return { conflicts: [], omitted: [], per_mod_count: {} };
     if (command === "list_variants") return { variants: [], activeVariantId: null };

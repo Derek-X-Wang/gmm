@@ -29,6 +29,7 @@ pub mod mod_update_batch;
 pub mod mod_updates;
 pub mod mods;
 pub mod network;
+pub mod presets;
 pub mod recommended_importers;
 pub mod reconcile;
 pub mod session;

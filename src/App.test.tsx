@@ -173,6 +173,7 @@ function ipcResult(command: string) {
         upstreamAhead: false,
         checkError: null,
       };
+    case "list_presets": return [];
     case "list_mods":
       return [];
     case "detect_conflicts":
@@ -492,6 +493,7 @@ it("renders the approved six main-screen slots in order with scoped notices and 
   // OS title bar and both its actions are native menu items — and the
   // per-Game status is no longer a slot in the page at all. It is window
   // chrome now, pinned to the bottom in the `contentinfo` bar below.
+  // #428 added the per-Game preset slot last, bringing the count to seven.
   expect(Array.from(main.children)).toEqual([
     header,
     global,
@@ -499,6 +501,7 @@ it("renders the approved six main-screen slots in order with scoped notices and 
     notices,
     screen.getByRole("heading", { name: "Add Mods for Genshin Impact" }).closest("section"),
     screen.getByRole("heading", { name: "Mod updates" }).closest("section"),
+    screen.getByRole("heading", { name: "Saved presets" }).closest("section"),
   ]);
   const statusBar = screen.getByRole("contentinfo");
   const status = screen.getByRole("region", { name: "Genshin Impact status" });
@@ -521,6 +524,7 @@ it("renders the approved six main-screen slots in order with scoped notices and 
   expect(screen.getByRole("heading", { name: "Add Mods for Genshin Impact" }).closest("section")!.querySelector("ul.mods")).toBeNull();
   expect(screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual([
     "Adopt for Genshin Impact", "Import ZIP for Genshin Impact", "GameBanana for Genshin Impact",
+    "Saved presets",
   ]);
   expect(main.querySelector("aside")).toBeNull();
   expect(main.querySelector("header.window-bar")).toBeNull();

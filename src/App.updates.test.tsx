@@ -97,6 +97,7 @@ beforeEach(() => {
       case "clean_stale_session": return null;
       case "detect_conflicts": return { conflicts: [], omitted: [], per_mod_count: {} };
       case "audit_library": return { unreferenced: [], duplicates: [], totalBytes: 0 };
+      case "list_presets": return [];
       case "list_mods":
       case "list_mod_updates":
       case "interrupted_session_launches": return [];

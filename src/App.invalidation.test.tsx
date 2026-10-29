@@ -116,6 +116,7 @@ beforeEach(() => {
       perGameEffective: { gimi: "C:\\GMM\\library\\gimi" },
     },
     audit_library: { unreferenced: [], duplicates: [], totalBytes: 0 },
+    list_presets: [],
     list_mods: [modFixture()],
     list_variants: variantsFixture("Old"),
     detect_conflicts: { conflicts: [], omitted: [], per_mod_count: {} },

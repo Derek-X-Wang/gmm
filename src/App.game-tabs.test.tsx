@@ -65,6 +65,7 @@ beforeEach(() => {
       };
       case "detect_conflicts": return { conflicts: [], omitted: [], per_mod_count: {} };
       case "mod_updates_globally_enabled": return true;
+      case "list_presets": return [];
       case "list_mods":
       case "list_mod_updates":
       case "interrupted_session_launches": return [];

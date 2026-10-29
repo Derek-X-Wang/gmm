@@ -53,6 +53,7 @@ beforeEach(() => {
       case "interrupted_session_launches": return launchVisible ? [reservation] : [];
       case "retire_interrupted_session_launch":
       case "retire_interrupted_enabled_transition": return retire();
+      case "list_presets": return [];
       case "list_mods": return [{ ...outfit, enabled_transition_recovery: producerVisible ? transition : null }];
       case "detect_conflicts": return { conflicts: [], omitted: [], per_mod_count: {} };
       case "list_variants": return { variants: [], activeVariantId: null };

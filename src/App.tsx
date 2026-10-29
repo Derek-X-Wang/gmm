@@ -4,6 +4,7 @@ import { GameHeader } from "./GameHeader";
 import { GlobalHeaderLine } from "./GlobalHeaderLine";
 import { ModList } from "./ModList";
 import { ModUpdateBatchAction } from "./ModUpdateBatchAction";
+import { GamePresets } from "./GamePresets";
 import { SessionCheckNotice, useSessionCheck } from "./SessionCheckNotice";
 import { useRecoveryOutcomes } from "./RecoveryOutcome";
 import { GameTabs } from "./GameTabs";
@@ -343,6 +344,7 @@ function MainApp({
         {hasActiveGame ? <>
           <ModList game={activeGame} displayName={active.displayName} />
           <ModUpdatesPanel game={activeGame} />
+          <GamePresets key={activeGame} game={activeGame} />
         </> : null}
       </main>
       {/*

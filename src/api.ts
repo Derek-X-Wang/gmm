@@ -89,6 +89,22 @@ const fromRaw = (m: RawMod): Mod => ({
   enabledTransitionRecovery: m.enabled_transition_recovery ?? null,
 });
 
+export interface Preset {
+  id: string;
+  game: GameCode;
+  name: string;
+  createdAt: string;
+  modCount: number;
+}
+
+export function savePreset(game: GameCode, name: string): Promise<Preset> {
+  return invoke<Preset>("save_preset", { game, name });
+}
+
+export function listPresets(game: GameCode): Promise<Preset[]> {
+  return invoke<Preset[]>("list_presets", { game });
+}
+
 export async function listMods(game: GameCode): Promise<Mod[]> {
   const raw = await invoke<RawMod[]>("list_mods", { game });
   return raw.map(fromRaw);

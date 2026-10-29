@@ -45,6 +45,7 @@ Opaque mutation keys/options have no production allowance.
 | 2 | App / useLaunchGame::launch | guidance.refetch | Error handling refetches exclusion guidance from its query; this refresh installs no mutation return value. |
 | 2 | App / ModUpdatesPanel::check | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | App / ModUpdatesPanel::toggleGlobal | none | No direct cache write in success/settlement; refresh or local UI only. |
+| 2 | GamePresets::save | setName | Successful atomic capture clears only the local name draft and invalidates presets/game; it installs no cache data. The listing query is unconditional. |
 | 2 | Diagnostics::exportBundle | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | ImporterOriginPanel::accept | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | ImporterOriginPanel::decline | none | No direct cache write in success/settlement; refresh or local UI only. |
