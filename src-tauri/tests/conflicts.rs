@@ -227,3 +227,29 @@ async fn enabled_mods_sharing_a_hash_surface_as_conflict() {
         "disabling B clears it: {report:?}"
     );
 }
+
+#[tokio::test]
+async fn disabled_mod_is_not_omitted_from_conflict_scan() {
+    let tmp = TempDir::new().unwrap();
+    let url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &url).await.unwrap();
+    let folder = tmp.path().join("disabled");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("merged.ini"),
+        b"[TextureOverrideA]\nhash = shared\n",
+    )
+    .unwrap();
+    let item = core
+        .adopt_folder(GameCode::Gimi, &folder, "Disabled")
+        .await
+        .unwrap();
+    assert!(!item.enabled);
+    let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
+    assert!(
+        report.omitted.is_empty(),
+        "disabled Mods cannot conflict and are not omissions"
+    );
+    assert!(report.conflicts.is_empty());
+    assert!(!report.per_mod_count.contains_key(&item.id));
+}

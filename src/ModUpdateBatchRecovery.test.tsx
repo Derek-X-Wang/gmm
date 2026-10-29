@@ -47,9 +47,9 @@ it.each(["incomplete report", "IPC loss"])("refreshes the mounted Conflict readi
     mutations: { retry: false },
   } });
   client.setQueryData(["conflicts", "gimi"], {
-    conflicts: [{ hash: "old1", mod_ids: [], sections: [] }, { hash: "old2", mod_ids: [], sections: [] }], per_mod_count: {},
+    conflicts: [{ hash: "old1", mod_ids: [], sections: [] }, { hash: "old2", mod_ids: [], sections: [] }], omitted: [], per_mod_count: {},
   });
-  const read = vi.fn().mockResolvedValue({ conflicts: [], per_mod_count: {} });
+  const read = vi.fn().mockResolvedValue({ conflicts: [], omitted: [], per_mod_count: {} });
   renderWithQuery(<>{view}<ConflictCount read={read} /></>, { client });
   expect(screen.getByText("Shared Conflict count: 2")).toBeVisible();
   expect(read).not.toHaveBeenCalled();
@@ -57,7 +57,7 @@ it.each(["incomplete report", "IPC loss"])("refreshes the mounted Conflict readi
   act(() => progress({ phase: "started", mods: rows }));
   await act(async () => {
     if (failure === "IPC loss") reject(new Error("connection lost"));
-    else resolve({ stopped: false, results: [], conflicts: { conflicts: [], per_mod_count: {} }, conflictError: "recovery pending" });
+    else resolve({ stopped: false, results: [], conflicts: { conflicts: [], omitted: [], per_mod_count: {} }, conflictError: "recovery pending" });
   });
   await waitFor(() => expect(read, "the mounted Conflict query must refetch after every batch outcome").toHaveBeenCalledTimes(1));
   expect(await screen.findByText("Shared Conflict count: 0")).toBeVisible();
@@ -85,7 +85,7 @@ it("displays skipped recovery separately from failures and keeps incomplete Conf
   await act(async () => resolve({
     stopped: false,
     results: [{ ...rows[0], status: "skipped", reason: "Interrupted update recovery required" }, { ...rows[1], status: "updated" }],
-    conflicts: { conflicts: [], per_mod_count: {} }, conflictError: "An enabled Mod is quarantined",
+    conflicts: { conflicts: [], omitted: [], per_mod_count: {} }, conflictError: "An enabled Mod is quarantined",
   }));
   expect(await screen.findByText("First: Skipped — Interrupted update recovery required")).toBeVisible();
   expect(screen.getByText("Last: Updated")).toBeVisible();

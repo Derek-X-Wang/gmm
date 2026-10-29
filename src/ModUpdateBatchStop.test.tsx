@@ -52,7 +52,7 @@ it("offers an explicit boundary stop, names the waiting Mod, and sends only once
   const report: ModUpdateBatchReport = {
     stopped: true,
     results: [{ ...rows[0], status: "updated" }, { ...rows[1], status: "updated" }, { ...rows[2], status: "skipped", reason: "Not started because you stopped the batch. The Library was not touched." }],
-    conflicts: { conflicts: [], per_mod_count: {} },
+    conflicts: { conflicts: [], omitted: [], per_mod_count: {} },
     conflictError: "The full Conflict reading is unverified because the batch stopped with Mods not attempted.",
   };
   await act(async () => resolve(report));
@@ -73,16 +73,16 @@ it("withdraws Stop during the final Conflict scan and offers it again for the ne
     progress({ phase: "completed", result: { ...rows[2], status: "updated" } });
     progress({ phase: "checkingConflicts" });
   });
-  expect(screen.getByRole("status")).toHaveTextContent("Checking Conflicts… 3 of 3 completed.");
+  expect(screen.getByRole("status")).toHaveTextContent("Checking Conflicts… 3 of 3 processed.");
   expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
   expect(invoke.mock.calls.filter(([command]) => command === "stop_mod_update_batch")).toHaveLength(0);
-  await act(async () => resolve({ stopped: false, results: rows.map((item) => ({ ...item, status: "updated" })), conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null }));
+  await act(async () => resolve({ stopped: false, results: rows.map((item) => ({ ...item, status: "updated" })), conflicts: { conflicts: [], omitted: [], per_mod_count: {} }, conflictError: null }));
   const apply = screen.getByRole("button", { name: "Apply all Mod updates" });
   await waitFor(() => expect(apply).toBeEnabled());
   fireEvent.click(apply);
   await waitFor(() => expect(invoke.mock.calls.filter(([command]) => command === "apply_all_mod_updates")).toHaveLength(2));
   expect(screen.getByRole("button", { name: "Stop after this Mod" })).toBeEnabled();
-  expect(screen.getByRole("status")).toHaveTextContent("Starting updates… 0 of 3 completed.");
+  expect(screen.getByRole("status")).toHaveTextContent("Starting updates… 0 of 3 processed.");
 });
 it("keeps stop delivery failure visible and allows a retry", async () => {
   renderWithQuery(view);
@@ -103,7 +103,7 @@ it("does not expose a stale stop token on another Game and a late stop leaves a 
   expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
   rerender(view);
   fireEvent.click(screen.getByRole("button", { name: "Stop after this Mod" }));
-  await act(async () => resolve({ stopped: false, results: rows.map((item) => ({ ...item, status: "updated" })), conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null }));
+  await act(async () => resolve({ stopped: false, results: rows.map((item) => ({ ...item, status: "updated" })), conflicts: { conflicts: [], omitted: [], per_mod_count: {} }, conflictError: null }));
   expect(screen.getByRole("status")).toHaveTextContent("Batch finished.");
   expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
 });
@@ -114,7 +114,7 @@ it("ignores a delayed stop error after the batch has already finished", async ()
   let rejectStop!: (error: Error) => void;
   invoke.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectStop = reject; }));
   fireEvent.click(screen.getByRole("button", { name: "Stop after this Mod" }));
-  await act(async () => resolve({ stopped: false, results: rows.map((item) => ({ ...item, status: "updated" })), conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null }));
+  await act(async () => resolve({ stopped: false, results: rows.map((item) => ({ ...item, status: "updated" })), conflicts: { conflicts: [], omitted: [], per_mod_count: {} }, conflictError: null }));
   await act(async () => rejectStop(new Error("late connection failure")));
   expect(screen.getByRole("status")).toHaveTextContent("Batch finished.");
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();

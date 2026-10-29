@@ -118,7 +118,7 @@ beforeEach(() => {
     audit_library: { unreferenced: [], duplicates: [], totalBytes: 0 },
     list_mods: [modFixture()],
     list_variants: variantsFixture("Old"),
-    detect_conflicts: { conflicts: [], per_mod_count: {} },
+    detect_conflicts: { conflicts: [], omitted: [], per_mod_count: {} },
     av_guidance: { headline: "Launch blocked", body: "", exclusionSteps: [], sentinel: "AV-PATTERN: " },
   };
   mutations = {};
@@ -174,7 +174,7 @@ it("refreshes displayed Conflicts after applying a Mod update", async () => {
   mutations.apply_mod_update = () => {
     responses.detect_conflicts = {
       conflicts: [{ hash: "deadbeef", mod_ids: ["mod-outfit", "mod-other"], sections: [] }],
-      per_mod_count: { "mod-outfit": 1 },
+      omitted: [], per_mod_count: { "mod-outfit": 1 },
     } satisfies ConflictReport;
   };
   renderApp();
@@ -298,9 +298,9 @@ it("shows a retained launch reservation immediately after launch fails", async (
 
 it("refreshes reinstall recovery even when its retry rejects", async () => {
   responses.list_mods = [{ ...modFixture(), reinstall_recovery: recoveryFixture }];
-  responses.detect_conflicts = { conflicts: [{ hash: "recover-hash", mod_ids: ["mod-outfit", "other"] }], per_mod_count: { "mod-outfit": 1 } };
+  responses.detect_conflicts = { conflicts: [{ hash: "recover-hash", mod_ids: ["mod-outfit", "other"] }], omitted: [], per_mod_count: { "mod-outfit": 1 } };
   mutations.retry_reinstall_recovery = () => {
-    responses.detect_conflicts = { conflicts: [], per_mod_count: {} };
+    responses.detect_conflicts = { conflicts: [], omitted: [], per_mod_count: {} };
     responses.list_mods = [{ ...modFixture(), reinstall_recovery: { ...recoveryFixture, reason: "New recorded reinstall obstruction", attempts: 2 } }];
     throw new Error("Reinstall recovery failed");
   };
@@ -543,7 +543,7 @@ it("keeps row recovery, Variants, Conflict disclosures and Mod updates under sep
   }];
   responses.detect_conflicts = {
     conflicts: [{ hash: "shared-hash", mod_ids: ["mod-outfit", "broken-mod"] }],
-    per_mod_count: { "mod-outfit": 1, "broken-mod": 1 },
+    omitted: [], per_mod_count: { "mod-outfit": 1, "broken-mod": 1 },
   };
   mutations.set_active_variant = () => { throw new Error("Variant change denied"); };
   mutations.apply_mod_update = () => { throw new Error("Update refused"); };
@@ -686,10 +686,10 @@ it("refreshes Game Session context after Launch succeeds", async () => {
 
 it.each([false, true])("refreshes this Game's Mods and Conflicts after changing enabled state from %s", async (enabled) => {
   responses.list_mods = [modFixture(enabled)];
-  responses.detect_conflicts = { conflicts: [{ hash: "toggle-hash", mod_ids: ["mod-outfit", "other"] }], per_mod_count: { "mod-outfit": 1 } };
+  responses.detect_conflicts = { conflicts: [{ hash: "toggle-hash", mod_ids: ["mod-outfit", "other"] }], omitted: [], per_mod_count: { "mod-outfit": 1 } };
   mutations.set_mod_enabled = () => {
     responses.list_mods = [modFixture(!enabled)];
-    responses.detect_conflicts = { conflicts: [], per_mod_count: {} };
+    responses.detect_conflicts = { conflicts: [], omitted: [], per_mod_count: {} };
     throw new Error("Toggle partly persisted");
   };
   renderApp();

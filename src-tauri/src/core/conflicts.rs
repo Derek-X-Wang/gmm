@@ -230,13 +230,16 @@ fn is_override_section(name: &str) -> bool {
     lower.starts_with("textureoverride") || lower.starts_with("resourceoverride")
 }
 
-/// Aggregated conflict report. Empty when no hash is bound by two or
-/// more enabled Mods.
+/// Aggregated findings for enabled Mods, with any scan omissions recorded.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConflictReport {
     pub conflicts: Vec<Conflict>,
     /// `mod_id -> conflict_count` so the UI doesn't have to count.
     pub per_mod_count: HashMap<String, usize>,
+    /// Sorted enabled Mod ids skipped because of quarantined reinstall recovery.
+    /// Takes `mods.enabled` at face value; enable/disable recovery can leave it
+    /// inconsistent with deployment on disk (see #442).
+    pub omitted: Vec<String>,
 }
 
 /// One Conflict: a hash bound by two or more Mods. `sections` is the
@@ -292,6 +295,7 @@ pub fn build_report(per_mod_bindings: &[(String, Vec<HashBinding>)]) -> Conflict
     ConflictReport {
         conflicts,
         per_mod_count,
+        omitted: Vec::new(),
     }
 }
 

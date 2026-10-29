@@ -3353,6 +3353,7 @@ impl Core {
         .await?;
 
         let mut per_mod_bindings: Vec<(String, Vec<conflicts::HashBinding>)> = Vec::new();
+        let mut omitted = Vec::new();
         for row in rows {
             let enabled: i64 = row.try_get("enabled")?;
             if enabled == 0 {
@@ -3360,6 +3361,7 @@ impl Core {
             }
             let id: String = row.try_get("id")?;
             if quarantined.contains(&id) {
+                omitted.push(id);
                 continue;
             }
             let library_path: String = row.try_get("library_path")?;
@@ -3371,7 +3373,10 @@ impl Core {
             per_mod_bindings.push((id, bindings));
         }
 
-        Ok(conflicts::build_report(&per_mod_bindings))
+        let mut report = conflicts::build_report(&per_mod_bindings);
+        omitted.sort();
+        report.omitted = omitted;
+        Ok(report)
     }
 
     /// Resolve the one Junction target implied by a Mod's persisted active

@@ -28,7 +28,7 @@ beforeEach(() => {
       if (failRefresh) throw new Error("Library read failed");
       return mods;
     }
-    if (command === "detect_conflicts") return { conflicts: [], per_mod_count: {} };
+    if (command === "detect_conflicts") return { conflicts: [], omitted: [], per_mod_count: {} };
     if (command === "list_variants") return { variants: [], activeVariantId: null };
     if (command === "list_mod_updates") return [];
     if (command === "get_mod_panel_width") return storedWidth;

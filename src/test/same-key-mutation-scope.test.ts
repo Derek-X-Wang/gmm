@@ -266,7 +266,7 @@ it("runs different Games concurrently and queues same-Game batch writers across 
   fireEvent.click(button("parallel"));
   await waitFor(() => expect(running.map((r) => r.game)).toEqual(["gimi", "zzmi"]));
   expect(client.getMutationCache().getAll().filter((m) => m.state.isPaused)).toHaveLength(1);
-  const report: ModUpdateBatchReport = { stopped: false, results: [], conflicts: { conflicts: [], per_mod_count: {} }, conflictError: null };
+  const report: ModUpdateBatchReport = { stopped: false, results: [], conflicts: { conflicts: [], omitted: [], per_mod_count: {} }, conflictError: null };
   await act(async () => running[0].finish(report));
   await waitFor(() => expect(running.map((r) => r.game)).toEqual(["gimi", "zzmi", "gimi"]));
   expect(client.getQueryData(["conflicts", "gimi"])).toEqual(report.conflicts);
