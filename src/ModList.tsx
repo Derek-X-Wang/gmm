@@ -226,7 +226,14 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       <div className={confirmedEmpty ? "mod-import-landing" : "row row--between"}>
         <h2>
           {confirmedEmpty ? `Add Mods for ${displayName}` : mods.data === undefined ? "Mods" : `Mods (${mods.data.length})`}
-          {conflicts.data && conflicts.data.conflicts.length > 0 ? (
+          {conflicts.data && conflicts.data.omitted.length > 0 ? (
+            <span className="conflict-badge">
+              {conflicts.data.conflicts.length > 0
+                ? <> · {conflicts.data.conflicts.length} conflict{conflicts.data.conflicts.length === 1 ? "" : "s"}</>
+                : " · no conflicts found yet"}
+              {" · "}{conflicts.data.omitted.length} Mod{conflicts.data.omitted.length === 1 ? "" : "s"} unscanned
+            </span>
+          ) : conflicts.data && conflicts.data.conflicts.length > 0 ? (
             <span className="conflict-badge"> · {conflicts.data.conflicts.length} conflict{conflicts.data.conflicts.length === 1 ? "" : "s"}</span>
           ) : null}
         </h2>
@@ -314,6 +321,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                 conflicts={conflicts.data?.conflicts ?? []}
                 count={conflicts.data?.per_mod_count[m.id] ?? 0}
                 omitted={conflicts.data?.omitted.includes(m.id) ?? false}
+                incomplete={(conflicts.data?.omitted.length ?? 0) > 0}
               />
               <VariantSelector
                 modId={m.id}
@@ -510,11 +518,13 @@ function ConflictBadge({
   conflicts,
   count,
   omitted,
+  incomplete,
 }: {
   modId: string;
   conflicts: Conflict[];
   count: number;
   omitted: boolean;
+  incomplete: boolean;
 }) {
   const [open, setOpen] = useState(false);
   if (omitted) return <span className="muted small">Conflicts unscanned</span>;
@@ -525,9 +535,9 @@ function ConflictBadge({
       <button
         className="conflict-pill"
         onClick={() => setOpen((v) => !v)}
-        title="Click for details"
+        title={incomplete ? "A Mod needing recovery was not scanned; the full result is unverified." : "Click for details"}
       >
-        {count} conflict{count === 1 ? "" : "s"}
+        {count} conflict{count === 1 ? "" : "s"}{incomplete ? " (partial)" : ""}
       </button>
       {open ? (
         <div className="conflict-detail">

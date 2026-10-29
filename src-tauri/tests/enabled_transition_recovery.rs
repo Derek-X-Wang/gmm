@@ -462,3 +462,96 @@ async fn unknown_reused_owner_can_be_confirmed_retired_and_recovered() {
         "confirmed retirement must release and resolve the durable transition witness",
     );
 }
+
+// Use the same persistent UPDATE obstruction as the recovery-warning fixture.
+// Both Mods bind hash 42, so scanning the stuck disable would assert a conflict.
+async fn stuck_conflict_transition(intended_enabled: bool) -> (TestEnv, Core, gmm_lib::core::Mod) {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let affected = env.seed_mod(&core, "Stuck Transition").await;
+    let peer = env.seed_mod(&core, "Healthy Peer").await;
+    core.set_enabled(&peer.id, true, &env.game_mods)
+        .await
+        .expect("enable healthy peer before the obstruction");
+    if !intended_enabled {
+        core.set_enabled(&affected.id, true, &env.game_mods)
+            .await
+            .expect("enable affected Mod before the stuck disable");
+    }
+    let pool = env.pool().await;
+    sqlx::query(
+        "CREATE TRIGGER keep_enabled_update_failing
+         BEFORE UPDATE OF enabled ON mods
+         BEGIN
+             SELECT RAISE(ABORT, 'persistent enabled update obstruction');
+         END",
+    )
+    .execute(&pool)
+    .await
+    .expect("install persistent update failure");
+    core.set_enabled(&affected.id, intended_enabled, &env.game_mods)
+        .await
+        .expect_err("the injected update must remain unresolved");
+    let listed = core.list_mods(GameCode::Gimi).await.expect("list Mods");
+    let row = listed.iter().find(|row| row.id == affected.id).unwrap();
+    assert_eq!(row.enabled, !intended_enabled);
+    assert_eq!(
+        env.deployment("Stuck Transition")
+            .join("merged.ini")
+            .is_file(),
+        intended_enabled,
+        "deployment must disagree with the persisted enabled flag",
+    );
+    assert_eq!(
+        row.enabled_transition_recovery
+            .as_ref()
+            .unwrap()
+            .intended_enabled,
+        intended_enabled,
+    );
+    assert_eq!(enabled_transition_witness_count(&pool).await, 1);
+    pool.close().await;
+    (env, core, affected)
+}
+
+#[tokio::test]
+async fn stuck_enable_is_omitted_from_conflict_reading() {
+    let (_env, core, affected) = stuck_conflict_transition(true).await;
+    let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
+    assert_eq!(
+        report.omitted,
+        vec![affected.id],
+        "a deployed Mod with a stale disabled flag must make the reading incomplete",
+    );
+    assert!(report.conflicts.is_empty());
+}
+
+#[tokio::test]
+async fn stuck_disable_is_not_counted_as_a_conflict() {
+    let (_env, core, affected) = stuck_conflict_transition(false).await;
+    let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
+    assert_eq!(
+        report.per_mod_count.get(&affected.id),
+        None,
+        "a stuck-disable Mod must not be counted as a deployed conflict",
+    );
+    assert!(report.conflicts.is_empty());
+    assert_eq!(report.omitted, vec![affected.id]);
+}
+
+#[tokio::test]
+async fn healthy_enabled_mods_without_witnesses_still_conflict() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let first = env.seed_mod(&core, "Healthy First").await;
+    let second = env.seed_mod(&core, "Healthy Second").await;
+    for id in [&first.id, &second.id] {
+        core.set_enabled(id, true, &env.game_mods).await.unwrap();
+    }
+    let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
+    assert!(report.omitted.is_empty());
+    assert_eq!(report.conflicts.len(), 1);
+    assert_eq!(report.conflicts[0].hash, "42");
+    assert_eq!(report.per_mod_count.get(&first.id), Some(&1));
+    assert_eq!(report.per_mod_count.get(&second.id), Some(&1));
+}

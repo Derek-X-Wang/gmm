@@ -230,15 +230,16 @@ fn is_override_section(name: &str) -> bool {
     lower.starts_with("textureoverride") || lower.starts_with("resourceoverride")
 }
 
-/// Aggregated findings for enabled Mods, with any scan omissions recorded.
+/// Aggregated Conflict findings, with scan omissions including Mods with an
+/// enabled-transition witness regardless of their persisted enabled flag.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConflictReport {
     pub conflicts: Vec<Conflict>,
     /// `mod_id -> conflict_count` so the UI doesn't have to count.
     pub per_mod_count: HashMap<String, usize>,
-    /// Sorted enabled Mod ids skipped because of quarantined reinstall recovery.
-    /// Takes `mods.enabled` at face value; enable/disable recovery can leave it
-    /// inconsistent with deployment on disk (see #442).
+    /// Sorted Mod ids not scanned because their deployed state is unestablished:
+    /// enabled Mods in quarantined reinstall recovery, and Mods with an
+    /// enabled-transition witness regardless of their persisted enabled flag.
     pub omitted: Vec<String>,
 }
 

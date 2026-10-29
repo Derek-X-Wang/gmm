@@ -301,7 +301,10 @@ async fn shared_reinstall_commit_failure_restores_bytes_while_database_keeps_old
 
 #[tokio::test]
 async fn quarantine_during_batch_is_omitted_and_makes_conflicts_unverified() {
-    use std::{cell::Cell, future::Future, task::Poll};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    };
 
     let tmp = TempDir::new().unwrap();
     let url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
@@ -353,34 +356,49 @@ async fn quarantine_during_batch_is_omitted_and_makes_conflicts_unverified() {
         "the unrelated Mod must not be quarantined when the batch starts"
     );
 
-    let applying = Cell::new(false);
+    let (paused_tx, mut paused_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let resume_rx = Mutex::new(resume_rx);
+    let parked = AtomicBool::new(false);
+    let batch_core = core.clone().with_crash_hook(Arc::new(move |point| {
+        if point == gmm_lib::core::crash_points::REINSTALL_AFTER_WITNESS_COMMIT
+            && !parked.swap(true, Ordering::Relaxed)
+        {
+            paused_tx.send(()).unwrap();
+            // Dropping resume_tx on a test panic also releases the blocking task.
+            let _ = resume_rx.lock().unwrap().recv();
+        }
+    }));
     let endpoints = Endpoints {
         api_base: server.url(),
     };
-    let mut batch =
-        Box::pin(
-            core.apply_all_mod_updates_with_endpoints(GameCode::Gimi, &endpoints, |event| {
+    let runtime = tokio::runtime::Handle::current();
+    // Handle::block_on in spawn_blocking drives IO/timers only while another thread is in Runtime::block_on; the main thread is always awaiting here.
+    let mut batch = tokio::task::spawn_blocking(move || {
+        runtime.block_on(batch_core.apply_all_mod_updates_with_endpoints(
+            GameCode::Gimi,
+            &endpoints,
+            |event| {
                 if let ModUpdateProgress::Applying { item } = event {
                     assert_eq!(item.mod_id, healthy.id);
-                    applying.set(true);
                 }
-            }),
-        );
-    // Poll the production future past its pre-loop snapshot and into the first
-    // reinstall's asynchronous preflight/download. Leave it pending while the
-    // unrelated Retry recovery command runs; no timing sleeps or new seams.
-    std::future::poll_fn(|cx| match batch.as_mut().poll(cx) {
-        Poll::Pending if applying.get() => Poll::Ready(()),
-        Poll::Pending => Poll::Pending,
-        Poll::Ready(result) => panic!("batch finished before recovery interleaving: {result:?}"),
-    })
-    .await;
+            },
+        ))
+    });
+    // Use the established reinstall pause point: the batch snapshot is past,
+    // preparation has committed, and no writer transaction is open. Keep the
+    // synchronous hook off the test runtime's thread so recovery can run.
+    tokio::select! {
+        signal = paused_rx.recv() => assert_eq!(signal, Some(()), "batch finished before recovery interleaving"),
+        result = &mut batch => panic!("batch finished before recovery interleaving: {result:?}"),
+    }
     std::fs::rename(&unrelated.library_path, tmp.path().join("held-old-tree")).unwrap();
     assert!(matches!(
         core.retry_reinstall_recovery(&unrelated.id).await.unwrap(),
         gmm_lib::core::ReinstallRecoveryOutcome::Quarantined { .. }
     ));
-    let report = batch.await.unwrap();
+    resume_tx.send(()).unwrap();
+    let report = batch.await.unwrap().unwrap();
     assert!(!report.stopped);
     assert_eq!(report.results.len(), 1);
     assert_eq!(report.results[0].outcome, ModUpdateOutcome::Updated);
