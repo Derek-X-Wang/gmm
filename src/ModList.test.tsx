@@ -366,43 +366,66 @@ it("labels an omitted Mod Conflict badge unscanned instead of zero", async () =>
   expect(within(row).getByRole("button", { name: "Retry recovery" })).toBeVisible();
 });
 
-it.each([0, 1])("qualifies the Game heading when omitted Mods leave %i known Conflicts", async (count) => {
+it.each([0, 1, 3])("qualifies the Game heading when omitted Mods leave %i conflicts", async (count) => {
   mods = [outfit, { ...outfit, id: "peer", name: "Peer", enabled: true }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation((command, args) => command === "detect_conflicts"
     ? Promise.resolve({
-      conflicts: count ? [{ hash: "42", mod_ids: ["peer", "other"], sections: [] }] : [],
+      conflicts: Array.from({ length: count }, (_, i) => ({ hash: `${i}`, mod_ids: ["peer", "other"], sections: [] })),
       per_mod_count: { peer: count }, omitted: [outfit.id],
     })
     : implementation(command, args));
   renderMods();
   await screen.findByText("Conflicts unscanned");
   expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(
-    `Mods (2) · ${count} known Conflicts found; the full result is unverified.`,
+    count ? `Mods (2) · ${count} conflict${count === 1 ? "" : "s"} · 1 Mod unscanned`
+      : "Mods (2) · no conflicts found yet · 1 Mod unscanned",
   );
 });
 
-it.each([0, 1])("qualifies a non-omitted peer with %i known Conflicts when another Mod was omitted", async (count) => {
+it("pluralizes multiple unscanned Mods in the Game heading", async () => {
+  mods = [outfit, { ...outfit, id: "peer", name: "Peer" }];
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "detect_conflicts"
+    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [outfit.id, "peer"] })
+    : implementation(command, args));
+  renderMods();
+  await waitFor(() => expect(screen.getByRole("heading", { level: 2 }))
+    .toHaveTextContent(/^Mods \(2\) · no conflicts found yet · 2 Mods unscanned$/));
+});
+
+it.each([false, true])("renders no Conflict badge for a zero-conflict row while another Mod is omitted (enabled: %s)", async (enabled) => {
+  mods = [outfit, { ...outfit, id: "peer", name: "Peer", enabled }];
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "detect_conflicts"
+    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [outfit.id] })
+    : implementation(command, args));
+  renderMods();
+  await screen.findByText("Conflicts unscanned");
+  const row = screen.getByText("Peer").closest("li")!;
+  expect(within(row).queryByText(/conflict|unverified|unscanned/i)).not.toBeInTheDocument();
+  expect(row.querySelector(".conflict-inline")).toBeNull();
+});
+
+it.each([1, 3])("shows a short partial badge for a peer with %i conflicts while another Mod is omitted", async (count) => {
   mods = [outfit, { ...outfit, id: "peer", name: "Peer", enabled: true }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation((command, args) => command === "detect_conflicts"
     ? Promise.resolve({
-      conflicts: count ? [{ hash: "42", mod_ids: ["peer", "other"], sections: [] }] : [],
+      conflicts: Array.from({ length: count }, (_, i) => ({ hash: `${42 + i}`, mod_ids: ["peer", "other"], sections: [] })),
       per_mod_count: { peer: count }, omitted: [outfit.id],
     })
     : implementation(command, args));
   renderMods();
-  const row = (await screen.findByText("Peer")).closest("li")!;
-  expect(await within(row).findByText(
-    `${count} known Conflicts found; the full result is unverified.`,
-  )).toBeVisible();
+  await screen.findByText("Conflicts unscanned");
+  const row = screen.getByText("Peer").closest("li")!;
+  const badge = within(row).getByRole("button", {
+    name: `${count} conflict${count === 1 ? "" : "s"} (partial)`,
+  });
+  expect(badge).toHaveAttribute("title", "A Mod needing recovery was not scanned; the full result is unverified.");
   expect(within(row).queryByText(/^1 conflict$/)).not.toBeInTheDocument();
-  if (count) {
-    await userEvent.click(within(row).getByRole("button", {
-      name: "1 known Conflicts found; the full result is unverified.",
-    }));
-    expect(within(row).getByText("42")).toBeVisible();
-  }
+  await userEvent.click(badge);
+  expect(within(row).getByText("42")).toBeVisible();
 });
 
 it("keeps a complete Game heading and peer count unqualified", async () => {

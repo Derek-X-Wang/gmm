@@ -230,7 +230,8 @@ fn is_override_section(name: &str) -> bool {
     lower.starts_with("textureoverride") || lower.starts_with("resourceoverride")
 }
 
-/// Aggregated findings for enabled Mods, with any scan omissions recorded.
+/// Aggregated Conflict findings, with scan omissions including Mods with an
+/// enabled-transition witness regardless of their persisted enabled flag.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConflictReport {
     pub conflicts: Vec<Conflict>,

@@ -301,7 +301,10 @@ async fn shared_reinstall_commit_failure_restores_bytes_while_database_keeps_old
 
 #[tokio::test]
 async fn quarantine_during_batch_is_omitted_and_makes_conflicts_unverified() {
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    };
 
     let tmp = TempDir::new().unwrap();
     let url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
@@ -356,8 +359,11 @@ async fn quarantine_during_batch_is_omitted_and_makes_conflicts_unverified() {
     let (paused_tx, mut paused_rx) = tokio::sync::mpsc::unbounded_channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     let resume_rx = Mutex::new(resume_rx);
+    let parked = AtomicBool::new(false);
     let batch_core = core.clone().with_crash_hook(Arc::new(move |point| {
-        if point == gmm_lib::core::crash_points::REINSTALL_AFTER_WITNESS_COMMIT {
+        if point == gmm_lib::core::crash_points::REINSTALL_AFTER_WITNESS_COMMIT
+            && !parked.swap(true, Ordering::Relaxed)
+        {
             paused_tx.send(()).unwrap();
             // Dropping resume_tx on a test panic also releases the blocking task.
             let _ = resume_rx.lock().unwrap().recv();
@@ -367,6 +373,7 @@ async fn quarantine_during_batch_is_omitted_and_makes_conflicts_unverified() {
         api_base: server.url(),
     };
     let runtime = tokio::runtime::Handle::current();
+    // Handle::block_on in spawn_blocking drives IO/timers only while another thread is in Runtime::block_on; the main thread is always awaiting here.
     let mut batch = tokio::task::spawn_blocking(move || {
         runtime.block_on(batch_core.apply_all_mod_updates_with_endpoints(
             GameCode::Gimi,

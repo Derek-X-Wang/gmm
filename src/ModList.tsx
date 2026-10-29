@@ -227,7 +227,12 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
         <h2>
           {confirmedEmpty ? `Add Mods for ${displayName}` : mods.data === undefined ? "Mods" : `Mods (${mods.data.length})`}
           {conflicts.data && conflicts.data.omitted.length > 0 ? (
-            <span className="conflict-badge"> · {conflicts.data.conflicts.length} known Conflicts found; the full result is unverified.</span>
+            <span className="conflict-badge">
+              {conflicts.data.conflicts.length > 0
+                ? <> · {conflicts.data.conflicts.length} conflict{conflicts.data.conflicts.length === 1 ? "" : "s"}</>
+                : " · no conflicts found yet"}
+              {" · "}{conflicts.data.omitted.length} Mod{conflicts.data.omitted.length === 1 ? "" : "s"} unscanned
+            </span>
           ) : conflicts.data && conflicts.data.conflicts.length > 0 ? (
             <span className="conflict-badge"> · {conflicts.data.conflicts.length} conflict{conflicts.data.conflicts.length === 1 ? "" : "s"}</span>
           ) : null}
@@ -523,19 +528,16 @@ function ConflictBadge({
 }) {
   const [open, setOpen] = useState(false);
   if (omitted) return <span className="muted small">Conflicts unscanned</span>;
-  if (!count) return incomplete
-    ? <span className="muted small">0 known Conflicts found; the full result is unverified.</span>
-    : null;
+  if (!count) return null;
   const mine = conflicts.filter((c) => c.mod_ids.includes(modId));
   return (
     <span className="conflict-inline">
       <button
         className="conflict-pill"
         onClick={() => setOpen((v) => !v)}
-        title="Click for details"
+        title={incomplete ? "A Mod needing recovery was not scanned; the full result is unverified." : "Click for details"}
       >
-        {incomplete ? `${count} known Conflicts found; the full result is unverified.`
-          : <>{count} conflict{count === 1 ? "" : "s"}</>}
+        {count} conflict{count === 1 ? "" : "s"}{incomplete ? " (partial)" : ""}
       </button>
       {open ? (
         <div className="conflict-detail">

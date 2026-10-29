@@ -3331,8 +3331,10 @@ impl Core {
             .await
     }
 
-    /// Build a [`conflicts::ConflictReport`] for `game`. Walks the
-    /// enabled Mods, resolves each one's effective directory (Library
+    /// Build a [`conflicts::ConflictReport`] for `game`. Records Mods with an
+    /// enabled-transition witness as omitted regardless of their persisted
+    /// enabled flag, and enabled Mods in quarantined reinstall recovery.
+    /// Walks the remaining enabled Mods, resolves each one's directory (Library
     /// path joined with the active Variant's subpath when present),
     /// extracts `[TextureOverride*]` / `[ResourceOverride*]` hash
     /// bindings, and reports every hash bound by two or more Mods.
