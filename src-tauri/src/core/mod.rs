@@ -3344,6 +3344,14 @@ impl Core {
             .filter(|witness| witness.is_quarantined())
             .map(|witness| witness.mod_id().to_string())
             .collect();
+        let transitioning: std::collections::HashSet<_> = {
+            let mut connection = self.pool.acquire().await?;
+            library_mutation::load_enabled_transition_witnesses(&mut connection)
+                .await?
+                .into_iter()
+                .map(|witness| witness.mod_id().to_string())
+                .collect()
+        };
         let rows = sqlx::query(
             "SELECT id, library_path, active_variant_id, enabled FROM mods
              WHERE game_code = ?",
@@ -3355,11 +3363,16 @@ impl Core {
         let mut per_mod_bindings: Vec<(String, Vec<conflicts::HashBinding>)> = Vec::new();
         let mut omitted = Vec::new();
         for row in rows {
+            let id: String = row.try_get("id")?;
+            // A transition may have changed deployment before persisting enabled.
+            if transitioning.contains(&id) {
+                omitted.push(id);
+                continue;
+            }
             let enabled: i64 = row.try_get("enabled")?;
             if enabled == 0 {
                 continue;
             }
-            let id: String = row.try_get("id")?;
             if quarantined.contains(&id) {
                 omitted.push(id);
                 continue;
