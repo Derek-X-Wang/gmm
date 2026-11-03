@@ -143,6 +143,18 @@ jobs:
       - name: pnpm build
         run: pnpm build
 
+      # Debug test binaries need room beyond the restored Rust cache. These
+      # Android, .NET, Haskell, and Swift toolchains are unused by this job.
+      - name: Reclaim Linux disk space before Rust checks
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p src-tauri/target
+          echo "Free space before reclaim (bytes):"
+          df -B1 src-tauri/target
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /usr/share/swift
+          echo "Free space after reclaim (bytes):"
+          df -B1 src-tauri/target
+
       # Rust check chain across the workspace.
       - name: cargo fmt --check
         working-directory: src-tauri
@@ -193,6 +205,12 @@ jobs:
         id: rust-tests
         working-directory: src-tauri
         run: cargo test --workspace
+
+      - name: Report Linux disk space after Rust tests
+        if: always() && runner.os == 'Linux' && (steps.rust-tests.outcome == 'success' || steps.rust-tests.outcome == 'failure')
+        run: |
+          echo "Free space after cargo test (bytes):"
+          df -B1 src-tauri/target
 
       # Re-run this named suite even if an earlier Cargo target failed. It
       # executes a real CTRL_C_EVENT and mutation-proves write-path recovery
