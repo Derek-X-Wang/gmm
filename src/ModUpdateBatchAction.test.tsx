@@ -186,7 +186,7 @@ it("names all-in-flight omissions without claiming recovery", async () => {
   await act(async () => resolve({
     stopped: false, results: [],
     conflicts: { conflicts: [], per_mod_count: {}, omitted: [{ mod_id: "First", cause: "inFlight" }] },
-    conflictError: "The full Conflict reading is unverified.",
+    conflictError: "The full Conflict reading is unverified because the scan omitted Mods with enable/disable transitions in flight.",
   }));
   expect(await screen.findByRole("alert")).toHaveTextContent(/^Conflicts unverified: The full Conflict reading is unverified because the scan omitted Mods with enable\/disable transitions in flight\.$/);
   expect(screen.queryByText(/recovery/i)).not.toBeInTheDocument();
@@ -199,7 +199,20 @@ it("names both omission causes in a mixed batch", async () => {
   await act(async () => resolve({
     stopped: false, results: [],
     conflicts: { conflicts: [], per_mod_count: {}, omitted: [{ mod_id: "First", cause: "inFlight" }, { mod_id: "Broken", cause: "unestablished" }] },
-    conflictError: "The full Conflict reading is unverified.",
+    conflictError: "The full Conflict reading is unverified because the scan omitted Mods with enable/disable transitions in flight and Mods needing recovery.",
   }));
   expect(await screen.findByRole("alert")).toHaveTextContent(/^Conflicts unverified: The full Conflict reading is unverified because the scan omitted Mods with enable\/disable transitions in flight and Mods needing recovery\.$/);
+});
+
+it.each([false, true])("renders the backend's exact Conflict sentence alongside omissions (stopped: %s)", async (stopped) => {
+  const backendMessage = "Backend reading: deployment scan is pending; keep this exact explanation.";
+  renderWithQuery(view());
+  await start();
+  await act(async () => resolve({
+    stopped, results: [], conflictError: backendMessage,
+    conflicts: { conflicts: [], per_mod_count: {}, omitted: [{ mod_id: "First", cause: "inFlight" }] },
+  }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(`Conflicts unverified: ${backendMessage}`);
+  expect(screen.getByRole("alert").textContent).toBe(`Conflicts unverified: ${backendMessage}`);
+  expect(screen.getByText("0 known Conflicts found; the full result is unverified.")).toBeVisible();
 });

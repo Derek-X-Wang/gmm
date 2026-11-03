@@ -18,7 +18,7 @@ vi.mock("./updater", () => {
   } };
 });
 vi.mock("./LoaderVersionNote", () => ({ LoaderVersionNote: () => null }));
-const { ModList } = await import("./ModList");
+const { ModList, hasOnlyInFlightOmissions } = await import("./ModList");
 const { default: App } = await import("./App");
 
 const outfit = {
@@ -459,4 +459,16 @@ it("reads an in-flight omitted row as transient without recovery controls", asyn
   expect(within(row).queryByRole("button", { name: /recovery|retire/i })).not.toBeInTheDocument();
   expect(within(row).queryByText(/needs recovery|needing recovery/i)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "1 conflict (partial)" })).toHaveAttribute("title", "A Mod with an enable/disable transition in flight was not scanned; the full result is unverified.");
+});
+
+it("does not classify an empty omission list as in-flight only", () => {
+  expect(hasOnlyInFlightOmissions([])).toBe(false);
+});
+
+it("classifies only a nonempty all-in-flight omission list as in-flight only", () => {
+  expect(hasOnlyInFlightOmissions([{ mod_id: "live", cause: "inFlight" }])).toBe(true);
+  expect(hasOnlyInFlightOmissions([{ mod_id: "broken", cause: "unestablished" }])).toBe(false);
+  expect(hasOnlyInFlightOmissions([
+    { mod_id: "live", cause: "inFlight" }, { mod_id: "broken", cause: "unestablished" },
+  ])).toBe(false);
 });

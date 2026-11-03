@@ -16,6 +16,7 @@ import {
   setModEnabled,
   setModUpdateCheckEnabled,
   type Conflict,
+  type ConflictReport,
   type GameCode as ApiGameCode,
 } from "./api";
 import { SessionCheckNotice, useSessionCheck } from "./SessionCheckNotice";
@@ -29,6 +30,10 @@ import {
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { commandFailureMessage } from "./commandError";
 import { ModDetailPanel } from "./ModDetailPanel";
+
+export function hasOnlyInFlightOmissions(omitted: ConflictReport["omitted"]): boolean {
+  return omitted.length > 0 && omitted.every((entry) => entry.cause === "inFlight");
+}
 
 /**
  * Per-mod badge that surfaces an available upstream version + Apply
@@ -322,7 +327,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                 count={conflicts.data?.per_mod_count[m.id] ?? 0}
                 omitted={conflicts.data?.omitted.find((entry) => entry.mod_id === m.id)?.cause}
                 incomplete={(conflicts.data?.omitted.length ?? 0) > 0}
-                inFlightOnly={conflicts.data?.omitted.every((entry) => entry.cause === "inFlight") ?? false}
+                inFlightOnly={hasOnlyInFlightOmissions(conflicts.data?.omitted ?? [])}
               />
               <VariantSelector
                 modId={m.id}

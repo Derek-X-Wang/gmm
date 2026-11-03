@@ -95,15 +95,7 @@ export function ModUpdateBatchAction({ game, rows, mods, verified, checking }: {
   const ahead = rows.filter((row) => row.upstreamAhead);
   const batch = batches[game];
   const report = batch?.report;
-  const omissions = report?.conflicts?.omitted ?? [];
-  const inFlight = omissions.some((entry) => entry.cause === "inFlight");
-  const unestablished = omissions.some((entry) => entry.cause === "unestablished");
-  const omissionReason = inFlight
-    ? (unestablished ? "Mods with enable/disable transitions in flight and Mods needing recovery" : "Mods with enable/disable transitions in flight")
-    : "Mods needing recovery";
-  const conflictError = omissions.length > 0
-    ? `The full Conflict reading is unverified because ${report?.stopped ? "the batch stopped with Mods not attempted and " : ""}the scan omitted ${omissionReason}.`
-    : report?.conflictError;
+  const conflictError = report?.conflictError;
   const conflictReadingUnverified = !!conflictError;
   const sessionBlocked = !sessionCheck.session.isSuccess || !!sessionCheck.session.data;
   const start = () => {
