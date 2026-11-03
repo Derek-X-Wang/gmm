@@ -268,3 +268,13 @@ lives in `mods.panelWidthCssPx`; it does not change Mod data or native window
 geometry. Requests run in order, successful writes update the cached width,
 and read or write errors remain visible in the inspector. The inventory now
 contains 43 call sites in 12 files.
+
+## Conflict omission causes — #444
+
+Conflict omissions now carry one cause per Mod. In-flight transitions have
+transient row text and no recovery action; unestablished deployment keeps
+existing recovery controls. Batch explanations name in-flight transitions,
+recovery, or both. Preset explanations ask users to review affected Mods
+without assuming all omissions need recovery. This reporting-only change
+adds no path mutation or cache writer; all inventory rows, scope ids,
+invalidation rules, and totals remain unchanged.

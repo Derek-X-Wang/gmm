@@ -886,6 +886,10 @@ impl EnabledTransitionWitness {
         })
     }
 
+    pub(super) fn owner_is_live(&self) -> bool {
+        self.owner().owner_is_live()
+    }
+
     pub(super) fn recovery(&self) -> Option<EnabledTransitionRecovery> {
         let owner_uncertain = self.owner().owner_uncertain();
         let reason = match (&self.recovery_error, owner_uncertain) {

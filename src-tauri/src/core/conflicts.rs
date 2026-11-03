@@ -237,10 +237,27 @@ pub struct ConflictReport {
     pub conflicts: Vec<Conflict>,
     /// `mod_id -> conflict_count` so the UI doesn't have to count.
     pub per_mod_count: HashMap<String, usize>,
-    /// Sorted Mod ids not scanned because their deployed state is unestablished:
-    /// enabled Mods in quarantined reinstall recovery, and Mods with an
-    /// enabled-transition witness regardless of their persisted enabled flag.
-    pub omitted: Vec<String>,
+    /// Omissions sorted by Mod id, each with the cause that prevented scanning.
+    /// Enabled Mods in quarantined reinstall recovery are unestablished.
+    /// Transition witnesses omit Mods regardless of their persisted enabled flag:
+    /// a live owner without recovery state is in flight; all others are
+    /// unestablished. No Junction inspection establishes deployment here.
+    pub omitted: Vec<ConflictOmission>,
+}
+
+/// Why a Mod was excluded from this Conflict reading.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ConflictOmissionCause {
+    InFlight,
+    Unestablished,
+}
+
+/// One omitted Mod and the reason the scan cannot include it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConflictOmission {
+    pub mod_id: String,
+    pub cause: ConflictOmissionCause,
 }
 
 /// One Conflict: a hash bound by two or more Mods. `sections` is the

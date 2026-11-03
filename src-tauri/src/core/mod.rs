@@ -3349,12 +3349,20 @@ impl Core {
             .filter(|witness| witness.is_quarantined())
             .map(|witness| witness.mod_id().to_string())
             .collect();
-        let transitioning: std::collections::HashSet<_> = {
+        let transitioning: std::collections::HashMap<_, _> = {
             let mut connection = self.pool.acquire().await?;
             library_mutation::load_enabled_transition_witnesses(&mut connection)
                 .await?
                 .into_iter()
-                .map(|witness| witness.mod_id().to_string())
+                .map(|witness| {
+                    let cause = if witness.recovery().is_none() && witness.owner_is_live() {
+                        conflicts::ConflictOmissionCause::InFlight
+                    } else {
+                        // A dead producer may have changed deployment before it died.
+                        conflicts::ConflictOmissionCause::Unestablished
+                    };
+                    (witness.mod_id().to_string(), cause)
+                })
                 .collect()
         };
         let rows = sqlx::query(
@@ -3369,17 +3377,20 @@ impl Core {
         let mut omitted = Vec::new();
         for row in rows {
             let id: String = row.try_get("id")?;
-            // A transition may have changed deployment before persisting enabled.
-            if transitioning.contains(&id) {
-                omitted.push(id);
-                continue;
-            }
             let enabled: i64 = row.try_get("enabled")?;
-            if enabled == 0 {
+            if enabled != 0 && quarantined.contains(&id) {
+                omitted.push(conflicts::ConflictOmission {
+                    mod_id: id,
+                    cause: conflicts::ConflictOmissionCause::Unestablished,
+                });
                 continue;
             }
-            if quarantined.contains(&id) {
-                omitted.push(id);
+            // A transition may have changed deployment before persisting enabled.
+            if let Some(&cause) = transitioning.get(&id) {
+                omitted.push(conflicts::ConflictOmission { mod_id: id, cause });
+                continue;
+            }
+            if enabled == 0 {
                 continue;
             }
             let library_path: String = row.try_get("library_path")?;
@@ -3392,7 +3403,7 @@ impl Core {
         }
 
         let mut report = conflicts::build_report(&per_mod_bindings);
-        omitted.sort();
+        omitted.sort_by(|a, b| a.mod_id.cmp(&b.mod_id));
         report.omitted = omitted;
         Ok(report)
     }

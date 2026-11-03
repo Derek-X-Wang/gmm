@@ -176,23 +176,38 @@ impl Core {
         progress(ModUpdateProgress::CheckingConflicts);
         let (conflicts, conflict_error) = match self.detect_conflicts(game).await {
             Ok(report) => {
-                // The scanner omits quarantined Mods. Preserve the known
+                // The scanner omits quarantined and transitioning Mods. Preserve the known
                 // findings without presenting that partial scan as complete.
                 let incomplete = stopped
                     || !report.omitted.is_empty()
                     || results
                         .iter()
                         .any(|result| matches!(result.outcome, ModUpdateOutcome::Unknown { .. }));
+                let in_flight = report
+                    .omitted
+                    .iter()
+                    .any(|entry| entry.cause == super::conflicts::ConflictOmissionCause::InFlight);
+                let unestablished = report.omitted.iter().any(|entry| {
+                    entry.cause == super::conflicts::ConflictOmissionCause::Unestablished
+                });
+                let omission_reason = match (in_flight, unestablished) {
+                    (true, true) => {
+                        "Mods with enable/disable transitions in flight and Mods needing recovery"
+                    }
+                    (true, false) => "Mods with enable/disable transitions in flight",
+                    _ => "Mods needing recovery",
+                };
                 let message = if stopped && !report.omitted.is_empty() {
-                    "The full Conflict reading is unverified because the batch stopped with Mods not attempted and the scan omitted Mods needing recovery."
+                    format!("The full Conflict reading is unverified because the batch stopped with Mods not attempted and the scan omitted {omission_reason}.")
                 } else if !report.omitted.is_empty() {
-                    "The full Conflict reading is unverified because the scan omitted Mods needing recovery."
+                    format!("The full Conflict reading is unverified because the scan omitted {omission_reason}.")
                 } else if stopped {
-                    "The full Conflict reading is unverified because the batch stopped with Mods not attempted."
+                    "The full Conflict reading is unverified because the batch stopped with Mods not attempted.".to_string()
                 } else {
                     "The full Conflict reading is unverified because a Mod update needs recovery."
+                        .to_string()
                 };
-                (Some(report), incomplete.then(|| message.to_string()))
+                (Some(report), incomplete.then_some(message))
             }
             Err(error) => (None, Some(error.to_string())),
         };

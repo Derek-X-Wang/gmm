@@ -1,5 +1,6 @@
 mod support;
 
+use gmm_lib::core::conflicts::{ConflictOmission, ConflictOmissionCause};
 use gmm_lib::core::preset_apply::{PresetApplyOutcome, PresetApplyProgress};
 use gmm_lib::core::{Core, Error, GameCode, Mod, SessionInfo};
 use sqlx::SqlitePool;
@@ -363,7 +364,10 @@ async fn indeterminate_enable_is_unknown_and_existing_startup_recovery_can_finis
     assert!(!f.core.list_mods(GameCode::Gimi).await.unwrap()[0].enabled);
     assert_eq!(
         report.conflicts.unwrap().omitted,
-        vec![item.id.clone()],
+        vec![ConflictOmission {
+            mod_id: item.id.clone(),
+            cause: ConflictOmissionCause::Unestablished
+        }],
         "an unresolved enable must be omitted even while its persisted flag is disabled"
     );
     assert!(report.conflict_error.unwrap().contains("unverified"));
@@ -432,7 +436,13 @@ async fn quarantined_reinstall_is_skipped_and_conflict_reading_is_unverified() {
             .outcome,
         PresetApplyOutcome::Applied { .. }
     ));
-    assert_eq!(report.conflicts.unwrap().omitted, vec![item.id]);
+    assert_eq!(
+        report.conflicts.unwrap().omitted,
+        vec![ConflictOmission {
+            mod_id: item.id,
+            cause: ConflictOmissionCause::Unestablished
+        }]
+    );
     assert!(report.conflict_error.unwrap().contains("unverified"));
 }
 
