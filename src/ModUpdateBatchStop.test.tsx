@@ -11,7 +11,7 @@ const rows: ModUpdateRow[] = ["First", "Current", "Later"].map((name) => ({
 }));
 let progress: (event: ModUpdateProgress) => void;
 let resolve: (report: ModUpdateBatchReport) => void;
-const view = <ModUpdateBatchAction game="gimi" rows={rows} verified checking={false} />;
+const view = <ModUpdateBatchAction game="gimi" rows={rows} mods={rows.map(({ modId: id, name }) => ({ id, name }))} verified checking={false} />;
 beforeEach(() => {
   invoke.mockReset().mockImplementation((command: string, args?: { onProgress: { onmessage: typeof progress } }) => {
     if (command === "current_session") return Promise.resolve(null);
@@ -99,7 +99,7 @@ it("keeps stop delivery failure visible and allows a retry", async () => {
 it("does not expose a stale stop token on another Game and a late stop leaves a finished batch", async () => {
   const { rerender } = renderWithQuery(view);
   await start();
-  rerender(<ModUpdateBatchAction game="srmi" rows={[]} verified checking={false} />);
+  rerender(<ModUpdateBatchAction game="srmi" rows={[]} mods={[]} verified checking={false} />);
   expect(screen.queryByRole("button", { name: "Stop after this Mod" })).not.toBeInTheDocument();
   rerender(view);
   fireEvent.click(screen.getByRole("button", { name: "Stop after this Mod" }));

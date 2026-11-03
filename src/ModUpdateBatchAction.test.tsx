@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { renderWithQuery } from "./test/harness";
 import { ModUpdateBatchAction } from "./ModUpdateBatchAction";
-import type { ModUpdateBatchReport, ModUpdateProgress, ModUpdateRow } from "./api";
+import type { Mod, ModUpdateBatchReport, ModUpdateProgress, ModUpdateRow } from "./api";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -26,7 +26,7 @@ beforeEach(() => {
     throw new Error(`Unexpected command: ${command}`);
   });
 });
-const view = (verified = true) => <ModUpdateBatchAction game="gimi" rows={rows} verified={verified} checking={false} />;
+const view = (verified = true) => <ModUpdateBatchAction game="gimi" rows={rows} mods={rows.map(({ modId: id, name }) => ({ id, name }))} verified={verified} checking={false} />;
 const start = async () => {
   const button = await screen.findByRole("button", { name: "Apply all Mod updates" });
   await waitFor(() => expect(button).toBeEnabled());
@@ -113,7 +113,7 @@ it("never offers Apply all from unverified update rows", async () => {
 it("keeps the running Game's results separate when switching Games", async () => {
   const { rerender } = renderWithQuery(view());
   await start();
-  rerender(<ModUpdateBatchAction game="srmi" rows={[]} verified checking={false} />);
+  rerender(<ModUpdateBatchAction game="srmi" rows={[]} mods={[]} verified checking={false} />);
   expect(screen.getByText("Mod updates are running for gimi.")).toBeVisible();
   act(() => progress({ phase: "completed", result: { ...rows[0], status: "updated" } }));
   expect(screen.queryByText("First: Updated")).not.toBeInTheDocument();
@@ -148,4 +148,34 @@ it("calls skipped in-flight outcomes processed", async () => {
   expect(screen.getByRole("status")).toHaveTextContent("Updating Broken… 1 of 3 processed.");
   expect(screen.getByRole("status")).not.toHaveTextContent("completed");
   expect(screen.getByText("First: Skipped — Recovery required")).toBeVisible();
+});
+
+it.each(["local", "manual"] as const)("names a %s Conflict participant from its Mod record", async (source) => {
+  const participant: Mod = {
+    id: "01JMM426000000000000000001", game: "gimi", name: "Recorded costume — 完整名称", source,
+    libraryPath: "library/costume", enabled: true, gamebananaId: null, sourceUrl: null,
+    author: null, version: null, screenshotUrl: null, reinstallRecovery: null, enabledTransitionRecovery: null,
+  };
+  renderWithQuery(<ModUpdateBatchAction game="gimi" rows={rows}
+    mods={[{ id: "First", name: "Recorded GameBanana name" }, participant]} verified checking={false} />);
+  await start();
+  await act(async () => resolve({
+    stopped: false, results: [], conflictError: null,
+    conflicts: { conflicts: [{ hash: "mixed", mod_ids: ["First", participant.id], sections: [] }], omitted: [], per_mod_count: {} },
+  }));
+  expect(await screen.findByText(/^Hash mixed:/)).toHaveTextContent("Hash mixed: Recorded GameBanana name, Recorded costume — 完整名称");
+  expect(screen.queryByText(new RegExp(participant.id))).not.toBeInTheDocument();
+});
+
+it("keeps the exact identifier for a Conflict participant in neither list", async () => {
+  const missingId = "01JMM426000000000000000002";
+  renderWithQuery(<ModUpdateBatchAction game="gimi" rows={rows}
+    mods={[{ id: "First", name: "Recorded GameBanana name" }, { id: `${missingId}0`, name: "Similar identifier is not a match" }]}
+    verified checking={false} />);
+  await start();
+  await act(async () => resolve({
+    stopped: false, results: [], conflictError: null,
+    conflicts: { conflicts: [{ hash: "missing", mod_ids: ["First", missingId], sections: [] }], omitted: [], per_mod_count: {} },
+  }));
+  expect(await screen.findByText(/^Hash missing:/)).toHaveTextContent(`Hash missing: Recorded GameBanana name, ${missingId}`);
 });

@@ -43,6 +43,7 @@ import {
   setModUpdatesGloballyEnabled,
   type GameCode as ApiGameCode,
   type MenuAction,
+  type Mod,
 } from "./api";
 import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarning";
 import { OnboardingWizard } from "./OnboardingWizard";
@@ -174,7 +175,7 @@ function MainApp({
   const visiting = useRef(false);
   // Keep the current list's data observed across navigation. A long Settings
   // visit must not evict it and clamp the return scroll to an empty screen.
-  useQuery({ queryKey: ["mods", activeGame], queryFn: () => listMods(activeGame) });
+  const mods = useQuery({ queryKey: ["mods", activeGame], queryFn: () => listMods(activeGame) });
   const { staleSession, dismissStaleSession } = useSessionLifecycle();
   const sessionSurface = useSessionPresentation({ games: list, staleSession, onDismiss: dismissStaleSession });
   const launchSurface = useLaunchGame({ game: activeGame, displayName: active.displayName });
@@ -343,7 +344,7 @@ function MainApp({
         </div>
         {hasActiveGame ? <>
           <ModList game={activeGame} displayName={active.displayName} />
-          <ModUpdatesPanel game={activeGame} />
+          <ModUpdatesPanel game={activeGame} mods={mods.data ?? []} />
           <GamePresets key={activeGame} game={activeGame} />
         </> : null}
       </main>
@@ -655,7 +656,7 @@ function AvGuidanceCallout({
  * status line showing how many mods have upstream updates available.
  * Per-mod badges live in each Mod row (see ModUpdateBadge).
  */
-function ModUpdatesPanel({ game }: { game: ApiGameCode }) {
+function ModUpdatesPanel({ game, mods }: { game: ApiGameCode; mods: Mod[] }) {
   const qc = useQueryClient();
   const global = useQuery({
     queryKey: ["modUpdates", "globalEnabled"],
@@ -699,7 +700,7 @@ function ModUpdatesPanel({ game }: { game: ApiGameCode }) {
           <span>Weekly check enabled</span>
         </label>
       </div>
-      <ModUpdateBatchAction game={game} rows={rows.data ?? []} verified={rows.isSuccess} checking={check.isPending} />
+      <ModUpdateBatchAction game={game} mods={mods} rows={rows.data ?? []} verified={rows.isSuccess} checking={check.isPending} />
       <CommandErrorNotice error={check.error} />
     </section>
   );

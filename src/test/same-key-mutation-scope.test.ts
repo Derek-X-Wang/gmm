@@ -255,7 +255,7 @@ it("runs different Games concurrently and queues same-Game batch writers across 
   });
   const rows: ModUpdateRow[] = [{ modId: "one", name: "One", installedVersion: "1", upstreamVersion: "2", upstreamAhead: true, updateCheckEnabled: true }];
   const batch = (label: string, game: GameCode) => createElement("section", { "aria-label": label },
-    createElement(ModUpdateBatchAction, { game, rows, verified: true, checking: false }));
+    createElement(ModUpdateBatchAction, { game, rows, mods: [], verified: true, checking: false }));
   const { client } = renderWithQuery(createElement("div", {}, batch("first", "gimi"), batch("queued", "gimi"), batch("parallel", "zzmi")));
   client.setQueryDefaults(["conflicts"], { gcTime: Infinity });
   const button = (label: string) => within(screen.getByRole("region", { name: label })).getByRole("button", { name: "Apply all Mod updates" });

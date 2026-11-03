@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   applyAllModUpdates, stopModUpdateBatch, type BatchMod, type BatchModResult, type GameCode,
-  type ModUpdateBatchReport, type ModUpdateProgress, type ModUpdateRow,
+  type Mod, type ModUpdateBatchReport, type ModUpdateProgress, type ModUpdateRow,
 } from "./api";
 import { SessionCheckNotice, useSessionCheck } from "./SessionCheckNotice";
 import { commandFailureMessage } from "./commandError";
@@ -21,9 +21,10 @@ type BatchView = {
   error?: string;
 };
 
-export function ModUpdateBatchAction({ game, rows, verified, checking }: {
+export function ModUpdateBatchAction({ game, rows, mods, verified, checking }: {
   game: GameCode;
   rows: ModUpdateRow[];
+  mods: Pick<Mod, "id" | "name">[];
   verified: boolean;
   checking: boolean;
 }) {
@@ -134,7 +135,7 @@ export function ModUpdateBatchAction({ game, rows, verified, checking }: {
           <p>{batch.report.conflicts.conflicts.length} known Conflicts found; the full result is unverified.</p>}
         <ul>{batch.report.conflicts.conflicts.map((conflict) => <li key={conflict.hash}>
           Hash {conflict.hash}: {conflict.mod_ids.map((id) =>
-            rows.find((row) => row.modId === id)?.name ?? id).join(", ")}
+            mods.find((mod) => mod.id === id)?.name ?? id).join(", ")}
         </li>)}</ul>
       </div>}
     </div>}

@@ -27,7 +27,7 @@ beforeEach(() => {
     throw new Error(`Unexpected command: ${command}`);
   });
 });
-const view = <ModUpdateBatchAction game="gimi" rows={rows} verified checking={false} />;
+const view = <ModUpdateBatchAction game="gimi" rows={rows} mods={rows.map(({ modId: id, name }) => ({ id, name }))} verified checking={false} />;
 async function start() {
   const button = screen.getByRole("button", { name: "Apply all Mod updates" });
   await waitFor(() => expect(button).toBeEnabled());
