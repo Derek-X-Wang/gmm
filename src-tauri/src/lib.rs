@@ -199,6 +199,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::attention_status,
             commands::list_mods,
+            commands::apply_preset,
             commands::save_preset,
             commands::list_presets,
             commands::retry_reinstall_recovery,

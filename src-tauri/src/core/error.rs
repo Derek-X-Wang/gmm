@@ -71,6 +71,14 @@ pub enum Error {
     #[error("Enter a name for the preset.")]
     InvalidPresetName,
 
+    #[error(
+        "This preset is no longer available for this Game. Refresh the preset list and try again."
+    )]
+    PresetNotFound,
+
+    #[error("Set this Game's install path before applying a preset.")]
+    PresetGamePathMissing,
+
     #[error("Preset name \"{name}\" is already taken. Choose another name.")]
     PresetNameTaken { name: String },
 
