@@ -588,6 +588,8 @@ async fn missing_mods_directory_refuses_once_without_creating_it_or_mutating_mod
         .save_preset(GameCode::Gimi, "Same state")
         .await
         .unwrap();
+    let later = f.add("Added later", GameCode::Gimi).await;
+    f.enable(&later).await;
     let before = f.core.list_mods(GameCode::Gimi).await.unwrap();
     let moved = f.mods.with_file_name("Mods-backup");
     fs::rename(&f.mods, &moved).unwrap();
@@ -604,6 +606,70 @@ async fn missing_mods_directory_refuses_once_without_creating_it_or_mutating_mod
     assert!(!f.mods.exists());
     assert_eq!(f.core.list_mods(GameCode::Gimi).await.unwrap(), before);
     assert_eq!(durable_directory_key(&moved.join("Unchanged")), identity);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM enabled_transitions")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0,
+        "a missing Mods directory must refuse before any enabled transition"
+    );
+}
+
+#[tokio::test]
+async fn mods_location_file_refuses_distinctly_before_progress_or_any_mod_mutation() {
+    let f = Fixture::new().await;
+    let item = f.add("Unchanged", GameCode::Gimi).await;
+    f.enable(&item).await;
+    let preset = f
+        .core
+        .save_preset(GameCode::Gimi, "Same state")
+        .await
+        .unwrap();
+    let later = f.add("Added later", GameCode::Gimi).await;
+    f.enable(&later).await;
+    let before = f.core.list_mods(GameCode::Gimi).await.unwrap();
+    let moved = f.mods.with_file_name("Mods-backup");
+    fs::rename(&f.mods, &moved).unwrap();
+    let identity = durable_directory_key(&moved.join("Unchanged"));
+    let later_identity = durable_directory_key(&moved.join("Added later"));
+    fs::write(&f.mods, b"existing file at Mods location").unwrap();
+    let mut events = Vec::new();
+    let error = f
+        .core
+        .apply_preset(GameCode::Gimi, &preset.id, |event| events.push(event))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::PresetModsPathNotDirectory),
+        "an existing file at Mods must have a distinct refusal, never PresetGamePathMissing"
+    );
+    assert_eq!(
+        error.to_string(),
+        "This Game's Mods location exists but is not a directory. Choose a Game install path with a Mods directory before applying a preset."
+    );
+    assert!(
+        events.is_empty(),
+        "a Mods file must refuse the whole apply up front"
+    );
+    assert_eq!(
+        fs::read(&f.mods).unwrap(),
+        b"existing file at Mods location"
+    );
+    assert_eq!(f.core.list_mods(GameCode::Gimi).await.unwrap(), before);
+    assert_eq!(durable_directory_key(&moved.join("Unchanged")), identity);
+    assert_eq!(
+        durable_directory_key(&moved.join("Added later")),
+        later_identity
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM enabled_transitions")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0,
+        "a Mods file must refuse before any enabled transition"
+    );
 }
 
 #[tokio::test]

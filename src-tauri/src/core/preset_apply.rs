@@ -70,8 +70,14 @@ impl Core {
             .await?
             .ok_or(Error::PresetGamePathMissing)?;
         let mods_dir = install.join("Mods");
-        if !mods_dir.is_dir() {
-            return Err(Error::PresetGamePathMissing);
+        let metadata = super::filesystem::metadata_if_exists(&mods_dir)
+            .map_err(|source| Error::Io {
+                path: mods_dir.clone(),
+                source,
+            })?
+            .ok_or(Error::PresetGamePathMissing)?;
+        if !metadata.is_dir() {
+            return Err(Error::PresetModsPathNotDirectory);
         }
         let mut entries: BTreeMap<String, Option<String>> = sqlx::query(
             "SELECT mod_id, active_variant_id FROM preset_entries WHERE preset_id = ? ORDER BY mod_id",

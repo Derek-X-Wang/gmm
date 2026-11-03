@@ -19,6 +19,7 @@ the test contract. From the repository root, run these steps in order:
 pnpm install --frozen-lockfile
 cd src-tauri
 cargo build --workspace
+cargo clippy --workspace --all-targets --no-deps -- -D warnings
 cargo test --workspace
 ```
 
@@ -30,6 +31,10 @@ cargo test --workspace
   as fixtures, including `concurrency-probe`. Do not substitute
   `cargo build --tests`; it does not produce the standalone fixtures. Rebuild
   after changing or mutating any code those helpers run.
+- `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is part of
+  the contract because the workspace denies `clippy::disallowed_methods`, so a
+  lint failure is a real defect rather than style, and `cargo test` does not
+  run it.
 - `cargo test --workspace` then runs the Rust suite against those fixtures.
 
 **Do not relocate the Cargo target directory.** Fixture tests resolve helper
