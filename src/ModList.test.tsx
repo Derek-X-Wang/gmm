@@ -356,7 +356,7 @@ it("labels an omitted Mod Conflict badge unscanned instead of zero", async () =>
   } }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation((command, args) => command === "detect_conflicts"
-    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [outfit.id] })
+    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [{ mod_id: outfit.id, cause: "unestablished" }] })
     : implementation(command, args));
   renderMods();
   const badge = await screen.findByText("Conflicts unscanned");
@@ -373,7 +373,7 @@ it.each([0, 1, 3])("qualifies the Game heading when omitted Mods leave %i confli
   invoke.mockImplementation((command, args) => command === "detect_conflicts"
     ? Promise.resolve({
       conflicts: Array.from({ length: count }, (_, i) => ({ hash: `${i}`, mod_ids: ["peer", "other"], sections: [] })),
-      per_mod_count: { peer: count }, omitted: [outfit.id],
+      per_mod_count: { peer: count }, omitted: [{ mod_id: outfit.id, cause: "unestablished" }],
     })
     : implementation(command, args));
   renderMods();
@@ -388,7 +388,7 @@ it("pluralizes multiple unscanned Mods in the Game heading", async () => {
   mods = [outfit, { ...outfit, id: "peer", name: "Peer" }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation((command, args) => command === "detect_conflicts"
-    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [outfit.id, "peer"] })
+    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [{ mod_id: outfit.id, cause: "unestablished" }, { mod_id: "peer", cause: "unestablished" }] })
     : implementation(command, args));
   renderMods();
   await waitFor(() => expect(screen.getByRole("heading", { level: 2 }))
@@ -399,7 +399,7 @@ it.each([false, true])("renders no Conflict badge for a zero-conflict row while 
   mods = [outfit, { ...outfit, id: "peer", name: "Peer", enabled }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation((command, args) => command === "detect_conflicts"
-    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [outfit.id] })
+    ? Promise.resolve({ conflicts: [], per_mod_count: {}, omitted: [{ mod_id: outfit.id, cause: "unestablished" }] })
     : implementation(command, args));
   renderMods();
   await screen.findByText("Conflicts unscanned");
@@ -414,7 +414,7 @@ it.each([1, 3])("shows a short partial badge for a peer with %i conflicts while 
   invoke.mockImplementation((command, args) => command === "detect_conflicts"
     ? Promise.resolve({
       conflicts: Array.from({ length: count }, (_, i) => ({ hash: `${42 + i}`, mod_ids: ["peer", "other"], sections: [] })),
-      per_mod_count: { peer: count }, omitted: [outfit.id],
+      per_mod_count: { peer: count }, omitted: [{ mod_id: outfit.id, cause: "unestablished" }],
     })
     : implementation(command, args));
   renderMods();
@@ -444,4 +444,19 @@ it("keeps a complete Game heading and peer count unqualified", async () => {
   expect(screen.getByRole("heading", { level: 2 })).toBeVisible();
   expect(screen.getByRole("button", { name: "1 conflict" })).toBeVisible();
   expect(screen.queryByText(/full result is unverified/)).not.toBeInTheDocument();
+});
+
+it("reads an in-flight omitted row as transient without recovery controls", async () => {
+  mods = [outfit, { ...outfit, id: "peer", name: "Peer", enabled: true }];
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "detect_conflicts"
+    ? Promise.resolve({ conflicts: [{ hash: "42", mod_ids: ["peer", "other"], sections: [] }], per_mod_count: { peer: 1 }, omitted: [{ mod_id: outfit.id, cause: "inFlight" }] })
+    : implementation(command, args));
+  renderMods();
+  const badge = await screen.findByText("Conflicts unscanned — enable/disable transition in flight");
+  const row = badge.closest("li")!;
+  expect(badge).toBeVisible();
+  expect(within(row).queryByRole("button", { name: /recovery|retire/i })).not.toBeInTheDocument();
+  expect(within(row).queryByText(/needs recovery|needing recovery/i)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "1 conflict (partial)" })).toHaveAttribute("title", "A Mod with an enable/disable transition in flight was not scanned; the full result is unverified.");
 });

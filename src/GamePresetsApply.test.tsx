@@ -71,7 +71,7 @@ it("keeps skipped, failed and unknown outcomes distinct and qualifies incomplete
     { modId: "s", name: "Recovery Mod", targetEnabled: true, status: "skipped", reason: "Recovery Mod needs recovery." },
     { modId: "f", name: "Lost Variant", targetEnabled: true, status: "failed", reason: "Lost Variant: recorded Variant is gone." },
     { modId: "u", name: "Interrupted", targetEnabled: true, status: "unknown", reason: "Interrupted has an unverified final state." },
-  ], conflicts: { ...empty, omitted: ["s", "u"] }, conflictError: "The full Conflict reading is unverified." };
+  ], conflicts: { ...empty, omitted: [{ mod_id: "s", cause: "unestablished" }, { mod_id: "u", cause: "unestablished" }] }, conflictError: "The full Conflict reading is unverified." };
   renderWithQuery(<GamePresets game="gimi" />);
   await apply();
   expect(await screen.findByText(/Recovery Mod: skipped/)).toBeVisible();

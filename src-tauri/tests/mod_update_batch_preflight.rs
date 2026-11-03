@@ -1,6 +1,7 @@
 //! Read-only preflight must avoid downloads; recovery must qualify Conflict readings.
 mod support;
 
+use gmm_lib::core::conflicts::{ConflictOmission, ConflictOmissionCause};
 use gmm_lib::core::{
     gamebanana::Endpoints,
     mod_update_batch::{ModUpdateOutcome, ModUpdateProgress},
@@ -216,7 +217,10 @@ async fn quarantine_case(outdated: bool, enabled: bool) {
     assert_eq!(
         report.conflicts.as_ref().unwrap().omitted,
         if enabled {
-            vec![quarantined.id.clone()]
+            vec![ConflictOmission {
+                mod_id: quarantined.id.clone(),
+                cause: ConflictOmissionCause::Unestablished,
+            }]
         } else {
             vec![]
         },
@@ -407,7 +411,10 @@ async fn quarantine_during_batch_is_omitted_and_makes_conflicts_unverified() {
     let conflicts = report.conflicts.unwrap();
     assert_eq!(
         conflicts.omitted,
-        vec![unrelated.id.clone()],
+        vec![ConflictOmission {
+            mod_id: unrelated.id.clone(),
+            cause: ConflictOmissionCause::Unestablished
+        }],
         "the scan must name the Mod quarantined after the batch snapshot"
     );
     assert!(!conflicts.per_mod_count.contains_key(&unrelated.id));

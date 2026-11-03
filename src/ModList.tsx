@@ -320,8 +320,9 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                 modId={m.id}
                 conflicts={conflicts.data?.conflicts ?? []}
                 count={conflicts.data?.per_mod_count[m.id] ?? 0}
-                omitted={conflicts.data?.omitted.includes(m.id) ?? false}
+                omitted={conflicts.data?.omitted.find((entry) => entry.mod_id === m.id)?.cause}
                 incomplete={(conflicts.data?.omitted.length ?? 0) > 0}
+                inFlightOnly={conflicts.data?.omitted.every((entry) => entry.cause === "inFlight") ?? false}
               />
               <VariantSelector
                 modId={m.id}
@@ -519,14 +520,17 @@ function ConflictBadge({
   count,
   omitted,
   incomplete,
+  inFlightOnly,
 }: {
   modId: string;
   conflicts: Conflict[];
   count: number;
-  omitted: boolean;
+  omitted: "inFlight" | "unestablished" | undefined;
   incomplete: boolean;
+  inFlightOnly: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  if (omitted === "inFlight") return <span className="muted small">Conflicts unscanned — enable/disable transition in flight</span>;
   if (omitted) return <span className="muted small">Conflicts unscanned</span>;
   if (!count) return null;
   const mine = conflicts.filter((c) => c.mod_ids.includes(modId));
@@ -535,7 +539,9 @@ function ConflictBadge({
       <button
         className="conflict-pill"
         onClick={() => setOpen((v) => !v)}
-        title={incomplete ? "A Mod needing recovery was not scanned; the full result is unverified." : "Click for details"}
+        title={incomplete ? (inFlightOnly
+          ? "A Mod with an enable/disable transition in flight was not scanned; the full result is unverified."
+          : "A Mod needing recovery was not scanned; the full result is unverified.") : "Click for details"}
       >
         {count} conflict{count === 1 ? "" : "s"}{incomplete ? " (partial)" : ""}
       </button>

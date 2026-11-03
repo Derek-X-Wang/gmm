@@ -130,7 +130,7 @@ it.each([0, 1])("qualifies the post-batch reading when Mods were omitted (%i kno
     conflictError: "The full Conflict reading is unverified because the scan omitted Mods needing recovery.",
     conflicts: {
       conflicts: count ? [{ hash: "shared", mod_ids: ["First", "Last"], sections: [] }] : [],
-      per_mod_count: {}, omitted: ["Broken"],
+      per_mod_count: {}, omitted: [{ mod_id: "Broken", cause: "unestablished" }],
     },
   }));
   expect(await screen.findByText(`${count} known Conflicts found; the full result is unverified.`)).toBeVisible();
@@ -178,4 +178,28 @@ it("keeps the exact identifier for a Conflict participant in neither list", asyn
     conflicts: { conflicts: [{ hash: "missing", mod_ids: ["First", missingId], sections: [] }], omitted: [], per_mod_count: {} },
   }));
   expect(await screen.findByText(/^Hash missing:/)).toHaveTextContent(`Hash missing: Recorded GameBanana name, ${missingId}`);
+});
+
+it("names all-in-flight omissions without claiming recovery", async () => {
+  renderWithQuery(view());
+  await start();
+  await act(async () => resolve({
+    stopped: false, results: [],
+    conflicts: { conflicts: [], per_mod_count: {}, omitted: [{ mod_id: "First", cause: "inFlight" }] },
+    conflictError: "The full Conflict reading is unverified.",
+  }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/^Conflicts unverified: The full Conflict reading is unverified because the scan omitted Mods with enable\/disable transitions in flight\.$/);
+  expect(screen.queryByText(/recovery/i)).not.toBeInTheDocument();
+  expect(screen.getByText("0 known Conflicts found; the full result is unverified.")).toBeVisible();
+});
+
+it("names both omission causes in a mixed batch", async () => {
+  renderWithQuery(view());
+  await start();
+  await act(async () => resolve({
+    stopped: false, results: [],
+    conflicts: { conflicts: [], per_mod_count: {}, omitted: [{ mod_id: "First", cause: "inFlight" }, { mod_id: "Broken", cause: "unestablished" }] },
+    conflictError: "The full Conflict reading is unverified.",
+  }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/^Conflicts unverified: The full Conflict reading is unverified because the scan omitted Mods with enable\/disable transitions in flight and Mods needing recovery\.$/);
 });

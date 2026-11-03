@@ -94,7 +94,17 @@ export function ModUpdateBatchAction({ game, rows, mods, verified, checking }: {
   };
   const ahead = rows.filter((row) => row.upstreamAhead);
   const batch = batches[game];
-  const conflictReadingUnverified = !!batch?.report?.conflictError;
+  const report = batch?.report;
+  const omissions = report?.conflicts?.omitted ?? [];
+  const inFlight = omissions.some((entry) => entry.cause === "inFlight");
+  const unestablished = omissions.some((entry) => entry.cause === "unestablished");
+  const omissionReason = inFlight
+    ? (unestablished ? "Mods with enable/disable transitions in flight and Mods needing recovery" : "Mods with enable/disable transitions in flight")
+    : "Mods needing recovery";
+  const conflictError = omissions.length > 0
+    ? `The full Conflict reading is unverified because ${report?.stopped ? "the batch stopped with Mods not attempted and " : ""}the scan omitted ${omissionReason}.`
+    : report?.conflictError;
+  const conflictReadingUnverified = !!conflictError;
   const sessionBlocked = !sessionCheck.session.isSuccess || !!sessionCheck.session.data;
   const start = () => {
     const batchId = crypto.randomUUID();
@@ -128,7 +138,7 @@ export function ModUpdateBatchAction({ game, rows, mods, verified, checking }: {
           `${result.status === "failed" ? "Failed" : result.status === "skipped" ? "Skipped" : "Unknown"} — ${result.reason}`}
       </li>)}</ul>
       {batch.error && <p role="alert">{batch.error}{batch.started ? " Conflict check result unavailable." : ""}</p>}
-      {batch.report?.conflictError && <p role="alert">Conflicts unverified: {batch.report.conflictError}</p>}
+      {conflictError && <p role="alert">Conflicts unverified: {conflictError}</p>}
       {batch.report?.conflicts && <div>
         {!conflictReadingUnverified && <p>{batch.report.conflicts.conflicts.length} Conflicts found after the batch.</p>}
         {conflictReadingUnverified &&

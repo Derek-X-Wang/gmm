@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use gmm_lib::core::conflicts::{ConflictOmission, ConflictOmissionCause};
 use gmm_lib::core::{Core, Error, GameCode};
 use sqlx::SqlitePool;
 use tempfile::TempDir;
@@ -520,7 +521,10 @@ async fn stuck_enable_is_omitted_from_conflict_reading() {
     let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
     assert_eq!(
         report.omitted,
-        vec![affected.id],
+        vec![ConflictOmission {
+            mod_id: affected.id,
+            cause: ConflictOmissionCause::Unestablished
+        }],
         "a deployed Mod with a stale disabled flag must make the reading incomplete",
     );
     assert!(report.conflicts.is_empty());
@@ -536,7 +540,13 @@ async fn stuck_disable_is_not_counted_as_a_conflict() {
         "a stuck-disable Mod must not be counted as a deployed conflict",
     );
     assert!(report.conflicts.is_empty());
-    assert_eq!(report.omitted, vec![affected.id]);
+    assert_eq!(
+        report.omitted,
+        vec![ConflictOmission {
+            mod_id: affected.id,
+            cause: ConflictOmissionCause::Unestablished
+        }]
+    );
 }
 
 #[tokio::test]
@@ -554,4 +564,152 @@ async fn healthy_enabled_mods_without_witnesses_still_conflict() {
     assert_eq!(report.conflicts[0].hash, "42");
     assert_eq!(report.per_mod_count.get(&first.id), Some(&1));
     assert_eq!(report.per_mod_count.get(&second.id), Some(&1));
+}
+
+// Insert the same validated witness that a producer commits before deployment.
+// These classification tests need no Junction reads or recovery execution.
+async fn conflict_witness(
+    env: &TestEnv,
+    core: &Core,
+    owner_pid: u32,
+    owner_started_at: Option<u64>,
+    recovery_error: Option<&str>,
+) -> gmm_lib::core::Mod {
+    let item = env.seed_mod(core, "Omitted Producer").await;
+    let pool = env.pool().await;
+    sqlx::query(
+        "INSERT INTO enabled_transitions (
+            mod_id, game_code, intended_enabled, junction_path,
+            junction_target, junction_parent_identity, junction_identity, owner_pid,
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity, recovery_error,
+            recovery_attempted_at, recovery_attempts
+         ) VALUES (?, 'gimi', 1, ?, ?, ?, NULL, ?, ?, 1,
+                   '2026-08-28T00:00:00Z', ?, ?, ?, ?, ?)",
+    )
+    .bind(&item.id)
+    .bind(
+        env.deployment("Omitted Producer")
+            .to_string_lossy()
+            .as_ref(),
+    )
+    .bind(item.library_path.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&env.game_mods))
+    .bind(i64::from(owner_pid))
+    .bind(owner_started_at.map(|value| value as i64))
+    .bind(durable_directory_key(&item.library_path))
+    .bind(durable_directory_key(&item.library_path))
+    .bind(recovery_error)
+    .bind(recovery_error.map(|_| "2026-08-28T00:00:00Z"))
+    .bind(i64::from(recovery_error.is_some()))
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    item
+}
+
+fn current_process_start() -> u64 {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let pid = Pid::from_u32(std::process::id());
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system
+        .process(pid)
+        .expect("current producer is live")
+        .start_time()
+}
+
+#[tokio::test]
+async fn live_owner_witness_is_omitted_as_in_flight() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let item = conflict_witness(
+        &env,
+        &core,
+        std::process::id(),
+        Some(current_process_start()),
+        None,
+    )
+    .await;
+    for enabled in [0_i64, 1] {
+        sqlx::query("UPDATE mods SET enabled = ? WHERE id = ?")
+            .bind(enabled)
+            .bind(&item.id)
+            .execute(&env.pool().await)
+            .await
+            .unwrap();
+        let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
+        assert_eq!(
+            report.omitted,
+            vec![ConflictOmission {
+                mod_id: item.id.clone(),
+                cause: ConflictOmissionCause::InFlight
+            }],
+            "a live producer without recovery state is in flight regardless of the enabled flag"
+        );
+        assert!(report.conflicts.is_empty());
+        assert!(!report.per_mod_count.contains_key(&item.id));
+    }
+}
+
+#[tokio::test]
+async fn recorded_recovery_error_is_omitted_as_unestablished() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let item = conflict_witness(
+        &env,
+        &core,
+        std::process::id(),
+        Some(current_process_start()),
+        Some("recorded recovery failure"),
+    )
+    .await;
+    let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
+    assert_eq!(
+        report.omitted,
+        vec![ConflictOmission {
+            mod_id: item.id,
+            cause: ConflictOmissionCause::Unestablished
+        }],
+        "a recorded recovery error stays unestablished even while its producer is live"
+    );
+}
+
+#[tokio::test]
+async fn owner_gone_without_recorded_error_is_omitted_as_unestablished() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    assert!(
+        !gmm_lib::core::session::is_pid_alive(i32::MAX as u32),
+        "fixture producer PID must be gone"
+    );
+    let item = conflict_witness(&env, &core, i32::MAX as u32, None, None).await;
+    assert!(
+        core.list_mods(GameCode::Gimi).await.unwrap()[0]
+            .enabled_transition_recovery
+            .is_none(),
+        "the dead-owner case has no recorded recovery error or uncertain owner"
+    );
+    let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
+    assert_eq!(report.omitted, vec![ConflictOmission { mod_id: item.id, cause: ConflictOmissionCause::Unestablished }], "a dead producer may have changed deployment before dying; no error does not establish its final state");
+}
+
+#[tokio::test]
+async fn uncertain_live_owner_is_omitted_as_unestablished() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let item = conflict_witness(&env, &core, std::process::id(), None, None).await;
+    let report = core.detect_conflicts(GameCode::Gimi).await.unwrap();
+    assert_eq!(
+        report.omitted,
+        vec![ConflictOmission {
+            mod_id: item.id,
+            cause: ConflictOmissionCause::Unestablished
+        }]
+    );
 }

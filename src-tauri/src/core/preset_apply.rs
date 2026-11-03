@@ -140,7 +140,7 @@ impl Core {
         let (conflicts, conflict_error) = match self.detect_conflicts(game).await {
             Ok(report) => {
                 let unverified = !report.omitted.is_empty() || results.iter().any(|result| matches!(result.outcome, PresetApplyOutcome::Unknown { .. }));
-                (Some(report), unverified.then(|| "The full Conflict reading is unverified because Mods were omitted or a Mod's final state is unknown. Review recovery in the Library.".to_string()))
+                (Some(report), unverified.then(|| "The full Conflict reading is unverified because Mods were omitted or a Mod's final state is unknown. Review the affected Mods in the Library.".to_string()))
             }
             Err(_) => (None, Some("The Conflict scan could not finish. Review the Library and check Conflicts again.".to_string())),
         };

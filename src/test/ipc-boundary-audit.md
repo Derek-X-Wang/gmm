@@ -136,3 +136,13 @@ Inventory rows tolerate leading whitespace. Opaque option spreads, computed
 options, unnamed owners, indirect observer aliases and unresolved enabled callbacks
 fail closed unless a specific Rule 1 reason is declared and matched in the audit.
 These tests do not validate IPC or Windows runtime.
+
+## Conflict omission causes — #444
+
+`detect_conflicts` now returns `omitted` entries with `mod_id` and `cause`
+(`inFlight` or `unestablished`), sorted by Mod id. This is a read-only shape
+change with no command, query, mutation, or opaque callback added. ModList
+uses the cause for the row and partial-count tooltip. ModUpdateBatchAction
+formats the same cause-specific explanation from the omission entries. GamePresets renders the
+backend's neutral incomplete-reading explanation; it does not infer recovery
+from omissions. Existing inventory rows and totals remain unchanged.

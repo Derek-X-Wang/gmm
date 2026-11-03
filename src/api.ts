@@ -651,7 +651,7 @@ export interface Conflict {
 export interface ConflictReport {
   conflicts: Conflict[];
   per_mod_count: Record<string, number>;
-  omitted: string[];
+  omitted: { mod_id: string; cause: "inFlight" | "unestablished" }[];
 }
 
 export async function detectConflicts(game: GameCode): Promise<ConflictReport> {
