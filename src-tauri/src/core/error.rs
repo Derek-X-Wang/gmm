@@ -68,6 +68,12 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    #[error("Enter a name for the preset.")]
+    InvalidPresetName,
+
+    #[error("Preset name \"{name}\" is already taken. Choose another name.")]
+    PresetNameTaken { name: String },
+
     #[error("invalid game code: {0}")]
     InvalidGameCode(String),
 

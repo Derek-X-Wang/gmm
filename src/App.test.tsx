@@ -173,6 +173,7 @@ function ipcResult(command: string) {
         upstreamAhead: false,
         checkError: null,
       };
+    case "list_presets": return [];
     case "list_mods":
       return [];
     case "detect_conflicts":
@@ -472,7 +473,7 @@ it("keeps unrelated Game controls available when the aggregate needs attention",
 });
 
 
-it("renders the approved six main-screen slots in order with scoped notices and no configuration", async () => {
+it("renders the approved seven main-screen slots in order with scoped notices and no configuration", async () => {
   startupFailures = [{ game: "gimi", kind: "invalidActiveVariant", error: variantError }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (command, args) => {
@@ -492,6 +493,7 @@ it("renders the approved six main-screen slots in order with scoped notices and 
   // OS title bar and both its actions are native menu items — and the
   // per-Game status is no longer a slot in the page at all. It is window
   // chrome now, pinned to the bottom in the `contentinfo` bar below.
+  // #428 added the per-Game preset slot last, bringing the count to seven.
   expect(Array.from(main.children)).toEqual([
     header,
     global,
@@ -499,6 +501,7 @@ it("renders the approved six main-screen slots in order with scoped notices and 
     notices,
     screen.getByRole("heading", { name: "Add Mods for Genshin Impact" }).closest("section"),
     screen.getByRole("heading", { name: "Mod updates" }).closest("section"),
+    screen.getByRole("heading", { name: "Saved presets" }).closest("section"),
   ]);
   const statusBar = screen.getByRole("contentinfo");
   const status = screen.getByRole("region", { name: "Genshin Impact status" });

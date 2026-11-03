@@ -57,6 +57,25 @@ pub async fn attention_status(core: State<'_, Core>) -> CommandResult<AttentionR
 }
 
 #[tauri::command]
+pub async fn save_preset(
+    core: State<'_, Core>,
+    game: GameCode,
+    name: String,
+) -> CommandResult<crate::core::presets::Preset> {
+    core.save_preset(game, &name)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn list_presets(
+    core: State<'_, Core>,
+    game: GameCode,
+) -> CommandResult<Vec<crate::core::presets::Preset>> {
+    core.list_presets(game).await.map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub async fn list_mods(core: State<'_, Core>, game: GameCode) -> CommandResult<Vec<Mod>> {
     core.list_mods(game).await.map_err(CommandError::from)
 }

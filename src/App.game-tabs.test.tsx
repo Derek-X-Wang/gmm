@@ -65,6 +65,7 @@ beforeEach(() => {
       };
       case "detect_conflicts": return { conflicts: [], omitted: [], per_mod_count: {} };
       case "mod_updates_globally_enabled": return true;
+      case "list_presets": return [];
       case "list_mods":
       case "list_mod_updates":
       case "interrupted_session_launches": return [];
@@ -514,4 +515,25 @@ it("returns focus to the selected tab when saving the last absent Game removes A
   expect(screen.queryByRole("button", { name: "Add game" })).not.toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("tab", { name: "Wuthering Waves" })).toHaveFocus();
+});
+
+it("clears the preset success notice and name draft when the active Game changes", async () => {
+  paths = { gimi: "C:\\Genshin", srmi: "C:\\StarRail" };
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command: string, args?: { game: GameCode; name: string }) => {
+    if (command === "save_preset") return {
+      id: "saved", game: args!.game, name: args!.name, createdAt: "now", modCount: 0,
+    };
+    return original(command, args);
+  });
+  renderCachedApp();
+  const panel = await screen.findByRole("region", { name: "Saved presets" });
+  await userEvent.type(within(panel).getByRole("textbox", { name: "Preset name" }), "Raiden team");
+  await userEvent.click(within(panel).getByRole("button", { name: "Save current setup as…" }));
+  expect(await within(panel).findByRole("status")).toHaveTextContent("Saved preset “Raiden team”.");
+  await userEvent.type(within(panel).getByRole("textbox", { name: "Preset name" }), "half typed");
+  await userEvent.click(screen.getByRole("tab", { name: "Honkai: Star Rail" }));
+  const starRailPanel = screen.getByRole("region", { name: "Saved presets" });
+  expect(within(starRailPanel).queryByRole("status")).not.toBeInTheDocument();
+  expect(within(starRailPanel).getByRole("textbox", { name: "Preset name" })).toHaveValue("");
 });
