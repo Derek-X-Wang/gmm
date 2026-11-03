@@ -11,7 +11,7 @@ const rows: ModUpdateRow[] = ["First", "Current", "Later"].map((name) => ({
 }));
 let progress: (event: ModUpdateProgress) => void;
 let resolve: (report: ModUpdateBatchReport) => void;
-const view = <ModUpdateBatchAction game="gimi" rows={rows} verified checking={false} />;
+const view = <ModUpdateBatchAction game="gimi" rows={rows} mods={rows.map(({ modId: id, name }) => ({ id, name }))} verified checking={false} />;
 beforeEach(() => {
   invoke.mockReset().mockImplementation((command: string, args?: { onProgress: { onmessage: typeof progress } }) => {
     if (command === "current_session") return Promise.resolve(null);

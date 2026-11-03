@@ -55,8 +55,6 @@ impl Core {
         preset_id: &str,
         mut progress: impl FnMut(PresetApplyProgress),
     ) -> Result<PresetApplyReport> {
-        self.ensure_no_active_session().await?;
-        self.ensure_no_pending_enabled_transition().await?;
         if !self
             .list_presets(game)
             .await?
@@ -65,11 +63,16 @@ impl Core {
         {
             return Err(Error::PresetNotFound);
         }
+        self.ensure_no_active_session().await?;
+        self.ensure_no_pending_enabled_transition().await?;
         let install = self
             .game_install_path(game)
             .await?
             .ok_or(Error::PresetGamePathMissing)?;
         let mods_dir = install.join("Mods");
+        if !mods_dir.is_dir() {
+            return Err(Error::PresetGamePathMissing);
+        }
         let mut entries: BTreeMap<String, Option<String>> = sqlx::query(
             "SELECT mod_id, active_variant_id FROM preset_entries WHERE preset_id = ? ORDER BY mod_id",
         )
@@ -99,7 +102,7 @@ impl Core {
                 .await?;
             plan.push((
                 PresetApplyMod {
-                    name: name.unwrap_or_else(|| id.clone()),
+                    name: name.unwrap_or_else(|| format!("Mod with recorded identifier {id}")),
                     mod_id: id,
                     target_enabled: true,
                 },
@@ -113,12 +116,12 @@ impl Core {
         let mut results = Vec::with_capacity(plan.len());
         for (item, row, selection) in plan {
             let outcome = match row {
-                None => PresetApplyOutcome::Skipped { reason: format!("{} is no longer in this Game's Library.", item.name) },
+                None => PresetApplyOutcome::Skipped { reason: format!("{} was skipped because it is no longer in this Game's Library.", item.name) },
                 Some(row) if row.reinstall_recovery.is_some() || row.enabled_transition_recovery.is_some() =>
                     PresetApplyOutcome::Skipped { reason: format!("{} needs recovery. Recover it in the Library before applying a preset.", item.name) },
-                Some(_) => {
+                Some(row) => {
                     progress(PresetApplyProgress::Applying { item: item.clone() });
-                    self.apply_preset_mod(&item, selection, &mods_dir).await
+                    self.apply_preset_mod(&item, row.enabled, selection, &mods_dir).await
                 }
             };
             let result = PresetApplyResult { item, outcome };
@@ -145,6 +148,7 @@ impl Core {
     async fn apply_preset_mod(
         &self,
         item: &PresetApplyMod,
+        enabled: bool,
         selection: Option<Option<String>>,
         mods_dir: &std::path::Path,
     ) -> PresetApplyOutcome {
@@ -165,28 +169,35 @@ impl Core {
         };
         let change = async {
             if selection.is_some() {
+                // Trust the recorded state; filesystem drift belongs to audit_library.
+                if enabled && self.active_variant_id(&item.mod_id).await?.as_deref() == desired {
+                    return Ok(true);
+                }
                 // Select while disabled, so an interrupted selection cannot leave
                 // an enabled Mod between its stored and deployed appearances.
                 self.set_enabled(&item.mod_id, false, mods_dir).await?;
                 self.set_active_variant(&item.mod_id, desired, mods_dir)
                     .await?;
-                self.set_enabled(&item.mod_id, true, mods_dir).await
+                self.set_enabled(&item.mod_id, true, mods_dir).await?;
             } else {
-                self.set_enabled(&item.mod_id, false, mods_dir).await
+                self.set_enabled(&item.mod_id, false, mods_dir).await?;
             }
+            Ok(false)
         }
         .await;
         match change {
-            Ok(()) => PresetApplyOutcome::Applied { reason: if item.target_enabled {
+            Ok(already_matched) => PresetApplyOutcome::Applied { reason: if already_matched {
+                format!("{} already matched the preset; no change was needed.", item.name)
+            } else if item.target_enabled {
                 format!("{} is enabled with its recorded Variant selection.", item.name)
             } else {
                 format!("{} is disabled because it is not in this preset, including Mods added after it was saved.", item.name)
             } },
-            Err(Error::ReinstallRecoveryQuarantined { .. } | Error::EnabledTransitionPending { .. }) => PresetApplyOutcome::Skipped { reason: format!("{} could not continue because Library recovery is pending. Recover the affected Mod in the Library, then retry.", item.name) },
+            Err(Error::ReinstallRecoveryQuarantined { .. } | Error::EnabledTransitionPending { .. }) => PresetApplyOutcome::Skipped { reason: format!("{} could not continue because Library recovery is pending. Check the Library for the Mod that needs recovery; it may be a different Mod. Complete that recovery, then retry.", item.name) },
             Err(Error::SessionActive { .. } | Error::SessionLaunchInProgress { .. } | Error::SessionLaunchInterrupted { .. }) => PresetApplyOutcome::Failed { reason: format!("{} could not finish because a Game Session or launch now blocks Library changes. End it, then retry the preset.", item.name) },
             // The shared actions may have committed an intermediate state before
             // returning an error. Never infer success or rollback from that error.
-            Err(_) => PresetApplyOutcome::Unknown { reason: format!("{} has an unverified final state after an interrupted preset change. Check the Library, complete any enable/disable recovery, then retry the preset.", item.name) },
+            Err(_) => PresetApplyOutcome::Unknown { reason: format!("GMM could not confirm the final state of {}. Check its state in the Library, then retry the preset.", item.name) },
         }
     }
 }

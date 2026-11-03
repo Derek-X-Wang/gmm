@@ -76,7 +76,7 @@ pub enum Error {
     )]
     PresetNotFound,
 
-    #[error("Set this Game's install path before applying a preset.")]
+    #[error("Set this Game's install path and make sure its Mods directory exists before applying a preset.")]
     PresetGamePathMissing,
 
     #[error("Preset name \"{name}\" is already taken. Choose another name.")]
