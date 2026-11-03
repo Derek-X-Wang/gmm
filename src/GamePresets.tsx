@@ -15,8 +15,8 @@ export function GamePresets({ game }: { game: GameCode }) {
       void qc.invalidateQueries({ queryKey: ["presets", game] });
     },
   });
-  return <section aria-label="Saved presets">
-    <h3>Saved presets</h3>
+  return <section className="card" aria-label="Saved presets">
+    <h2>Saved presets</h2>
     <form onSubmit={(event) => { event.preventDefault(); save.mutate(name); }}>
       <label htmlFor={nameId}>Preset name</label>
       <input id={nameId} value={name} onChange={(event) => setName(event.target.value)} disabled={save.isPending} />

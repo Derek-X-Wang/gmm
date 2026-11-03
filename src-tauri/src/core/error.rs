@@ -71,8 +71,8 @@ pub enum Error {
     #[error("Enter a name for the preset.")]
     InvalidPresetName,
 
-    #[error("Preset name \"{name}\" is already taken for {game}. Choose another name.")]
-    PresetNameTaken { game: String, name: String },
+    #[error("Preset name \"{name}\" is already taken. Choose another name.")]
+    PresetNameTaken { name: String },
 
     #[error("invalid game code: {0}")]
     InvalidGameCode(String),

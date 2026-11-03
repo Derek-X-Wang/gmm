@@ -13,7 +13,7 @@ beforeEach(() => {
     if (command === "list_presets") return Promise.resolve(saved.filter((preset) => preset.game === args.game));
     if (command === "save_preset") {
       if (saved.some((preset) => preset.game === args.game && preset.name === args.name)) {
-        return Promise.reject({ kind: "other", message: `Preset name "${args.name}" is already taken for ${args.game}. Choose another name.` });
+        return Promise.reject({ kind: "other", message: `Preset name "${args.name}" is already taken. Choose another name.` });
       }
       const preset = { id: String(saved.length), game: args.game, name: args.name, createdAt: "now", modCount: 0 } as Preset;
       saved.push(preset);
@@ -41,7 +41,7 @@ it("surfaces the taken-name error and keeps the existing preset and name draft",
   renderWithQuery(<GamePresets game="gimi" />);
   await screen.findByText("Screenshot — 2 Mods enabled");
   await save("Screenshot");
-  expect(await screen.findByRole("alert")).toHaveTextContent('Preset name "Screenshot" is already taken for gimi. Choose another name.');
+  expect(await screen.findByRole("alert")).toHaveTextContent('Preset name "Screenshot" is already taken. Choose another name.');
   expect(screen.getByRole("textbox")).toHaveValue("Screenshot");
   expect(screen.getByText("Screenshot — 2 Mods enabled")).toBeVisible();
   expect(saved).toHaveLength(1);

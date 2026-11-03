@@ -1279,6 +1279,163 @@ async fn seed(pool: &SqlitePool, version: usize) {
             .await
             .expect("seed upstream version");
     }
+
+    if version >= 17 {
+        for (id, name) in [
+            ("corpus-populated", "Populated setup"),
+            ("corpus-empty", "Empty setup"),
+        ] {
+            sqlx::query("INSERT INTO presets (id, game_code, name, created_at) VALUES (?, 'gimi', ?, '2026-10-29T00:00:00Z')")
+                .bind(id).bind(name).execute(pool).await.expect("seed preset");
+        }
+        for (mod_id, variant_id) in [
+            (SEED_MODS[0].id, Some("01JCORPUSVARIANT000000001")),
+            (SEED_MODS[1].id, None),
+        ] {
+            sqlx::query("INSERT INTO preset_entries (preset_id, mod_id, active_variant_id) VALUES ('corpus-populated', ?, ?)")
+                .bind(mod_id).bind(variant_id).execute(pool).await.expect("seed preset entry");
+        }
+    }
+}
+
+#[tokio::test]
+async fn preset_migration_enforces_the_identity_snapshot_schema_contract() {
+    let (_, fixture) = corpus()
+        .into_iter()
+        .find(|(version, _)| *version == 16)
+        .unwrap();
+    let tmp = TempDir::new().unwrap();
+    let db = stage(&fixture, &tmp);
+    drop(open_core(&db, &tmp).await);
+    let pool = raw_pool(&db).await;
+    for (table, expected) in [
+        ("presets", vec!["id", "game_code", "name", "created_at"]),
+        (
+            "preset_entries",
+            vec!["preset_id", "mod_id", "active_variant_id"],
+        ),
+    ] {
+        let columns: Vec<String> = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get("name"))
+            .collect();
+        assert_eq!(columns, expected, "{table}: identity-only column order");
+    }
+    for (table, expected) in [
+        ("presets", ("games", "game_code", "code", "NO ACTION")),
+        ("preset_entries", ("presets", "preset_id", "id", "CASCADE")),
+    ] {
+        let foreign_keys: Vec<(String, String, String, String)> =
+            sqlx::query(&format!("PRAGMA foreign_key_list({table})"))
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    (
+                        row.get("table"),
+                        row.get("from"),
+                        row.get("to"),
+                        row.get("on_delete"),
+                    )
+                })
+                .collect();
+        assert_eq!(
+            foreign_keys,
+            vec![(
+                expected.0.into(),
+                expected.1.into(),
+                expected.2.into(),
+                expected.3.into()
+            )],
+            "{table}: foreign-key target and ON DELETE action are part of the schema contract"
+        );
+    }
+    let indexes = sqlx::query("PRAGMA index_list(presets)")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let mut has_unique_game_name = false;
+    for index in indexes {
+        if index.get::<i64, _>("unique") != 1 || index.get::<i64, _>("partial") != 0 {
+            continue;
+        }
+        let name: String = index.get("name");
+        let columns: Vec<String> =
+            sqlx::query("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+                .bind(name)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.get("name"))
+                .collect();
+        has_unique_game_name |= columns == ["game_code", "name"];
+    }
+    assert!(
+        has_unique_game_name,
+        "presets must declare UNIQUE (game_code, name)"
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn preset_corpus_contains_and_preserves_populated_and_empty_setups() {
+    for (version, fixture) in corpus().into_iter().filter(|(version, _)| *version >= 17) {
+        let tmp = TempDir::new().unwrap();
+        let db = stage(&fixture, &tmp);
+        for upgraded in [false, true] {
+            if upgraded {
+                drop(open_core(&db, &tmp).await);
+            }
+            let pool = raw_pool(&db).await;
+            let presets: Vec<(String, String, String, String)> =
+                sqlx::query_as("SELECT id, game_code, name, created_at FROM presets ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                presets,
+                vec![
+                    (
+                        "corpus-empty".into(),
+                        "gimi".into(),
+                        "Empty setup".into(),
+                        "2026-10-29T00:00:00Z".into()
+                    ),
+                    (
+                        "corpus-populated".into(),
+                        "gimi".into(),
+                        "Populated setup".into(),
+                        "2026-10-29T00:00:00Z".into()
+                    ),
+                ],
+                "schema {version}, upgraded={upgraded}: durable presets must survive"
+            );
+            let entries: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT preset_id, mod_id, active_variant_id FROM preset_entries ORDER BY mod_id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                entries,
+                vec![
+                    (
+                        "corpus-populated".into(),
+                        SEED_MODS[0].id.into(),
+                        Some("01JCORPUSVARIANT000000001".into())
+                    ),
+                    ("corpus-populated".into(), SEED_MODS[1].id.into(), None),
+                ],
+                "schema {version}, upgraded={upgraded}: nullable Variant identities must survive"
+            );
+            pool.close().await;
+        }
+    }
 }
 
 /// Sanity check on the fixtures themselves: an old fixture must really

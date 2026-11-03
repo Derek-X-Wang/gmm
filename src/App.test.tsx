@@ -473,7 +473,7 @@ it("keeps unrelated Game controls available when the aggregate needs attention",
 });
 
 
-it("renders the approved six main-screen slots in order with scoped notices and no configuration", async () => {
+it("renders the approved seven main-screen slots in order with scoped notices and no configuration", async () => {
   startupFailures = [{ game: "gimi", kind: "invalidActiveVariant", error: variantError }];
   const implementation = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (command, args) => {
@@ -524,7 +524,6 @@ it("renders the approved six main-screen slots in order with scoped notices and 
   expect(screen.getByRole("heading", { name: "Add Mods for Genshin Impact" }).closest("section")!.querySelector("ul.mods")).toBeNull();
   expect(screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual([
     "Adopt for Genshin Impact", "Import ZIP for Genshin Impact", "GameBanana for Genshin Impact",
-    "Saved presets",
   ]);
   expect(main.querySelector("aside")).toBeNull();
   expect(main.querySelector("header.window-bar")).toBeNull();

@@ -1,6 +1,8 @@
 //! Capture current Mod state into database-only, per-Game snapshots.
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::sync::LazyLock;
 use ulid::Ulid;
 
 use super::{Core, Error, GameCode, Result};
@@ -17,7 +19,15 @@ pub struct Preset {
 
 impl Core {
     pub async fn save_preset(&self, game: GameCode, name: &str) -> Result<Preset> {
-        let name = name.trim();
+        self.ensure_no_pending_enabled_transition().await?;
+        if name.chars().any(char::is_control) {
+            return Err(Error::InvalidPresetName);
+        }
+        static NAME_EDGES: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^[\s\p{Cf}]+|[\s\p{Cf}]+$").expect("valid preset name edge pattern")
+        });
+        let trimmed = NAME_EDGES.replace_all(name, "");
+        let name = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
         if name.is_empty() {
             return Err(Error::InvalidPresetName);
         }
@@ -27,7 +37,7 @@ impl Core {
         sqlx::query("INSERT INTO presets (id, game_code, name, created_at) VALUES (?, ?, ?, ?)")
             .bind(&id)
             .bind(game.as_str())
-            .bind(name)
+            .bind(&name)
             .bind(&created_at)
             .execute(&mut *tx)
             .await
@@ -37,7 +47,6 @@ impl Core {
                     .is_some_and(|error| error.is_unique_violation())
                 {
                     Error::PresetNameTaken {
-                        game: game.as_str().to_owned(),
                         name: name.to_owned(),
                     }
                 } else {

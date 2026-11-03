@@ -97,8 +97,11 @@ async fn duplicate_name_is_refused_within_game_but_allowed_for_another_game() {
         .await
         .expect_err("duplicate name must be refused, never overwritten");
     assert!(matches!(error, Error::PresetNameTaken { .. }));
-    assert!(error.to_string().contains("Patch day"));
-    assert!(error.to_string().contains("gimi"));
+    assert_eq!(
+        error.to_string(),
+        "Preset name \"Patch day\" is already taken. Choose another name."
+    );
+    assert!(!error.to_string().contains("gimi"));
     assert_eq!(
         core.list_presets(GameCode::Gimi).await.unwrap(),
         vec![first]
@@ -207,4 +210,109 @@ async fn entries_keep_identities_after_library_records_are_removed_and_store_no_
         core.list_presets(GameCode::Gimi).await.unwrap(),
         vec![preset]
     );
+}
+
+#[tokio::test]
+async fn zero_width_space_only_name_is_refused() {
+    let (_tmp, core, _pool) = fixture().await;
+    assert!(matches!(
+        core.save_preset(GameCode::Gimi, "\u{200b}").await,
+        Err(Error::InvalidPresetName)
+    ));
+}
+
+#[tokio::test]
+async fn control_characters_in_names_are_refused_before_normalization() {
+    let (_tmp, core, _pool) = fixture().await;
+    for name in ["\t\n", "Raiden\nteam", "Raiden\tteam", "Raiden\u{7f}team"] {
+        assert!(
+            matches!(
+                core.save_preset(GameCode::Gimi, name).await,
+                Err(Error::InvalidPresetName)
+            ),
+            "control characters must be refused: {name:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn normalized_name_is_stored_and_echoed() {
+    let (_tmp, core, pool) = fixture().await;
+    let screenshot = core
+        .save_preset(GameCode::Gimi, "  Screenshot  ")
+        .await
+        .unwrap();
+    assert_eq!(screenshot.name, "Screenshot");
+    let normalized = core
+        .save_preset(
+            GameCode::Gimi,
+            "\u{200b}\u{a0}Screen  \u{2003}shot\u{2060} ",
+        )
+        .await
+        .unwrap();
+    assert_eq!(normalized.name, "Screen shot");
+    let stored: String = sqlx::query_scalar("SELECT name FROM presets WHERE id = ?")
+        .bind(&screenshot.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, "Screenshot");
+    assert!(core
+        .list_presets(GameCode::Gimi)
+        .await
+        .unwrap()
+        .contains(&normalized));
+}
+
+#[tokio::test]
+async fn normalized_whitespace_names_collide() {
+    let (_tmp, core, _pool) = fixture().await;
+    let first = core
+        .save_preset(GameCode::Gimi, "Screen shot")
+        .await
+        .unwrap();
+    assert!(matches!(
+        core.save_preset(GameCode::Gimi, "Screen  shot").await,
+        Err(Error::PresetNameTaken { .. })
+    ));
+    assert_eq!(
+        core.list_presets(GameCode::Gimi).await.unwrap(),
+        vec![first]
+    );
+}
+
+#[tokio::test]
+async fn capture_refuses_pending_enabled_transition_before_writing_any_preset() {
+    let (_tmp, core, pool) = fixture().await;
+    seed_mod(&pool, "00000000000000000000000001", "gimi", true).await;
+    sqlx::query(
+        "INSERT INTO enabled_transitions (
+            mod_id, game_code, intended_enabled, junction_path,
+            junction_target, junction_parent_identity, junction_identity, owner_pid,
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
+         ) VALUES ('00000000000000000000000001', 'gimi', 0, 'junction', 'target',
+                   '0000000000000001:0000000000000002',
+                   '0000000000000001:0000000000000003', 42, 1, 1,
+                   '2026-10-29T00:00:00Z', '0000000000000001:0000000000000004',
+                   '0000000000000001:0000000000000005')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let error = core
+        .save_preset(GameCode::Gimi, "Unsettled")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::EnabledTransitionPending { ref mod_id } if mod_id == "00000000000000000000000001"),
+        "capture must refuse the pending transition: {error:?}"
+    );
+    for table in ["presets", "preset_entries"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "pending capture must not write to {table}");
+    }
 }
