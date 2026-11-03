@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { applyPreset, listPresets, savePreset, type GameCode, type PresetApplyMod, type PresetApplyProgress, type PresetApplyReport, type PresetApplyResult } from "./api";
+import { applyPreset, deletePreset, listMods, listPresets, recapturePreset, renamePreset, savePreset, type Preset, type GameCode, type PresetApplyMod, type PresetApplyProgress, type PresetApplyReport, type PresetApplyResult } from "./api";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { commandFailureMessage } from "./commandError";
 
@@ -16,6 +16,23 @@ export function GamePresets({ game }: { game: GameCode }) {
   const qc = useQueryClient();
   const nameId = useId();
   const [name, setName] = useState("");
+  const [action, setAction] = useState<{ kind: "rename" | "delete" | "recapture"; preset: Preset }>();
+  const [renameDraft, setRenameDraft] = useState("");
+  const renameId = useId();
+  const recapturing = action?.kind === "recapture";
+  const currentMods = useQuery({ queryKey: ["mods", game], queryFn: () => listMods(game), enabled: recapturing });
+  const rename = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => renamePreset(game, id, name),
+    onSuccess: () => { setAction(undefined); void qc.invalidateQueries({ queryKey: ["presets", game] }); },
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => deletePreset(game, id),
+    onSuccess: () => { setAction(undefined); void qc.invalidateQueries({ queryKey: ["presets", game] }); },
+  });
+  const recapture = useMutation({
+    mutationFn: (id: string) => recapturePreset(game, id),
+    onSuccess: () => { setAction(undefined); void qc.invalidateQueries({ queryKey: ["presets", game] }); },
+  });
   const [applyState, setApplyState] = useState<ApplyState>();
   const presets = useQuery({ queryKey: ["presets", game], queryFn: () => listPresets(game) });
   const save = useMutation({
@@ -55,12 +72,18 @@ export function GamePresets({ game }: { game: GameCode }) {
       }
     },
   });
+  const busy = save.isPending || apply.isPending || rename.isPending || remove.isPending || recapture.isPending;
+  function choose(kind: "rename" | "delete" | "recapture", preset: Preset) {
+    rename.reset(); remove.reset(); recapture.reset();
+    setRenameDraft(preset.name);
+    setAction({ kind, preset });
+  }
   return <section className="card" aria-label="Saved presets">
     <h2>Saved presets</h2>
     <form onSubmit={(event) => { event.preventDefault(); save.mutate(name); }}>
       <label htmlFor={nameId}>Preset name</label>
-      <input id={nameId} value={name} onChange={(event) => setName(event.target.value)} disabled={save.isPending || apply.isPending} />
-      <button type="submit" disabled={save.isPending || apply.isPending || !name.trim()}>
+      <input id={nameId} value={name} onChange={(event) => setName(event.target.value)} disabled={busy} />
+      <button type="submit" disabled={busy || !name.trim()}>
         {save.isPending ? "Saving preset…" : "Save current setup as…"}
       </button>
     </form>
@@ -72,8 +95,32 @@ export function GamePresets({ game }: { game: GameCode }) {
     {!!presets.data?.length && <p>Applying a preset enables its saved Mods and disables every other Mod for this Game, including Mods added after it was saved. Keep GMM open until it finishes.</p>}
     {presets.data && <ul>{presets.data.map((preset) => <li key={preset.id}>
       {preset.name} — {preset.modCount === 0 ? "No Mods enabled" : `${preset.modCount} Mods enabled`}
-      {" "}<button disabled={apply.isPending || save.isPending} onClick={() => apply.mutate(preset.id)}>Apply {preset.name}</button>
+      {" "}<button disabled={busy} onClick={() => apply.mutate(preset.id)}>Apply {preset.name}</button>
+      {" "}<button disabled={busy} onClick={() => choose("rename", preset)}>Rename {preset.name}</button>
+      {" "}<button disabled={busy} onClick={() => choose("recapture", preset)}>Re-capture current setup into {preset.name}</button>
+      {" "}<button disabled={busy} onClick={() => choose("delete", preset)}>Delete saved preset {preset.name}</button>
     </li>)}</ul>}
+    <CommandErrorNotice error={rename.error} heading="Could not rename preset." />
+    <CommandErrorNotice error={remove.error} heading="Could not delete saved preset." />
+    <CommandErrorNotice error={recapture.error} heading="Could not replace saved setup." />
+    {action?.kind === "rename" && <form onSubmit={(event) => { event.preventDefault(); rename.mutate({ id: action.preset.id, name: renameDraft }); }}>
+      <label htmlFor={renameId}>New preset name</label>
+      <input id={renameId} value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} disabled={busy} />
+      <button type="submit" disabled={busy || !renameDraft.trim()}>Save new name</button>
+      <button type="button" disabled={busy} onClick={() => setAction(undefined)}>Cancel rename</button>
+    </form>}
+    {action?.kind === "delete" && <div role="alertdialog" aria-label="Delete saved preset">
+      <p>Delete saved preset “{action.preset.name}”? Only the saved description is removed. No Mod is turned off and no Mod is changed.</p>
+      <button disabled={busy} onClick={() => remove.mutate(action.preset.id)}>Delete saved description</button>
+      <button disabled={busy} onClick={() => setAction(undefined)}>Keep saved preset</button>
+    </div>}
+    {recapturing && <div role="alertdialog" aria-label="Replace saved setup">
+      <CommandErrorNotice error={currentMods.error} heading="Could not read current setup." />
+      {currentMods.isFetching && <p>Reading current setup…</p>}
+      {currentMods.isSuccess && <p>Replace saved setup “{action.preset.name}”? It holds {action.preset.modCount} Mods now and will hold {currentMods.data.filter((mod) => mod.enabled).length} Mods after re-capture. The previous saved entries cannot be recovered. The name stays the same. No Mod is changed.</p>}
+      <button disabled={busy || !currentMods.isSuccess || currentMods.isFetching} onClick={() => recapture.mutate(action.preset.id)}>Replace saved entries with current setup</button>
+      <button disabled={busy} onClick={() => setAction(undefined)}>Keep previous saved entries</button>
+    </div>}
     {applyState && <div>
       <p role="status">{applyState.reading} {apply.isPending && `${applyState.results.length} of ${applyState.mods.length} Mods completed.`}</p>
       {applyState.error && <p role="alert">{applyState.error}</p>}

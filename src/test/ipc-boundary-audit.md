@@ -37,6 +37,7 @@ Opaque mutation keys/options have no production allowance.
 
 | Rule | Site | Opaque callback allowance | Reason |
 | --- | --- | --- | --- |
+| 1 | GamePresets::currentMods | none | Every observer status and error read is under recapturing, the same boolean that enables the current-setup confirmation query. |
 | 1 | ModDetailPanel::remembered | none | The early return when closed gates the width-read error on open. |
 | 1 | ModDetailPanel::updates | none | The upstream notice shares hasUpstream with enabled. |
 | 1 | OnboardingWizard / ImporterStep::installPaths | none | No observer error render; per-Game result errors are separate data. |
@@ -45,6 +46,9 @@ Opaque mutation keys/options have no production allowance.
 | 2 | App / useLaunchGame::launch | guidance.refetch | Error handling refetches exclusion guidance from its query; this refresh installs no mutation return value. |
 | 2 | App / ModUpdatesPanel::check | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | App / ModUpdatesPanel::toggleGlobal | none | No direct cache write in success/settlement; refresh or local UI only. |
+| 2 | GamePresets::rename | setAction | Only clears local action state and invalidates presets/game; no direct cache write. |
+| 2 | GamePresets::remove | setAction | Only clears local action state and invalidates presets/game; no direct cache write. |
+| 2 | GamePresets::recapture | setAction | Only clears local action state and invalidates presets/game; no direct cache write. |
 | 2 | GamePresets::save | setName | Successful atomic capture clears only the local name draft and invalidates presets/game; it installs no cache data. The listing query is unconditional. |
 | 2 | GamePresets::apply | (old?.mods ?? []).map, commandFailureMessage, old?.results.find, setApplyState | Message formatting and local apply state only; no direct cache writer. Settlement unconditionally refreshes Conflicts and affected Library reads. Scope conflicts-${game} serializes operations within this Game. |
 | 2 | Diagnostics::exportBundle | none | No direct cache write in success/settlement; refresh or local UI only. |
