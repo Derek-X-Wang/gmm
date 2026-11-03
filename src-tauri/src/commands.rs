@@ -611,7 +611,7 @@ pub async fn set_active_variant(
     let mods_dir = install.join("Mods");
     std::fs::create_dir_all(&mods_dir)
         .map_err(|error| CommandError::other(format!("create {}: {error}", mods_dir.display())))?;
-    core.set_active_variant(&mod_id, &variant_id, &mods_dir)
+    core.set_active_variant(&mod_id, Some(&variant_id), &mods_dir)
         .await
         .map_err(CommandError::from)
 }

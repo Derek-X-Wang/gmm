@@ -2506,7 +2506,7 @@ impl Core {
     pub(super) async fn set_active_variant_in_library_mutation(
         &self,
         mod_id: &str,
-        variant_id: &str,
+        variant_id: Option<&str>,
         game_mods_dir: &Path,
     ) -> Result<()> {
         let mut fence = self
@@ -2520,11 +2520,13 @@ impl Core {
         .await?;
 
         // Validate the Variant belongs to this Mod before persisting it.
-        sqlx::query("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
-            .bind(variant_id)
-            .bind(mod_id)
-            .fetch_one(&mut *fence.transaction)
-            .await?;
+        if let Some(variant_id) = variant_id {
+            sqlx::query("SELECT subpath FROM mod_variants WHERE id = ? AND mod_id = ?")
+                .bind(variant_id)
+                .bind(mod_id)
+                .fetch_one(&mut *fence.transaction)
+                .await?;
+        }
 
         let mod_row =
             sqlx::query("SELECT junction_dir_name, library_path, enabled FROM mods WHERE id = ?")

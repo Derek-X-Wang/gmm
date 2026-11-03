@@ -945,7 +945,7 @@ async fn seed_enabled_gamebanana_mod(
         .iter()
         .find(|variant| variant.name == "Red")
         .expect("Red Variant");
-    core.set_active_variant(&imported.id, &red.id, &env.game_mods)
+    core.set_active_variant(&imported.id, Some(&red.id), &env.game_mods)
         .await
         .expect("select Red Variant before reinstall");
     core.set_enabled(&imported.id, true, &env.game_mods)
@@ -2479,7 +2479,7 @@ async fn failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_
     let variant_switch = started
         .set_active_variant(
             &imported.id,
-            "unavailable-while-quarantined",
+            Some("unavailable-while-quarantined"),
             &env.game_mods,
         )
         .await

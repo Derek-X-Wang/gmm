@@ -3321,11 +3321,12 @@ impl Core {
 
     /// Switch the active Variant for `mod_id`. Drops the existing
     /// junction (if any) and recreates it pointing at the new
-    /// variant subpath. The Library copy is never touched.
+    /// variant subpath, or the Library root when the selection is absent.
+    /// The Library copy is never touched.
     pub async fn set_active_variant(
         &self,
         mod_id: &str,
-        variant_id: &str,
+        variant_id: Option<&str>,
         game_mods_dir: &Path,
     ) -> Result<()> {
         self.set_active_variant_in_library_mutation(mod_id, variant_id, game_mods_dir)

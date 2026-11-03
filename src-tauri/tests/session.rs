@@ -149,7 +149,7 @@ async fn set_active_variant_is_rejected_while_a_session_is_active() {
     start_a_session(&core).await;
 
     let err = core
-        .set_active_variant(&m.id, variant_id, &game_mods)
+        .set_active_variant(&m.id, Some(variant_id), &game_mods)
         .await
         .expect_err("set_active_variant must error while a session is active");
     assert_session_error(&err);
