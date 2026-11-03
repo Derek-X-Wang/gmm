@@ -46,6 +46,7 @@ Opaque mutation keys/options have no production allowance.
 | 2 | App / ModUpdatesPanel::check | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | App / ModUpdatesPanel::toggleGlobal | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | GamePresets::save | setName | Successful atomic capture clears only the local name draft and invalidates presets/game; it installs no cache data. The listing query is unconditional. |
+| 2 | GamePresets::apply | (old?.mods ?? []).map, commandFailureMessage, old?.results.find, setApplyState | Message formatting and local apply state only; no direct cache writer. Settlement unconditionally refreshes Conflicts and affected Library reads. Scope conflicts-${game} serializes operations within this Game. |
 | 2 | Diagnostics::exportBundle | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | ImporterOriginPanel::accept | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | ImporterOriginPanel::decline | none | No direct cache write in success/settlement; refresh or local UI only. |

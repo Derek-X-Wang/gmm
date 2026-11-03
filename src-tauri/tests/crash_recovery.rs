@@ -1716,7 +1716,7 @@ async fn every_crash_point_is_exercised_by_an_operation() {
         .iter()
         .find(|variant| variant.id != active)
         .expect("coverage Mod has a second Variant");
-    core.set_active_variant(&adopted.id, &other.id, &env.game_mods)
+    core.set_active_variant(&adopted.id, Some(&other.id), &env.game_mods)
         .await
         .expect("coverage Variant switch");
     core.set_enabled(&adopted.id, false, &env.game_mods)

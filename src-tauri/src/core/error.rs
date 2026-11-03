@@ -71,6 +71,17 @@ pub enum Error {
     #[error("Enter a name for the preset.")]
     InvalidPresetName,
 
+    #[error(
+        "This preset is no longer available for this Game. Refresh the preset list and try again."
+    )]
+    PresetNotFound,
+
+    #[error("Set this Game's install path and make sure its Mods directory exists before applying a preset.")]
+    PresetGamePathMissing,
+
+    #[error("This Game's Mods location exists but is not a directory. Choose a Game install path with a Mods directory before applying a preset.")]
+    PresetModsPathNotDirectory,
+
     #[error("Preset name \"{name}\" is already taken. Choose another name.")]
     PresetNameTaken { name: String },
 

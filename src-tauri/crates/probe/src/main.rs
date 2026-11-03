@@ -203,7 +203,7 @@ async fn run(args: &Args) -> Result<(), String> {
             let mod_id = args.req("--mod-id")?;
             let variant_id = args.req("--variant-id")?;
             let mods_dir = PathBuf::from(args.req("--mods-dir")?);
-            core.set_active_variant(&mod_id, &variant_id, &mods_dir)
+            core.set_active_variant(&mod_id, Some(&variant_id), &mods_dir)
                 .await
                 .map_err(|e| e.to_string())
         }

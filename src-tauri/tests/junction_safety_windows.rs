@@ -168,7 +168,7 @@ async fn switching_variants_never_touches_library_contents() {
         .expect("enable");
 
     for v in &variants {
-        core.set_active_variant(&adopted.id, &v.id, &mods_dir)
+        core.set_active_variant(&adopted.id, Some(&v.id), &mods_dir)
             .await
             .unwrap_or_else(|e| panic!("switch to {:?}: {e}", v.id));
 

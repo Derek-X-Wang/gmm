@@ -196,7 +196,7 @@ async fn switching_active_variant_retargets_the_junction() {
     // Switch to Red.
     let variants = core.list_variants(&imported.id).await.expect("list");
     let red = variants.iter().find(|v| v.name == "Red").expect("red");
-    core.set_active_variant(&imported.id, &red.id, &game_mods)
+    core.set_active_variant(&imported.id, Some(&red.id), &game_mods)
         .await
         .expect("switch");
 
@@ -208,7 +208,7 @@ async fn switching_active_variant_retargets_the_junction() {
 
     // And once more, to Green.
     let green = variants.iter().find(|v| v.name == "Green").expect("green");
-    core.set_active_variant(&imported.id, &green.id, &game_mods)
+    core.set_active_variant(&imported.id, Some(&green.id), &game_mods)
         .await
         .expect("switch");
     let merged_after = fs::read(link.join("merged.ini")).expect("read merged");

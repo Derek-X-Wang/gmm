@@ -57,6 +57,21 @@ pub async fn attention_status(core: State<'_, Core>) -> CommandResult<AttentionR
 }
 
 #[tauri::command]
+pub async fn apply_preset(
+    core: State<'_, Core>,
+    game: GameCode,
+    preset_id: String,
+    on_progress: tauri::ipc::Channel<crate::core::preset_apply::PresetApplyProgress>,
+) -> CommandResult<crate::core::preset_apply::PresetApplyReport> {
+    core.apply_preset(game, &preset_id, |progress| {
+        // A closed view must never interrupt an in-flight Mod change.
+        let _ = on_progress.send(progress);
+    })
+    .await
+    .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub async fn save_preset(
     core: State<'_, Core>,
     game: GameCode,
@@ -611,7 +626,7 @@ pub async fn set_active_variant(
     let mods_dir = install.join("Mods");
     std::fs::create_dir_all(&mods_dir)
         .map_err(|error| CommandError::other(format!("create {}: {error}", mods_dir.display())))?;
-    core.set_active_variant(&mod_id, &variant_id, &mods_dir)
+    core.set_active_variant(&mod_id, Some(&variant_id), &mods_dir)
         .await
         .map_err(CommandError::from)
 }

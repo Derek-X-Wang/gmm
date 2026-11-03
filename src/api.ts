@@ -97,6 +97,40 @@ export interface Preset {
   modCount: number;
 }
 
+export interface PresetApplyMod {
+  modId: string;
+  name: string;
+  /** Requested state; only an applied result establishes completion. */
+  targetEnabled: boolean;
+}
+
+export interface PresetApplyResult extends PresetApplyMod {
+  status: "applied" | "skipped" | "failed" | "unknown";
+  reason: string;
+}
+
+export type PresetApplyProgress =
+  | { phase: "started"; mods: PresetApplyMod[] }
+  | { phase: "applying"; item: PresetApplyMod }
+  | { phase: "completed"; result: PresetApplyResult }
+  | { phase: "checkingConflicts" };
+
+export interface PresetApplyReport {
+  results: PresetApplyResult[];
+  conflicts: ConflictReport | null;
+  conflictError: string | null;
+}
+
+export function applyPreset(
+  game: GameCode,
+  presetId: string,
+  progress: (event: PresetApplyProgress) => void,
+): Promise<PresetApplyReport> {
+  const onProgress = new Channel<PresetApplyProgress>();
+  onProgress.onmessage = progress;
+  return invoke<PresetApplyReport>("apply_preset", { game, presetId, onProgress });
+}
+
 export function savePreset(game: GameCode, name: string): Promise<Preset> {
   return invoke<Preset>("save_preset", { game, name });
 }

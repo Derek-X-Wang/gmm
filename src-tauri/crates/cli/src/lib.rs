@@ -319,7 +319,7 @@ async fn execute(core: &Core, args: &Args) -> CommandResult<Value> {
             let item = find_mod(core, args.value("--mod-id")).await?;
             let dir = mods_dir(core, item.game).await?;
             if args.command == "set-variant" {
-                core.set_active_variant(&item.id, args.value("--variant-id"), &dir)
+                core.set_active_variant(&item.id, Some(args.value("--variant-id")), &dir)
                     .await?;
             } else {
                 std::fs::create_dir_all(&dir).map_err(|error| {

@@ -498,7 +498,7 @@ async fn reconcile_repoints_a_junction_left_on_a_stale_variant() {
     // swap leaves: row says `other`, Junction still on the old Variant.
     let link = game_mods.join("Variant Mod");
     let stale_target = fs::canonicalize(&link).expect("resolve");
-    core.set_active_variant(&m.id, &other.id, &game_mods)
+    core.set_active_variant(&m.id, Some(&other.id), &game_mods)
         .await
         .expect("switch variant");
     gmm_lib::core::junction::remove(&link).expect("remove");
