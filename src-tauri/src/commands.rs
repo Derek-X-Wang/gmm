@@ -83,6 +83,40 @@ pub async fn save_preset(
 }
 
 #[tauri::command]
+pub async fn rename_preset(
+    core: State<'_, Core>,
+    game: GameCode,
+    preset_id: String,
+    name: String,
+) -> CommandResult<()> {
+    core.rename_preset(game, &preset_id, &name)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn delete_preset(
+    core: State<'_, Core>,
+    game: GameCode,
+    preset_id: String,
+) -> CommandResult<()> {
+    core.delete_preset(game, &preset_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub async fn recapture_preset(
+    core: State<'_, Core>,
+    game: GameCode,
+    preset_id: String,
+) -> CommandResult<()> {
+    core.recapture_preset(game, &preset_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 pub async fn list_presets(
     core: State<'_, Core>,
     game: GameCode,

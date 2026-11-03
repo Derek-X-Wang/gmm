@@ -135,6 +135,18 @@ export function savePreset(game: GameCode, name: string): Promise<Preset> {
   return invoke<Preset>("save_preset", { game, name });
 }
 
+export function renamePreset(game: GameCode, presetId: string, name: string): Promise<void> {
+  return invoke<void>("rename_preset", { game, presetId, name });
+}
+
+export function deletePreset(game: GameCode, presetId: string): Promise<void> {
+  return invoke<void>("delete_preset", { game, presetId });
+}
+
+export function recapturePreset(game: GameCode, presetId: string): Promise<void> {
+  return invoke<void>("recapture_preset", { game, presetId });
+}
+
 export function listPresets(game: GameCode): Promise<Preset[]> {
   return invoke<Preset[]>("list_presets", { game });
 }
