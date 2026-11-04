@@ -452,6 +452,48 @@ pub fn record_manifest_refresh_started() {
     );
 }
 
+/// Distinctive log line marking the start of the startup stretch that
+/// otherwise logs nothing: GMM's own startup work is done and control is
+/// about to pass to the Tauri runtime (plugin init, window and webview
+/// construction). `.github/scripts/installer-smoke.ps1` reports its elapsed
+/// time since launch, and with [`MAIN_WINDOW_SHOWN_MARKER`] brackets that
+/// stretch (#450).
+pub const STARTUP_HANDOFF_MARKER: &str = "gmm-startup-handoff";
+
+/// Emit [`STARTUP_HANDOFF_MARKER`] immediately before `tauri::Builder` is
+/// constructed.
+///
+/// Attests only that execution reached that line on the main thread. It says
+/// nothing about the background threads spawned earlier (the startup
+/// reconcile and the manifest refresh), which run concurrently and are not
+/// awaited, and nothing about whether Tauri then starts successfully.
+pub fn record_startup_handoff() {
+    tracing::info!(
+        marker = STARTUP_HANDOFF_MARKER,
+        "native startup finished; handing off to the Tauri runtime",
+    );
+}
+
+/// Distinctive log line marking the end of the startup stretch bracketed by
+/// [`STARTUP_HANDOFF_MARKER`]: the main window's `show()` call succeeded.
+pub const MAIN_WINDOW_SHOWN_MARKER: &str = "gmm-main-window-shown";
+
+/// Emit [`MAIN_WINDOW_SHOWN_MARKER`] after `WebviewWindow::show()` returns
+/// `Ok`, and only then.
+///
+/// `Ok` from `show()` proves the windowing backend accepted the request to
+/// make the window visible. It does not prove the webview has loaded a page,
+/// painted, or can reach the backend; [`IPC_READY_MARKER`] is the evidence
+/// for the frontend. A `show()` failure is logged and startup continues, so
+/// recording this marker on that path would claim a window GMM has not
+/// established (#419).
+pub fn record_main_window_shown() {
+    tracing::info!(
+        marker = MAIN_WINDOW_SHOWN_MARKER,
+        "main window show() succeeded",
+    );
+}
+
 /// Stable marker for the webview's startup reading and connectivity events.
 pub const NETWORK_SIGNAL_MARKER: &str = "gmm-network-signal";
 

@@ -32,6 +32,7 @@ use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow, WindowEvent,
 };
 
+use crate::core::diagnostics;
 use crate::core::window_state::{
     self, DisplayRect, PendingWindowState, RestorePlan, SavedWindowState,
 };
@@ -99,8 +100,11 @@ pub fn restore_and_track<R: Runtime>(app: &AppHandle<R>) {
     // window, so there is nothing to recover to. It would leave GMM
     // running with nothing on screen, which is why `show()` being
     // reachable is held by a test rather than by review.
-    if let Err(e) = window.show() {
-        tracing::error!(target: "gmm::window", error = %e, "could not show the main window");
+    match window.show() {
+        Ok(()) => diagnostics::record_main_window_shown(),
+        Err(e) => {
+            tracing::error!(target: "gmm::window", error = %e, "could not show the main window");
+        }
     }
 
     if let Some(core) = app.try_state::<Core>() {

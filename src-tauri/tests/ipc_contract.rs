@@ -1052,6 +1052,104 @@ mod manifest_refresh_started_marker {
     }
 
     #[test]
+    fn installer_smoke_counts_the_startup_bracket_markers_for_this_launch() {
+        use gmm_lib::core::diagnostics::{MAIN_WINDOW_SHOWN_MARKER, STARTUP_HANDOFF_MARKER};
+
+        let script = read(".github/scripts/installer-smoke.ps1");
+        let startup = powershell_function_body(&script, "Invoke-StartupSmoke");
+        for marker in [STARTUP_HANDOFF_MARKER, MAIN_WINDOW_SHOWN_MARKER] {
+            assert!(
+                script.contains(marker),
+                "installer-smoke.ps1 must retain the marker literal '{marker}' \
+                 for the cross-language contract",
+            );
+        }
+
+        // Same before/after discipline as the other markers: a line left by an
+        // earlier launch must not satisfy this one.
+        let launch = position(startup, "$script:AppProc = Start-Process $exe -PassThru");
+        for (before, after) in [
+            (
+                "$handoffBefore = Get-DiagnosticMarkerCount $StartupHandoffMarker",
+                "(Get-DiagnosticMarkerCount $StartupHandoffMarker) -gt $handoffBefore",
+            ),
+            (
+                "$windowBefore = Get-DiagnosticMarkerCount $MainWindowShownMarker",
+                "(Get-DiagnosticMarkerCount $MainWindowShownMarker) -gt $windowBefore",
+            ),
+        ] {
+            let count_before = position(startup, before);
+            let count_after = position(startup, after);
+            assert!(
+                count_before < launch && launch < count_after,
+                "installer-smoke.ps1 must capture `{before}` before launch and compare \
+                 it after launch",
+            );
+        }
+
+        // The elapsed clock starts at the launch, not earlier.
+        let clock = position(
+            startup,
+            "$script:LaunchClock = [System.Diagnostics.Stopwatch]::StartNew()",
+        );
+        assert!(
+            clock < launch && startup[clock..launch].lines().count() <= 2,
+            "the launch clock must start immediately before Start-Process",
+        );
+
+        // The timeout message must tell the two failures apart.
+        assert!(startup.contains("the main window never appeared"));
+        assert!(startup.contains("but the frontend never reached the backend"));
+    }
+
+    #[test]
+    fn startup_emits_the_handoff_marker_immediately_before_the_tauri_builder() {
+        let lib = read("src-tauri/src/lib.rs");
+        let marker_call = "diagnostics::record_startup_handoff();";
+        let marker_end = lib
+            .find(marker_call)
+            .map(|start| start + marker_call.len())
+            .expect("startup handoff marker call not found in lib.rs");
+        assert!(
+            lib[marker_end..]
+                .trim_start()
+                .starts_with("tauri::Builder::default()"),
+            "the handoff marker must be emitted immediately before tauri::Builder::default()",
+        );
+    }
+
+    #[test]
+    fn main_window_marker_is_recorded_only_when_show_succeeds() {
+        let window = read("src-tauri/src/runtime/window.rs");
+        let show = window
+            .find("match window.show() {")
+            .expect("restore_and_track must match on window.show()");
+        let rest = &window[show..];
+        let ok_arm = rest
+            .find("Ok(()) =>")
+            .expect("window.show() match must have an Ok arm");
+        let err_arm = rest
+            .find("Err(e) =>")
+            .expect("window.show() match must have an Err arm");
+        assert!(ok_arm < err_arm);
+        assert!(
+            rest[ok_arm..err_arm].contains("record_main_window_shown()"),
+            "the Ok arm of window.show() must record the main-window marker",
+        );
+        let after_err = &rest[err_arm..];
+        let err_end = after_err.find("\n    }\n").unwrap_or(after_err.len());
+        assert!(
+            !after_err[..err_end].contains("record_main_window_shown"),
+            "a failed show() must not record the main-window marker (#419)",
+        );
+        assert_eq!(
+            window.matches("record_main_window_shown()").count(),
+            1,
+            "the main-window marker must have exactly one call site",
+        );
+    }
+
+    #[test]
     fn startup_reads_the_override_only_through_the_loopback_guard() {
         let lib = read("src-tauri/src/lib.rs");
         assert!(

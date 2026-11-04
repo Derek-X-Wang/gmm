@@ -411,6 +411,12 @@ $IpcReadyMarker = "gmm-ipc-ready"
 # readiness: seeing both while the HTTP response is held open proves the
 # refresh ran and did not block the usable application behind the network.
 $ManifestRefreshStartedMarker = "gmm-manifest-refresh-started"
+# Must match `STARTUP_HANDOFF_MARKER` and `MAIN_WINDOW_SHOWN_MARKER`. Together
+# they bracket the stretch between native startup finishing and the main window
+# being shown, which GMM otherwise logs nothing across (#450). Their elapsed
+# times are printed for every run so a slow pass names its slow phase too.
+$StartupHandoffMarker = "gmm-startup-handoff"
+$MainWindowShownMarker = "gmm-main-window-shown"
 # This is the terminal event emitted by the startup refresh thread after the
 # fixture releases its response, which happens only after IPC is ready.
 $ManifestRefreshFinishedMessage = "recommended-importers refresh finished"
@@ -421,6 +427,17 @@ function Get-DiagnosticMarkerCount($marker) {
     if (-not (Test-Path $logDir)) { return 0 }
     @(Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue |
         Select-String -SimpleMatch $marker).Count
+}
+
+# Seconds since the Start-Process that launched the app, or $null before launch.
+# Milestones are noticed by a 500 ms poll, so each is accurate to about that.
+function Get-LaunchElapsedSeconds {
+    if (-not $script:LaunchClock) { return $null }
+    [math]::Round($script:LaunchClock.Elapsed.TotalSeconds, 1)
+}
+
+function Format-LaunchElapsed($seconds) {
+    "T+{0:N1}s" -f $seconds
 }
 
 function Invoke-StartupSmoke {
@@ -472,6 +489,8 @@ function Invoke-StartupSmoke {
 
     $ipcBefore = Get-DiagnosticMarkerCount $IpcReadyMarker
     $manifestRefreshBefore = Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker
+    $handoffBefore = Get-DiagnosticMarkerCount $StartupHandoffMarker
+    $windowBefore = Get-DiagnosticMarkerCount $MainWindowShownMarker
     $manifestRefreshFinishedBefore = Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage
     $previousManifestUrl = [System.Environment]::GetEnvironmentVariable(
         $ManifestUrlOverrideEnv,
@@ -484,6 +503,7 @@ function Invoke-StartupSmoke {
     )
     $script:FailureClass = "PRODUCT"
     try {
+        $script:LaunchClock = [System.Diagnostics.Stopwatch]::StartNew()
         $script:AppProc = Start-Process $exe -PassThru
     } finally {
         [System.Environment]::SetEnvironmentVariable(
@@ -506,30 +526,48 @@ function Invoke-StartupSmoke {
     $manifestRefreshSeen = $false
     $manifestRefreshFinishedSeen = $false
     $manifestRequestSeen = $false
+    $handoffSeen = $false
+    $windowSeen = $false
+    $handoffAt = $null
+    $windowAt = $null
 
     while ((Get-Date) -lt $deadline) {
         Assert-ManifestFixtureAcceptHealthy $manifestAccept "startup-poll"
 
         if (-not $dbSeen -and (Test-Path $dbPath)) {
             $dbSeen = $true
-            Write-Host "gmm.db created (SQLite migrations ran)"
+            Write-Host "gmm.db created (SQLite migrations ran) at $(Format-LaunchElapsed (Get-LaunchElapsedSeconds))"
         }
         if (-not $logSeen -and (Test-Path $logDir) -and
             (Get-ChildItem $logDir -Filter *.log -ErrorAction SilentlyContinue)) {
             $logSeen = $true
-            Write-Host "log file created (tracing subscriber up)"
+            Write-Host "log file created (tracing subscriber up) at $(Format-LaunchElapsed (Get-LaunchElapsedSeconds))"
         }
         if ($logSeen) {
+            # Checked in startup order, so one poll that finds several reports
+            # them in the order they happened.
+            if (-not $handoffSeen -and
+                (Get-DiagnosticMarkerCount $StartupHandoffMarker) -gt $handoffBefore) {
+                $handoffSeen = $true
+                $handoffAt = Get-LaunchElapsedSeconds
+                Write-Host "new startup-handoff marker seen (native startup done, Tauri runtime taking over) at $(Format-LaunchElapsed $handoffAt)"
+            }
+            if (-not $windowSeen -and
+                (Get-DiagnosticMarkerCount $MainWindowShownMarker) -gt $windowBefore) {
+                $windowSeen = $true
+                $windowAt = Get-LaunchElapsedSeconds
+                Write-Host "new main-window-shown marker seen (show() succeeded) at $(Format-LaunchElapsed $windowAt)"
+            }
             if (-not $ipcSeen -and
                 (Get-DiagnosticMarkerCount $IpcReadyMarker) -gt $ipcBefore) {
                 $ipcSeen = $true
-                Write-Host "new IPC readiness marker seen (frontend reached the backend)"
+                Write-Host "new IPC readiness marker seen (frontend reached the backend) at $(Format-LaunchElapsed (Get-LaunchElapsedSeconds))"
             }
             if (-not $manifestRefreshSeen -and
                 (Get-DiagnosticMarkerCount $ManifestRefreshStartedMarker) -gt
                     $manifestRefreshBefore) {
                 $manifestRefreshSeen = $true
-                Write-Host "new manifest-refresh marker seen"
+                Write-Host "new manifest-refresh marker seen at $(Format-LaunchElapsed (Get-LaunchElapsedSeconds))"
             }
             if (-not $manifestRefreshFinishedSeen -and
                 (Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage) -gt
@@ -542,7 +580,7 @@ function Invoke-StartupSmoke {
             $script:HeldManifestConnection = $manifestAccept.Result
             Start-ManifestFixturePeerMonitor
             $manifestRequestSeen = $true
-            Write-Host "manifest request accepted and deliberately left unanswered"
+            Write-Host "manifest request accepted and deliberately left unanswered at $(Format-LaunchElapsed (Get-LaunchElapsedSeconds))"
         }
         Assert-ManifestFixturePeerConnected "startup-poll"
         if ($manifestRefreshFinishedSeen) {
@@ -560,15 +598,35 @@ function Invoke-StartupSmoke {
     if (-not $dbSeen) { throw "timed out waiting for $dbPath" }
     if (-not $logSeen) { throw "timed out waiting for a log file in $logDir" }
     Assert-ManifestFixtureAcceptHealthy $manifestAccept "startup-post-loop"
+    # Name the phase that consumed the deadline. These are different product
+    # failures: a window that never appeared, and a window whose frontend never
+    # reached the backend.
+    if (-not $windowSeen) {
+        $handoffText = if ($handoffSeen) {
+            "the Tauri-handoff marker '$StartupHandoffMarker' was seen at $(Format-LaunchElapsed $handoffAt), " +
+            "so the time went into plugin init and window or webview construction"
+        } else {
+            "the Tauri-handoff marker '$StartupHandoffMarker' was not seen either, " +
+            "so startup never finished native startup and reached the Tauri handoff"
+        }
+        $startupPhase = "the main window never appeared (marker '$MainWindowShownMarker' not seen); $handoffText"
+    } elseif (-not $ipcSeen) {
+        $startupPhase = "the main window appeared at $(Format-LaunchElapsed $windowAt) " +
+                        "but the frontend never reached the backend"
+    } else {
+        $startupPhase = $null
+    }
     if (-not $ipcSeen -and $manifestRefreshSeen -and $manifestRequestSeen) {
         throw "IPC readiness did not occur while the manifest request remained held open " +
-              "and unanswered — startup did not prove independence from the network"
+              "and unanswered — startup did not prove independence from the network. " +
+              "Startup phase: $startupPhase"
     }
     if (-not $ipcSeen) {
         throw "timed out waiting for the IPC readiness marker '$IpcReadyMarker' in $logDir — " +
               "the backend started but the frontend never completed a command round-trip " +
               "(unregistered command, ACL denial, a WebView that never loaded, or " +
-              "startup work blocked Tauri past the deadline)"
+              "startup work blocked Tauri past the deadline). " +
+              "Startup phase: $startupPhase"
     }
     if (-not $manifestRefreshSeen) {
         throw "timed out waiting for a new manifest-refresh marker " +
@@ -579,6 +637,14 @@ function Invoke-StartupSmoke {
     }
     Assert-ManifestFixturePeerConnected "startup-post-loop"
     Write-Host "IPC readiness observed while manifest request was held open and unanswered"
+    # The poll stops once IPC is ready. Say so if a bracketing marker had not
+    # been logged by then, rather than leaving its timing silently absent.
+    if (-not $handoffSeen) {
+        Write-Host "startup-handoff marker was not seen before the poll ended"
+    }
+    if (-not $windowSeen) {
+        Write-Host "main-window-shown marker was not seen before the poll ended"
+    }
 
     Complete-ManifestFixtureRequest
     $script:FailureClass = "PRODUCT"
