@@ -64,10 +64,29 @@ function Test-AppFileReleased($path) {
     }
 }
 
+# How many log lines carry $marker across every log file. Unlike
+# Get-IpcMarkerCount this rescans the files each call: it is for the rare,
+# bounded liveness fallback, where simplicity beats an incremental offset.
+function Get-AppLogMarkerCount([string]$marker) {
+    $logs = Join-Path $AppData "logs"
+    if (-not (Test-Path $logs)) { return 0 }
+    @(Get-ChildItem $logs -Filter *.log -File |
+        Select-String -SimpleMatch $marker).Count
+}
+
 # The smoke's fresh data directory and this launch's IPC/refresh markers tie
 # this lock observation to the sole app launched there. A stale file alone
 # is not liveness: Windows releases its exclusive handle when GMM dies.
+#
+# GMM's single-instance lock is deliberately fail-open: if the lock file cannot
+# be opened (an antivirus mid-scan is the realistic cause) GMM starts without
+# it, and a healthy GMM then holds no lock. When the caller passes a
+# $FailOpenMarker, a count above $FailOpenBefore (taken before this launch, so
+# an earlier launch's line cannot count) is accepted as the second liveness
+# signal. That pass says only that GMM is running; it does NOT say the lock was
+# held or that single-instance behaviour was checked, and must not claim so.
 function Wait-AppLiveInstanceLock($proc, $lockPath, [datetime]$deadline,
+    [string]$FailOpenMarker = "", [int]$FailOpenBefore = 0,
     [scriptblock]$FileReleased = ${function:Test-AppFileReleased}) {
     do {
         if ($proc.HasExited) {
@@ -80,6 +99,12 @@ function Wait-AppLiveInstanceLock($proc, $lockPath, [datetime]$deadline,
         }
         if ($held) {
             Write-Host "post-startup liveness confirmed: running GMM holds $lockPath"
+            return
+        }
+        if ($FailOpenMarker -and (Get-AppLogMarkerCount $FailOpenMarker) -gt $FailOpenBefore) {
+            Write-Warning ("GMM is running but holds NO instance lock: it logged '$FailOpenMarker' " +
+                "because it could not take $lockPath, and starts anyway by design. " +
+                "Single-instance behaviour was NOT verified in this run.")
             return
         }
         if ((Get-Date) -ge $deadline) {

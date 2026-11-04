@@ -494,6 +494,26 @@ pub fn record_main_window_shown() {
     );
 }
 
+/// Distinctive log line recording that GMM started without a single-instance
+/// lock because the lock file could not be opened (the fail-open arm of the
+/// gate in `run()`; see `core::instance_lock`).
+///
+/// `.github/scripts/app-starts.ps1` counts it before and after a launch so the
+/// installer smoke can tell a healthy GMM that legitimately holds no lock from
+/// a dead one. It proves only that this launch took the fail-open path and kept
+/// running. It does not prove the data directory is single-instance in that
+/// state, and the smoke must not report that it does.
+pub const INSTANCE_LOCK_FAIL_OPEN_MARKER: &str = "gmm-instance-lock-fail-open";
+
+/// Emit [`INSTANCE_LOCK_FAIL_OPEN_MARKER`]. Additional to the `warn!` that
+/// carries the underlying IO error: this line is the machine-readable fact.
+pub fn record_instance_lock_fail_open() {
+    tracing::warn!(
+        marker = INSTANCE_LOCK_FAIL_OPEN_MARKER,
+        "single-instance lock unavailable; running without it",
+    );
+}
+
 /// Stable marker for the webview's startup reading and connectivity events.
 pub const NETWORK_SIGNAL_MARKER: &str = "gmm-network-signal";
 

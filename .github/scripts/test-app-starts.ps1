@@ -61,7 +61,7 @@ $contract = {
         $tokens = $null; $parseErrors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors)
         Assert-That ($parseErrors.Count -eq 0) 'parse errors'
-        $helperNames = @('Get-IpcMarkerCount', 'Test-AppFileReleased', 'Wait-AppLiveInstanceLock', 'Wait-AppResourcesReleased', 'Assert-AppStarts')
+        $helperNames = @('Get-IpcMarkerCount', 'Get-AppLogMarkerCount', 'Test-AppFileReleased', 'Wait-AppLiveInstanceLock', 'Wait-AppResourcesReleased', 'Assert-AppStarts')
         Check "$scriptName/SharedDefinitionsOnly" {
             $statements = @($ast.EndBlock.Statements)
             Assert-That ($statements.Count -eq $helperNames.Count) 'shared file must contain only the expected helper definitions'
@@ -215,6 +215,81 @@ $contract = {
                 Assert-That ($script:Sleeps -eq 3) 'liveness ceiling not enforced'
             }
         }
+        # GMM's single-instance lock is fail-open, so a healthy GMM may hold no
+        # lock. The fail-open marker is the second liveness signal (#420). These
+        # cases inject marker lines into a real log file and the file-release
+        # probe; none of them launches GMM or reproduces a real fail-open start.
+        $failOpenMarker = 'gmm-instance-lock-fail-open'
+        $failOpenLog = Join-Path $logDir 'fail-open.log'
+        function Invoke-FailOpenWait([int]$before, [string]$lockPath = $lock, [scriptblock]$release = $script:Probe) {
+            $script:HostLines = @(Wait-AppLiveInstanceLock $script:Proc $lockPath -deadline $script:Now.AddSeconds(30) `
+                -FailOpenMarker $failOpenMarker -FailOpenBefore $before -FileReleased $release 6>&1 | ForEach-Object { "$_" })
+        }
+        Check "$scriptName/LivenessFailOpenMarkerPasses" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            try {
+                [IO.File]::WriteAllText($failOpenLog, ($failOpenMarker + [Environment]::NewLine))
+                Invoke-FailOpenWait 0
+                Assert-That ($script:Sleeps -eq 0) 'fail-open liveness added a fixed delay'
+                Assert-That ($script:Warnings.Count -eq 1) 'fail-open pass must warn prominently'
+                Assert-That ($script:Warnings[0] -match 'holds NO instance lock' -and $script:Warnings[0] -match 'NOT verified') 'fail-open pass must say single-instance was not verified'
+                Assert-That (($script:Warnings + $script:HostLines) -join ' ' -notmatch 'confirmed') 'fail-open pass must not claim confirmation'
+            } finally { Remove-Item $failOpenLog -ErrorAction SilentlyContinue }
+        }
+        Check "$scriptName/LivenessFailOpenMarkerAppearsLater" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            try {
+                $script:OnSleep = { if ($script:Sleeps -eq 2) { [IO.File]::WriteAllText($failOpenLog, ($failOpenMarker + [Environment]::NewLine)) } }
+                Invoke-FailOpenWait 0
+                Assert-That ($script:Sleeps -eq 2) 'must pass on the first sight of the marker'
+                Assert-That ($script:Warnings.Count -eq 1) 'late fail-open pass must warn'
+            } finally { Remove-Item $failOpenLog -ErrorAction SilentlyContinue }
+        }
+        Check "$scriptName/LivenessStaleFailOpenMarkerIsNotEvidence" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            try {
+                # A line from an earlier launch is already counted in the baseline.
+                [IO.File]::WriteAllText($failOpenLog, ($failOpenMarker + [Environment]::NewLine))
+                $before = Get-AppLogMarkerCount $failOpenMarker
+                Assert-That ($before -eq 1) 'baseline must count the earlier launch line'
+                Assert-Failure { Invoke-FailOpenWait $before } '^timed out waiting for post-startup liveness: running GMM must hold '
+                Assert-That ($script:Sleeps -eq 3) 'liveness ceiling not enforced'
+                Assert-That ($script:Warnings.Count -eq 0) 'stale marker must not produce a pass warning'
+            } finally { Remove-Item $failOpenLog -ErrorAction SilentlyContinue }
+        }
+        Check "$scriptName/LivenessNeitherSignalExpires" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            Assert-Failure { Invoke-FailOpenWait 0 } '^timed out waiting for post-startup liveness: running GMM must hold '
+            Assert-That ($script:Sleeps -eq 3) 'liveness ceiling not enforced'
+            Assert-That ($script:Warnings.Count -eq 0) 'no signal must not warn as a pass'
+        }
+        Check "$scriptName/LivenessHeldLockStaysConfirmed" {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            $script:BusyPaths[$lock] = $true
+            try {
+                [IO.File]::WriteAllText($failOpenLog, ($failOpenMarker + [Environment]::NewLine))
+                Invoke-FailOpenWait 0
+                Assert-That (($script:HostLines -join ' ') -match 'post-startup liveness confirmed') 'a held lock must still be confirmed'
+                Assert-That ($script:Warnings.Count -eq 0) 'a held lock must not be reported as fail-open'
+            } finally { Remove-Item $failOpenLog -ErrorAction SilentlyContinue; $script:BusyPaths.Clear() }
+        }
+        Check "$scriptName/LivenessExitedProcessIgnoresFailOpenMarker" {
+            Reset-Clock
+            try {
+                [IO.File]::WriteAllText($failOpenLog, ($failOpenMarker + [Environment]::NewLine))
+                Assert-Failure { Invoke-FailOpenWait 0 } '^GMM exited with code 17 before post-startup liveness:'
+                $script:Proc.HasExited = $false
+                Assert-Failure {
+                    Invoke-FailOpenWait 0 -release { param($path) $script:Proc.HasExited = $true; return $true }
+                } '^GMM exited with code 17 during post-startup liveness:'
+                Assert-That ($script:Warnings.Count -eq 0) 'a dead process must not pass on the marker'
+            } finally { Remove-Item $failOpenLog -ErrorAction SilentlyContinue }
+        }
         # Run the shipped smoke completion statements, including the handle
         # saved before Stop-StartupAttempt clears AppProc. Inject only the
         # portable file-release predicate, as for the other consumers below.
@@ -222,7 +297,8 @@ $contract = {
         $completion = @($smokeFn.Body.EndBlock.Statements | Select-Object -Last 3)
         $completionText = ($completion | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine
         Check 'installer-smoke/MeasuredCompletionOnly' {
-            Assert-That ($completion[0].Extent.Text -eq 'Wait-AppLiveInstanceLock $script:AppProc (Join-Path $AppData "instance.lock") -deadline $refreshDeadline') 'smoke must assert live lock after refresh'
+            Assert-That ($completion[0].Extent.Text -eq 'Wait-AppLiveInstanceLock $script:AppProc (Join-Path $AppData "instance.lock") -deadline (Get-Date).AddSeconds(30) -FailOpenMarker $InstanceLockFailOpenMarker -FailOpenBefore $instanceLockFailOpenBefore') 'smoke must assert liveness after refresh, on its own deadline'
+            Assert-That (-not $completion[0].Extent.Text.Contains('$refreshDeadline')) 'liveness must not borrow the refresh ceiling'
             Assert-That ($completionText.Contains('Wait-AppResourcesReleased $appToStop $exe -database $dbPath')) 'smoke must wait for its database'
             $sleeps = @($smokeFn.Body.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Start-Sleep' }, $true))
             foreach ($sleep in $sleeps) {
@@ -237,19 +313,37 @@ $contract = {
                 $script:AppProc = $script:Proc
                 $script:BusyPaths[$lock] = $true
                 $dbPath = $db
-                $refreshDeadline = $script:Now.AddSeconds(30)
+                # The refresh ceiling is already spent: liveness must not depend on it.
+                $refreshDeadline = $script:Now.AddSeconds(-1)
+                $InstanceLockFailOpenMarker = 'gmm-instance-lock-fail-open'
+                $instanceLockFailOpenBefore = 0
                 if ($heldDatabase) { $script:BusyPaths[$db] = $true }
-                $completionOperation = [scriptblock]::Create('param($dbPath, $refreshDeadline)' + [Environment]::NewLine + $completionText.Replace('-deadline $refreshDeadline', '-deadline $refreshDeadline -FileReleased $script:Probe').Replace('-database $dbPath', '-database $dbPath -FileReleased $script:Probe'))
+                $completionOperation = [scriptblock]::Create('param($dbPath, $refreshDeadline, $InstanceLockFailOpenMarker, $instanceLockFailOpenBefore)' + [Environment]::NewLine + $completionText.Replace('-FailOpenBefore $instanceLockFailOpenBefore', '-FailOpenBefore $instanceLockFailOpenBefore -FileReleased $script:Probe').Replace('-database $dbPath', '-database $dbPath -FileReleased $script:Probe'))
                 if ($heldDatabase) {
-                    Assert-Failure { & $completionOperation $dbPath $refreshDeadline } (('timed out waiting for GMM teardown:.*still held: ') + [regex]::Escape($db))
+                    Assert-Failure { & $completionOperation $dbPath $refreshDeadline $InstanceLockFailOpenMarker $instanceLockFailOpenBefore } (('timed out waiting for GMM teardown:.*still held: ') + [regex]::Escape($db))
                     Assert-That ($script:Sleeps -eq 3) 'database hold must expire'
                 } else {
-                    & $completionOperation $dbPath $refreshDeadline
+                    & $completionOperation $dbPath $refreshDeadline $InstanceLockFailOpenMarker $instanceLockFailOpenBefore
                     Assert-That ($script:Sleeps -eq 0) 'healthy completion added a fixed delay'
                 }
                 Assert-That ($script:Stopped -and $script:Proc.Disposed -and $null -eq $script:AppProc) 'smoke must stop, wait and dispose the saved handle'
                 Assert-That ($db -in $script:ProbedPaths) 'smoke did not probe its database'
             }
+        }
+        Check 'installer-smoke/CompletionLivenessHasOwnBudget' {
+            Reset-Clock
+            $script:Proc.HasExited = $false
+            $script:AppProc = $script:Proc
+            $dbPath = $db
+            $refreshDeadline = $script:Now.AddSeconds(-1)
+            $InstanceLockFailOpenMarker = 'gmm-instance-lock-fail-open'
+            $instanceLockFailOpenBefore = 0
+            # The lock is taken only on the second poll; an already-spent refresh
+            # ceiling would have allowed the first probe and nothing more.
+            $script:OnSleep = { if ($script:Sleeps -eq 2) { $script:BusyPaths[$lock] = $true } }
+            $completionOperation = [scriptblock]::Create('param($dbPath, $refreshDeadline, $InstanceLockFailOpenMarker, $instanceLockFailOpenBefore)' + [Environment]::NewLine + $completionText.Replace('-FailOpenBefore $instanceLockFailOpenBefore', '-FailOpenBefore $instanceLockFailOpenBefore -FileReleased $script:Probe').Replace('-database $dbPath', '-database $dbPath -FileReleased $script:Probe'))
+            try { & $completionOperation $dbPath $refreshDeadline $InstanceLockFailOpenMarker $instanceLockFailOpenBefore } finally { $script:BusyPaths.Clear() }
+            Assert-That ($script:Sleeps -eq 2) 'liveness must retry within a budget of its own'
         }
         Check "$scriptName/TeardownImmediate" {
             Reset-Clock

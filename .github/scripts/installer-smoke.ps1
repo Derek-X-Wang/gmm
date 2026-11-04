@@ -411,6 +411,10 @@ $IpcReadyMarker = "gmm-ipc-ready"
 # readiness: seeing both while the HTTP response is held open proves the
 # refresh ran and did not block the usable application behind the network.
 $ManifestRefreshStartedMarker = "gmm-manifest-refresh-started"
+# Must match `INSTANCE_LOCK_FAIL_OPEN_MARKER`. GMM's single-instance lock is
+# deliberately fail-open, so a healthy GMM may hold no lock; this marker is the
+# liveness signal for that state (#420).
+$InstanceLockFailOpenMarker = "gmm-instance-lock-fail-open"
 # Must match `STARTUP_HANDOFF_MARKER` and `MAIN_WINDOW_SHOWN_MARKER`. Together
 # they bracket the stretch between native startup finishing and the main window
 # being shown, which GMM otherwise logs nothing across (#450). Their elapsed
@@ -492,6 +496,7 @@ function Invoke-StartupSmoke {
     $handoffBefore = Get-DiagnosticMarkerCount $StartupHandoffMarker
     $windowBefore = Get-DiagnosticMarkerCount $MainWindowShownMarker
     $manifestRefreshFinishedBefore = Get-DiagnosticMarkerCount $ManifestRefreshFinishedMessage
+    $instanceLockFailOpenBefore = Get-DiagnosticMarkerCount $InstanceLockFailOpenMarker
     $previousManifestUrl = [System.Environment]::GetEnvironmentVariable(
         $ManifestUrlOverrideEnv,
         [System.EnvironmentVariableTarget]::Process
@@ -666,10 +671,11 @@ function Invoke-StartupSmoke {
         throw "timed out waiting for manifest refresh completion after fixture response"
     }
 
-    # Observe the kernel-held instance lock after IPC and refresh completion.
-    # Reuse the remaining refresh-completion ceiling (30s above): the lock
-    # predates IPC, so it needs no additional startup allowance or idle delay.
-    Wait-AppLiveInstanceLock $script:AppProc (Join-Path $AppData "instance.lock") -deadline $refreshDeadline
+    # Observe the kernel-held instance lock after IPC and refresh completion,
+    # or GMM's own fail-open marker when it legitimately holds none. The wait
+    # gets a budget of its own: the refresh ceiling above may be nearly spent.
+    # A failure ceiling, not a delay; it returns on the first positive sign.
+    Wait-AppLiveInstanceLock $script:AppProc (Join-Path $AppData "instance.lock") -deadline (Get-Date).AddSeconds(30) -FailOpenMarker $InstanceLockFailOpenMarker -FailOpenBefore $instanceLockFailOpenBefore
 
     # Must happen before reading gmm.db: the running app holds the SQLite
     # file open, and a read while it is locked fails with a sharing violation.
