@@ -1,0 +1,72 @@
+[
+  {
+    "file": "after-dark-file-menu.png",
+    "bytes": 102213,
+    "sha256": "af068890229c823ecab4a2cd3ed888a3e41e2fd7d56f6e55f52c55c42738757d"
+  },
+  {
+    "file": "after-dark-folder-dialog.png",
+    "bytes": 104759,
+    "sha256": "3928b2d83669a83e065f62698ae182de64cf8e48a67ad19be8c41137dc14f835"
+  },
+  {
+    "file": "after-dark-frame.png",
+    "bytes": 110961,
+    "sha256": "a8f692fd23749e3554022cdc0c9f97a765febd7079241e84d1aa7af8757309b5"
+  },
+  {
+    "file": "after-dark-webview-context-menu.png",
+    "bytes": 133479,
+    "sha256": "9a388f8d05dc5de47d7b4decbd18a3ce6b5bbeafdbf26ead7ae67ddc462c908f"
+  },
+  {
+    "file": "after-light-file-menu.png",
+    "bytes": 102586,
+    "sha256": "65669453b31dc18a18fcae71469dcb37107736e892b7c63a072eb9bddb4d789f"
+  },
+  {
+    "file": "after-light-folder-dialog.png",
+    "bytes": 94896,
+    "sha256": "9e0d68e53831603c1bb22deb9a1bb104157723ea1cda83d0cabc342263db70f5"
+  },
+  {
+    "file": "after-light-frame.png",
+    "bytes": 99779,
+    "sha256": "d8ad7cad5378c274eb12cce84c95edc48b82b79cf5887558a6ed4e0afacde648"
+  },
+  {
+    "file": "after-light-webview-context-menu.png",
+    "bytes": 133506,
+    "sha256": "128fb7ddaf8002752e8158d4ed7ebccb570cdf99220db8d2c3bdf0431e08611e"
+  },
+  {
+    "file": "before-light-file-menu.png",
+    "bytes": 100456,
+    "sha256": "d5b76c4ba79202594fdfb2f005a4ff9422777fa1c4b496eeed8f0616ed8c5d3a"
+  },
+  {
+    "file": "before-light-folder-dialog.png",
+    "bytes": 94796,
+    "sha256": "ab92185f32616147307943fda1aa9d4de1e28eedfa47e2fb240f9d2ba7454d8b"
+  },
+  {
+    "file": "before-light-frame.png",
+    "bytes": 107743,
+    "sha256": "d264b5b20c554b76d627f5dc20e7acf023c7568d0f3413b8b977054990a02904"
+  },
+  {
+    "file": "before-light-webview-context-menu.png",
+    "bytes": 127903,
+    "sha256": "3f2fef49ea94ae9d1c93c8f01a250c6599c6abe4cbf93bd42f9bdb85940964a2"
+  },
+  {
+    "file": "windows-dark-restored.png",
+    "bytes": 22466,
+    "sha256": "b76727e44404f80f7bc0f803118a5bf9d51cf02c7f229f9d9683ae63c5b80827"
+  },
+  {
+    "file": "windows-light.png",
+    "bytes": 23608,
+    "sha256": "893f7cabf71799aeb1b6a79564b28c1d60c6efd50eed24e60865b533ea4cb8cc"
+  }
+]

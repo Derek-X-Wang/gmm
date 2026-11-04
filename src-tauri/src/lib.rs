@@ -189,6 +189,12 @@ pub fn run() {
         .setup(|app| {
             let menu = crate::menu::build_menu(app.handle())?;
             app.set_menu(menu)?;
+            // Match the fixed dark page palette in native Windows chrome
+            // (#434). The config selects Dark before the WebView2 profile is
+            // created; applying it after menu attachment also themes muda's
+            // menu bar. This is a startup policy, not OS-theme following.
+            #[cfg(windows)]
+            app.set_theme(Some(tauri::Theme::Dark));
             // Remembered window geometry (#369). The window is declared
             // `visible: false` so the restore is not seen as a jump, so
             // this call owns showing it — and shows it on every path,
