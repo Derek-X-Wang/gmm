@@ -59,6 +59,7 @@ pub fn run() {
                 error = %e,
                 "could not take the single-instance lock; starting anyway without it",
             );
+            diagnostics::record_instance_lock_fail_open();
             None
         }
     };

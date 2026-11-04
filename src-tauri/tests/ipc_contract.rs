@@ -1188,3 +1188,78 @@ mod manifest_refresh_started_marker {
         );
     }
 }
+
+/// GMM's single-instance lock is deliberately fail-open: when the lock file
+/// cannot be opened, GMM starts without it. The installer smoke's liveness
+/// check accepts the fail-open marker as the alternative signal that a running
+/// GMM is healthy, so the Rust constant, the Rust emission site and the
+/// script's literal and call site must stay in lockstep (#420).
+mod instance_lock_fail_open_marker {
+    use super::read;
+    use gmm_lib::core::diagnostics::INSTANCE_LOCK_FAIL_OPEN_MARKER;
+
+    #[test]
+    fn installer_smoke_retains_the_marker_literal() {
+        let script = read(".github/scripts/installer-smoke.ps1");
+        assert!(
+            script.contains(INSTANCE_LOCK_FAIL_OPEN_MARKER),
+            "installer-smoke.ps1 must retain the marker literal \
+             '{INSTANCE_LOCK_FAIL_OPEN_MARKER}' for the cross-language contract",
+        );
+    }
+
+    #[test]
+    fn installer_smoke_counts_the_marker_for_this_launch_and_hands_it_to_the_liveness_wait() {
+        let script = read(".github/scripts/installer-smoke.ps1");
+        let launch = script
+            .find("$script:AppProc = Start-Process $exe -PassThru")
+            .expect("launch not found in installer-smoke.ps1");
+        let before = script
+            .find(
+                "$instanceLockFailOpenBefore = Get-DiagnosticMarkerCount $InstanceLockFailOpenMarker",
+            )
+            .expect("the fail-open count must be captured before launch");
+        let wait = script
+            .find("Wait-AppLiveInstanceLock ")
+            .expect("liveness wait not found");
+        assert!(
+            before < launch && launch < wait,
+            "the fail-open count must be captured before launch so a line left by an \
+             earlier launch cannot satisfy this one",
+        );
+        let call = script[wait..].lines().next().expect("liveness call line");
+        assert!(
+            call.contains("-FailOpenMarker $InstanceLockFailOpenMarker")
+                && call.contains("-FailOpenBefore $instanceLockFailOpenBefore"),
+            "the liveness wait must receive the marker and this launch's prior count: {call}",
+        );
+        assert!(
+            !call.contains("$refreshDeadline"),
+            "the liveness wait needs its own deadline, not the partly consumed refresh ceiling",
+        );
+    }
+
+    #[test]
+    fn the_fail_open_arm_records_the_marker_and_keeps_its_warning() {
+        let lib = read("src-tauri/src/lib.rs");
+        let warning = lib
+            .find("could not take the single-instance lock; starting anyway without it")
+            .expect("the fail-open warning must stay: it carries the underlying IO error");
+        let record = lib
+            .find("diagnostics::record_instance_lock_fail_open();")
+            .expect("the fail-open arm must record the marker");
+        let arm_end = lib[warning..]
+            .find("None")
+            .map(|offset| warning + offset)
+            .expect("the fail-open arm must evaluate to None");
+        assert!(
+            warning < record && record < arm_end,
+            "the marker must be recorded inside the fail-open arm, after its warning",
+        );
+        assert_eq!(
+            lib.matches("record_instance_lock_fail_open()").count(),
+            1,
+            "only the fail-open arm may record the marker",
+        );
+    }
+}
