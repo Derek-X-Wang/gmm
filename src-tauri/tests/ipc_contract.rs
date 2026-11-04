@@ -1263,3 +1263,61 @@ mod instance_lock_fail_open_marker {
         );
     }
 }
+
+/// The native Dark preference is set twice (#434): `"theme": "Dark"` in
+/// `tauri.conf.json` themes the window frame and the WebView2 profile, and
+/// `app.set_theme(...)` in `setup` themes muda's menu bar. The second call's
+/// position is load-bearing and its failure is silent, so it is pinned here.
+mod native_dark_chrome {
+    use super::read;
+
+    #[test]
+    fn the_menu_bar_theme_call_follows_set_menu_and_precedes_window_restore_on_windows_only() {
+        let lib = read("src-tauri/src/lib.rs");
+        let set_menu = lib
+            .find("app.set_menu(")
+            .expect("setup must attach the native menu with app.set_menu(");
+        let set_theme = lib.find("app.set_theme(").expect(
+            "setup must call app.set_theme(...): without it the native menu bar stays \
+             light under Windows Light, because tauri.conf.json's \"theme\" does not \
+             reach muda's menu bar (#434)",
+        );
+        let restore = lib
+            .find("crate::runtime::window::restore_and_track(")
+            .expect("setup must call restore_and_track(");
+
+        assert_eq!(
+            lib.matches("app.set_theme(").count(),
+            1,
+            "app.set_theme( must have exactly one call site in lib.rs, so this \
+             position check covers every call",
+        );
+        assert!(
+            set_menu < set_theme,
+            "app.set_theme(...) must come after app.set_menu(...). Tauri only themes \
+             a window whose menu is already attached, and it discards the error from \
+             muda when the menu is not attached yet. A call placed before set_menu \
+             is therefore a silent no-op that puts the menu bar back to light under \
+             Windows Light (#434)",
+        );
+        assert!(
+            set_theme < restore,
+            "app.set_theme(...) must come before restore_and_track(...), which \
+             shows the window. Theming after the window is shown can leave a light \
+             menu bar visible first (#434)",
+        );
+
+        let guard = lib[..set_theme]
+            .trim_end()
+            .lines()
+            .next_back()
+            .expect("the line before app.set_theme(")
+            .trim();
+        assert!(
+            guard == "#[cfg(windows)]",
+            "app.set_theme(...) must sit directly under #[cfg(windows)]: the \
+             native menu theme is a Windows-only policy, and an un-gated call \
+             changes macOS and Linux chrome that #434 never asked to change",
+        );
+    }
+}

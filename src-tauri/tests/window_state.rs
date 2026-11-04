@@ -1028,6 +1028,11 @@ fn the_declared_window_matches_the_constants_the_fallback_uses() {
         "the window is hidden until the geometry is applied, so the restore \
          is not seen as a jump from the default size to the remembered one",
     );
+    assert_eq!(
+        window["theme"].as_str(),
+        Some("Dark"),
+        "native frame and WebView2 must start dark even when Windows is Light",
+    );
 }
 
 /// The window is declared `visible: false`, so exactly one thing makes

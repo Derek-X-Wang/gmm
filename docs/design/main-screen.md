@@ -121,6 +121,33 @@ The top-level labels carry `&` mnemonics so Windows underlines a letter, and
 no accelerator is declared. Neither is reliable on Windows; see the limitation
 row in [Open shell decisions](#open-shell-decisions).
 
+### Native dark appearance on Windows
+
+GMM's single dark palette also selects the native **Dark** preference at
+startup (#434). The main window declares `theme: "Dark"` before its HWND and
+WebView2 profile are created. After attaching the File/Help menu, startup calls
+Tauri's `App::set_theme(Some(Theme::Dark))` so muda's menu bar receives the same
+preference before the hidden window is shown. No stylesheet or palette guard
+changes are involved.
+
+This is a **startup-applied fixed preference**, rather than live OS-theme
+following: controlled surfaces do not need to read the Windows theme. It keeps
+the frame, menu bar and WebView2 context menu dark under Windows Light as well
+as Dark, without adding an OS theme-change handler.
+
+Two stock Windows surfaces remain OS-controlled with the pinned APIs: the
+**File dropdown** and the **Select Folder dialog**. muda 0.19.2's theme control
+paints the menu bar; its stock popup still follows Windows. The common-dialog
+backend in rfd 0.16.0 exposes no theme option, and a dark owner does not force
+its picker dark under Windows Light. These are explicit limitations of this
+implementation. No undocumented process-wide dark-mode hooks or replacement
+dialogs are introduced. When checking those two surfaces after changing the
+Windows mode, relaunch GMM; live following is not promised.
+
+The [Windows evidence for #434](../evidence/434/README.md) records each
+surface's before/after result, Dark-mode recheck, verification method and
+remaining unverified cases.
+
 ### Settings as a modal dialog
 
 Settings opens as a **modal dialog** over the main screen (#326). The

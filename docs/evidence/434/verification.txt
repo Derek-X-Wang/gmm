@@ -1,0 +1,66 @@
+Windows verification for #434 — 2026-11-04
+Windows 11 Home 25H2, OS build 26200.9711; x64 MSVC.
+
+Installed for this task:
+- Rust 1.99.1 MSVC, with Cargo, Clippy and rustfmt (rustup default profile).
+- Visual Studio Build Tools 2022 17.14.44; MSVC 14.44.35207.
+- Windows SDK 10.0.26100.0.
+- Repo-pinned pnpm 10.22.0 used for dependency/frontend checks and the corrected signer rerun.
+Rust's bin directory was added to the user PATH. The pnpm 10 shim is task-local.
+
+Required commands, in the requested order:
+PASS  pnpm install --frozen-lockfile (pnpm 10.22.0; lockfile unchanged).
+PASS  pnpm tsc --noEmit.
+PASS  pnpm test — 45 files, 830 tests; CSS/prefers-color-scheme guard unchanged.
+PASS  cargo build --workspace — plain build, including standalone helpers.
+PASS  cargo clippy --workspace --all-targets --no-deps -- -D warnings.
+FAIL  cargo test --workspace — elevated run stopped at library_audit: 13 passed,
+      18 failed, all reporting Windows error 225 on temporary game executables.
+PASS  cargo fmt --check.
+Also PASS: pnpm build.
+
+A non-elevated baseline run first exposed error 1314 on a directory-symlink
+fixture. An elevated rerun passed all 80 concurrency tests, then reached the
+225 blocker above. An earlier overlapping GUI capture caused one elevated
+build to fail with a locked gmm.exe; that run was discarded, GMM was closed,
+and the workspace was rebuilt before subsequent runs.
+
+Additional full diagnostic run:
+cargo test --workspace --no-fail-fast — FAIL (exit 101), elevated.
+814 passed, 145 failed, 4 ignored across the completed workspace run.
+130 failures explicitly report Windows error 225; 10 are other assertion or
+runtime failures not separately diagnosed. Five were pnpm invocation failures.
+The bundled pnpm 11 attempted an automatic reinstall of pnpm 10's node_modules
+and aborted without a TTY; using the pinned pnpm 10 shim fixed the signing group.
+A subsequent cargo test --test updater_signature PASSED: 5 passed, 1 ignored.
+This targeted pass does not retroactively make the full diagnostic run green.
+See rust-test-results.json for every target result and failing test name.
+
+All six files gated with #![cfg(windows)] compiled and ran:
+e2e_windows:             PASS — 2 passed.
+junction_safety_windows: FAIL — 4 passed, 1 failed with Windows error 225.
+launch_command_windows:  PASS — 7 passed.
+ntfs_windows:            PASS — 12 passed.
+registry_windows:        PASS — 5 passed.
+session_smoke:           PASS — 6 passed.
+Related guards: menu 11 passed; window_state 34 passed (includes native Dark).
+These are Rust runner outcomes, not a claim about conditional hardware cases.
+
+Baseline control:
+Rebuilt unmodified main b1af4af and ran the focused duplicate-resolution
+library_audit case. It failed with the same Windows error 225. The stub is
+written by tests/support/mod.rs using the literal bytes "fixture game".
+No security setting was changed, and no exclusion or bypass was applied.
+The additional assertion failures were not individually baseline-reproduced.
+
+Build/test profiles:
+CARGO_PROFILE_DEV_DEBUG=0 and CARGO_PROFILE_TEST_DEBUG=0 reduce disk use.
+Debug assertions stay enabled. CARGO_TARGET_DIR was unset throughout, and no
+--target-dir or Cargo target-directory override was used.
+
+Unverified:
+A clean full Rust suite on this host; signed/release MSI packaging; installer
+smoke/lifecycle; other Windows versions; high-contrast mode; live OS switching.
+The real native desktop debug build was visually inspected under Light and
+Dark. The installed release was not replaced. Original profile and Dark mode
+were restored; restoration.json records the database identity check.

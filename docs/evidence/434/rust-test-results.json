@@ -1,0 +1,1495 @@
+{
+  "command": "cargo test --workspace --no-fail-fast",
+  "exitCode": 101,
+  "elevated": true,
+  "targetDirectoryRedirected": false,
+  "totals": {
+    "passed": 814,
+    "failed": 145,
+    "ignored": 4
+  },
+  "targets": [
+    {
+      "target": "unit:concurrency_probe",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:gmm_lib",
+      "result": "ok",
+      "passed": 86,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:gmm",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:adopt",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:app_version",
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:attention",
+      "result": "ok",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:av",
+      "result": "ok",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:ci_test_selection",
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:cli_docs",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:command_error_boundary",
+      "result": "ok",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:commands_ipc",
+      "result": "ok",
+      "passed": 31,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:concurrency",
+      "result": "FAILED",
+      "passed": 61,
+      "failed": 19,
+      "ignored": 0
+    },
+    {
+      "target": "integration:conflicts",
+      "result": "FAILED",
+      "passed": 8,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "target": "integration:crash_recovery",
+      "result": "FAILED",
+      "passed": 20,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "target": "integration:detect_endfield",
+      "result": "ok",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:detect_epic",
+      "result": "ok",
+      "passed": 17,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:detect_genshin",
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:detect_honkai_impact",
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:detect_star_rail",
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:detect_wuthering",
+      "result": "ok",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:detect_zenless",
+      "result": "ok",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:diagnostics",
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:e2e_windows",
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:enabled_transition_recovery",
+      "result": "ok",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:filesystem_uncertainty_boundary",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:game_path",
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:game_path_status",
+      "result": "FAILED",
+      "passed": 8,
+      "failed": 18,
+      "ignored": 0
+    },
+    {
+      "target": "integration:gamebanana",
+      "result": "ok",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:import_atomic",
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_evacuation_recovery",
+      "result": "FAILED",
+      "passed": 0,
+      "failed": 7,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_install_recording",
+      "result": "FAILED",
+      "passed": 1,
+      "failed": 2,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_origin",
+      "result": "ok",
+      "passed": 29,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_origin_change",
+      "result": "ok",
+      "passed": 16,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_origin_committed_manifest",
+      "result": "FAILED",
+      "passed": 4,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "result": "FAILED",
+      "passed": 3,
+      "failed": 14,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_origin_unreadable",
+      "result": "ok",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_origin_update_never_switches",
+      "result": "FAILED",
+      "passed": 6,
+      "failed": 3,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_package_contents",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "integration:importer_rollback_record",
+      "result": "FAILED",
+      "passed": 0,
+      "failed": 5,
+      "ignored": 0
+    },
+    {
+      "target": "integration:importer_sources",
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "integration:instance_lock",
+      "result": "ok",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:ipc_contract",
+      "result": "ok",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:junction",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:junction_safety_windows",
+      "result": "FAILED",
+      "passed": 4,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "target": "integration:launch_command",
+      "result": "FAILED",
+      "passed": 3,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "target": "integration:launch_command_windows",
+      "result": "ok",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:library_audit",
+      "result": "FAILED",
+      "passed": 13,
+      "failed": 18,
+      "ignored": 0
+    },
+    {
+      "target": "integration:library_mutation_boundary",
+      "result": "ok",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:library_paths",
+      "result": "FAILED",
+      "passed": 8,
+      "failed": 3,
+      "ignored": 0
+    },
+    {
+      "target": "integration:library_recovery",
+      "result": "ok",
+      "passed": 16,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:loader_vendor",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:loader_version",
+      "result": "ok",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:menu",
+      "result": "ok",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:migrations",
+      "result": "ok",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "integration:mod_panel",
+      "result": "ok",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:mod_update_batch",
+      "result": "FAILED",
+      "passed": 2,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "target": "integration:mod_update_batch_early_stop",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:mod_update_batch_preflight",
+      "result": "FAILED",
+      "passed": 2,
+      "failed": 4,
+      "ignored": 0
+    },
+    {
+      "target": "integration:mod_update_batch_stop",
+      "result": "FAILED",
+      "passed": 2,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "target": "integration:mod_updates",
+      "result": "FAILED",
+      "passed": 4,
+      "failed": 2,
+      "ignored": 0
+    },
+    {
+      "target": "integration:no_origin_message",
+      "result": "FAILED",
+      "passed": 3,
+      "failed": 1,
+      "ignored": 0
+    },
+    {
+      "target": "integration:ntfs_windows",
+      "result": "ok",
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:nullable_variant",
+      "result": "ok",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:onboarding",
+      "result": "ok",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:path_status_runtime_boundary",
+      "result": "ok",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:preset_apply",
+      "result": "FAILED",
+      "passed": 0,
+      "failed": 15,
+      "ignored": 0
+    },
+    {
+      "target": "integration:preset_manage",
+      "result": "FAILED",
+      "passed": 0,
+      "failed": 7,
+      "ignored": 0
+    },
+    {
+      "target": "integration:presets",
+      "result": "ok",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:proxy",
+      "result": "ok",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:proxy_password_update",
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:recommendations_off_switch",
+      "result": "ok",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:recommended_importers",
+      "result": "ok",
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:recommended_importers_fetch",
+      "result": "ok",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:reconcile",
+      "result": "ok",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:registry_windows",
+      "result": "ok",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:release_asset_pattern",
+      "result": "ok",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:sanitize",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:sanitize_dedup",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:sanitize_dos",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:sanitize_length",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:session",
+      "result": "ok",
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:session_smoke",
+      "result": "ok",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:updater_config",
+      "result": "ok",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:updater_consent",
+      "result": "ok",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:updater_signature",
+      "result": "FAILED",
+      "passed": 0,
+      "failed": 5,
+      "ignored": 1
+    },
+    {
+      "target": "integration:updater_skip_logging",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:updates",
+      "result": "ok",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:variants",
+      "result": "FAILED",
+      "passed": 9,
+      "failed": 3,
+      "ignored": 0
+    },
+    {
+      "target": "integration:window_state",
+      "result": "ok",
+      "passed": 34,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:witness_trust_boundary",
+      "result": "ok",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:zip_import",
+      "result": "ok",
+      "passed": 19,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:gmm_cli",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:gmm_cli",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:commands",
+      "result": "FAILED",
+      "passed": 12,
+      "failed": 12,
+      "ignored": 0
+    },
+    {
+      "target": "unit:lifecycle_fixture",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:gmm_loader",
+      "result": "ok",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:check_origins",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:validate_manifest",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:check_origins",
+      "result": "ok",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "integration:cli",
+      "result": "ok",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:noop_dll",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:victim",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unit:xtask",
+      "result": "ok",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "doc:gmm_lib",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "doc:gmm_cli",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "doc:gmm_loader",
+      "result": "ok",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "failures": [
+    {
+      "target": "integration:concurrency",
+      "test": "copy_based_relocation_waits_for_reinstall_then_startup_settles",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "direct_quarantined_withdrawal_cannot_remove_a_recovered_deployment",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "disable_excludes_relocation_until_junction_and_flag_agree",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "enable_excludes_relocation_until_junction_and_flag_agree",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "failed_reinstall_recovery_quarantines_one_mod_and_in_app_retry_settles_it",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "importer_install_is_refused_by_another_processs_game_session",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "importer_recovery_retains_the_backup_when_the_live_entry_changes_between_snapshots",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "junction_withdrawal_failure_quarantines_as_possibly_deployed_without_aborting_startup",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "partial_junction_restore_keeps_relocated_rows_and_bytes_in_agreement",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "probe_importer_abort_leaves_a_witness_that_startup_replays",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "quarantined_withdrawal_racing_retry_leaves_enabled_mod_deployed",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "rebuild_cannot_redeploy_mod_quarantined_after_snapshot",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "reconcile_cannot_redeploy_mod_quarantined_after_snapshot",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "reinstall_crash_after_metadata_commit_keeps_the_complete_new_mod",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "reinstall_crash_after_old_quarantine_rolls_back_the_whole_mod",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "reinstall_crash_after_replacement_move_still_rolls_back_the_whole_mod",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "reinstall_rejects_structurally_impossible_mod_paths_as_corruption",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "retry_without_witness_does_not_report_missing_enabled_deployment_as_already_recovered",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:concurrency",
+      "test": "session_claim_after_relocation_commit_cannot_disable_a_relocated_mod",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:conflicts",
+      "test": "enabled_mods_sharing_a_hash_surface_as_conflict",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:crash_recovery",
+      "test": "every_crash_point_is_exercised_by_an_operation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "non_unreal_games_do_not_require_a_binary_directory_suffix",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "correct_binary_level_still_names_genuinely_missing_content",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "dangling_importer_directory_link_is_unverified_with_its_path",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "missing_executable_alternative_and_unreadable_other_remain_uncertain",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "every_game_uses_its_existing_validator_and_importer_layout",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "importer_names_follow_existing_case_insensitive_conventions",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "local_pin_version_is_independent_of_install_receipts",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "each_missing_importer_requirement_is_identified",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "origin_change_clears_receipt_and_reports_uncertainty_for_both_layouts",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "hand_installed_files_are_unrecorded_not_absent_and_pin_is_not_a_receipt",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "sharing_violations_preserve_independent_game_and_importer_facts",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "tauri_read_command_serializes_the_separate_facts",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "recorded_healthy_install_exposes_local_version_and_origin",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "origin_only_and_unreadable_receipts_still_establish_recorded_damage",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "version_only_receipt_keeps_unknown_origin_without_backfilling",
+      "classification": "other assertion/runtime failure; not separately diagnosed"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "wrong_importer_types_are_unverified_not_absent",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "recorded_install_with_missing_entries_is_damaged",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:game_path_status",
+      "test": "check_never_persists_settings_or_recovery_records",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_evacuation_recovery",
+      "test": "pending_importer_evacuation_blocks_origin_override_change",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_evacuation_recovery",
+      "test": "rollback_ignores_a_partial_backup_retained_by_recovery",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_evacuation_recovery",
+      "test": "backup_identity_change_becomes_retryable_when_the_original_directory_returns",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_evacuation_recovery",
+      "test": "recovery_preserves_a_user_repaired_importer_entry_and_its_backup",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_evacuation_recovery",
+      "test": "rollback_after_absent_acknowledge_release_ignores_the_reappeared_backup",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_evacuation_recovery",
+      "test": "acknowledge_and_release_preserves_bytes_at_both_recorded_locations",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_evacuation_recovery",
+      "test": "partial_importer_evacuation_keeps_its_witness_and_explains_the_recovery",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_install_recording",
+      "test": "the_install_command_records_the_version_and_the_origin_it_came_from",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_install_recording",
+      "test": "the_install_command_refuses_to_report_success_over_an_unrecorded_install",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_committed_manifest",
+      "test": "himis_install_failure_explains_itself_and_points_at_the_control",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "a_dismissal_is_scoped_to_the_origin_not_to_the_game",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "accepting_installs_from_the_proposed_origin_and_records_it",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "accepting_when_nothing_is_proposed_is_an_error_not_a_silent_install",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "declining_twice_records_one_dismissal",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "a_dismissal_ignores_the_capitalisation_of_the_origin",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "nothing_is_proposed_and_no_dismissals_are_offered_while_recommendations_are_off",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "declining_stops_the_same_origin_being_proposed_again",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "the_user_can_set_an_override_and_clear_it_back_to_the_recommendation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "a_dismissal_can_be_undone_from_the_games_own_surface",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "switching_recommendations_off_and_back_on_re_prompts_nothing_dismissed",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "dismissal_state_that_cannot_be_read_is_surfaced_and_does_not_silence_the_prompt",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "declining_never_escalates_into_opting_out",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "a_different_recommended_origin_is_offered_rather_than_applied",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_proposals",
+      "test": "there_is_no_way_to_record_an_origin_without_installing",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_update_never_switches",
+      "test": "the_ordinary_install_action_does_not_move_the_game_to_the_recommendation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_update_never_switches",
+      "test": "the_update_check_asks_the_origin_the_install_actually_came_from",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_origin_update_never_switches",
+      "test": "a_first_install_does_follow_the_recommendation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_rollback_record",
+      "test": "rollback_still_restores_the_files_and_leaves_nothing_of_its_own_behind",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_rollback_record",
+      "test": "rolling_back_a_version_update_restores_the_exact_previous_install",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_rollback_record",
+      "test": "a_rollback_with_no_provenance_records_unknown_rather_than_guessing",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_rollback_record",
+      "test": "a_rollback_whose_record_cannot_be_written_is_not_reported_as_a_plain_success",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:importer_rollback_record",
+      "test": "rolling_back_an_origin_switch_stops_the_record_describing_the_undone_install",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:junction_safety_windows",
+      "test": "relocating_the_library_preserves_every_mod_file",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:launch_command",
+      "test": "refuses_to_launch_when_no_game_executable_is_present",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_fingerprint_covers_every_rendered_review_field",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_preflights_every_junction_before_withdrawing_any",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "audit_surfaces_every_informed_duplicate_choice_without_mutating_it",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_distinguishes_two_junction_names_with_one_target",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_a_junction_path_claimed_outside_the_reviewed_group",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_preserves_a_missing_target_through_an_outside_alias",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_a_missing_selected_variant_target",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_a_survivor_claiming_the_junction_by_its_short_name",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_a_regular_directory_at_the_junction_path",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_a_junction_path_claimed_by_the_keeper",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_an_active_reinstall_witness_without_changing_any_state",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_enabled_record_without_an_install_path",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_a_junction_repointed_outside_the_library",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_when_a_displayed_field_changed_after_review",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_when_a_withdrawn_junction_is_still_present",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_refuses_when_the_reviewed_group_is_stale",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "duplicate_resolution_withdraws_a_missing_target_through_a_library_alias",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_audit",
+      "test": "explicit_duplicate_resolution_keeps_shared_bytes_and_withdraws_the_rejected_junction",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_paths",
+      "test": "relocation_stops_when_a_deployment_entry_survives_withdrawal",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_paths",
+      "test": "changing_global_root_relocates_every_mod_and_rebuilds_junctions",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:library_paths",
+      "test": "per_game_override_relocates_only_that_game",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:mod_update_batch",
+      "test": "batch_continues_after_mid_batch_failure_reports_truth_and_restores_bytes_and_junction",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:mod_update_batch_preflight",
+      "test": "preexisting_reinstall_recovery_is_skipped_without_download_and_qualifies_conflicts",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:mod_update_batch_preflight",
+      "test": "disabled_quarantined_mod_is_not_omitted_and_does_not_qualify_conflicts",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:mod_update_batch_preflight",
+      "test": "quarantine_during_batch_is_omitted_and_makes_conflicts_unverified",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:mod_update_batch_preflight",
+      "test": "quarantined_local_mod_outside_update_set_still_makes_conflicts_unverified",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:mod_update_batch_stop",
+      "test": "stop_mid_swap_finishes_current_preserves_prior_and_skips_untouched_mods",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:mod_updates",
+      "test": "reinstall_replaces_library_bytes_and_bumps_version",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:mod_updates",
+      "test": "failed_reinstall_preserves_installed_bytes_enabled_state_and_junction",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:no_origin_message",
+      "test": "the_install_failure_for_a_retracted_game_names_the_origin_control",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "missing_mods_directory_refuses_once_without_creating_it_or_mutating_mods",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "missing_install_path_refuses_before_progress_or_mod_mutation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "mods_location_file_refuses_distinctly_before_progress_or_any_mod_mutation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "quarantined_reinstall_is_skipped_and_conflict_reading_is_unverified",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "untouched_io_refusal_is_unknown_without_claiming_interruption_or_recovery",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "mod_moved_to_another_game_keeps_its_resolvable_name_in_skip_reason",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "complete_state_restores_variants_disables_later_mods_and_preserves_other_games",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "indeterminate_enable_is_unknown_and_existing_startup_recovery_can_finish_it",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "already_matching_preset_performs_no_library_mutation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "missing_mod_and_dangling_variant_are_distinct_and_do_not_stop_the_rest",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "unrelated_game_pending_transition_refuses_the_entire_apply_up_front",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "missing_and_foreign_presets_take_precedence_over_session_and_recovery_blockers",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "live_session_refuses_before_progress_or_any_mod_mutation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "empty_preset_disables_every_mod",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_apply",
+      "test": "preset_identity_is_scoped_to_game_before_progress",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_manage",
+      "test": "rename_and_save_normalize_identically_to_the_same_stored_value",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_manage",
+      "test": "rename_refuses_another_presets_normalized_name_and_preserves_entries",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_manage",
+      "test": "management_refuses_missing_ids_and_presets_from_another_game",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_manage",
+      "test": "rename_delete_and_recapture_preserve_every_mod_row_variant_transition_and_junction_identity",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_manage",
+      "test": "recapture_refuses_pending_transition_without_replacing_saved_entries",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_manage",
+      "test": "delete_cascades_all_saved_entries_and_has_no_mod_bearing_foreign_keys",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:preset_manage",
+      "test": "recapture_replaces_previous_entries_and_keeps_id_name_and_created_at",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:updater_signature",
+      "test": "a_tampered_signature_is_refused",
+      "classification": "pnpm invocation, resolved by targeted rerun with 10.22.0"
+    },
+    {
+      "target": "integration:updater_signature",
+      "test": "the_signature_file_the_bundler_writes_sits_next_to_the_artifact",
+      "classification": "pnpm invocation, resolved by targeted rerun with 10.22.0"
+    },
+    {
+      "target": "integration:updater_signature",
+      "test": "a_tauri_signed_artifact_is_one_the_updater_accepts",
+      "classification": "pnpm invocation, resolved by targeted rerun with 10.22.0"
+    },
+    {
+      "target": "integration:updater_signature",
+      "test": "an_artifact_tampered_after_signing_is_refused",
+      "classification": "pnpm invocation, resolved by targeted rerun with 10.22.0"
+    },
+    {
+      "target": "integration:updater_signature",
+      "test": "an_artifact_signed_by_a_different_key_is_refused",
+      "classification": "pnpm invocation, resolved by targeted rerun with 10.22.0"
+    },
+    {
+      "target": "integration:variants",
+      "test": "relocation_classifies_a_corrupt_variant_as_selection_repair_not_rebuild",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:variants",
+      "test": "switching_active_variant_retargets_the_junction",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:variants",
+      "test": "startup_reconcile_reports_a_corrupt_variant_selection_for_the_affected_game",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "archive_import_enable_conflicts_and_disable_succeed",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "dry_run_enable_does_not_change_state",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "dead_session_does_not_block_launch_preflight",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "all_mutations_offer_dry_runs_without_changing_state",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "game_directory_write_requires_confirmation",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "dead_session_does_not_block_enable",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "active_variant_failure_keeps_its_shared_classification",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "launch_failure_is_classified_and_retires_its_claim",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "dead_session_does_not_block_disable",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "live_session_refusals_name_the_remedy_even_with_attention_override",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "adopt_listing_importer_and_variants_return_real_state",
+      "classification": "Windows error 225 (virus/PUA report)"
+    },
+    {
+      "target": "integration:commands",
+      "test": "status_reports_session_liveness_without_mutating_and_dry_run_preserves_it",
+      "classification": "Windows error 225 (virus/PUA report)"
+    }
+  ],
+  "laterTargetedRerun": {
+    "command": "cargo test --test updater_signature",
+    "pnpm": "10.22.0",
+    "passed": 5,
+    "failed": 0,
+    "ignored": 1
+  },
+  "baselineReproduction": {
+    "commit": "b1af4af3be629c67294217daa40d142ab41bc991",
+    "command": "cargo test --test library_audit explicit_duplicate_resolution_keeps_shared_bytes_and_withdraws_the_rejected_junction -- --exact",
+    "result": "FAIL: same Windows error 225 reading the temporary game executable; baseline workspace build passed"
+  },
+  "securitySettingsChanged": false
+}
