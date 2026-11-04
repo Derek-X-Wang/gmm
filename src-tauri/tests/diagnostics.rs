@@ -11,10 +11,11 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use gmm_lib::core::diagnostics::{
-    build_bundle, build_writer, prune_old_logs, record_ipc_ready, record_manifest_refresh_started,
-    record_network_signal, SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS,
-    IPC_READY_COMMAND, IPC_READY_MARKER, LOG_FILE_PREFIX, LOG_FILE_SUFFIX,
-    MANIFEST_REFRESH_STARTED_MARKER,
+    build_bundle, build_writer, prune_old_logs, record_ipc_ready, record_main_window_shown,
+    record_manifest_refresh_started, record_network_signal, record_startup_handoff,
+    SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS, IPC_READY_COMMAND,
+    IPC_READY_MARKER, LOG_FILE_PREFIX, LOG_FILE_SUFFIX, MAIN_WINDOW_SHOWN_MARKER,
+    MANIFEST_REFRESH_STARTED_MARKER, STARTUP_HANDOFF_MARKER,
 };
 use tempfile::TempDir;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -277,6 +278,43 @@ fn manifest_refresh_started_marker_lands_in_the_log_file() {
         body.contains(MANIFEST_REFRESH_STARTED_MARKER),
         "log must carry the manifest refresh marker {MANIFEST_REFRESH_STARTED_MARKER}, got:\n{body}",
     );
+}
+
+/// The installer smoke reports the elapsed time of these two markers to
+/// bracket the otherwise unlogged stretch before the window appears (#450).
+/// Both lines have to survive the JSON layer, or the smoke silently loses
+/// the phase split.
+#[test]
+fn startup_bracket_markers_land_in_the_log_file() {
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+
+    let (writer, guard) = build_writer(&log_dir).expect("writer");
+    let layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(writer);
+
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        record_startup_handoff();
+        record_main_window_shown();
+    });
+    drop(guard);
+
+    let mut body = String::new();
+    for entry in fs::read_dir(&log_dir).expect("read log_dir") {
+        let path = entry.expect("entry").path();
+        let mut f = fs::File::open(&path).expect("open log");
+        f.read_to_string(&mut body).expect("read log");
+    }
+    for marker in [STARTUP_HANDOFF_MARKER, MAIN_WINDOW_SHOWN_MARKER] {
+        assert!(
+            body.contains(marker),
+            "log must carry the startup marker {marker}, got:\n{body}",
+        );
+    }
 }
 
 /// Pin the public grep contract independently of the production constant.
