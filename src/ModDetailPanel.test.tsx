@@ -24,8 +24,10 @@ let storedWidth: number | null;
 let rawMods: object[];
 let failWidthWrite: boolean;
 let failWidthRead: boolean;
+let screenshotAnswer: unknown;
 
 beforeEach(() => {
+  screenshotAnswer = { status: "unavailable", reason: "GameBanana answered with status 404." };
   storedWidth = null;
   failWidthWrite = false;
   failWidthRead = false;
@@ -43,6 +45,7 @@ beforeEach(() => {
       storedWidth = args!.width!;
       return null;
     }
+    if (command === "get_mod_screenshot") return screenshotAnswer;
     if (command === "list_mods") return rawMods;
     if (command === "detect_conflicts") return { conflicts: [], omitted: [], per_mod_count: {} };
     if (command === "list_variants") return { variants: [], activeVariantId: null };
@@ -300,4 +303,96 @@ it("flushes a pending width when the panel unmounts while the app lives", async 
   expect(storedWidth).toBe(480);
   await act(async () => { await vi.advanceTimersByTimeAsync(250); });
   expect(invoke.mock.calls.filter(([command]) => command === "set_mod_panel_width")).toHaveLength(1);
+});
+
+// ---- Screenshot (#437) -----------------------------------------------------
+
+const DATA_URI = "data:image/png;base64,iVBORw0KGgo=";
+const screenshotCalls = () => invoke.mock.calls.filter(([command]) => command === "get_mod_screenshot");
+const figureOf = (container: HTMLElement) => container.querySelector("figure.mod-detail-panel__screenshot");
+
+it.each([null, "", "   "])("renders nothing and asks for nothing when the Mod has no screenshot (%j)", async (missing) => {
+  const { container, client } = renderPanel({ ...outfit, screenshotUrl: missing });
+  await waitFor(() => expect(client.isFetching()).toBe(0));
+  expect(figureOf(container)).toBeNull();
+  expect(screen.queryByText(/screenshot/i)).not.toBeInTheDocument();
+  expect(screenshotCalls()).toHaveLength(0);
+});
+
+it("shows the bounded box at once, before the Core has answered", async () => {
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "get_mod_screenshot" ? new Promise(() => {}) : implementation(command, args));
+  const { container } = renderPanel();
+  expect(figureOf(container)).toBeInTheDocument();
+  expect(within(figureOf(container) as HTMLElement).getByText("Loading screenshot…")).toBeVisible();
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  expect(screen.queryByText("No screenshot available")).not.toBeInTheDocument();
+});
+
+it("renders the Core's data URI and never the remote address", async () => {
+  screenshotAnswer = { status: "image", dataUri: DATA_URI };
+  const { container } = renderPanel();
+  const image = await screen.findByRole("img", { name: "Screenshot of March Outfit" });
+  expect(image).toHaveAttribute("src", DATA_URI);
+  expect(container.innerHTML).not.toContain(outfit.screenshotUrl);
+  expect(invoke).toHaveBeenCalledWith("get_mod_screenshot", { modId: "outfit" });
+});
+
+it("says the image is unavailable, with the reason, and does not blame the Mod", async () => {
+  screenshotAnswer = { status: "unavailable", reason: "Proxy unreachable: connection refused." };
+  const { container } = renderPanel();
+  const figure = figureOf(container) as HTMLElement;
+  expect(await within(figure).findByText("No screenshot available")).toBeVisible();
+  expect(within(figure).getByText("Proxy unreachable: connection refused.")).toBeVisible();
+  expect(within(figure).getByText("Proxy unreachable: connection refused.")).toHaveClass("small");
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  expect(screen.getByRole("complementary")).not.toHaveTextContent(/faulty|broken|corrupt|damaged|invalid Mod/i);
+});
+
+it("reads a failed request as an unavailable image, not a faulty Mod", async () => {
+  const implementation = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "get_mod_screenshot") throw new Error("IPC closed");
+    return implementation(command, args);
+  });
+  const { container } = renderPanel();
+  const figure = figureOf(container) as HTMLElement;
+  expect(await within(figure).findByText("No screenshot available")).toBeVisible();
+  expect(within(figure).getByText("GMM could not ask for the screenshot.")).toBeVisible();
+});
+
+it("places the screenshot below the heading and above the facts", async () => {
+  const { container } = renderPanel();
+  await waitFor(() => expect(screen.getByText("No screenshot available")).toBeVisible());
+  const heading = screen.getByRole("heading", { name: "March Outfit" });
+  const figure = figureOf(container) as HTMLElement;
+  const facts = container.querySelector("dl") as HTMLElement;
+  expect(heading.compareDocumentPosition(figure) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(figure.compareDocumentPosition(facts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it("asks again for the Mod that is now selected", async () => {
+  const first = renderPanel();
+  await waitFor(() => expect(screenshotCalls()).toHaveLength(1));
+  first.rerender(<ModDetailPanel id="inspector" open
+    mod={{ ...outfit, id: "other", name: "Other Outfit", screenshotUrl: "https://images.gamebanana.com/img/ss/mods/other.jpg" }}
+    onClose={vi.fn()} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_mod_screenshot", { modId: "other" }));
+});
+
+it("bounds the screenshot box and its image, whatever the panel width", () => {
+  const authored: string = readFileSync("src/App.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (selector: string) => {
+    const matches = [...authored.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+      .filter(([, selectors]) => selectors.split(",").some((raw) => raw.trim() === selector));
+    expect(matches, `one rule owns ${selector}`).toHaveLength(1);
+    return matches[0][2];
+  };
+  // The invariant is that a bound exists, not its pixel count.
+  expect(rule(".mod-detail-panel__screenshot")).toMatch(/(?:^|;)\s*height\s*:\s*\d+px\s*;/);
+  expect(rule(".mod-detail-panel__screenshot")).toMatch(/(?:^|;)\s*overflow\s*:\s*hidden\s*;/);
+  const image = rule(".mod-detail-panel__screenshot img");
+  expect(image).toMatch(/(?:^|;)\s*max-width\s*:\s*100%\s*;/);
+  expect(image).toMatch(/(?:^|;)\s*max-height\s*:\s*100%\s*;/);
+  expect(image).toMatch(/(?:^|;)\s*object-fit\s*:\s*contain\s*;/);
 });

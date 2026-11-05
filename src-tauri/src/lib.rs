@@ -227,6 +227,7 @@ pub fn run() {
             commands::log_frontend_error,
             commands::log_network_signal,
             commands::get_mod_panel_width,
+            commands::get_mod_screenshot,
             commands::set_mod_panel_width,
             commands::get_skipped_update,
             commands::get_app_version,

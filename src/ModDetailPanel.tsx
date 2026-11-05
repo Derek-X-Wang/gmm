@@ -1,10 +1,39 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getModPanelWidth, listModUpdates, setModPanelWidth, type Mod } from "./api";
+import { getModPanelWidth, getModScreenshot, listModUpdates, setModPanelWidth, type Mod } from "./api";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 
 const widthKey = ["modPanelWidth"];
 const WIDTH_SAVE_DELAY_MS = 250;
+
+/**
+ * The Core fetches the bytes through the user's proxy and hands back a data URI;
+ * `mod.screenshotUrl` only tells us whether to ask. It must never become an
+ * `<img src>`, which would load outside the proxy (#437).
+ *
+ * Every state is a statement about the image, never about the Mod.
+ */
+function ModScreenshotFigure({ mod }: { mod: Mod }) {
+  const screenshot = useQuery({
+    queryKey: ["modScreenshot", mod.id, mod.screenshotUrl],
+    queryFn: () => getModScreenshot(mod.id),
+    // Failures are not cached by the Core, so asking again later can succeed.
+    retry: false,
+  });
+  return (
+    <figure className="mod-detail-panel__screenshot">
+      {screenshot.isPending ? <p className="small" role="status">Loading screenshot…</p>
+        : screenshot.data?.status === "image"
+          ? <img src={screenshot.data.dataUri} alt={`Screenshot of ${mod.name}`} />
+          : <>
+            <p>No screenshot available</p>
+            <p className="small">{screenshot.data?.status === "unavailable"
+              ? screenshot.data.reason
+              : "GMM could not ask for the screenshot."}</p>
+          </>}
+    </figure>
+  );
+}
 
 export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: {
   id: string;
@@ -69,6 +98,7 @@ export function ModDetailPanel({ id, open, mod, onClose, focusOnOpen = false }: 
         <button ref={closeRef} type="button" onClick={() => { commitWidth(); onClose(); }} aria-label="Close Mod details">Close</button>
       </div>
       {mod ? <>
+        {mod.screenshotUrl?.trim() ? <ModScreenshotFigure mod={mod} /> : null}
         {/* Same definition-list convention and shared styling as DuplicateModDetails.
             Audit-only identity, recovery and Variant facts do not belong here. */}
         <dl className="duplicate-mod-details mod-detail-panel__facts small">

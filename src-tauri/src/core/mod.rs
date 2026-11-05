@@ -25,6 +25,7 @@ mod library_mutation;
 mod library_ownership;
 pub mod library_recovery;
 mod mod_panel;
+pub mod mod_screenshot;
 pub mod mod_update_batch;
 pub mod mod_updates;
 pub mod mods;
@@ -84,6 +85,8 @@ pub struct Core {
     /// [`crash_points`] for why this is an injected field rather than a
     /// cfg flag or an environment variable.
     crash_hook: Option<CrashHook>,
+    /// In-memory LRU of fetched Mod screenshots; see [`mod_screenshot`].
+    screenshots: mod_screenshot::SharedScreenshotCache,
 }
 
 #[derive(Clone, Copy)]
@@ -236,6 +239,7 @@ impl Core {
             pool,
             default_library_root,
             crash_hook: None,
+            screenshots: Default::default(),
         })
     }
 
@@ -289,6 +293,7 @@ impl Core {
             pool,
             default_library_root,
             crash_hook: None,
+            screenshots: Default::default(),
         })
     }
 
