@@ -227,15 +227,27 @@ fn every_tauri_command_uses_structured_command_result() {
     );
 }
 
-/// Names of `#[tauri::command]` functions whose body mentions
-/// `CommandError::from`, directly or as a `map_err` argument.
+/// Names of `#[tauri::command]` functions that convert a core failure without
+/// `SurfaceErrors`, so a Mod's ULID reaches the user unaccompanied by its name
+/// (#446). Two shapes are recognised:
 ///
-/// A command that converts a core failure that way skips `SurfaceErrors`, so
-/// a Mod's ULID reaches the user unaccompanied by its name (#446).
+/// - `CommandError::from`, called directly or passed to `map_err`.
+/// - A `?` whose receiver chain starts at the identifier `core` and contains
+///   no `.surface(..)`. `?` invokes the same `From<Error> for CommandError`,
+///   so `core.work().await?` bypasses the resolver as surely as the first
+///   shape. A `?` on a helper that already returns `CommandResult`, such as
+///   `refuse_during_session(&core).await?`, does not start at `core` and
+///   stays legal.
+///
+/// This is syntax, not type inference, and deliberately does not try to be
+/// general. It cannot see `.map_err(Into::into)`, a closure that calls
+/// `e.into()`, or a `?` on a chain that does not start at `core` (for example
+/// a value first bound to another name). Those remain review
+/// responsibilities, as the module doc lists for the `CommandResult` gate.
 fn commands_bypassing_the_resolver(items: &[Item]) -> Vec<String> {
     #[derive(Default)]
-    struct DirectConversion(bool);
-    impl<'ast> Visit<'ast> for DirectConversion {
+    struct Bypass(bool);
+    impl<'ast> Visit<'ast> for Bypass {
         fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
             let mut segments = expression
                 .path
@@ -250,13 +262,36 @@ fn commands_bypassing_the_resolver(items: &[Item]) -> Vec<String> {
             }
             syn::visit::visit_expr_path(self, expression);
         }
+
+        fn visit_expr_try(&mut self, expression: &'ast syn::ExprTry) {
+            let mut resolved = false;
+            let mut link = expression.expr.as_ref();
+            let starts_at_core = loop {
+                link = match link {
+                    syn::Expr::MethodCall(call) => {
+                        resolved |= call.method == "surface";
+                        &call.receiver
+                    }
+                    syn::Expr::Await(awaited) => &awaited.base,
+                    syn::Expr::Try(inner) => &inner.expr,
+                    syn::Expr::Field(field) => &field.base,
+                    syn::Expr::Paren(paren) => &paren.expr,
+                    syn::Expr::Path(path) => break path.path.is_ident("core"),
+                    _ => break false,
+                };
+            };
+            if starts_at_core && !resolved {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_try(self, expression);
+        }
     }
 
     let mut bypassing = Vec::new();
     for item in items {
         match item {
             Item::Fn(function) if is_tauri_command(function) => {
-                let mut conversion = DirectConversion::default();
+                let mut conversion = Bypass::default();
                 conversion.visit_block(&function.block);
                 if conversion.0 {
                     bypassing.push(function.sig.ident.to_string());
@@ -313,7 +348,7 @@ fn no_tauri_command_converts_a_core_error_without_the_resolver() {
     assert!(
         bypassing.is_empty(),
         "a #[tauri::command] body must convert core errors with `.surface(&core).await` so a \
-         Mod's name is resolved beside its identifier; CommandError::from skips that: {}",
+         Mod's name is resolved beside its identifier; CommandError::from, or a bare `?` on a `core` call, skips that: {}",
         bypassing.join(", ")
     );
 }
@@ -354,6 +389,57 @@ fn the_resolver_gate_flags_a_command_that_converts_directly() {
     assert_eq!(
         commands_bypassing_the_resolver(&file.items),
         ["bypasses_through_map_err", "bypasses_by_call"]
+    );
+}
+
+#[test]
+fn the_resolver_gate_flags_a_question_mark_on_an_unresolved_core_chain() {
+    let file = syn::parse_file(
+        r#"
+        #[tauri::command]
+        async fn resolves_before_the_question_mark(core: State<'_, Core>) -> CommandResult<Thing> {
+            let value = core.work().await.surface(&core).await?;
+            Ok(transform(value))
+        }
+
+        #[tauri::command]
+        async fn question_mark_on_core(core: State<'_, Core>) -> CommandResult<Thing> {
+            let value = core.work().await?;
+            Ok(transform(value))
+        }
+
+        #[tauri::command]
+        async fn resolved_early_in_a_longer_chain(core: State<'_, Core>) -> CommandResult<Thing> {
+            let value = core.first().await.surface(&core).await?.second().await?;
+            Ok(value)
+        }
+
+        #[tauri::command]
+        async fn question_mark_deep_in_an_unresolved_chain(
+            core: State<'_, Core>,
+        ) -> CommandResult<Thing> {
+            let value = core.first().await?.second().await?;
+            Ok(value)
+        }
+
+        #[tauri::command]
+        async fn question_mark_on_a_helper_that_returns_command_result(
+            core: State<'_, Core>,
+        ) -> CommandResult<Thing> {
+            refuse_during_session(&core).await?;
+            let value = core.work().await.surface(&core).await?;
+            Ok(value)
+        }
+        "#,
+    )
+    .expect("parse question-mark fixture");
+
+    assert_eq!(
+        commands_bypassing_the_resolver(&file.items),
+        [
+            "question_mark_on_core",
+            "question_mark_deep_in_an_unresolved_chain"
+        ]
     );
 }
 
