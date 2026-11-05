@@ -719,6 +719,18 @@ export async function getModPanelWidth(): Promise<number | null> {
   return invoke<number | null>("get_mod_panel_width");
 }
 
+/**
+ * The status describes the image, never the Mod. The Core fetches the bytes
+ * through the user's proxy, so the WebView never loads a remote image itself.
+ */
+export type ModScreenshot =
+  | { status: "image"; dataUri: string }
+  | { status: "unavailable"; reason: string };
+
+export async function getModScreenshot(modId: string): Promise<ModScreenshot> {
+  return invoke<ModScreenshot>("get_mod_screenshot", { modId });
+}
+
 export async function setModPanelWidth(width: number): Promise<void> {
   await invoke("set_mod_panel_width", { width });
 }

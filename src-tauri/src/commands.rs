@@ -18,6 +18,7 @@ use crate::core::conflicts::ConflictReport;
 use crate::core::diagnostics;
 use crate::core::importer::{InstallReport, LatestRelease};
 use crate::core::importer_origin::{ImporterOrigin, OriginStatus};
+use crate::core::mod_screenshot::ModScreenshot;
 use crate::core::mod_updates::ModUpdateRow;
 use crate::core::network::{PasswordUpdate, ProxyConfigPublic};
 use crate::core::reconcile::{ReconcileResult, StartupReconcileState, StartupReconcileStatus};
@@ -313,6 +314,18 @@ pub fn log_network_signal(signal: NetworkSignal) -> CommandResult<()> {
 #[tauri::command]
 pub async fn get_mod_panel_width(core: State<'_, Core>) -> CommandResult<Option<u32>> {
     core.mod_panel_width().await.map_err(CommandError::from)
+}
+
+/// The Mod's screenshot as a `data:` URI fetched through the user's proxy, or
+/// the reason there is none. The WebView never loads a remote image itself.
+#[tauri::command]
+pub async fn get_mod_screenshot(
+    core: State<'_, Core>,
+    mod_id: String,
+) -> CommandResult<ModScreenshot> {
+    core.mod_screenshot(&mod_id)
+        .await
+        .map_err(CommandError::from)
 }
 
 #[tauri::command]

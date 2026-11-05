@@ -872,6 +872,33 @@ code {
   flex-wrap: wrap;
 }
 
+/* The box has one fixed height, whatever the image or the panel width (240-560px),
+ * so a tall or wide image can never push the facts list or the width control. */
+.mod-detail-panel__screenshot {
+  box-sizing: border-box;
+  height: 180px;
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid #2e2e36;
+  text-align: center;
+}
+
+.mod-detail-panel__screenshot > p {
+  margin: 0;
+  padding-inline: 0.5rem;
+}
+
+.mod-detail-panel__screenshot img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
 .mod-detail-panel__facts > div {
   grid-template-columns: minmax(0, 1fr);
   gap: 0.125rem;
