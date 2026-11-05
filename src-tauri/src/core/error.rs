@@ -523,4 +523,36 @@ impl Error {
             _ => SurfaceFailureKind::Other,
         }
     }
+
+    /// Every Mod identifier this error's message mentions, in the order the
+    /// message mentions them. Empty for every other variant.
+    ///
+    /// The command boundary uses this to put the Mod's name next to the
+    /// identifier. `tests/mod_name_resolution.rs` parses this file and fails
+    /// if a variant with a Mod identifier field has no arm here, so a new
+    /// variant cannot reach the user with a bare ULID unnoticed.
+    pub fn mod_ids(&self) -> Vec<&str> {
+        match self {
+            Self::EnabledTransitionWitnessCorrupt { mod_id, .. }
+            | Self::EnabledTransitionPending { mod_id }
+            | Self::DuplicateModResolutionBlockedByReinstall { mod_id }
+            | Self::DuplicateModInstallPathMissing { mod_id, .. }
+            | Self::DuplicateModJunctionConflict { mod_id, .. }
+            | Self::DuplicateModJunctionStillPresent { mod_id, .. }
+            | Self::LibraryRelocationBlockedByReinstall { mod_id }
+            | Self::ReinstallRecoveryUncertain { mod_id, .. }
+            | Self::ReinstallWitnessCorrupt { mod_id, .. }
+            | Self::ReinstallRecoveryQuarantined { mod_id }
+            | Self::ReinstallRecoveryDeploymentUnverified { mod_id, .. } => vec![mod_id],
+            Self::DuplicateModJunctionClaimedBySurvivor {
+                mod_id,
+                surviving_mod_id,
+                ..
+            } => vec![mod_id, surviving_mod_id],
+            // Carries a `mod_id`, but its message already names the Mod and
+            // never prints the identifier, so there is nothing to annotate.
+            Self::InvalidActiveVariant { .. } => Vec::new(),
+            _ => Vec::new(),
+        }
+    }
 }

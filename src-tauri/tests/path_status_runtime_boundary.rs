@@ -165,17 +165,22 @@ fn command_delegates_once_to_the_tested_core_boundary() {
         1,
         "command must contain only delegation"
     );
-    let Some(syn::Stmt::Expr(syn::Expr::MethodCall(map_error), None)) = command.block.stmts.first()
+    // The Core result is converted by the command-boundary resolver (#446):
+    // `core.game_path_status(game).await.surface(&core).await`, nothing chained.
+    let Some(syn::Stmt::Expr(syn::Expr::Await(resolved), None)) = command.block.stmts.first()
     else {
-        panic!("command must return mapped Core result");
+        panic!("command must await the resolved Core result");
     };
-    assert_eq!(map_error.method, "map_err");
-    assert_eq!(map_error.args.len(), 1);
-    assert_eq!(
-        path_name(map_error.args.first().unwrap()),
-        ["CommandError", "from"]
-    );
-    let syn::Expr::Await(awaited) = map_error.receiver.as_ref() else {
+    let syn::Expr::MethodCall(resolver) = resolved.base.as_ref() else {
+        panic!("resolve the Core result with SurfaceErrors::surface");
+    };
+    assert_eq!(resolver.method, "surface");
+    assert_eq!(resolver.args.len(), 1);
+    let syn::Expr::Reference(resolver_core) = resolver.args.first().unwrap() else {
+        panic!("surface must borrow the Core");
+    };
+    assert_eq!(path_name(&resolver_core.expr), ["core"]);
+    let syn::Expr::Await(awaited) = resolver.receiver.as_ref() else {
         panic!("await Core result");
     };
     let syn::Expr::MethodCall(delegation) = awaited.base.as_ref() else {

@@ -4426,6 +4426,36 @@ impl Core {
         Ok((link, target))
     }
 
+    /// Names for the given Mod identifiers. Identifiers with no row are absent.
+    ///
+    /// This runs after GMM has already failed, to make that failure readable,
+    /// so it has no `Result`: a database problem here must never replace or
+    /// mask the failure being explained. Any query error yields an empty map
+    /// and the caller falls back to the identifier alone.
+    pub async fn mod_names(&self, ids: &[&str]) -> std::collections::HashMap<String, String> {
+        if ids.is_empty() {
+            return Default::default();
+        }
+        let mut query =
+            sqlx::QueryBuilder::<Sqlite>::new("SELECT id, name FROM mods WHERE id IN (");
+        let mut separated = query.separated(", ");
+        for id in ids {
+            separated.push_bind(*id);
+        }
+        separated.push_unseparated(")");
+        match query
+            .build_query_as::<(String, String)>()
+            .fetch_all(&self.pool)
+            .await
+        {
+            Ok(rows) => rows.into_iter().collect(),
+            Err(error) => {
+                tracing::warn!(%error, "could not look up Mod names for an error message");
+                Default::default()
+            }
+        }
+    }
+
     /// List every Mod for a given game, ordered by creation time ascending.
     pub async fn list_mods(&self, game: GameCode) -> Result<Vec<Mod>> {
         let mut recoveries: std::collections::HashMap<_, _> = self

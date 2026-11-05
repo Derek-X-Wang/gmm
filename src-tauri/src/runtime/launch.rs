@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter, Runtime};
 
 use gmm_loader::Loader;
 
-use crate::command_error::{CommandError, CommandResult};
+use crate::command_error::{CommandError, CommandResult, SurfaceErrors};
 use crate::core::av;
 use crate::core::games::InjectMode;
 use crate::core::{Core, GameCode, SessionInfo};
@@ -222,7 +222,7 @@ async fn launch_inner<E: SessionEvents>(
 
         // Cheap pre-check; the atomic INSERT in start_session is the
         // real gate against double-launch races.
-        if let Some(existing) = core.session_info().await.map_err(CommandError::from)? {
+        if let Some(existing) = core.session_info().await.surface(core).await? {
             return Err(CommandError::other(format!(
                 "{} is already running (since {}).",
                 existing.game.as_str(),
@@ -238,7 +238,7 @@ async fn launch_inner<E: SessionEvents>(
         let claim = core
             .begin_session_launch(game)
             .await
-            .map_err(CommandError::from)
+            .surface(core).await
             .map_err(|error| {
                 error.map_message(|message| format!("begin_session_launch: {message}"))
             })?;
@@ -247,7 +247,7 @@ async fn launch_inner<E: SessionEvents>(
             let install = core
                 .game_install_path(game)
                 .await
-                .map_err(CommandError::from)?
+                .surface(core).await?
                 .ok_or_else(|| {
                     CommandError::other(
                         "Set the game install path in Settings before launching.",
@@ -290,7 +290,7 @@ async fn launch_inner<E: SessionEvents>(
                     let child_guard = ChildGuard::new(child);
                     core.record_session_launch_child(&claim, child_guard.pid())
                         .await
-                        .map_err(CommandError::from)
+                        .surface(core).await
                         .map_err(|error| {
                             error.map_message(|message| {
                                 format!("record_session_launch_child: {message}")
@@ -336,7 +336,7 @@ async fn launch_inner<E: SessionEvents>(
                     let child_guard = ChildGuard::new(child);
                     core.record_session_launch_child(&claim, child_guard.pid())
                         .await
-                        .map_err(CommandError::from)
+                        .surface(core).await
                         .map_err(|error| {
                             error.map_message(|message| {
                                 format!("record_session_launch_child: {message}")
@@ -371,7 +371,7 @@ async fn launch_inner<E: SessionEvents>(
             // drop kills every losing launch's spawned game.
             core.complete_session_launch(&claim, &info)
                 .await
-                .map_err(CommandError::from)
+                .surface(core).await
                 .map_err(|error| {
                     error.map_message(|message| format!("complete_session_launch: {message}"))
                 })?;
@@ -458,7 +458,7 @@ async fn reconcile_live_slot(core: &Core, runtime: &SessionRuntime) -> CommandRe
         )));
     }
     drop(runtime.take());
-    core.end_session().await.map_err(CommandError::from)?;
+    core.end_session().await.surface(core).await?;
     Ok(())
 }
 
