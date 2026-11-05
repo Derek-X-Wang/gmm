@@ -227,6 +227,136 @@ fn every_tauri_command_uses_structured_command_result() {
     );
 }
 
+/// Names of `#[tauri::command]` functions whose body mentions
+/// `CommandError::from`, directly or as a `map_err` argument.
+///
+/// A command that converts a core failure that way skips `SurfaceErrors`, so
+/// a Mod's ULID reaches the user unaccompanied by its name (#446).
+fn commands_bypassing_the_resolver(items: &[Item]) -> Vec<String> {
+    #[derive(Default)]
+    struct DirectConversion(bool);
+    impl<'ast> Visit<'ast> for DirectConversion {
+        fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+            let mut segments = expression
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .rev();
+            if segments.next().as_deref() == Some("from")
+                && segments.next().as_deref() == Some("CommandError")
+            {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_path(self, expression);
+        }
+    }
+
+    let mut bypassing = Vec::new();
+    for item in items {
+        match item {
+            Item::Fn(function) if is_tauri_command(function) => {
+                let mut conversion = DirectConversion::default();
+                conversion.visit_block(&function.block);
+                if conversion.0 {
+                    bypassing.push(function.sig.ident.to_string());
+                }
+            }
+            Item::Mod(module) => {
+                if let Some((_, nested)) = &module.content {
+                    bypassing.extend(commands_bypassing_the_resolver(nested));
+                }
+            }
+            _ => {}
+        }
+    }
+    bypassing
+}
+
+#[test]
+fn no_tauri_command_converts_a_core_error_without_the_resolver() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    rust_sources_below(&source_root, &mut sources);
+    rust_sources_below(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/cli/src"),
+        &mut sources,
+    );
+
+    // A gate that parses nothing passes trivially, so it must also see the
+    // commands that do route through `.surface(..)`.
+    let mut command_count = 0;
+    let mut bypassing = Vec::new();
+    for path in sources {
+        let source = fs::read_to_string(&path).expect("read Rust source");
+        let file = syn::parse_file(&source).expect("parse Rust source");
+        let mut violations = Vec::new();
+        inspect_commands(
+            &file.items,
+            &path,
+            &source_root,
+            &mut Vec::new(),
+            &mut command_count,
+            &mut violations,
+        );
+        bypassing.extend(
+            commands_bypassing_the_resolver(&file.items)
+                .into_iter()
+                .map(|name| format!("{}::{name}", path.display())),
+        );
+    }
+
+    assert!(
+        command_count > 0,
+        "the command boundary gate found no Tauri commands"
+    );
+    assert!(
+        bypassing.is_empty(),
+        "a #[tauri::command] body must convert core errors with `.surface(&core).await` so a \
+         Mod's name is resolved beside its identifier; CommandError::from skips that: {}",
+        bypassing.join(", ")
+    );
+}
+
+#[test]
+fn the_resolver_gate_flags_a_command_that_converts_directly() {
+    let file = syn::parse_file(
+        r#"
+        #[tauri::command]
+        async fn resolves(core: State<'_, Core>) -> CommandResult<()> {
+            core.work().await.surface(&core).await
+        }
+
+        #[tauri::command]
+        async fn bypasses_through_map_err(core: State<'_, Core>) -> CommandResult<()> {
+            core.work().await.map_err(CommandError::from)
+        }
+
+        mod nested {
+            #[tauri::command]
+            async fn bypasses_by_call(core: State<'_, Core>) -> CommandResult<()> {
+                match core.work().await {
+                    Ok(value) => Ok(value),
+                    Err(error) => Err(crate::command_error::CommandError::from(error)),
+                }
+            }
+        }
+
+        // Not a command body: helpers such as the launch orchestration are
+        // outside this rule.
+        async fn helper(core: &Core) -> CommandResult<()> {
+            core.work().await.map_err(CommandError::from)
+        }
+        "#,
+    )
+    .expect("parse resolver-gate fixture");
+
+    assert_eq!(
+        commands_bypassing_the_resolver(&file.items),
+        ["bypasses_through_map_err", "bypasses_by_call"]
+    );
+}
+
 #[test]
 fn command_error_preserves_classification_and_message() {
     let source = Error::InvalidActiveVariant {

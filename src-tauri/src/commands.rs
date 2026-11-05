@@ -34,7 +34,7 @@ use crate::runtime::SessionRuntime;
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 
-use crate::command_error::{CommandError, CommandResult};
+use crate::command_error::{CommandError, CommandResult, SurfaceErrors};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,7 +54,7 @@ pub struct ImportZipArgs {
 
 #[tauri::command]
 pub async fn attention_status(core: State<'_, Core>) -> CommandResult<AttentionReport> {
-    core.attention_status().await.map_err(CommandError::from)
+    core.attention_status().await.surface(&core).await
 }
 
 #[tauri::command]
@@ -69,7 +69,8 @@ pub async fn apply_preset(
         let _ = on_progress.send(progress);
     })
     .await
-    .map_err(CommandError::from)
+    .surface(&core)
+    .await
 }
 
 #[tauri::command]
@@ -78,9 +79,7 @@ pub async fn save_preset(
     game: GameCode,
     name: String,
 ) -> CommandResult<crate::core::presets::Preset> {
-    core.save_preset(game, &name)
-        .await
-        .map_err(CommandError::from)
+    core.save_preset(game, &name).await.surface(&core).await
 }
 
 #[tauri::command]
@@ -92,7 +91,8 @@ pub async fn rename_preset(
 ) -> CommandResult<()> {
     core.rename_preset(game, &preset_id, &name)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -103,7 +103,8 @@ pub async fn delete_preset(
 ) -> CommandResult<()> {
     core.delete_preset(game, &preset_id)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -114,7 +115,8 @@ pub async fn recapture_preset(
 ) -> CommandResult<()> {
     core.recapture_preset(game, &preset_id)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -122,12 +124,12 @@ pub async fn list_presets(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<Vec<crate::core::presets::Preset>> {
-    core.list_presets(game).await.map_err(CommandError::from)
+    core.list_presets(game).await.surface(&core).await
 }
 
 #[tauri::command]
 pub async fn list_mods(core: State<'_, Core>, game: GameCode) -> CommandResult<Vec<Mod>> {
-    core.list_mods(game).await.map_err(CommandError::from)
+    core.list_mods(game).await.surface(&core).await
 }
 
 #[tauri::command]
@@ -137,7 +139,8 @@ pub async fn retry_reinstall_recovery(
 ) -> CommandResult<ReinstallRecoveryOutcome> {
     core.retry_reinstall_recovery(&mod_id)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -147,7 +150,8 @@ pub async fn retire_interrupted_enabled_transition(
 ) -> CommandResult<()> {
     core.retire_interrupted_enabled_transition(&mod_id)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -157,7 +161,8 @@ pub async fn get_importer_evacuation_recovery(
 ) -> CommandResult<Option<ImporterEvacuationRecovery>> {
     core.importer_evacuation_recovery(game)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -167,7 +172,8 @@ pub async fn retry_importer_evacuation_recovery(
 ) -> CommandResult<()> {
     core.retry_importer_evacuation_recovery(game)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -177,14 +183,16 @@ pub async fn retire_interrupted_importer_evacuation(
 ) -> CommandResult<()> {
     core.retire_interrupted_importer_evacuation(game)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
 pub async fn adopt_folder(core: State<'_, Core>, args: AdoptArgs) -> CommandResult<Mod> {
     core.adopt_folder(args.game, &args.source_path, &args.name)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -196,7 +204,8 @@ pub async fn import_zip(core: State<'_, Core>, args: ImportZipArgs) -> CommandRe
         ImportZipOptions::default(),
     )
     .await
-    .map_err(CommandError::from)
+    .surface(&core)
+    .await
 }
 
 /// Error string returned when a user tries to enable a mod before
@@ -215,14 +224,16 @@ pub async fn set_mod_enabled(
     let install = core
         .game_install_path(game)
         .await
-        .map_err(CommandError::from)?
+        .surface(&core)
+        .await?
         .ok_or_else(|| CommandError::other(NO_INSTALL_PATH_FOR_ENABLE_MSG))?;
     let mods_dir = install.join("Mods");
     std::fs::create_dir_all(&mods_dir)
         .map_err(|error| CommandError::other(format!("create {}: {error}", mods_dir.display())))?;
     core.set_enabled(&id, enabled, &mods_dir)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -230,9 +241,7 @@ pub async fn get_game_install_path(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<Option<PathBuf>> {
-    core.game_install_path(game)
-        .await
-        .map_err(CommandError::from)
+    core.game_install_path(game).await.surface(&core).await
 }
 
 #[tauri::command]
@@ -240,9 +249,7 @@ pub async fn get_game_path_status(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<crate::core::game_path::GamePathStatus> {
-    core.game_path_status(game)
-        .await
-        .map_err(CommandError::from)
+    core.game_path_status(game).await.surface(&core).await
 }
 
 #[tauri::command]
@@ -253,7 +260,8 @@ pub async fn set_game_install_path(
 ) -> CommandResult<()> {
     core.set_game_install_path(game, &path)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -313,7 +321,7 @@ pub fn log_network_signal(signal: NetworkSignal) -> CommandResult<()> {
 /// Requested inspector width in CSS pixels; never reads window geometry.
 #[tauri::command]
 pub async fn get_mod_panel_width(core: State<'_, Core>) -> CommandResult<Option<u32>> {
-    core.mod_panel_width().await.map_err(CommandError::from)
+    core.mod_panel_width().await.surface(&core).await
 }
 
 /// The Mod's screenshot as a `data:` URI fetched through the user's proxy, or
@@ -323,28 +331,22 @@ pub async fn get_mod_screenshot(
     core: State<'_, Core>,
     mod_id: String,
 ) -> CommandResult<ModScreenshot> {
-    core.mod_screenshot(&mod_id)
-        .await
-        .map_err(CommandError::from)
+    core.mod_screenshot(&mod_id).await.surface(&core).await
 }
 
 #[tauri::command]
 pub async fn set_mod_panel_width(core: State<'_, Core>, width: u32) -> CommandResult<()> {
-    core.set_mod_panel_width(width)
-        .await
-        .map_err(CommandError::from)
+    core.set_mod_panel_width(width).await.surface(&core).await
 }
 
 #[tauri::command]
 pub async fn get_skipped_update(core: State<'_, Core>) -> CommandResult<Option<String>> {
-    core.skipped_update().await.map_err(CommandError::from)
+    core.skipped_update().await.surface(&core).await
 }
 
 #[tauri::command]
 pub async fn set_skipped_update(core: State<'_, Core>, build: String) -> CommandResult<()> {
-    core.set_skipped_update(&build)
-        .await
-        .map_err(CommandError::from)
+    core.set_skipped_update(&build).await.surface(&core).await
 }
 
 /// Running version from the binary's compiled Tauri package metadata.
@@ -364,7 +366,7 @@ pub async fn export_diagnostics_bundle<R: tauri::Runtime>(
     dest_path: PathBuf,
     updater_error: Option<String>,
 ) -> CommandResult<()> {
-    let mut snapshot = core.settings_snapshot().await.map_err(CommandError::from)?;
+    let mut snapshot = core.settings_snapshot().await.surface(&core).await?;
     snapshot.app_version = Some(get_app_version(app)?);
     snapshot.updater_error = updater_error;
     // The build is sync I/O; offload so we don't block the Tauri event
@@ -381,7 +383,8 @@ pub async fn export_diagnostics_bundle<R: tauri::Runtime>(
     })
     .await
     .map_err(|error| CommandError::other(format!("bundle task join error: {error}")))?
-    .map_err(CommandError::from)
+    .surface(&core)
+    .await
 }
 
 /// Tauri command — surfaces the directory we write logs into so the
@@ -454,10 +457,7 @@ pub async fn get_library_paths(core: State<'_, Core>) -> CommandResult<LibraryPa
 #[doc(hidden)]
 pub async fn library_paths_for_core(core: &Core) -> CommandResult<LibraryPaths> {
     let default_root = core.default_library_root().to_path_buf();
-    let root_override = core
-        .library_root_override()
-        .await
-        .map_err(CommandError::from)?;
+    let root_override = core.library_root_override().await.surface(core).await?;
     let effective_root = root_override
         .clone()
         .unwrap_or_else(|| default_root.clone());
@@ -471,7 +471,7 @@ pub async fn library_paths_for_core(core: &Core) -> CommandResult<LibraryPaths> 
                 backups,
             });
         }
-        Err(error) => return Err(CommandError::from(error)),
+        Err(error) => return Err(CommandError::resolved(error, core).await),
     }
 
     let mut per_game_overrides = HashMap::new();
@@ -481,7 +481,8 @@ pub async fn library_paths_for_core(core: &Core) -> CommandResult<LibraryPaths> 
         let over = core
             .library_root_override_for_game(*game)
             .await
-            .map_err(CommandError::from)?;
+            .surface(core)
+            .await?;
         if over.is_some() {
             match core.resolved_library_root_for(*game).await {
                 Ok(_) => {}
@@ -492,7 +493,7 @@ pub async fn library_paths_for_core(core: &Core) -> CommandResult<LibraryPaths> 
                         backups,
                     });
                 }
-                Err(error) => return Err(CommandError::from(error)),
+                Err(error) => return Err(CommandError::resolved(error, core).await),
             }
         }
         let eff = over
@@ -505,7 +506,8 @@ pub async fn library_paths_for_core(core: &Core) -> CommandResult<LibraryPaths> 
     let mod_overlaps = core
         .mod_library_path_overlaps()
         .await
-        .map_err(CommandError::from)?
+        .surface(core)
+        .await?
         .into_iter()
         .map(|overlap| LibraryModPathOverlap {
             mod_id: overlap.mod_id,
@@ -533,7 +535,7 @@ pub async fn audit_library(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<LibraryAuditReport> {
-    core.audit_library(game).await.map_err(CommandError::from)
+    core.audit_library(game).await.surface(&core).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -551,7 +553,8 @@ pub async fn resolve_duplicate_mods(
 ) -> CommandResult<DuplicateResolution> {
     core.resolve_duplicate_mods(&args.keeper_id, &args.reviewed_mods)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Arguments for recovering an unreferenced Library directory.
@@ -579,7 +582,8 @@ pub async fn reveal_unreferenced_library_dir(
     let path = core
         .unreferenced_library_dir_for_reveal(game, &path)
         .await
-        .map_err(CommandError::from)?;
+        .surface(&core)
+        .await?;
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|e| CommandError::other(format!("could not open {}: {e}", path.display())))
@@ -593,7 +597,8 @@ pub async fn recover_unreferenced_library_dir(
 ) -> CommandResult<Mod> {
     core.recover_unreferenced_library_dir(args.game, &args.path, &args.name)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Permanently delete one unreferenced Library folder the user confirmed.
@@ -609,7 +614,8 @@ pub async fn delete_unreferenced_library_dir(
 ) -> CommandResult<DeletedLibraryDir> {
     core.delete_unreferenced_library_dir(game, &path)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -619,7 +625,8 @@ pub async fn set_library_root(
 ) -> CommandResult<MoveReport> {
     core.set_library_root(path.as_deref())
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -630,7 +637,8 @@ pub async fn set_library_path_for_game(
 ) -> CommandResult<MoveReport> {
     core.set_library_path_for_game(game, path.as_deref())
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[derive(Debug, Serialize)]
@@ -642,14 +650,8 @@ pub struct ModVariants {
 
 #[tauri::command]
 pub async fn list_variants(core: State<'_, Core>, mod_id: String) -> CommandResult<ModVariants> {
-    let variants = core
-        .list_variants(&mod_id)
-        .await
-        .map_err(CommandError::from)?;
-    let active_variant_id = core
-        .active_variant_id(&mod_id)
-        .await
-        .map_err(CommandError::from)?;
+    let variants = core.list_variants(&mod_id).await.surface(&core).await?;
+    let active_variant_id = core.active_variant_id(&mod_id).await.surface(&core).await?;
     Ok(ModVariants {
         variants,
         active_variant_id,
@@ -666,7 +668,8 @@ pub async fn set_active_variant(
     let install = core
         .game_install_path(game)
         .await
-        .map_err(CommandError::from)?
+        .surface(&core)
+        .await?
         .ok_or_else(|| {
             CommandError::other("Set the game install path before switching variants.")
         })?;
@@ -675,7 +678,8 @@ pub async fn set_active_variant(
         .map_err(|error| CommandError::other(format!("create {}: {error}", mods_dir.display())))?;
     core.set_active_variant(&mod_id, Some(&variant_id), &mods_dir)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -683,9 +687,7 @@ pub async fn detect_conflicts(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<ConflictReport> {
-    core.detect_conflicts(game)
-        .await
-        .map_err(CommandError::from)
+    core.detect_conflicts(game).await.surface(&core).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -702,7 +704,8 @@ pub async fn import_gamebanana(
 ) -> CommandResult<Mod> {
     core.import_gamebanana(args.game, &args.url_or_id)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -712,7 +715,8 @@ pub async fn check_importer_update(
 ) -> CommandResult<UpdateStatus> {
     core.check_importer_update_for(game)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Informational Loader version report. Returns the version GMM
@@ -720,7 +724,7 @@ pub async fn check_importer_update(
 /// `checkError` rather than masquerading as "up to date" (#78).
 #[tauri::command]
 pub async fn check_loader_update(core: State<'_, Core>) -> CommandResult<LoaderVersionStatus> {
-    core.check_loader_update().await.map_err(CommandError::from)
+    core.check_loader_update().await.surface(&core).await
 }
 
 #[tauri::command]
@@ -731,7 +735,8 @@ pub async fn set_importer_pinned(
 ) -> CommandResult<()> {
     core.set_importer_pinned(game, version.as_deref())
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -739,9 +744,7 @@ pub async fn list_mod_updates(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<Vec<ModUpdateRow>> {
-    core.list_mod_updates(game)
-        .await
-        .map_err(CommandError::from)
+    core.list_mod_updates(game).await.surface(&core).await
 }
 
 #[tauri::command]
@@ -749,9 +752,7 @@ pub async fn check_mod_updates_now(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<Vec<ModUpdateRow>> {
-    core.check_mod_updates_now(game)
-        .await
-        .map_err(CommandError::from)
+    core.check_mod_updates_now(game).await.surface(&core).await
 }
 
 #[tauri::command]
@@ -762,7 +763,8 @@ pub async fn set_mod_update_check_enabled(
 ) -> CommandResult<()> {
     core.set_mod_update_check_enabled(&mod_id, enabled)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -772,14 +774,16 @@ pub async fn set_mod_updates_globally_enabled(
 ) -> CommandResult<()> {
     core.set_mod_updates_globally_enabled(enabled)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
 pub async fn mod_updates_globally_enabled(core: State<'_, Core>) -> CommandResult<bool> {
     core.mod_updates_globally_enabled()
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 // Registered commands remove their stop tokens on return, including refusal/error.
@@ -840,7 +844,8 @@ pub async fn apply_all_mod_updates(
         let _ = on_progress.send(progress);
     })
     .await
-    .map_err(CommandError::from)
+    .surface(&core)
+    .await
 }
 
 #[cfg(test)]
@@ -851,7 +856,8 @@ mod batch_stop_tests;
 pub async fn apply_mod_update(core: State<'_, Core>, mod_id: String) -> CommandResult<()> {
     core.reinstall_gamebanana_mod(&mod_id)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -861,7 +867,8 @@ pub async fn fetch_latest_importer_release(
 ) -> CommandResult<Option<LatestRelease>> {
     core.latest_importer_release(game)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Download and install the Game's Model Importer from its resolved
@@ -878,9 +885,7 @@ pub async fn install_importer(
     game: GameCode,
 ) -> CommandResult<InstallReport> {
     refuse_during_session(&core).await?;
-    core.install_importer(game)
-        .await
-        .map_err(CommandError::from)
+    core.install_importer(game).await.surface(&core).await
 }
 
 // ---- Importer Origin surface (ADR 0005 / #109) ----
@@ -914,9 +919,7 @@ pub async fn importer_origin_status(
     core: State<'_, Core>,
     game: GameCode,
 ) -> CommandResult<OriginStatus> {
-    core.importer_origin_status(game)
-        .await
-        .map_err(CommandError::from)
+    core.importer_origin_status(game).await.surface(&core).await
 }
 
 /// Set or clear the user's per-game Importer Origin override (layer 1).
@@ -932,7 +935,8 @@ pub async fn set_importer_origin_override(
     let origin = origin.map(|o| o.build()).transpose()?;
     core.set_importer_origin_override(game, origin.as_ref())
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Accept the Importer Origin change GMM is offering: install from the
@@ -948,7 +952,8 @@ pub async fn accept_importer_origin_proposal(
     refuse_during_session(&core).await?;
     core.accept_importer_origin_proposal(game)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Decline an Importer Origin: remember it and stop proposing it.
@@ -964,7 +969,8 @@ pub async fn dismiss_importer_origin(
 ) -> CommandResult<()> {
     core.dismiss_importer_origin(game, &origin.build()?)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Undo a dismissal from the affected game's own surface.
@@ -976,7 +982,8 @@ pub async fn restore_importer_origin(
 ) -> CommandResult<()> {
     core.restore_importer_origin(game, &origin.build()?)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// The global recommendations switch. On for a user who has never
@@ -985,7 +992,8 @@ pub async fn restore_importer_origin(
 pub async fn importer_recommendations_enabled(core: State<'_, Core>) -> CommandResult<bool> {
     core.importer_recommendations_enabled()
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Switch GMM's curated recommendations on or off.
@@ -1004,7 +1012,8 @@ pub async fn set_importer_recommendations_enabled(
 ) -> CommandResult<()> {
     core.set_importer_recommendations_enabled(enabled)
         .await
-        .map_err(CommandError::from)?;
+        .surface(&core)
+        .await?;
     if enabled {
         let core = Core::clone(&core);
         tauri::async_runtime::spawn(async move {
@@ -1055,14 +1064,15 @@ impl ProxyArgs {
             password,
         )
         .await
-        .map_err(CommandError::from)?;
-        core.proxy_config_public().await.map_err(CommandError::from)
+        .surface(core)
+        .await?;
+        core.proxy_config_public().await.surface(core).await
     }
 }
 
 #[tauri::command]
 pub async fn get_proxy_config(core: State<'_, Core>) -> CommandResult<ProxyConfigPublic> {
-    core.proxy_config_public().await.map_err(CommandError::from)
+    core.proxy_config_public().await.surface(&core).await
 }
 
 #[tauri::command]
@@ -1075,9 +1085,7 @@ pub async fn set_proxy_config(
 
 #[tauri::command]
 pub async fn test_proxy_connection(core: State<'_, Core>) -> CommandResult<()> {
-    core.test_proxy_connection()
-        .await
-        .map_err(CommandError::from)
+    core.test_proxy_connection().await.surface(&core).await
 }
 
 /// Roll the Game's Model Importer back to its most recent backup.
@@ -1091,9 +1099,7 @@ pub async fn rollback_importer(
     game: GameCode,
 ) -> CommandResult<Option<PathBuf>> {
     refuse_during_session(&core).await?;
-    core.rollback_importer(game)
-        .await
-        .map_err(CommandError::from)
+    core.rollback_importer(game).await.surface(&core).await
 }
 
 /// Tauri command — reconcile junctions for a game in place. Used by
@@ -1107,12 +1113,14 @@ pub async fn reconcile_junctions(
     let install = core
         .game_install_path(game)
         .await
-        .map_err(CommandError::from)?
+        .surface(&core)
+        .await?
         .ok_or_else(|| CommandError::other("Set the game install path in Settings first."))?;
     let mods_dir = install.join("Mods");
     core.reconcile_junctions(game, &mods_dir)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Snapshot the best-effort startup reconcile pass. React polls until
@@ -1136,12 +1144,14 @@ pub async fn rebuild_junctions(
     let install = core
         .game_install_path(game)
         .await
-        .map_err(CommandError::from)?
+        .surface(&core)
+        .await?
         .ok_or_else(|| CommandError::other("Set the game install path in Settings first."))?;
     let mods_dir = install.join("Mods");
     core.rebuild_junctions(game, &mods_dir)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 /// Tauri command — auto-detect a game's install path. On success the
@@ -1168,7 +1178,8 @@ pub async fn detect_game_install_path(
     if let Some(path) = detected.as_ref() {
         core.set_game_install_path(game, path)
             .await
-            .map_err(CommandError::from)?;
+            .surface(&core)
+            .await?;
     }
     Ok(detected)
 }
@@ -1181,7 +1192,7 @@ pub async fn detect_game_install_path(
 /// the caller never gets a partial mutation while the game is
 /// running.
 async fn refuse_during_session(core: &State<'_, Core>) -> CommandResult<()> {
-    if let Some(info) = core.session_info().await.map_err(CommandError::from)? {
+    if let Some(info) = core.session_info().await.surface(core).await? {
         return Err(CommandError::other(format!(
             "{} is running (session active since {}). Close the game before changing this.",
             info.game.as_str(),
@@ -1193,12 +1204,12 @@ async fn refuse_during_session(core: &State<'_, Core>) -> CommandResult<()> {
 
 #[tauri::command]
 pub async fn current_session(core: State<'_, Core>) -> CommandResult<Option<SessionInfo>> {
-    core.session_info().await.map_err(CommandError::from)
+    core.session_info().await.surface(&core).await
 }
 
 #[tauri::command]
 pub async fn clean_stale_session(core: State<'_, Core>) -> CommandResult<Option<SessionInfo>> {
-    core.clean_stale_session().await.map_err(CommandError::from)
+    core.clean_stale_session().await.surface(&core).await
 }
 
 #[tauri::command]
@@ -1207,7 +1218,8 @@ pub async fn interrupted_session_launches(
 ) -> CommandResult<Vec<InterruptedSessionLaunch>> {
     core.interrupted_session_launches()
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -1217,7 +1229,8 @@ pub async fn retire_interrupted_session_launch(
 ) -> CommandResult<()> {
     core.retire_interrupted_session_launch(&id)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
@@ -1294,19 +1307,20 @@ pub async fn is_onboarding_complete(core: State<'_, Core>) -> CommandResult<Onbo
     // for the resulting log line; without it, a build where every
     // command is denied still passes the smoke.
     diagnostics::record_ipc_ready();
-    core.onboarding_status().await.map_err(CommandError::from)
+    core.onboarding_status().await.surface(&core).await
 }
 
 #[tauri::command]
 pub async fn mark_onboarding_complete(core: State<'_, Core>, skipped: bool) -> CommandResult<()> {
     core.mark_onboarding_complete(skipped)
         .await
-        .map_err(CommandError::from)
+        .surface(&core)
+        .await
 }
 
 #[tauri::command]
 pub async fn reset_onboarding(core: State<'_, Core>) -> CommandResult<()> {
-    core.reset_onboarding().await.map_err(CommandError::from)
+    core.reset_onboarding().await.surface(&core).await
 }
 
 /// Per-game install-path detection result returned by
@@ -1350,7 +1364,8 @@ pub async fn detect_all_games(core: State<'_, Core>) -> CommandResult<Vec<GameDe
             // path without an extra round-trip.
             core.set_game_install_path(p.code, path)
                 .await
-                .map_err(CommandError::from)?;
+                .surface(&core)
+                .await?;
         }
         out.push(GameDetection {
             code: p.code,
