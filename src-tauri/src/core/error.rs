@@ -336,6 +336,16 @@ pub enum Error {
     )]
     EnabledTransitionWitnessCorrupt { mod_id: String, reason: String },
 
+    /// The recovery record is well-formed, but a directory it names no longer
+    /// is what the record saw. Blaming the database here would point the user
+    /// at the one part that is intact.
+    #[error(
+        "GMM could not finish the interrupted enable/disable for Mod {mod_id}: {reason}. \
+         The saved recovery record is intact, but a folder on disk changed since GMM recorded it, \
+         so GMM stopped rather than change a deployment entry it cannot verify."
+    )]
+    EnabledTransitionFilesystemChanged { mod_id: String, reason: String },
+
     #[error(
         "GMM found corrupt Model Importer evacuation state for {game}: {reason}. \
          GMM stopped because corrupt database state is not proof that game-directory files are safe to change."
@@ -534,6 +544,7 @@ impl Error {
     pub fn mod_ids(&self) -> Vec<&str> {
         match self {
             Self::EnabledTransitionWitnessCorrupt { mod_id, .. }
+            | Self::EnabledTransitionFilesystemChanged { mod_id, .. }
             | Self::EnabledTransitionPending { mod_id }
             | Self::DuplicateModResolutionBlockedByReinstall { mod_id }
             | Self::DuplicateModInstallPathMissing { mod_id, .. }
