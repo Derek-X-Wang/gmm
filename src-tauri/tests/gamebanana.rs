@@ -69,7 +69,7 @@ async fn fetch_submission_parses_apiv11_payload() {
     let endpoints = Endpoints {
         api_base: server.url(),
     };
-    let s: GameBananaSubmission = fetch_submission(&client, &endpoints, 12345)
+    let s: GameBananaSubmission = fetch_submission(&client, &endpoints, 12345, false)
         .await
         .expect("fetch");
 

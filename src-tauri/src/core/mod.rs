@@ -1018,11 +1018,12 @@ impl Core {
     /// `update_check_enabled` is true. Updates `upstream_version` in
     /// the DB and persists `mod_updates.last_check_at`. Honours the
     /// global toggle: if `mod_updates.enabled` is `false`, returns the
-    /// existing rows without a fetch.
+    /// existing rows without a fetch. Mods whose fetch failed keep their
+    /// cached row and are named in the report's `unchecked`.
     pub async fn check_mod_updates_now(
         &self,
         game: GameCode,
-    ) -> Result<Vec<mod_updates::ModUpdateRow>> {
+    ) -> Result<mod_updates::ModUpdateCheckReport> {
         self.check_mod_updates_now_with_endpoints(game, &gamebanana::Endpoints::default())
             .await
     }
@@ -1034,13 +1035,16 @@ impl Core {
         &self,
         game: GameCode,
         endpoints: &gamebanana::Endpoints,
-    ) -> Result<Vec<mod_updates::ModUpdateRow>> {
+    ) -> Result<mod_updates::ModUpdateCheckReport> {
         if !self.mod_updates_globally_enabled().await? {
-            return self.list_mod_updates(game).await;
+            return Ok(mod_updates::ModUpdateCheckReport {
+                rows: self.list_mod_updates(game).await?,
+                unchecked: Vec::new(),
+            });
         }
 
         let rows = sqlx::query(
-            "SELECT id, gamebanana_id, update_check_enabled
+            "SELECT id, name, gamebanana_id, update_check_enabled
              FROM mods
              WHERE game_code = ? AND source = ?",
         )
@@ -1050,6 +1054,9 @@ impl Core {
         .await?;
 
         let client = self.http_client().await?;
+        // The proxy setting cannot change mid-check, so read it once.
+        let proxy_configured = self.proxy_config().await?.is_configured();
+        let mut unchecked = Vec::new();
         for row in rows {
             let enabled: i64 = row.try_get("update_check_enabled")?;
             if enabled == 0 {
@@ -1059,8 +1066,11 @@ impl Core {
             let gid: Option<i64> = row.try_get("gamebanana_id")?;
             let Some(gid) = gid else { continue };
             // Best-effort: a single failed fetch must not abort the
-            // batch. Tracing captures the reason for diagnostics.
-            match gamebanana::fetch_submission(&client, endpoints, gid as u64).await {
+            // batch. It is logged for diagnostics and returned in the
+            // report so the user can see which Mods were not checked.
+            match gamebanana::fetch_submission(&client, endpoints, gid as u64, proxy_configured)
+                .await
+            {
                 Ok(s) => {
                     sqlx::query("UPDATE mods SET upstream_version = ? WHERE id = ?")
                         .bind(s.version.as_deref())
@@ -1076,6 +1086,11 @@ impl Core {
                         error = %e,
                         "skipping mod update poll",
                     );
+                    unchecked.push(mod_updates::ModCheckFailure {
+                        mod_id,
+                        name: row.try_get("name")?,
+                        reason: e.to_string(),
+                    });
                 }
             }
         }
@@ -1086,7 +1101,10 @@ impl Core {
             Some(Utc::now().to_rfc3339().as_str()),
         )
         .await?;
-        self.list_mod_updates(game).await
+        Ok(mod_updates::ModUpdateCheckReport {
+            rows: self.list_mod_updates(game).await?,
+            unchecked,
+        })
     }
 
     /// Read the global mod-update toggle. Defaults to `true` when
@@ -1153,7 +1171,9 @@ impl Core {
         // 1. Resolve metadata + download the fresh ZIP before creating any
         //    filesystem recovery state. The installed Mod remains untouched.
         let client = self.http_client().await?;
-        let submission = gamebanana::fetch_submission(&client, endpoints, gid).await?;
+        let proxy_configured = self.proxy_config().await?.is_configured();
+        let submission =
+            gamebanana::fetch_submission(&client, endpoints, gid, proxy_configured).await?;
         let cache = self
             .default_library_root
             .parent()
@@ -3023,7 +3043,9 @@ impl Core {
         })?;
 
         let client = self.http_client().await?;
-        let submission = gamebanana::fetch_submission(&client, endpoints, id).await?;
+        let proxy_configured = self.proxy_config().await?.is_configured();
+        let submission =
+            gamebanana::fetch_submission(&client, endpoints, id, proxy_configured).await?;
 
         // Stash the download in a Library-adjacent cache (the same
         // data_dir tree the diagnostics + importer modules use) so

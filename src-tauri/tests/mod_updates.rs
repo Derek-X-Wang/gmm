@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::Write;
 
 use gmm_lib::core::gamebanana::Endpoints;
+use gmm_lib::core::network::ProxyConfig;
 use gmm_lib::core::{Core, GameCode};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
@@ -166,7 +167,8 @@ async fn check_now_writes_upstream_version_and_flags_when_ahead() {
     let rows = core
         .check_mod_updates_now_with_endpoints(GameCode::Gimi, &endpoints)
         .await
-        .expect("check");
+        .expect("check")
+        .rows;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].mod_id, imported.id);
     assert_eq!(rows[0].upstream_version.as_deref(), Some("0.2.0"));
@@ -224,7 +226,8 @@ async fn global_toggle_off_skips_network_but_still_lists_rows() {
     let rows = core
         .check_mod_updates_now_with_endpoints(GameCode::Gimi, &endpoints)
         .await
-        .expect("check");
+        .expect("check")
+        .rows;
     assert_eq!(rows.len(), 1, "rows still listed");
     no_fetch.assert_async().await;
 }
@@ -276,7 +279,8 @@ async fn global_toggle_off_preserves_cached_update_state() {
     let on_rows = core
         .check_mod_updates_now_with_endpoints(GameCode::Gimi, &endpoints)
         .await
-        .expect("seed cached update state");
+        .expect("seed cached update state")
+        .rows;
     api.assert_async().await;
     assert_eq!(on_rows[0].upstream_version.as_deref(), Some("0.2.0"));
     assert!(on_rows[0].upstream_ahead);
@@ -612,4 +616,262 @@ async fn unreadable_quarantine_after_reinstall_rollback_does_not_relabel_success
         durable_intent.is_file(),
         "deferred ordinary cleanup must retain its durable ownership intent",
     );
+}
+
+/// Two Mods ingested at 0.1.0, with the first already polled up to 0.2.0
+/// so there is a cached update to keep. Returns their IDs.
+async fn two_polled_mods(tmp: &TempDir, core: &Core) -> (String, String) {
+    let mut ingest_server = mockito::Server::new_async().await;
+    let first = ingest(
+        &mut ingest_server,
+        core,
+        1001,
+        "First",
+        "0.1.0",
+        b"hash=1\n",
+        &tmp.path().join("a.zip"),
+    )
+    .await;
+    let second = ingest(
+        &mut ingest_server,
+        core,
+        1002,
+        "Second",
+        "0.1.0",
+        b"hash=2\n",
+        &tmp.path().join("b.zip"),
+    )
+    .await;
+    let mut seed = mockito::Server::new_async().await;
+    let _seed = seed
+        .mock("GET", mockito::Matcher::Regex("/apiv11/Mod/1001.*".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"_sName":"First","_sVersion":"0.2.0","_aFiles":[{"_sFile":"m.zip","_sDownloadUrl":"https://example.test/m.zip"}]}"#)
+        .create_async()
+        .await;
+    let seeded = core
+        .check_mod_updates_now_with_endpoints(
+            GameCode::Gimi,
+            &Endpoints {
+                api_base: seed.url(),
+            },
+        )
+        .await
+        .expect("seed");
+    assert_eq!(
+        seeded.unchecked.len(),
+        1,
+        "only First is served; Second is the unchecked one"
+    );
+    (first.id, second.id)
+}
+
+/// A base URL nothing listens on: bind, then drop, so connections are refused.
+fn closed_port_url() -> String {
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", dead.local_addr().unwrap());
+    drop(dead);
+    url
+}
+
+#[tokio::test]
+async fn a_partial_check_updates_the_reached_mod_and_lists_only_the_rest() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &db_url)
+        .await
+        .expect("init");
+    let (first, second) = two_polled_mods(&tmp, &core).await;
+
+    let mut poll = mockito::Server::new_async().await;
+    let _first = poll
+        .mock("GET", mockito::Matcher::Regex("/apiv11/Mod/1001.*".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"_sName":"First","_sVersion":"0.3.0","_aFiles":[{"_sFile":"m.zip","_sDownloadUrl":"https://example.test/m.zip"}]}"#)
+        .create_async()
+        .await;
+    let _second = poll
+        .mock("GET", mockito::Matcher::Regex("/apiv11/Mod/1002.*".into()))
+        .with_status(503)
+        .create_async()
+        .await;
+
+    let report = core
+        .check_mod_updates_now_with_endpoints(
+            GameCode::Gimi,
+            &Endpoints {
+                api_base: poll.url(),
+            },
+        )
+        .await
+        .expect("a failed fetch is reported, not raised");
+
+    let reached = report.rows.iter().find(|r| r.mod_id == first).unwrap();
+    assert_eq!(reached.upstream_version.as_deref(), Some("0.3.0"));
+    assert_eq!(report.unchecked.len(), 1, "{:?}", report.unchecked);
+    assert_eq!(report.unchecked[0].mod_id, second);
+    assert_eq!(report.unchecked[0].name, "Second");
+    assert!(
+        report.unchecked[0].reason.contains("503"),
+        "{:?}",
+        report.unchecked
+    );
+}
+
+#[tokio::test]
+async fn a_dead_network_lists_every_mod_and_keeps_the_cached_rows() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &db_url)
+        .await
+        .expect("init");
+    let (first, second) = two_polled_mods(&tmp, &core).await;
+    let before = core.list_mod_updates(GameCode::Gimi).await.expect("list");
+    assert_eq!(
+        before
+            .iter()
+            .find(|r| r.mod_id == first)
+            .unwrap()
+            .upstream_version
+            .as_deref(),
+        Some("0.2.0")
+    );
+
+    let report = core
+        .check_mod_updates_now_with_endpoints(
+            GameCode::Gimi,
+            &Endpoints {
+                api_base: closed_port_url(),
+            },
+        )
+        .await
+        .expect("check");
+
+    // The two outcomes #78 and #79 had to separate: "checked, nothing new"
+    // has an empty `unchecked`; this is the other one.
+    assert_eq!(report.rows, before, "a failed check changes no cached row");
+    let mut listed: Vec<_> = report.unchecked.iter().map(|u| u.mod_id.clone()).collect();
+    listed.sort();
+    let mut expected = vec![first, second];
+    expected.sort();
+    assert_eq!(listed, expected);
+    for failure in &report.unchecked {
+        assert!(!failure.reason.is_empty(), "{failure:?}");
+        assert!(
+            !failure.reason.contains("Proxy unreachable"),
+            "no proxy is configured: {failure:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unreachable_proxy_reads_as_a_transport_failure_not_a_broken_mod() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &db_url)
+        .await
+        .expect("init");
+    two_polled_mods(&tmp, &core).await;
+    core.set_proxy_config(&ProxyConfig {
+        url: Some(closed_port_url()),
+        username: None,
+        password: None,
+    })
+    .await
+    .expect("proxy");
+
+    // A name that cannot resolve, so the dead proxy is the only way out.
+    let report = core
+        .check_mod_updates_now_with_endpoints(
+            GameCode::Gimi,
+            &Endpoints {
+                api_base: "http://gamebanana.gmm-test.invalid".to_string(),
+            },
+        )
+        .await
+        .expect("check");
+
+    assert_eq!(report.unchecked.len(), 2);
+    for failure in &report.unchecked {
+        assert!(failure.reason.contains("Proxy unreachable"), "{failure:?}");
+        let lowered = failure.reason.to_lowercase();
+        assert!(
+            !lowered.contains("corrupt") && !lowered.contains("broken"),
+            "{failure:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_mod_with_its_check_turned_off_is_skipped_not_reported_unchecked() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &db_url)
+        .await
+        .expect("init");
+    let (first, second) = two_polled_mods(&tmp, &core).await;
+    core.set_mod_update_check_enabled(&first, false)
+        .await
+        .expect("opt out");
+
+    let report = core
+        .check_mod_updates_now_with_endpoints(
+            GameCode::Gimi,
+            &Endpoints {
+                api_base: closed_port_url(),
+            },
+        )
+        .await
+        .expect("check");
+
+    let listed: Vec<_> = report.unchecked.iter().map(|u| u.mod_id.as_str()).collect();
+    assert_eq!(
+        listed,
+        [second.as_str()],
+        "the opted-out Mod is not a failure"
+    );
+    assert_eq!(report.rows.len(), 2, "its row is still returned");
+}
+
+#[tokio::test]
+async fn a_check_that_reaches_every_mod_has_nothing_unchecked() {
+    let tmp = TempDir::new().expect("tmp");
+    let db_url = format!("sqlite://{}/gmm.db?mode=rwc", tmp.path().display());
+    let core = Core::new(tmp.path().join("library"), &db_url)
+        .await
+        .expect("init");
+    let mut ingest_server = mockito::Server::new_async().await;
+    ingest(
+        &mut ingest_server,
+        &core,
+        1001,
+        "First",
+        "0.1.0",
+        b"hash=1\n",
+        &tmp.path().join("a.zip"),
+    )
+    .await;
+    let mut poll = mockito::Server::new_async().await;
+    let _ok = poll
+        .mock("GET", mockito::Matcher::Regex("/apiv11/Mod/1001.*".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"_sName":"First","_sVersion":"0.1.0","_aFiles":[{"_sFile":"m.zip","_sDownloadUrl":"https://example.test/m.zip"}]}"#)
+        .create_async()
+        .await;
+
+    let report = core
+        .check_mod_updates_now_with_endpoints(
+            GameCode::Gimi,
+            &Endpoints {
+                api_base: poll.url(),
+            },
+        )
+        .await
+        .expect("check");
+
+    assert!(report.unchecked.is_empty(), "{:?}", report.unchecked);
+    assert!(!report.rows[0].upstream_ahead, "checked, nothing new");
 }
