@@ -36,6 +36,32 @@ pub struct ModUpdateRow {
     pub update_check_enabled: bool,
 }
 
+/// A Mod whose upstream fetch did not complete during a check.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModCheckFailure {
+    pub mod_id: String,
+    pub name: String,
+    /// User-facing reason. A transport failure names the transport (for
+    /// example an unreachable proxy), never the Mod.
+    pub reason: String,
+}
+
+/// What a check did, as opposed to what the database holds afterwards.
+///
+/// `unchecked` lives here and not on [`ModUpdateRow`] because
+/// `list_mod_updates` returns the same rows without fetching anything, so
+/// a per-row field would read as "this Mod is fine" when nothing was
+/// checked. A Mod whose per-Mod check is off is skipped by design and is
+/// not listed. Empty `unchecked` means every Mod with its check on was
+/// reached.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModUpdateCheckReport {
+    pub rows: Vec<ModUpdateRow>,
+    pub unchecked: Vec<ModCheckFailure>,
+}
+
 /// Settings keys for the global toggle + last-check timestamp.
 pub mod keys {
     pub const GLOBAL_ENABLED: &str = "mod_updates.enabled";
