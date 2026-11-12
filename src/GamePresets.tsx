@@ -21,6 +21,7 @@ export function GamePresets({ game }: { game: GameCode }) {
   const renameId = useId();
   const recapturing = action?.kind === "recapture";
   const currentMods = useQuery({ queryKey: ["mods", game], queryFn: () => listMods(game), enabled: recapturing });
+  const unknownMods = (currentMods.data ?? []).filter((mod) => mod.enabledTransitionRecovery?.released);
   const rename = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => renamePreset(game, id, name),
     onSuccess: () => { setAction(undefined); void qc.invalidateQueries({ queryKey: ["presets", game] }); },
@@ -117,8 +118,9 @@ export function GamePresets({ game }: { game: GameCode }) {
     {recapturing && <div role="alertdialog" aria-label="Replace saved setup">
       <CommandErrorNotice error={currentMods.error} heading="Could not read current setup." />
       {currentMods.isFetching && <p>Reading current setup…</p>}
-      {currentMods.isSuccess && <p>Replace saved setup “{action.preset.name}”? It holds {action.preset.modCount} Mods now and will hold {currentMods.data.filter((mod) => mod.enabled).length} Mods after re-capture. The previous saved entries cannot be recovered. The name stays the same. No Mod is changed.</p>}
-      <button disabled={busy || !currentMods.isSuccess || currentMods.isFetching} onClick={() => recapture.mutate(action.preset.id)}>Replace saved entries with current setup</button>
+      {currentMods.isSuccess && unknownMods.length === 0 && <p>Replace saved setup “{action.preset.name}”? It holds {action.preset.modCount} Mods now and will hold {currentMods.data.filter((mod) => mod.enabled).length} Mods after re-capture. The previous saved entries cannot be recovered. The name stays the same. No Mod is changed.</p>}
+      {currentMods.isSuccess && unknownMods.length > 0 && <p>GMM does not know whether {unknownMods.map((mod) => mod.name).join(", ")} {unknownMods.length === 1 ? "is" : "are"} enabled, so it cannot re-capture this setup. Enable or disable {unknownMods.length === 1 ? "that Mod" : "those Mods"} first. No Mod is changed.</p>}
+      <button disabled={busy || !currentMods.isSuccess || currentMods.isFetching || unknownMods.length > 0} onClick={() => recapture.mutate(action.preset.id)}>Replace saved entries with current setup</button>
       <button disabled={busy} onClick={() => setAction(undefined)}>Keep previous saved entries</button>
     </div>}
     {applyState && <div>

@@ -47,6 +47,7 @@ const DUPLICATE_REPORT = {
           libraryPath: DUPLICATE_PATH,
           junctionDirName: "Manual Keeper",
           enabled: false,
+          enabledStateUnknown: false,
           createdAt: "2026-08-23T00:00:00Z",
           gamebananaId: null,
           sourceUrl: null,
@@ -67,6 +68,7 @@ const DUPLICATE_REPORT = {
           libraryPath: DUPLICATE_PATH,
           junctionDirName: "GameBanana Duplicate",
           enabled: true,
+          enabledStateUnknown: false,
           createdAt: "2026-08-24T00:00:00Z",
           gamebananaId: 24680,
           sourceUrl: "https://gamebanana.com/mods/24680",
@@ -599,4 +601,18 @@ it.each(["recover", "delete", "duplicates"] as const)("refreshes the Library aud
   }
   await waitFor(() => expect(screen.queryByText(action === "duplicates" ? DUPLICATE_PATH : FIRST)).not.toBeInTheDocument());
   expect(screen.getByText(/Library action failed after state changed/)).toBeInTheDocument();
+});
+
+it("shows a duplicate Mod whose enabled state GMM released as unknown, not its stored flag", async () => {
+  const [group] = DUPLICATE_REPORT.duplicates;
+  auditLibrary.mockResolvedValue({
+    ...DUPLICATE_REPORT,
+    duplicates: [{ ...group, mods: group.mods.map((mod) => ({ ...mod, enabledStateUnknown: mod.id === "01REJECTED" })) }],
+  });
+  renderWithQuery(<LibraryAuditWarning game="gimi" />);
+  const warning = await screen.findByRole("region", {
+    name: /unreferenced library folders and duplicate mod records/i,
+  });
+  expect(warning).toHaveTextContent(/GameBanana Duplicate.*Unknown \(GMM does not know if it is enabled\)/s);
+  expect(warning).not.toHaveTextContent(/GameBanana Duplicate · GIMI · Enabled/);
 });

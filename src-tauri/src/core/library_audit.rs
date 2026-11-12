@@ -53,6 +53,9 @@ pub struct DuplicateModRecord {
     pub library_path: PathBuf,
     pub junction_dir_name: String,
     pub enabled: bool,
+    /// True after the user released an interrupted enable/disable: GMM does
+    /// not know this Mod's enabled state, so `enabled` must not be shown.
+    pub enabled_state_unknown: bool,
     pub created_at: String,
     pub gamebanana_id: Option<u64>,
     pub source_url: Option<String>,
@@ -336,6 +339,13 @@ pub(super) async fn load_duplicate_mod_records(
             .into_iter()
             .map(|witness| witness.mod_id().to_string())
             .collect();
+    let unknown_enabled_state: HashSet<_> =
+        super::library_mutation::load_enabled_transition_witnesses(&mut *connection)
+            .await?
+            .into_iter()
+            .filter(|witness| witness.is_released())
+            .map(|witness| witness.mod_id().to_string())
+            .collect();
     let rows = sqlx::query(
         "SELECT m.id, m.game_code, m.name, m.source, m.library_path,
                 m.junction_dir_name, m.enabled, m.created_at, m.gamebanana_id,
@@ -367,6 +377,7 @@ pub(super) async fn load_duplicate_mod_records(
                     library_path: PathBuf::from(row.try_get::<String, _>("library_path")?),
                     junction_dir_name: row.try_get("junction_dir_name")?,
                     enabled: row.try_get::<i64, _>("enabled")? != 0,
+                    enabled_state_unknown: unknown_enabled_state.contains(&id),
                     created_at: row.try_get("created_at")?,
                     gamebanana_id: row
                         .try_get::<Option<i64>, _>("gamebanana_id")?

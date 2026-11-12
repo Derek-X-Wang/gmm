@@ -51,6 +51,7 @@ pub(super) enum LibraryMutation {
     FinishInterruptedDeletes,
     ResolveInterruptedStaging,
     ResolveEnabledTransition,
+    ReleaseEnabledTransition,
     RetryReinstallRecovery,
     WithdrawQuarantinedReinstallJunction,
     SetLibraryRoot,
@@ -73,6 +74,7 @@ impl LibraryMutation {
             Self::FinishInterruptedDeletes => "finish_interrupted_library_deletes",
             Self::ResolveInterruptedStaging => "resolve_interrupted_staging_at_startup",
             Self::ResolveEnabledTransition => "resolve_enabled_transition",
+            Self::ReleaseEnabledTransition => "release_enabled_transition",
             Self::RetryReinstallRecovery => "retry_reinstall_recovery",
             Self::WithdrawQuarantinedReinstallJunction => "withdraw_quarantined_reinstall_junction",
             Self::SetLibraryRoot => "set_library_root",
@@ -184,6 +186,10 @@ pub(super) struct EnabledTransitionWitness {
     recovery_error: Option<String>,
     recovery_attempted_at: Option<String>,
     recovery_attempts: u32,
+    /// Set when the user confirmed releasing a transition GMM could not
+    /// finish. A released row owns nothing and only records that GMM does
+    /// not know this Mod's enabled state.
+    released_at: Option<DateTime<FixedOffset>>,
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +369,7 @@ define_unvalidated_witness_tables! {
         recovery_attempts: i64,
         junction_target_identity: Option<String>,
         library_identity: Option<String>,
+        released_at: Option<String>,
     }
 
     table IMPORTER_EVACUATIONS_TABLE = "importer_evacuations";
@@ -711,6 +718,7 @@ impl UnvalidatedEnabledTransitionWitness {
             recovery_attempts,
             junction_target_identity,
             library_identity,
+            released_at,
         } = self;
         let corrupt = |reason| Error::EnabledTransitionWitnessCorrupt {
             mod_id: mod_id.clone(),
@@ -809,6 +817,15 @@ impl UnvalidatedEnabledTransitionWitness {
                 "a recorded recovery error has no recovery-attempt timestamp".to_string(),
             ));
         }
+        let released_at = released_at
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value).map_err(|_| {
+                    corrupt(format!(
+                        "the released-at value {value:?} is not an RFC 3339 timestamp"
+                    ))
+                })
+            })
+            .transpose()?;
         Ok(EnabledTransitionWitness {
             mod_id,
             game,
@@ -826,6 +843,7 @@ impl UnvalidatedEnabledTransitionWitness {
             recovery_error,
             recovery_attempted_at,
             recovery_attempts,
+            released_at,
         })
     }
 }
@@ -900,7 +918,25 @@ impl EnabledTransitionWitness {
         self.owner().owner_is_live()
     }
 
+    pub(super) fn is_released(&self) -> bool {
+        self.released_at.is_some()
+    }
+
     pub(super) fn recovery(&self) -> Option<EnabledTransitionRecovery> {
+        if let Some(released_at) = self.released_at {
+            return Some(EnabledTransitionRecovery {
+                intended_enabled: self.intended_enabled,
+                reason: format!(
+                    "An interrupted {} that GMM could not finish was released. GMM does not know whether this Mod's Junction matches its stored enabled flag.",
+                    if self.intended_enabled { "enable" } else { "disable" },
+                ),
+                attempted_at: released_at.to_rfc3339(),
+                attempts: self.recovery_attempts,
+                junction_path: self.junction_path.clone(),
+                owner_uncertain: false,
+                released: true,
+            });
+        }
         let owner_uncertain = self.owner().owner_uncertain();
         let reason = match (&self.recovery_error, owner_uncertain) {
             (Some(reason), _) => reason.clone(),
@@ -919,6 +955,7 @@ impl EnabledTransitionWitness {
             attempts: self.recovery_attempts,
             junction_path: self.junction_path.clone(),
             owner_uncertain,
+            released: false,
         })
     }
 }
@@ -1221,6 +1258,18 @@ pub(super) async fn load_enabled_transition_witnesses(
         .collect()
 }
 
+/// True when the user released an interrupted enable/disable for this Mod and
+/// has not yet enabled or disabled it again.
+pub(super) async fn enabled_state_is_unknown(
+    connection: &mut SqliteConnection,
+    mod_id: &str,
+) -> Result<bool> {
+    Ok(load_enabled_transition_witnesses(connection)
+        .await?
+        .iter()
+        .any(|witness| witness.mod_id() == mod_id && witness.is_released()))
+}
+
 pub(super) async fn load_importer_evacuation_witnesses(
     connection: &mut SqliteConnection,
 ) -> Result<Vec<ImporterEvacuationWitness>> {
@@ -1387,6 +1436,7 @@ impl Core {
             mutation,
             LibraryMutation::AuditLibrary
                 | LibraryMutation::ResolveEnabledTransition
+                | LibraryMutation::ReleaseEnabledTransition
                 | LibraryMutation::FinishInterruptedDeletes
                 | LibraryMutation::ResolveInterruptedStaging
                 | LibraryMutation::WithdrawQuarantinedReinstallJunction
@@ -1398,7 +1448,9 @@ impl Core {
         }
         if !matches!(
             mutation,
-            LibraryMutation::AuditLibrary | LibraryMutation::ResolveEnabledTransition
+            LibraryMutation::AuditLibrary
+                | LibraryMutation::ResolveEnabledTransition
+                | LibraryMutation::ReleaseEnabledTransition
         ) {
             if let Some(mod_id) =
                 LibraryOwnershipSnapshot::enabled_transition_mod_ids(&mut transaction)
@@ -1843,6 +1895,19 @@ impl Core {
         let current_enabled: i64 = row.try_get("enabled")?;
         let link = game_mods_dir.join(junction_dir_name);
 
+        if enabled_state_is_unknown(&mut fence.transaction, id).await? {
+            return self
+                .settle_unknown_enabled_state(
+                    fence,
+                    id,
+                    enabled,
+                    game_mods_dir,
+                    &link,
+                    &library_path,
+                )
+                .await;
+        }
+
         if (current_enabled != 0) == enabled {
             sqlx::query("UPDATE mods SET enabled = ? WHERE id = ?")
                 .bind(if enabled { 1_i64 } else { 0_i64 })
@@ -1955,10 +2020,12 @@ impl Core {
         let mut fence = self
             .begin_library_mutation(LibraryMutation::ResolveEnabledTransition)
             .await?;
+        // A released row is never recovered: GMM gave up its claim, and only
+        // an explicit enable or disable re-establishes the Mod's state.
         let Some(witness) = load_enabled_transition_witnesses(&mut fence.transaction)
             .await?
             .into_iter()
-            .find(|witness| witness.mod_id() == mod_id)
+            .find(|witness| witness.mod_id() == mod_id && !witness.is_released())
         else {
             return Ok(());
         };
@@ -2124,7 +2191,7 @@ impl Core {
         drop(connection);
         let mut resolved = 0;
         for witness in witnesses {
-            if witness.owner().owner_is_live() {
+            if witness.is_released() || witness.owner().owner_is_live() {
                 continue;
             }
             match self.resolve_enabled_transition(witness.mod_id()).await {
@@ -2158,7 +2225,7 @@ impl Core {
         let Some(witness) = load_enabled_transition_witnesses(&mut transaction)
             .await?
             .into_iter()
-            .find(|witness| witness.mod_id() == mod_id)
+            .find(|witness| witness.mod_id() == mod_id && !witness.is_released())
         else {
             transaction.commit().await?;
             return Ok(());
@@ -2185,6 +2252,180 @@ impl Core {
                 Err(error)
             }
         }
+    }
+
+    /// Re-establish a released Mod's enabled state by doing the work.
+    ///
+    /// The stored flag and the recorded Junction identity are not evidence
+    /// here; only what the filesystem shows now is. The released row is
+    /// removed in the same transaction as the flag update, after the
+    /// Junction work succeeded. Any earlier failure or crash leaves the row,
+    /// so the Mod stays unknown instead of coming back as authoritative.
+    async fn settle_unknown_enabled_state(
+        &self,
+        mut fence: LibraryMutationFence,
+        id: &str,
+        enabled: bool,
+        game_mods_dir: &Path,
+        link: &Path,
+        library_path: &Path,
+    ) -> Result<()> {
+        let unverifiable = |path: &Path, reason: &str| Error::Io {
+            path: path.to_path_buf(),
+            source: io::Error::other(reason.to_string()),
+        };
+        if enabled {
+            let target = self
+                .junction_target_for(id, library_path, &mut *fence.transaction)
+                .await?;
+            if !library_path_within(&target, library_path)? {
+                return Err(unverifiable(
+                    link,
+                    "the Mod deployment Junction does not resolve inside its Library path",
+                ));
+            }
+            volume::require_ntfs_pair(game_mods_dir, &target)?;
+            IdentifiedDirectory::open(&target).map_err(|source| Error::Io {
+                path: target.clone(),
+                source,
+            })?;
+            if link_exists(link)? {
+                let actual = resolve_link(link).ok_or_else(|| {
+                    unverifiable(
+                        link,
+                        "the deployment entry is not a Junction GMM can safely replace",
+                    )
+                })?;
+                if !super::same_path(&actual, &target) {
+                    if !library_path_within(&actual, library_path)? {
+                        return Err(unverifiable(
+                            link,
+                            "the deployment Junction points outside this Mod's Library path",
+                        ));
+                    }
+                    junction::remove(link)?;
+                    junction::create(link, &target)?;
+                }
+            } else {
+                junction::create(link, &target)?;
+            }
+        } else if link_exists(link)? {
+            let actual = resolve_link(link).ok_or_else(|| {
+                unverifiable(
+                    link,
+                    "the deployment entry is not a Junction GMM can safely disable",
+                )
+            })?;
+            if !library_path_within(&actual, library_path)? {
+                return Err(unverifiable(
+                    link,
+                    "the deployment Junction points outside this Mod's Library path",
+                ));
+            }
+            junction::remove(link)?;
+        }
+        sqlx::query("UPDATE mods SET enabled = ? WHERE id = ?")
+            .bind(if enabled { 1_i64 } else { 0_i64 })
+            .bind(id)
+            .execute(&mut *fence.transaction)
+            .await?;
+        let removed = sqlx::query(
+            "DELETE FROM enabled_transitions WHERE mod_id = ? AND released_at IS NOT NULL",
+        )
+        .bind(id)
+        .execute(&mut *fence.transaction)
+        .await?;
+        if removed.rows_affected() != 1 {
+            return Err(Error::EnabledTransitionWitnessCorrupt {
+                mod_id: id.to_string(),
+                reason: "the released record changed before the new state committed".to_string(),
+            });
+        }
+        fence.commit().await
+    }
+
+    /// Give up an interrupted enable/disable that GMM could not finish.
+    ///
+    /// This is the exit for an unresolvable transition, mirroring the Model
+    /// Importer evacuation acknowledge-and-release. It runs only on explicit
+    /// confirmation and only after automatic recovery failed and was recorded;
+    /// a transition GMM can still finish is never released. GMM stops claiming
+    /// the recorded Junction and Library identity and stops blocking the
+    /// Library and launch, but the row stays, stamped released, so the Mod's
+    /// enabled state is reported as unknown. Whatever now sits at the
+    /// recorded Junction path is never treated as something GMM created.
+    pub async fn release_enabled_transition(&self, mod_id: &str, confirmed: bool) -> Result<()> {
+        if !confirmed {
+            return Err(Error::EnabledTransitionReleaseUnconfirmed);
+        }
+        let fence = self
+            .begin_library_mutation(LibraryMutation::ReleaseEnabledTransition)
+            .await?;
+        let mut transaction = fence.transaction;
+        let Some(witness) = load_enabled_transition_witnesses(&mut transaction)
+            .await?
+            .into_iter()
+            .find(|witness| witness.mod_id() == mod_id)
+        else {
+            transaction.commit().await?;
+            return Ok(());
+        };
+        if witness.is_released() {
+            transaction.commit().await?;
+            return Ok(());
+        }
+        if witness.owner_is_live() {
+            return Err(Error::EnabledTransitionStillOwned);
+        }
+        if witness.recovery_error.is_none() {
+            return Err(Error::EnabledTransitionReleaseUnavailable {
+                mod_id: mod_id.to_string(),
+            });
+        }
+        let released = sqlx::query(
+            "UPDATE enabled_transitions SET released_at = ?, owner_active = 0
+             WHERE mod_id = ? AND released_at IS NULL",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(mod_id)
+        .execute(&mut *transaction)
+        .await?;
+        if released.rows_affected() != 1 {
+            return witness.corrupt("the transition witness changed before release committed");
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Refuse an action that would rely on the stored enabled flag of a
+    /// Mod whose state was released as unknown.
+    pub(super) async fn ensure_enabled_state_known(
+        &self,
+        connection: &mut SqliteConnection,
+        mod_id: &str,
+    ) -> Result<()> {
+        if enabled_state_is_unknown(connection, mod_id).await? {
+            return Err(Error::EnabledStateUnknown {
+                mod_id: mod_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuse to record the stored enabled flags as a snapshot while any Mod
+    /// has an unknown enabled state.
+    pub(super) async fn ensure_no_unknown_enabled_state(&self) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        if let Some(witness) = load_enabled_transition_witnesses(&mut connection)
+            .await?
+            .into_iter()
+            .find(EnabledTransitionWitness::is_released)
+        {
+            return Err(Error::EnabledStateUnknown {
+                mod_id: witness.mod_id().to_string(),
+            });
+        }
+        Ok(())
     }
 
     pub(super) async fn commit_importer_evacuation_witness(
@@ -2539,6 +2780,8 @@ impl Core {
             crash_points::SET_ACTIVE_VARIANT_AFTER_REINSTALL_GUARD,
         )
         .await?;
+        self.ensure_enabled_state_known(&mut fence.transaction, mod_id)
+            .await?;
 
         // Validate the Variant belongs to this Mod before persisting it.
         if let Some(variant_id) = variant_id {
@@ -2607,6 +2850,10 @@ impl Core {
             .bind(mod_id)
             .fetch_one(&mut *fence.transaction)
             .await?;
+        if enabled_state_is_unknown(&mut fence.transaction, mod_id).await? {
+            fence.commit().await?;
+            return Ok(ReconciledJunctionMutation::Stale);
+        }
         if enabled == 0 {
             fence.commit().await?;
             return Ok(ReconciledJunctionMutation::Stale);
@@ -2653,6 +2900,10 @@ impl Core {
             .bind(mod_id)
             .fetch_one(&mut *fence.transaction)
             .await?;
+        if enabled_state_is_unknown(&mut fence.transaction, mod_id).await? {
+            fence.commit().await?;
+            return Ok(ReconciledJunctionMutation::Stale);
+        }
         if enabled != 0 || !link_exists(link)? {
             fence.commit().await?;
             return Ok(ReconciledJunctionMutation::Stale);

@@ -75,6 +75,7 @@ Opaque mutation keys/options have no production allowance.
 | 2 | ModList::toggle | none | No direct cache write in success/settlement; refresh or local UI only. |
 | 2 | ModList::retryRecovery | commandFailureMessage, sectionRef.current?.focus, setRecoveryFeedback | commandFailureMessage formats the failure; focus and feedback setters affect local UI. Settlement refreshes Mods and Conflicts. |
 | 2 | ModList::retireEnabledTransition | commandFailureMessage, retirement.finish, retirement.start | Message formatting and retirement.start/finish publish local recovery feedback. Settlement refreshes Mods and Conflicts. |
+| 2 | ModList::releaseEnabledTransition | commandFailureMessage, retirement.finish, retirement.start | Message formatting and retirement.start/finish publish local release feedback. Settlement refreshes Mods and Conflicts. |
 | 2 | ModList / AdoptButton::adopt | onAdopted, setName, setOpen_, setPicked | Draft setters only change local UI; onAdopted/onImported is ModList.invalidate, which only refreshes Mods, audit and update rows. |
 | 2 | ModList / GameBananaImport::ingest | onImported, setInput, setOpen | Draft setters only change local UI; onAdopted/onImported is ModList.invalidate, which only refreshes Mods, audit and update rows. |
 | 2 | ModList / VariantSelector::switchVariant | none | No direct cache write in success/settlement; refresh or local UI only. |

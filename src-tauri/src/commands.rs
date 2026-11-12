@@ -154,6 +154,21 @@ pub async fn retire_interrupted_enabled_transition(
         .await
 }
 
+/// Give up an interrupted enable/disable that GMM cannot finish. `confirmed`
+/// is true only when the user accepted what GMM cannot prove; the Mod's
+/// enabled state is then unknown until they enable or disable it again.
+#[tauri::command]
+pub async fn release_enabled_transition(
+    core: State<'_, Core>,
+    mod_id: String,
+    confirmed: bool,
+) -> CommandResult<()> {
+    core.release_enabled_transition(&mod_id, confirmed)
+        .await
+        .surface(&core)
+        .await
+}
+
 #[tauri::command]
 pub async fn get_importer_evacuation_recovery(
     core: State<'_, Core>,

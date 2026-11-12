@@ -71,6 +71,7 @@ impl Core {
 
     pub async fn recapture_preset(&self, game: GameCode, preset_id: &str) -> Result<()> {
         self.ensure_no_pending_enabled_transition().await?;
+        self.ensure_no_unknown_enabled_state().await?;
         let mut tx = self.pool.begin().await?;
         // Acquire the writer before reading the target and replacing its entries.
         let found = sqlx::query("UPDATE presets SET name = name WHERE id = ? AND game_code = ?")
@@ -99,6 +100,7 @@ impl Core {
 
     pub async fn save_preset(&self, game: GameCode, name: &str) -> Result<Preset> {
         self.ensure_no_pending_enabled_transition().await?;
+        self.ensure_no_unknown_enabled_state().await?;
         let name = normalize_preset_name(name)?;
         let mut tx = self.pool.begin().await?;
         let id = Ulid::new().to_string();

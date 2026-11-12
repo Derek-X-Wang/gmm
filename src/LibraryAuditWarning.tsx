@@ -514,7 +514,7 @@ function DuplicateGroup({
                 onChange={() => onKeeperChange(mod.id)}
               />{" "}
               <strong>{mod.name}</strong> · {mod.game.toUpperCase()} ·{" "}
-              {mod.enabled ? "Enabled" : "Disabled"}
+              {mod.enabledStateUnknown ? "Unknown (GMM does not know if it is enabled)" : mod.enabled ? "Enabled" : "Disabled"}
             </span>
             <DuplicateModDetails mod={mod} />
           </label>

@@ -149,3 +149,21 @@ it.each([
   expect(await screen.findByRole("alert")).toHaveTextContent("Operation refused");
   expect(screen.getByText("Raiden team — 3 Mods enabled")).toBeVisible();
 });
+
+it("will not re-capture a setup that includes a Mod whose enabled state GMM does not know", async () => {
+  seedManagement();
+  const base = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command: string, args: { game: string; presetId: string; name: string }) =>
+    command === "list_mods"
+      ? Promise.resolve([
+          { id: "known", name: "Known Mod", enabled: true },
+          { id: "unknown", name: "Unknown Mod", enabled: true, enabled_transition_recovery: { released: true, intendedEnabled: true, reason: "released", attemptedAt: "now", attempts: 1, junctionPath: "p", ownerUncertain: false } },
+        ])
+      : base(command, args));
+  renderWithQuery(<GamePresets game="gimi" />);
+  fireEvent.click(await screen.findByRole("button", { name: "Re-capture current setup into Raiden team" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Replace saved setup" });
+  await waitFor(() => expect(dialog).toHaveTextContent("GMM does not know whether Unknown Mod is enabled"));
+  expect(dialog).not.toHaveTextContent(/will hold \d+ Mods/);
+  expect(screen.getByRole("button", { name: "Replace saved entries with current setup" })).toBeDisabled();
+});
