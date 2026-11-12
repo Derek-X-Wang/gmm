@@ -131,6 +131,10 @@ pub fn run() {
         });
     }
 
+    // Weekly Mod update check (ADR 0004, #461). Its own thread, nothing
+    // waits on it, and it can only refresh badges, never apply an update.
+    crate::core::mod_update_schedule::spawn(core.clone());
+
     // Refresh GMM's curated `recommended-importers.json` once per launch
     // (ADR 0005 / #96). Its own thread, and nothing waits on it: the
     // cached manifest is already in force, a refresh only applies when it
