@@ -50,12 +50,15 @@ impl CommandError {
 
     /// Convert a typed core failure, naming every Mod its message mentions.
     ///
-    /// Resolution happens here, at the command boundary, because the core
-    /// recovery paths that raise these errors may hold a transaction or a
-    /// mutation fence and must not make a fallible read of their own. The
-    /// failure kind and the identifier both survive: logs and database rows
-    /// carry the identifier, so the name is added next to it, never in place
-    /// of it.
+    /// Resolution happens here, at the command boundary, because a core path
+    /// that holds a mutation fence must not read through a second connection,
+    /// and a lookup whose only job is to explain a failure must not be able to
+    /// replace that failure. [`Core::mod_names`] reads `self.pool`, a second
+    /// connection, so it can only run once the fence is gone; it logs its own
+    /// error and returns no names, which leaves the bare identifier. Reads
+    /// through the fence's own transaction are unaffected. The failure kind
+    /// and the identifier both survive: logs and database rows carry the
+    /// identifier, so the name is added next to it, never in place of it.
     pub async fn resolved(error: Error, core: &Core) -> Self {
         let ids = error.mod_ids();
         if ids.is_empty() {

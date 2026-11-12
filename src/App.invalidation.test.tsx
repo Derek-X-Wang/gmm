@@ -829,3 +829,52 @@ it("keeps Resume setup available after skipping and returns through the same wiz
   await userEvent.click(screen.getByRole("button", { name: "Skip setup" }));
   expect(await screen.findByRole("button", { name: "Resume setup" })).toBeEnabled();
 });
+
+const outfitRow = {
+  modId: "mod-outfit", name: "Test Outfit", installedVersion: "1.0",
+  upstreamVersion: "2.0", upstreamAhead: true, updateCheckEnabled: true,
+};
+const unreachable = "Proxy unreachable: error sending request. Verify the URL, credentials, and that the proxy is running.";
+
+it("names the Mods a partial Check now could not reach and counts only the Mods it tried", async () => {
+  const reached = { ...outfitRow, modId: "mod-hair", name: "Test Hair", upstreamVersion: "3.0" };
+  const stale = { ...outfitRow, modId: "mod-cape", name: "Test Cape", installedVersion: "1.0", upstreamVersion: "1.0", upstreamAhead: false };
+  const optedOut = { ...outfitRow, modId: "mod-boots", name: "Test Boots", upstreamVersion: null, upstreamAhead: false, updateCheckEnabled: false };
+  const rows = [reached, stale, optedOut];
+  mutations.check_mod_updates_now = () => {
+    responses.list_mod_updates = rows;
+    return { rows, unchecked: [{ modId: "mod-cape", name: "Test Cape", reason: "status 503" }] };
+  };
+  renderApp();
+  await userEvent.click(await screen.findByRole("button", { name: "Check now" }));
+  const notice = (await screen.findByText(/Couldn't check 1 of 2 Mods for updates/)).closest("[role=alert]") as HTMLElement;
+  expect(notice).toHaveTextContent("Test Cape: status 503");
+  expect(notice).not.toHaveTextContent("Test Hair");
+  expect(notice).not.toHaveTextContent("Test Boots");
+});
+
+it("says a total Check now failure reached no Mod and keeps the cached update offer", async () => {
+  mutations.check_mod_updates_now = () => ({
+    rows: [outfitRow],
+    unchecked: [{ modId: "mod-outfit", name: "Test Outfit", reason: unreachable }],
+  });
+  renderApp();
+  await screen.findByRole("button", { name: "Update → 2.0" });
+  await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+  const notice = (await screen.findByText("Couldn't check any Mod for updates.", { exact: false })).closest("[role=alert]") as HTMLElement;
+  expect(notice).toHaveTextContent(`Test Outfit: ${unreachable}`);
+  expect(screen.getByRole("button", { name: "Update → 2.0" })).toBeInTheDocument();
+});
+
+it("shows no failure when the only Mod left unchecked is one the user opted out", async () => {
+  const optedOut = { ...outfitRow, upstreamVersion: null, upstreamAhead: false, updateCheckEnabled: false };
+  mutations.check_mod_updates_now = () => {
+    responses.list_mod_updates = [optedOut];
+    return { rows: [optedOut], unchecked: [] };
+  };
+  renderApp();
+  await screen.findByRole("button", { name: "Check now" });
+  await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Check now" })).toBeEnabled());
+  expect(screen.queryByText(/Couldn't check/)).not.toBeInTheDocument();
+});

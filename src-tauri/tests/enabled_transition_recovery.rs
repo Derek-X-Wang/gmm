@@ -395,6 +395,71 @@ async fn unresolved_transition_records_the_error_on_the_affected_mod() {
     );
 }
 
+/// The database is intact here; only a directory on disk changed. The message
+/// recovery records must not tell the user their database is corrupt, and it
+/// must still name the Mod so the command boundary can show its name.
+#[tokio::test]
+async fn a_changed_deployment_entry_is_reported_as_a_filesystem_change_not_corruption() {
+    let env = TestEnv::new();
+    let core = env.core().await;
+    let imported = env.seed_mod(&core, "Changed Entry").await;
+    core.set_enabled(&imported.id, true, &env.game_mods)
+        .await
+        .expect("enable fixture Mod");
+    let deployment = env.deployment("Changed Entry");
+    let target = std::fs::read_link(&deployment).expect("read enabled Junction target");
+
+    let pool = env.pool().await;
+    sqlx::query(
+        "INSERT INTO enabled_transitions (
+            mod_id, game_code, intended_enabled, junction_path,
+            junction_target, junction_parent_identity, junction_identity, owner_pid,
+            owner_started_at, owner_active, created_at,
+            junction_target_identity, library_identity
+         ) VALUES (?, 'gimi', 0, ?, ?, ?, ?, 0, NULL, 0,
+                   '2026-08-28T00:00:00Z', ?, ?)",
+    )
+    .bind(&imported.id)
+    .bind(deployment.to_string_lossy().as_ref())
+    .bind(target.to_string_lossy().as_ref())
+    .bind(durable_directory_key(&env.game_mods))
+    // The recorded entry is some other directory than the one now deployed.
+    .bind(durable_directory_key(&env.game_mods))
+    .bind(durable_directory_key(&target))
+    .bind(durable_directory_key(&imported.library_path))
+    .execute(&pool)
+    .await
+    .expect("inject a well-formed disable witness for a replaced deployment entry");
+    pool.close().await;
+    drop(core);
+
+    let recovered = env.core().await;
+    let listed = recovered
+        .list_mods(GameCode::Gimi)
+        .await
+        .expect("list Mod with refused recovery");
+    let recovery = listed[0]
+        .enabled_transition_recovery
+        .as_ref()
+        .expect("the refused recovery must remain a visible transition");
+    assert!(
+        recovery
+            .reason
+            .contains("deployment entry changed filesystem identity"),
+        "the refusal must name the filesystem change: {recovery:?}",
+    );
+    assert!(
+        !recovery.reason.contains("corrupt") && recovery.reason.contains("is intact"),
+        "a changed directory must not be reported as database corruption: {recovery:?}",
+    );
+
+    let error = Error::EnabledTransitionFilesystemChanged {
+        mod_id: imported.id.clone(),
+        reason: "x".into(),
+    };
+    assert_eq!(error.mod_ids(), [imported.id.as_str()]);
+}
+
 /// A pre-identity witness whose numeric owner PID has been reused remains
 /// conservatively live at startup. The user-confirmed retirement path is the
 /// only safe way to release that uncertainty and complete the transition.

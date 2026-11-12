@@ -886,6 +886,16 @@ impl EnabledTransitionWitness {
         })
     }
 
+    /// For a directory that changed on disk while the witness itself is
+    /// well-formed. Use `corrupt` only when the record is malformed or
+    /// disagrees with the Mod row.
+    fn filesystem_changed<T>(&self, reason: impl Into<String>) -> Result<T> {
+        Err(Error::EnabledTransitionFilesystemChanged {
+            mod_id: self.mod_id.clone(),
+            reason: reason.into(),
+        })
+    }
+
     pub(super) fn owner_is_live(&self) -> bool {
         self.owner().owner_is_live()
     }
@@ -1984,7 +1994,8 @@ impl Core {
                 source,
             })?;
         if junction_parent.identity() != witness.junction_parent_identity() {
-            return witness.corrupt("the recorded Junction parent changed filesystem identity");
+            return witness
+                .filesystem_changed("the recorded Junction parent changed filesystem identity");
         }
         if witness.intended_enabled() {
             // `true` proves the witnessed target's Library namespace: an
@@ -2002,14 +2013,17 @@ impl Core {
                     source,
                 })?;
             if current_library.identity() != witness.library_identity() {
-                return witness.corrupt("the recorded Mod Library changed filesystem identity");
+                return witness
+                    .filesystem_changed("the recorded Mod Library changed filesystem identity");
             }
             let current_target = IdentifiedDirectory::open(target).map_err(|source| Error::Io {
                 path: target.to_path_buf(),
                 source,
             })?;
             if current_target.identity() != witness.junction_target_identity() {
-                return witness.corrupt("the recorded Junction target changed filesystem identity");
+                return witness.filesystem_changed(
+                    "the recorded Junction target changed filesystem identity",
+                );
             }
             let selected_target = self
                 .junction_target_for(mod_id, &library_path, &mut *fence.transaction)
@@ -2025,7 +2039,8 @@ impl Core {
                     ),
                 })?;
                 if !super::same_path(&actual, target) {
-                    return witness.corrupt("the deployment Junction points at another target");
+                    return witness
+                        .filesystem_changed("the deployment Junction points at another target");
                 }
             } else {
                 volume::require_ntfs_pair(junction_parent_path, target)?;
@@ -2042,15 +2057,17 @@ impl Core {
                         }
                     })?;
                 if Some(current_entry.identity()) != witness.junction_identity() {
-                    return witness
-                        .corrupt("the recorded deployment entry changed filesystem identity");
+                    return witness.filesystem_changed(
+                        "the recorded deployment entry changed filesystem identity",
+                    );
                 }
                 match resolve_link(witness.junction_path()) {
                     Some(actual) if super::same_path(&actual, target) => {
                         junction::remove(witness.junction_path())?;
                     }
                     Some(_) => {
-                        return witness.corrupt("the deployment Junction points at another target")
+                        return witness
+                            .filesystem_changed("the deployment Junction points at another target")
                     }
                     None => remove_empty_partial_junction(witness.junction_path())?,
                 }

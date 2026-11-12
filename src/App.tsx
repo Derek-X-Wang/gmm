@@ -344,7 +344,7 @@ function MainApp({
         </div>
         {hasActiveGame ? <>
           <ModList game={activeGame} displayName={active.displayName} />
-          <ModUpdatesPanel game={activeGame} mods={mods.data ?? []} />
+          <ModUpdatesPanel key={activeGame} game={activeGame} mods={mods.data ?? []} />
           <GamePresets key={activeGame} game={activeGame} />
         </> : null}
       </main>
@@ -675,6 +675,10 @@ function ModUpdatesPanel({ game, mods }: { game: ApiGameCode; mods: Mod[] }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", "globalEnabled"] }),
   });
   const ahead = rows.data?.filter((r) => r.upstreamAhead).length ?? 0;
+  // Only the last check's own report: the cached rows say nothing about
+  // whether upstream was reached.
+  const unchecked = check.data?.unchecked ?? [];
+  const checkable = check.data?.rows.filter((r) => r.updateCheckEnabled).length ?? 0;
   return (
     <section className="card">
       <h2>
@@ -701,6 +705,21 @@ function ModUpdatesPanel({ game, mods }: { game: ApiGameCode; mods: Mod[] }) {
         </label>
       </div>
       <ModUpdateBatchAction game={game} mods={mods} rows={rows.data ?? []} verified={rows.isSuccess} checking={check.isPending} />
+      {unchecked.length > 0 ? (
+        <div className="error" role="alert">
+          <p>
+            {unchecked.length === checkable
+              ? "Couldn't check any Mod for updates."
+              : `Couldn't check ${unchecked.length} of ${checkable} Mods for updates.`}
+            {" "}Update counts for {unchecked.length === 1 ? "it" : "them"} may be out of date.
+          </p>
+          <ul>
+            {unchecked.map((u) => (
+              <li key={u.modId}>{u.name}: {u.reason}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       <CommandErrorNotice error={check.error} />
     </section>
   );

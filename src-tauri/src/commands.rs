@@ -19,7 +19,7 @@ use crate::core::diagnostics;
 use crate::core::importer::{InstallReport, LatestRelease};
 use crate::core::importer_origin::{ImporterOrigin, OriginStatus};
 use crate::core::mod_screenshot::ModScreenshot;
-use crate::core::mod_updates::ModUpdateRow;
+use crate::core::mod_updates::{ModUpdateCheckReport, ModUpdateRow};
 use crate::core::network::{PasswordUpdate, ProxyConfigPublic};
 use crate::core::reconcile::{ReconcileResult, StartupReconcileState, StartupReconcileStatus};
 use crate::core::updates::{LoaderVersionStatus, UpdateStatus};
@@ -751,7 +751,7 @@ pub async fn list_mod_updates(
 pub async fn check_mod_updates_now(
     core: State<'_, Core>,
     game: GameCode,
-) -> CommandResult<Vec<ModUpdateRow>> {
+) -> CommandResult<ModUpdateCheckReport> {
     core.check_mod_updates_now(game).await.surface(&core).await
 }
 
