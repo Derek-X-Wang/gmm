@@ -686,9 +686,10 @@ function ModUpdatesPanel({ game, mods }: { game: ApiGameCode; mods: Mod[] }) {
         {ahead > 0 ? <span className="update-badge"> · {ahead}</span> : null}
       </h2>
       <p className="muted">
-        Weekly poll of every <code>source = gamebanana</code> Mod. Updates never apply
-        automatically — click a badge on the Mod row to review + Apply. Pin a Mod's
-        check off via its row toggle. Network goes through the configured proxy.
+        About once a week, in the background, GMM checks every <code>source = gamebanana</code> Mod
+        for a newer version. Updates never apply automatically — click a badge on the
+        Mod row to review + Apply. Pin a Mod's check off via its row toggle. Network
+        goes through the configured proxy.
       </p>
       <div className="row">
         <button onClick={() => check.mutate()} disabled={check.isPending}>

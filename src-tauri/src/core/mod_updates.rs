@@ -11,7 +11,7 @@
 //! Per ADR 0004 the check is opt-out but never auto-applies. The
 //! global toggle lives in settings (`mod_updates.enabled`); each mod
 //! row has its own `update_check_enabled` flag for fine-grained
-//! control.
+//! control. [`crate::core::mod_update_schedule`] runs the weekly check.
 
 use serde::{Deserialize, Serialize};
 
@@ -62,10 +62,21 @@ pub struct ModUpdateCheckReport {
     pub unchecked: Vec<ModCheckFailure>,
 }
 
-/// Settings keys for the global toggle + last-check timestamp.
+/// Settings keys for the global toggle + per-Game last-check time.
 pub mod keys {
+    use crate::core::games::GameCode;
+
     pub const GLOBAL_ENABLED: &str = "mod_updates.enabled";
-    pub const LAST_CHECK_AT: &str = "mod_updates.last_check_at";
+
+    /// When a check of `game`'s Mods last reached upstream, as RFC 3339.
+    ///
+    /// Per Game because a check covers one Game: "GIMI was checked, ZZMI
+    /// was not" has to be expressible. It means *reached*, not *ran* (see
+    /// `Core::check_mod_updates_at`). The pre-scheduler global key
+    /// `mod_updates.last_check_at` was never read and is not migrated.
+    pub fn last_check_at(game: GameCode) -> String {
+        format!("mod_updates.last_check_at.{}", game.as_str())
+    }
 }
 
 /// Compute the `upstream_ahead` flag from the two version strings.
