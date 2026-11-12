@@ -98,7 +98,9 @@ async fn download_streams_bytes_to_disk() {
     let client = reqwest::Client::builder().build().expect("build");
     let tmp = TempDir::new().expect("tmp");
     let dest = tmp.path().join("payload.zip");
-    let n = download_to(&client, &url, &dest).await.expect("download");
+    let n = download_to(&client, &url, &dest, false)
+        .await
+        .expect("download");
     assert!(n > 0);
     assert!(dest.is_file());
     let bytes = std::fs::read(&dest).expect("read");

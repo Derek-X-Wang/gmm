@@ -746,6 +746,18 @@ impl Core {
                     .await?
             }
         };
+
+        // A Mod whose interrupted enable/disable was released has no
+        // trustworthy `enabled` flag (#462). Relocation would drop and rebuild
+        // its Junction on that flag, so it refuses before any Junction or
+        // Library byte is touched. Only a Mod in the set being moved refuses;
+        // an unsettled Mod elsewhere does not hold this relocation hostage.
+        for row in &rows {
+            let id: String = row.try_get("id")?;
+            if library_mutation::enabled_state_is_unknown(&mut fence.transaction, &id).await? {
+                return Err(Error::EnabledStateUnknown { mod_id: id });
+            }
+        }
         self.crash_point(crash_points::RELOCATE_AFTER_MOD_SNAPSHOT);
 
         // Disable affected mods first to drop their junctions. We don't
@@ -1210,7 +1222,7 @@ impl Core {
             source,
         })?;
         let zip_path = cache.join(format!("{}-{}", gid, submission.file_name));
-        gamebanana::download_to(&client, &submission.file_url, &zip_path).await?;
+        gamebanana::download_to(&client, &submission.file_url, &zip_path, proxy_configured).await?;
 
         // 2. Under a short writer fence, re-read the Mod, identify the old
         //    tree, create the staging directory, and commit the durable
@@ -1419,6 +1431,14 @@ impl Core {
             .bind(mod_id)
             .fetch_one(&mut *commit.transaction)
             .await?;
+            // The swap rewires the Junction on this flag, so a released Mod
+            // (#462) is refused here, under the fence that reads it. The
+            // rollback below leaves the installed tree and flag untouched.
+            if library_mutation::enabled_state_is_unknown(&mut commit.transaction, mod_id).await? {
+                return Err(Error::EnabledStateUnknown {
+                    mod_id: mod_id.to_string(),
+                });
+            }
             let enabled = state.try_get::<i64, _>("enabled")? != 0;
             let junction_dir_name: String = state.try_get("junction_dir_name")?;
             let mods_dir = state
@@ -2865,6 +2885,7 @@ impl Core {
         let pattern = importer::AssetPattern::new(origin.asset_pattern())?;
 
         let client = self.http_client().await?;
+        let proxy_configured = self.proxy_config().await?.is_configured();
         let release =
             importer::fetch_latest_release(&client, endpoints, &origin.repo_slug(), &pattern, None)
                 .await?
@@ -2881,7 +2902,7 @@ impl Core {
             .join("downloads")
             .join(game.as_str())
             .join(&release.asset_name);
-        importer::download_to(&client, &release.asset_url, &zip_path).await?;
+        importer::download_to(&client, &release.asset_url, &zip_path, proxy_configured).await?;
 
         // What is about to be replaced, captured *before* the swap. A
         // backup is a pile of files and carries no provenance of its
@@ -3094,7 +3115,7 @@ impl Core {
             clippy::disallowed_methods,
             reason = "Library mutation policy exemption: this writes the sibling download cache, not Library-owned content"
         )]
-        gamebanana::download_to(&client, &submission.file_url, &zip_path).await?;
+        gamebanana::download_to(&client, &submission.file_url, &zip_path, proxy_configured).await?;
 
         // Reuse the slice-1b ingest path verbatim; that gives us
         // zip-slip protection, junk-file drop, single-root
