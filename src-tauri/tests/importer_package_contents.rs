@@ -145,7 +145,7 @@ async fn every_live_importer_package_installs_as_a_model_importer() {
         };
 
         let dest = tmp.path().join(&release.asset_name);
-        if let Err(e) = importer::download_to(&client, &release.asset_url, &dest).await {
+        if let Err(e) = importer::download_to(&client, &release.asset_url, &dest, false).await {
             failures.push(format!(
                 "{game}: could not download {}: {e}",
                 release.asset_name

@@ -1210,7 +1210,7 @@ impl Core {
             source,
         })?;
         let zip_path = cache.join(format!("{}-{}", gid, submission.file_name));
-        gamebanana::download_to(&client, &submission.file_url, &zip_path).await?;
+        gamebanana::download_to(&client, &submission.file_url, &zip_path, proxy_configured).await?;
 
         // 2. Under a short writer fence, re-read the Mod, identify the old
         //    tree, create the staging directory, and commit the durable
@@ -2865,6 +2865,7 @@ impl Core {
         let pattern = importer::AssetPattern::new(origin.asset_pattern())?;
 
         let client = self.http_client().await?;
+        let proxy_configured = self.proxy_config().await?.is_configured();
         let release =
             importer::fetch_latest_release(&client, endpoints, &origin.repo_slug(), &pattern, None)
                 .await?
@@ -2881,7 +2882,7 @@ impl Core {
             .join("downloads")
             .join(game.as_str())
             .join(&release.asset_name);
-        importer::download_to(&client, &release.asset_url, &zip_path).await?;
+        importer::download_to(&client, &release.asset_url, &zip_path, proxy_configured).await?;
 
         // What is about to be replaced, captured *before* the swap. A
         // backup is a pile of files and carries no provenance of its
@@ -3094,7 +3095,7 @@ impl Core {
             clippy::disallowed_methods,
             reason = "Library mutation policy exemption: this writes the sibling download cache, not Library-owned content"
         )]
-        gamebanana::download_to(&client, &submission.file_url, &zip_path).await?;
+        gamebanana::download_to(&client, &submission.file_url, &zip_path, proxy_configured).await?;
 
         // Reuse the slice-1b ingest path verbatim; that gives us
         // zip-slip protection, junk-file drop, single-root

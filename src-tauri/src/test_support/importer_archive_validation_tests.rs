@@ -459,7 +459,7 @@ async fn a_wrong_asset_from_an_origin_is_refused_the_same_way_a_local_zip_is() {
         server.url()
     );
     let client = reqwest::Client::new();
-    gmm_lib::core::importer::download_to(&client, &url, &downloaded)
+    gmm_lib::core::importer::download_to(&client, &url, &downloaded, false)
         .await
         .expect("the download itself succeeds — the archive is the problem");
     route.assert_async().await;

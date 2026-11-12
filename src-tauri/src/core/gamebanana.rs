@@ -182,7 +182,16 @@ pub async fn fetch_submission(
 /// Download the submission's first file to `dest`. Returns bytes
 /// written. The caller is responsible for placing `dest` somewhere
 /// safe (typically the GMM cache directory).
-pub async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> Result<u64> {
+///
+/// `proxy_configured` lets a transport failure say that the proxy is
+/// the thing that could not be reached, rather than reading as a
+/// problem with the Mod or with GameBanana.
+pub async fn download_to(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    proxy_configured: bool,
+) -> Result<u64> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|source| Error::Io {
             path: parent.to_path_buf(),
@@ -193,7 +202,12 @@ pub async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> Re
         .get(url)
         .send()
         .await
-        .map_err(|e| Error::GameBanana(format!("GET {url}: {e}")))?
+        .map_err(|e| {
+            Error::GameBanana(format!(
+                "GET {url}: {}",
+                network::classify_error(&e, proxy_configured)
+            ))
+        })?
         .error_for_status()
         .map_err(|e| Error::GameBanana(format!("download {url}: {e}")))?
         .bytes()

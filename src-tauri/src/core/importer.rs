@@ -1665,12 +1665,26 @@ pub fn parse_latest_release(
 ///
 /// The caller must build the `client` via
 /// [`crate::core::Core::http_client`].
-pub async fn download_to(client: &reqwest::Client, url: &str, dest: &Path) -> Result<u64> {
+///
+/// `proxy_configured` lets a transport failure say that the proxy is
+/// the thing that could not be reached, rather than reading as a
+/// problem with the Model Importer's release.
+pub async fn download_to(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    proxy_configured: bool,
+) -> Result<u64> {
     let bytes = client
         .get(url)
         .send()
         .await
-        .map_err(|e| Error::Importer(format!("GET {url}: {e}")))?
+        .map_err(|e| {
+            Error::Importer(format!(
+                "GET {url}: {}",
+                super::network::classify_error(&e, proxy_configured)
+            ))
+        })?
         .error_for_status()
         .map_err(|e| Error::Importer(format!("download {url}: {e}")))?
         .bytes()
