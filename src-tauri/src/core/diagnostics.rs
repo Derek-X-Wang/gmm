@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -525,6 +526,60 @@ pub fn record_network_signal(online: bool, reason: &str) {
         reason,
         "webview network signal",
     );
+}
+
+/// Marker carried by the log record written when GMM panics. Greppable
+/// from a diagnostics bundle without parsing the JSON.
+pub const PANIC_MARKER: &str = "gmm-panic";
+
+/// Route Rust panics into the diagnostics log.
+///
+/// Release builds have no console, so a panic's message would otherwise
+/// go nowhere: the panicking thread never reaches a normal log
+/// statement and the log simply stops.
+///
+/// The previous hook is chained rather than replaced, so the default
+/// stderr output (and anything installed before us) still runs. Guarded
+/// by [`Once`] because installing twice would nest the hooks and write
+/// every panic record twice.
+///
+/// Limit: `tracing`'s writer is non-blocking, so the record reaches disk
+/// asynchronously. `tests/diagnostics.rs` proves it survives a panic
+/// that unwinds the main thread, because unwinding drops the
+/// [`WorkerGuard`] and flushes. A hard abort or a native fault skips
+/// that flush and is not covered.
+pub fn install_panic_hook() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| l.to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            tracing::error!(
+                marker = PANIC_MARKER,
+                location = %location,
+                payload = %panic_payload(info),
+                "GMM panicked",
+            );
+            previous(info);
+        }));
+    });
+}
+
+/// Extract a printable message from a panic payload. `panic!` produces
+/// either a `&str` (literal) or a `String` (formatted); anything else
+/// came from `panic_any` and has no display form we can rely on.
+fn panic_payload(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
 }
 
 /// Record a structured event sourced from the frontend. The Tauri

@@ -8,14 +8,16 @@
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use gmm_lib::core::diagnostics::{
-    build_bundle, build_writer, prune_old_logs, record_instance_lock_fail_open, record_ipc_ready,
-    record_main_window_shown, record_manifest_refresh_started, record_network_signal,
-    record_startup_handoff, SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS,
+    build_bundle, build_writer, install_panic_hook, install_subscriber, prune_old_logs,
+    record_instance_lock_fail_open, record_ipc_ready, record_main_window_shown,
+    record_manifest_refresh_started, record_network_signal, record_startup_handoff,
+    SettingsSnapshot, DEFAULT_BUNDLE_LOG_DAYS, DEFAULT_LOG_RETENTION_DAYS,
     INSTANCE_LOCK_FAIL_OPEN_MARKER, IPC_READY_COMMAND, IPC_READY_MARKER, LOG_FILE_PREFIX,
-    LOG_FILE_SUFFIX, MAIN_WINDOW_SHOWN_MARKER, MANIFEST_REFRESH_STARTED_MARKER,
+    LOG_FILE_SUFFIX, MAIN_WINDOW_SHOWN_MARKER, MANIFEST_REFRESH_STARTED_MARKER, PANIC_MARKER,
     STARTUP_HANDOFF_MARKER,
 };
 use tempfile::TempDir;
@@ -395,4 +397,122 @@ fn network_signal_marker_and_info_fields_land_in_the_log_file() {
         assert_eq!(event["fields"]["reason"], reason);
         assert!(event["timestamp"].as_str().is_some_and(|s| !s.is_empty()));
     }
+}
+
+/// Concatenate every `gmm*.log*` file in `log_dir`. Callers must drop the
+/// writer guard first or the non-blocking appender may not have flushed.
+fn read_all_logs(log_dir: &Path) -> String {
+    let mut out = String::new();
+    for entry in fs::read_dir(log_dir).expect("read log_dir") {
+        let entry = entry.expect("entry");
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with(LOG_FILE_PREFIX) || !name.contains(LOG_FILE_SUFFIX) {
+            continue;
+        }
+        fs::File::open(entry.path())
+            .expect("open log")
+            .read_to_string(&mut out)
+            .expect("read log");
+    }
+    out
+}
+
+/// A panic caught on a thread with a scoped subscriber must carry its
+/// message and source location into the log. This proves the hook's
+/// formatting; the process-exit test below covers the production path.
+#[test]
+fn panic_lands_in_the_log_with_message_and_location() {
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+
+    let (writer, guard) = build_writer(&log_dir).expect("writer");
+    let layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(writer);
+    let subscriber = tracing_subscriber::registry().with(layer);
+
+    install_panic_hook();
+
+    tracing::subscriber::with_default(subscriber, || {
+        // `catch_unwind` still runs the panic hook; it only stops the
+        // unwind from taking the test process with it.
+        let _ = std::panic::catch_unwind(|| panic!("boom-marker-9f3c"));
+    });
+    drop(guard);
+
+    let body = read_all_logs(&log_dir);
+    assert!(
+        body.contains(PANIC_MARKER),
+        "log must carry the panic marker {PANIC_MARKER}, got:\n{body}",
+    );
+    assert!(
+        body.contains("boom-marker-9f3c"),
+        "log must carry the panic payload, got:\n{body}",
+    );
+    assert!(
+        body.contains("diagnostics.rs"),
+        "log must carry the panic source location, got:\n{body}",
+    );
+}
+
+/// Environment variable through which the parent test hands the child
+/// its log directory.
+const PANIC_CHILD_LOG_DIR: &str = "GMM_TEST_PANIC_CHILD_LOG_DIR";
+
+/// The dying half of [`panic_in_the_production_setup_survives_process_exit`].
+/// It repeats what `run()` does — global subscriber, panic hook, then an
+/// unwinding panic that drops the writer guard on the way out. It does
+/// nothing unless the parent launches it in its own process, where a
+/// global subscriber cannot collide with other tests.
+#[test]
+fn panic_child_process() {
+    let Some(log_dir) = std::env::var_os(PANIC_CHILD_LOG_DIR) else {
+        return;
+    };
+    let _guard = install_subscriber(Path::new(&log_dir)).expect("global subscriber");
+    // Twice on purpose: nested hooks would write the record twice.
+    install_panic_hook();
+    install_panic_hook();
+    panic!("child-boom-marker-4be1");
+}
+
+/// The production setup — global subscriber, installed hook — must leave
+/// the panic in the log file after the panicking process has exited.
+///
+/// Scope of the claim: a panic that unwinds, which drops the writer
+/// guard and flushes the non-blocking appender. A hard abort or a native
+/// fault skips that flush and is not exercised here.
+#[test]
+fn panic_in_the_production_setup_survives_process_exit() {
+    let tmp = TempDir::new().expect("tmp");
+    let log_dir = tmp.path().join("logs");
+
+    let output = Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", "panic_child_process", "--nocapture"])
+        .env(PANIC_CHILD_LOG_DIR, &log_dir)
+        .env_remove("GMM_LOG")
+        .output()
+        .expect("spawn child test process");
+    assert!(
+        !output.status.success(),
+        "the child must die from its panic, got: {:?}",
+        output.status,
+    );
+
+    let body = read_all_logs(&log_dir);
+    assert!(
+        body.contains("child-boom-marker-4be1"),
+        "the log must hold the panic after the process exited, got:\n{body}",
+    );
+    assert!(
+        body.contains("diagnostics.rs"),
+        "the log must carry the panic source location, got:\n{body}",
+    );
+    let records = body.lines().filter(|l| l.contains(PANIC_MARKER)).count();
+    assert_eq!(
+        records, 1,
+        "installing the hook twice must still record the panic once, got:\n{body}",
+    );
 }
