@@ -748,8 +748,25 @@ export async function listModUpdates(game: GameCode): Promise<ModUpdateRow[]> {
   return invoke<ModUpdateRow[]>("list_mod_updates", { game });
 }
 
-export async function checkModUpdatesNow(game: GameCode): Promise<ModUpdateRow[]> {
-  return invoke<ModUpdateRow[]>("check_mod_updates_now", { game });
+export interface ModCheckFailure {
+  modId: string;
+  name: string;
+  reason: string;
+}
+
+/**
+ * What one check did. `unchecked` is the Mods whose upstream fetch did not
+ * complete; their `rows` entries are the earlier cached values. It is not a
+ * field of `ModUpdateRow` because `listModUpdates` returns the same rows
+ * without fetching, where it would always read as "fine".
+ */
+export interface ModUpdateCheckReport {
+  rows: ModUpdateRow[];
+  unchecked: ModCheckFailure[];
+}
+
+export async function checkModUpdatesNow(game: GameCode): Promise<ModUpdateCheckReport> {
+  return invoke<ModUpdateCheckReport>("check_mod_updates_now", { game });
 }
 
 export async function setModUpdateCheckEnabled(

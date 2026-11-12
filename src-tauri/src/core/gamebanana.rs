@@ -15,6 +15,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::error::{Error, Result};
+use super::network;
 
 /// Where the GameBanana API lives. Production hard-codes
 /// `https://gamebanana.com`; tests substitute a local mock server URL.
@@ -83,10 +84,15 @@ pub fn parse_url_or_id(input: &str) -> Option<u64> {
 ///
 /// We pick the first downloadable file's URL + name out of `_aFiles`.
 /// The first preview-media image becomes the screenshot URL.
+///
+/// `proxy_configured` lets a transport failure say that the proxy is
+/// the thing that could not be reached, rather than reading as a
+/// problem with the submission.
 pub async fn fetch_submission(
     client: &reqwest::Client,
     endpoints: &Endpoints,
     id: u64,
+    proxy_configured: bool,
 ) -> Result<GameBananaSubmission> {
     let url = format!(
         "{}/apiv11/Mod/{id}?\
@@ -97,7 +103,12 @@ pub async fn fetch_submission(
         .get(&url)
         .send()
         .await
-        .map_err(|e| Error::GameBanana(format!("GET {url}: {e}")))?
+        .map_err(|e| {
+            Error::GameBanana(format!(
+                "GET {url}: {}",
+                network::classify_error(&e, proxy_configured)
+            ))
+        })?
         .error_for_status()
         .map_err(|e| Error::GameBanana(format!("status {url}: {e}")))?;
     let json: serde_json::Value = res
