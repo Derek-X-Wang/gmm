@@ -60,8 +60,14 @@ impl LibraryOwnershipSnapshot {
     }
 
     pub(super) async fn load(connection: &mut SqliteConnection) -> Result<Self> {
-        let enabled_transition_witnesses =
-            super::library_mutation::load_enabled_transition_witnesses(&mut *connection).await?;
+        // A released row gave up its claim, so it owns neither the Mod nor
+        // the recorded Library identity.
+        let enabled_transition_witnesses: Vec<_> =
+            super::library_mutation::load_enabled_transition_witnesses(&mut *connection)
+                .await?
+                .into_iter()
+                .filter(|witness| !witness.is_released())
+                .collect();
         let enabled_transition_mod_ids: HashSet<_> = enabled_transition_witnesses
             .iter()
             .map(|witness| witness.mod_id().to_string())
@@ -144,6 +150,7 @@ impl LibraryOwnershipSnapshot {
             .map(|witnesses| {
                 witnesses
                     .into_iter()
+                    .filter(|witness| !witness.is_released())
                     .map(|witness| witness.mod_id().to_string())
                     .collect()
             })

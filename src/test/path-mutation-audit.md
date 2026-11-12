@@ -8,7 +8,7 @@ a completed folder pick. Each route invokes the same existing backend mutation;
 there is no frontend path validation, trimming, or implicit reset to default.
 The diagnostics log directory stays read-only.
 
-The inventory contains **48 `useMutation` call sites in 13 files** and is now
+The inventory contains **49 `useMutation` call sites in 13 files** and is now
 enforced by `mutation-invalidation-boundary.test.ts` under `pnpm test`. The gate
 parses production TypeScript/TSX under `src/`, including new files, and requires
 exactly one row per call site and no stale rows. The original audit traced each
@@ -86,6 +86,7 @@ from the production inventory.
 | ModList | toggle | Unchanged: already settles `mods/game` and `conflicts/game`. |
 | ModList | retryRecovery | Unchanged: already settles `mods/game` and `conflicts/game`; persistent feedback survives disappearing recovery controls. |
 | ModList | retireEnabledTransition | Unchanged: already settles `mods/game` and `conflicts/game`. |
+| ModList | releaseEnabledTransition | Settles `mods/game` and `conflicts/game`; a released Mod reports an unknown enabled state until it is enabled or disabled again. |
 | ModList / AdoptButton | adopt | Existing settlement callback retained; parent refresh now also includes `modUpdates/game` alongside `mods/game` and `libraryAudit/game`. Shared import callback. |
 | ModList / GameBananaImport | ingest | Changed parent callback: settles `modUpdates/game` as well as Mods/audit; fresh cached update rows otherwise omit a newly imported Mod. |
 | ModList / VariantSelector | switchVariant | Unchanged: transactional active-Variant update already refreshes `variants/modId` and `conflicts/game` on success. Existing refetch guard stays intact. |

@@ -222,6 +222,7 @@ pub fn run() {
             commands::list_presets,
             commands::retry_reinstall_recovery,
             commands::retire_interrupted_enabled_transition,
+            commands::release_enabled_transition,
             commands::get_importer_evacuation_recovery,
             commands::retry_importer_evacuation_recovery,
             commands::retire_interrupted_importer_evacuation,

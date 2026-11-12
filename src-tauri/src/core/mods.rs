@@ -30,7 +30,9 @@ pub struct ReinstallRecovery {
 
 /// A durable enable/disable transition that startup could not settle yet.
 /// The requested state remains authoritative; GMM blocks later deployment
-/// mutations and game launch until the recorded Junction operation succeeds.
+/// mutations and game launch until the recorded Junction operation succeeds,
+/// or until the user confirms releasing it (`released`), after which GMM
+/// reports the Mod's enabled state as unknown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnabledTransitionRecovery {
@@ -41,6 +43,10 @@ pub struct EnabledTransitionRecovery {
     pub junction_path: PathBuf,
     /// True when the numeric PID is live but its start identity is unknown.
     pub owner_uncertain: bool,
+    /// True after the user confirmed releasing a transition GMM could not
+    /// finish. The Mod's enabled state is then unknown: GMM no longer blocks
+    /// on it and does not state the stored flag as fact.
+    pub released: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -516,6 +516,24 @@ pub enum Error {
     EnabledTransitionStillOwned,
 
     #[error(
+        "GMM did not release the interrupted enable/disable because the release was not confirmed. \
+         Releasing gives up GMM's claim on that Mod's enabled state; confirm only after reading what GMM cannot prove."
+    )]
+    EnabledTransitionReleaseUnconfirmed,
+
+    #[error(
+        "GMM cannot release the interrupted enable/disable for Mod {mod_id} because no failed recovery is recorded for it. \
+         GMM can still finish it by itself: it retries at startup, or after you retire an uncertain producer."
+    )]
+    EnabledTransitionReleaseUnavailable { mod_id: String },
+
+    #[error(
+        "GMM does not know whether Mod {mod_id} is enabled, because an interrupted enable or disable was released. \
+         Enable or disable the Mod explicitly so GMM can re-establish its state by doing the work."
+    )]
+    EnabledStateUnknown { mod_id: String },
+
+    #[error(
         "GMM cannot retire this Model Importer evacuation while its original process is still running"
     )]
     ImporterEvacuationStillOwned,
@@ -546,6 +564,8 @@ impl Error {
             Self::EnabledTransitionWitnessCorrupt { mod_id, .. }
             | Self::EnabledTransitionFilesystemChanged { mod_id, .. }
             | Self::EnabledTransitionPending { mod_id }
+            | Self::EnabledTransitionReleaseUnavailable { mod_id }
+            | Self::EnabledStateUnknown { mod_id }
             | Self::DuplicateModResolutionBlockedByReinstall { mod_id }
             | Self::DuplicateModInstallPathMissing { mod_id, .. }
             | Self::DuplicateModJunctionConflict { mod_id, .. }

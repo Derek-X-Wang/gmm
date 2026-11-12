@@ -11,6 +11,7 @@ import {
   listModUpdates,
   listVariants,
   retryReinstallRecovery,
+  releaseEnabledTransition as releaseEnabledTransitionRequest,
   retireInterruptedEnabledTransition,
   setActiveVariant,
   setModEnabled,
@@ -216,6 +217,20 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
     },
   });
 
+  const releaseEnabledTransition = useMutation({
+    mutationFn: ({ id }: { id: string; name: string; game: ApiGameCode }) =>
+      releaseEnabledTransitionRequest(id),
+    onMutate: ({ name, game }) => retirement.start(game, `Releasing the interrupted enable or disable for ${name}…`),
+    onSuccess: (_, { name, game }) => retirement.finish(game,
+      `Released the interrupted enable or disable for ${name}. GMM does not know whether ${name} is enabled; enable or disable it to settle that.`),
+    onError: (error, { game }) => retirement.finish(game,
+      `Could not release the interrupted enable or disable: ${commandFailureMessage(error)}`, true),
+    onSettled: (_, __, { game }) => {
+      queryClient.invalidateQueries({ queryKey: ["mods", game] });
+      queryClient.invalidateQueries({ queryKey: ["conflicts", game] });
+    },
+  });
+
   const confirmedEmpty = mods.isSuccess && mods.data.length === 0;
 
   const invalidate = () => {
@@ -350,16 +365,33 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                   modName={m.name}
                   recovery={m.enabledTransitionRecovery}
                   pending={
-                    retireEnabledTransition.isPending &&
-                    retireEnabledTransition.variables?.id === m.id
+                    (retireEnabledTransition.isPending &&
+                      retireEnabledTransition.variables?.id === m.id) ||
+                    (releaseEnabledTransition.isPending && releaseEnabledTransition.variables?.id === m.id)
                   }
                   onRetire={() =>
                     retireEnabledTransition.mutate({ id: m.id, name: m.name, game })
                   }
+                  onRelease={() => releaseEnabledTransition.mutate({ id: m.id, name: m.name, game })}
                 />
               ) : null}
             </div>
             <div>
+              {m.enabledTransitionRecovery?.released ? (
+                <div className="toggle" role="group" aria-label={`Set ${m.name} state`}>
+                  <span>Unknown · GMM does not know if this Mod is enabled</span>
+                  {([true, false] as const).map((enabled) => (
+                    <button
+                      key={String(enabled)}
+                      type="button"
+                      disabled={toggle.isPending || sessionBlocked || m.reinstallRecovery !== null}
+                      onClick={() => toggle.mutate({ id: m.id, enabled })}
+                    >
+                      {enabled ? "Enable" : "Disable"}
+                    </button>
+                  ))}
+                </div>
+              ) : (
               <label className="toggle">
                 <input
                   type="checkbox"
@@ -386,6 +418,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                       : "Disabled"}
                 </span>
               </label>
+              )}
             </div>
           </li>
         ))}

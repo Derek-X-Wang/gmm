@@ -34,6 +34,8 @@ export interface EnabledTransitionRecovery {
   attempts: number;
   junctionPath: string;
   ownerUncertain: boolean;
+  /** The user released the transition: GMM does not know this Mod's enabled state. */
+  released: boolean;
 }
 
 export type ReinstallRecoveryOutcome =
@@ -164,6 +166,14 @@ export async function retryReinstallRecovery(
 
 export async function retireInterruptedEnabledTransition(modId: string): Promise<void> {
   return invoke<void>("retire_interrupted_enabled_transition", { modId });
+}
+
+/**
+ * Give up an interrupted enable/disable GMM cannot finish. Call only after the
+ * user confirmed what GMM cannot prove; the Mod's enabled state is then unknown.
+ */
+export async function releaseEnabledTransition(modId: string): Promise<void> {
+  return invoke<void>("release_enabled_transition", { modId, confirmed: true });
 }
 
 export async function adoptFolder(
@@ -421,6 +431,8 @@ export interface DuplicateModRecord {
   libraryPath: string;
   junctionDirName: string;
   enabled: boolean;
+  /** GMM does not know this Mod's enabled state; do not show `enabled`. */
+  enabledStateUnknown: boolean;
   createdAt: string;
   gamebananaId: number | null;
   sourceUrl: string | null;

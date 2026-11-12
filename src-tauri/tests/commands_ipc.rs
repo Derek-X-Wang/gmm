@@ -260,6 +260,7 @@ fn library_audit_response_uses_camel_case() {
                 library_path: "/library/gimi/01SHARED".into(),
                 junction_dir_name: "Keeper".into(),
                 enabled: true,
+                enabled_state_unknown: false,
                 created_at: "2026-08-24T00:00:00Z".into(),
                 gamebanana_id: Some(24680),
                 source_url: Some("https://gamebanana.com/mods/24680".into()),
@@ -302,6 +303,7 @@ fn library_audit_response_uses_camel_case() {
     for key in [
         "libraryPath",
         "junctionDirName",
+        "enabledStateUnknown",
         "gamebananaId",
         "sourceUrl",
         "upstreamVersion",

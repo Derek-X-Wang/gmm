@@ -472,3 +472,33 @@ it("classifies only a nonempty all-in-flight omission list as in-flight only", (
     { mod_id: "live", cause: "inFlight" }, { mod_id: "broken", cause: "unestablished" },
   ])).toBe(false);
 });
+
+const releasedTransition = {
+  intendedEnabled: true, reason: "released", attemptedAt: "2026-11-12T00:00:00Z", attempts: 1,
+  junctionPath: "C:/Game/Mods/March Outfit", ownerUncertain: false, released: true,
+};
+
+it("shows a released Mod as unknown and settles it through an explicit Enable", async () => {
+  mods = [{ ...outfit, enabled: true, enabled_transition_recovery: releasedTransition }];
+  renderMods();
+  await screen.findByText("March Outfit");
+  // The stored flag is true, yet neither state may be stated as fact.
+  expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByText("Enabled")).not.toBeInTheDocument();
+  expect(screen.queryByText("Disabled")).not.toBeInTheDocument();
+  expect(screen.getByText(/Unknown · GMM does not know if this Mod is enabled/)).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Enable" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_mod_enabled", { id: "mod-outfit", enabled: true, game: "srmi" }));
+  await userEvent.click(screen.getByRole("button", { name: "Disable" }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_mod_enabled", { id: "mod-outfit", enabled: false, game: "srmi" }));
+});
+
+it("releases only after the user confirms and sends the explicit confirmation", async () => {
+  mods = [{ ...outfit, enabled_transition_recovery: { ...releasedTransition, released: false } }];
+  renderMods();
+  await screen.findByText("March Outfit");
+  await userEvent.click(screen.getByRole("button", { name: /give up on this recovery/i }));
+  expect(invoke).not.toHaveBeenCalledWith("release_enabled_transition", expect.anything());
+  await userEvent.click(screen.getByRole("button", { name: /release and mark March Outfit as unknown/i }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("release_enabled_transition", { modId: "mod-outfit", confirmed: true }));
+});

@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { EnabledTransitionRecovery } from "./api";
 
 /** A transition that automatic startup recovery could not settle yet (#190). */
@@ -6,12 +8,39 @@ export function EnabledTransitionRecoveryWarning({
   recovery,
   pending,
   onRetire,
+  onRelease,
 }: {
   modName: string;
   recovery: EnabledTransitionRecovery;
   pending: boolean;
   onRetire: () => void;
+  /** Gives up the transition after the user confirms below. */
+  onRelease?: () => void;
 }) {
+  const [confirmingRelease, setConfirmingRelease] = useState(false);
+  if (recovery.released) {
+    return (
+      <section
+        className="reinstall-recovery-warning"
+        aria-label={`Unknown enabled state for ${modName}`}
+      >
+        <strong>Unknown — GMM does not know whether this Mod is enabled</strong>
+        <p>
+          An interrupted {recovery.intendedEnabled ? "enable" : "disable"} could not be finished, and
+          you released it. GMM no longer blocks game launch or Library changes for it, but it cannot
+          prove whether the Junction matches the stored enabled flag, so it does not show either.
+        </p>
+        <p>Enable or disable the Mod to settle it. GMM will do the work again and then record the result.</p>
+        <details>
+          <summary>Recorded path</summary>
+          <dl>
+            <dt>Deployment path</dt>
+            <dd><code>{recovery.junctionPath}</code></dd>
+          </dl>
+        </details>
+      </section>
+    );
+  }
   return (
     <section
       className="reinstall-recovery-warning"
@@ -42,6 +71,45 @@ export function EnabledTransitionRecoveryWarning({
               : "I confirmed no other GMM is changing this Mod — retire producer"}
           </button>
         </>
+      ) : null}
+      {!recovery.ownerUncertain && onRelease ? (
+        confirmingRelease ? (
+          <div role="group" aria-label={`Confirm release for ${modName}`}>
+            <p>
+              <strong>If you release this, GMM gives up the following:</strong>
+            </p>
+            <ul>
+              <li>GMM stops trying to finish the {recovery.intendedEnabled ? "enable" : "disable"}.</li>
+              <li>
+                GMM will not know whether {modName} is enabled. It will show Unknown, not Enabled or
+                Disabled.
+              </li>
+              <li>GMM stops blocking game launch and Library changes, in every Game.</li>
+              <li>
+                Whatever is now at <code>{recovery.junctionPath}</code> stays as it is. GMM will not
+                treat it as something it created.
+              </li>
+            </ul>
+            <p>You can settle it later by enabling or disabling the Mod again.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmingRelease(false);
+                onRelease();
+              }}
+              disabled={pending}
+            >
+              {pending ? "Releasing…" : `I understand — release and mark ${modName} as unknown`}
+            </button>
+            <button type="button" onClick={() => setConfirmingRelease(false)} disabled={pending}>
+              Keep waiting
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setConfirmingRelease(true)} disabled={pending}>
+            Give up on this recovery…
+          </button>
+        )
       ) : null}
       <details>
         <summary>Recorded path and recovery status</summary>
