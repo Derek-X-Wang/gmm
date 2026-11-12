@@ -27,6 +27,7 @@ pub mod library_recovery;
 mod mod_panel;
 pub mod mod_screenshot;
 pub mod mod_update_batch;
+pub mod mod_update_schedule;
 pub mod mod_updates;
 pub mod mods;
 pub mod network;
@@ -1016,7 +1017,8 @@ impl Core {
 
     /// Poll upstream for every GameBanana mod whose
     /// `update_check_enabled` is true. Updates `upstream_version` in
-    /// the DB and persists `mod_updates.last_check_at`. Honours the
+    /// the DB and, when the check reached at least one Mod, records the
+    /// Game's last-check time (see [`mod_updates::keys::last_check_at`]). Honours the
     /// global toggle: if `mod_updates.enabled` is `false`, returns the
     /// existing rows without a fetch. Mods whose fetch failed keep their
     /// cached row and are named in the report's `unchecked`.
@@ -1035,6 +1037,18 @@ impl Core {
         &self,
         game: GameCode,
         endpoints: &gamebanana::Endpoints,
+    ) -> Result<mod_updates::ModUpdateCheckReport> {
+        self.check_mod_updates_at(game, endpoints, Utc::now()).await
+    }
+
+    /// The check itself, with the clock injected so the scheduler's
+    /// cadence can be exercised without waiting. `now` is only what a
+    /// successful check records as the Game's last-check time.
+    pub async fn check_mod_updates_at(
+        &self,
+        game: GameCode,
+        endpoints: &gamebanana::Endpoints,
+        now: chrono::DateTime<Utc>,
     ) -> Result<mod_updates::ModUpdateCheckReport> {
         if !self.mod_updates_globally_enabled().await? {
             return Ok(mod_updates::ModUpdateCheckReport {
@@ -1057,6 +1071,7 @@ impl Core {
         // The proxy setting cannot change mid-check, so read it once.
         let proxy_configured = self.proxy_config().await?.is_configured();
         let mut unchecked = Vec::new();
+        let mut reached = 0_usize;
         for row in rows {
             let enabled: i64 = row.try_get("update_check_enabled")?;
             if enabled == 0 {
@@ -1077,6 +1092,7 @@ impl Core {
                         .bind(&mod_id)
                         .execute(&self.pool)
                         .await?;
+                    reached += 1;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1095,12 +1111,22 @@ impl Core {
             }
         }
 
-        put_setting(
-            &self.pool,
-            mod_updates::keys::LAST_CHECK_AT,
-            Some(Utc::now().to_rfc3339().as_str()),
-        )
-        .await?;
+        // The recorded time means "upstream was actually reached for this
+        // Game at this moment", because the scheduler reads it as "no
+        // check is due yet". A check that reached no Mod (offline, a dead
+        // proxy, every submission failing) therefore records nothing and
+        // leaves the Game due. A partial check does record: the Mods it
+        // missed are named in `unchecked`, and holding the whole Game
+        // back would re-poll every reached Mod on each launch for as long
+        // as one submission stays unreachable.
+        if reached > 0 {
+            put_setting(
+                &self.pool,
+                &mod_updates::keys::last_check_at(game),
+                Some(now.to_rfc3339().as_str()),
+            )
+            .await?;
+        }
         Ok(mod_updates::ModUpdateCheckReport {
             rows: self.list_mod_updates(game).await?,
             unchecked,

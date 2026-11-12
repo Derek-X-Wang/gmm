@@ -1,7 +1,7 @@
 # 0004 — Conservative auto-update defaults for game-touching artefacts
 
 Date: 2026-05-20
-Status: Accepted; GMM self-update decision amended 2026-10-16 (#325, #373, #380, #336)
+Status: Accepted; GMM self-update decision amended 2026-10-16 (#325, #373, #380, #336); weekly Mod check implemented 2026-11-12 (#461)
 
 ## Context
 
@@ -40,6 +40,16 @@ A launch check honours a remembered `Skip this build` choice. An explicit `Check
 After consent, Settings shows download progress and the status bar records that a download is in flight. Download, signature-verification and extraction failures remain visible in Settings and updater diagnostics. A failed check is distinct from finding the current release.
 
 GMM ships Windows MSI only. `tauri-plugin-updater` 2.10.1 starts the installer and exits GMM itself (`src/updater.rs:865`); the MSI handles launching the updated application. There is no successful in-process return from that Windows install path. #380 therefore removes the unreachable UI outcome. A test pins the reviewed plugin version from `Cargo.lock` and requires another review of Windows `install_inner` when the version changes. macOS and Linux AppImage have successful return paths in 2.10.1, so another bundle target also requires reconsidering this assumption.
+
+### Weekly Mod check implemented — 2026-11-12
+
+The **Mods** decision above is unchanged. It was accepted but never built: the settings panel promised a weekly check and only the `Check now` button ever ran one (#461). It is now built as decided; nothing here re-decides it.
+
+- GMM checks each Game's GameBanana Mods in the background about once a week, on launch and then while it stays open. The check refreshes the badge only. It never applies an update.
+- The cadence is per Game, because a check covers one Game. The recorded time is `mod_updates.last_check_at.<game>`.
+- The recorded time means "upstream was actually reached for this Game then". A check that reached no Mod records nothing, so the Game stays due and the next launch or pass tries again. A partial check does record, and names the Mods it missed.
+- The global toggle and each Mod's own toggle keep their meaning. With the global toggle off the schedule makes no network call.
+- The old global `mod_updates.last_check_at` was written unconditionally and never read. It is not migrated.
 
 ## Consequences
 
