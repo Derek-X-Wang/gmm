@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { checkLoaderUpdate } from "./api";
+import { evidenceDetail, readEvidence } from "./queryEvidence";
 
 /**
  * Informational Loader version report.
@@ -14,6 +15,10 @@ import { checkLoaderUpdate } from "./api";
  * told users to re-run the importer install to get it, which pulls a
  * Model Importer package and never touches the Loader. It also
  * rendered a failed check exactly like a healthy one.
+ *
+ * "Up to date with upstream" is only said about a check GMM just made. When
+ * the command fails or its refresh is paused, the last result is kept but is
+ * no longer a statement about upstream, so the note says it could not confirm.
  */
 export function LoaderVersionNote() {
   const loader = useQuery({
@@ -22,7 +27,17 @@ export function LoaderVersionNote() {
     retry: false,
   });
 
-  const status = loader.data;
+  const evidence = readEvidence(loader);
+  if (evidence.kind === "pending") return null;
+  if (evidence.kind === "unavailable") {
+    return (
+      <p className="muted small" role="status">
+        GMM could not check the Loader version. {evidenceDetail(evidence)}
+      </p>
+    );
+  }
+  const status = evidence.value;
+  // The command reports nothing GMM can state: say nothing rather than guess.
   if (!status) return null;
 
   const shipped = (
@@ -33,7 +48,12 @@ export function LoaderVersionNote() {
 
   return (
     <p className="muted small" role="status">
-      {status.checkError ? (
+      {evidence.kind === "stale" ? (
+        <>
+          {shipped}. GMM could not confirm whether upstream has a newer Loader, because the
+          last check could not be refreshed.
+        </>
+      ) : status.checkError ? (
         <>
           {shipped}. Couldn't check upstream: {status.checkError}
         </>

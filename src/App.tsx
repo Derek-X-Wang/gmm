@@ -49,16 +49,8 @@ import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarni
 import { OnboardingWizard } from "./OnboardingWizard";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { commandFailureMessage, type CommandFailure } from "./commandError";
+import { evidenceDetail, evidenceValue, readEvidence } from "./queryEvidence";
 import "./App.css";
-
-/**
- * Fallback used if `list_supported_games` ever returns empty (broken
- * backend wiring) or the query is still loading on first paint. Keeps
- * the UI usable instead of rendering an empty shell.
- */
-const FALLBACK_GAMES: GameSummary[] = [
-  { code: "gimi", displayName: "Genshin Impact" },
-];
 
 function App() {
   const qc = useQueryClient();
@@ -76,15 +68,31 @@ function App() {
   const [forceWizard, setForceWizard] = useState(false);
   const [setupError, setSetupError] = useState<unknown>(null);
 
-  if (onboarding.isLoading) {
+  const onboardingEvidence = readEvidence(onboarding);
+  if (onboardingEvidence.kind === "pending") {
     return (
       <main className="app">
         <p className="muted">Loading…</p>
       </main>
     );
   }
+  // Only an established status that says setup is incomplete may open the
+  // wizard. A status GMM could not read says nothing about setup, so it must
+  // not replace the whole application with first-run setup.
+  if (onboardingEvidence.kind === "unavailable" && !forceWizard) {
+    return (
+      <main className="app">
+        <div className="error" role="alert">
+          <strong>GMM could not read whether setup is finished.</strong>
+          <p>GMM did not open first-run setup, because it cannot tell whether setup is already done.</p>
+          <p className="small">{evidenceDetail(onboardingEvidence)}</p>
+          <button onClick={() => void onboarding.refetch()}>Try again</button>
+        </div>
+      </main>
+    );
+  }
 
-  const status = onboarding.data;
+  const status = evidenceValue(onboardingEvidence);
   const showWizard = forceWizard || !status?.complete;
 
   if (showWizard) {
@@ -107,7 +115,7 @@ function App() {
 
   return (
     <>
-      <MainApp
+      <GameRegistryGate
         skipped={status?.skipped ?? false}
         onSetupFailure={setSetupError}
         onResumeWizard={() => {
@@ -120,16 +128,18 @@ function App() {
   );
 }
 
-function MainApp({
-  skipped,
-  onResumeWizard,
-  onSetupFailure,
-}: {
+type MainAppProps = {
   skipped: boolean;
   onResumeWizard: () => void;
   onSetupFailure: (error: unknown) => void;
-}) {
-  const qc = useQueryClient();
+};
+
+/**
+ * Reads the supported-Game registry and renders the main screen only from a
+ * registry GMM actually read. Without one there is no honest tab strip to
+ * draw, so it says so rather than substituting a list of its own.
+ */
+function GameRegistryGate(props: MainAppProps) {
   const games = useQuery<GameSummary[]>({
     queryKey: ["supportedGames"],
     queryFn: listSupportedGames,
@@ -137,7 +147,40 @@ function MainApp({
     refetchOnWindowFocus: false,
     staleTime: Infinity,
   });
-  const list = (games.data ?? FALLBACK_GAMES).length > 0 ? games.data ?? FALLBACK_GAMES : FALLBACK_GAMES;
+  const evidence = readEvidence(games);
+  const registry = evidenceValue(evidence);
+  if (evidence.kind === "pending") {
+    return (
+      <main className="app">
+        <p className="muted">Loading…</p>
+      </main>
+    );
+  }
+  if (registry === undefined || registry.length === 0) {
+    return (
+      <main className="app">
+        <div className="error" role="alert">
+          <strong>GMM could not read the list of supported games.</strong>
+          <p>No game tabs are shown, because GMM cannot tell which games it supports.</p>
+          <p className="small">
+            {evidence.kind === "unavailable" ? evidenceDetail(evidence) : "The list was empty."}
+          </p>
+          <button onClick={() => void games.refetch()}>Try again</button>
+        </div>
+      </main>
+    );
+  }
+  return <MainApp {...props} registry={registry} />;
+}
+
+function MainApp({
+  skipped,
+  onResumeWizard,
+  onSetupFailure,
+  registry,
+}: MainAppProps & { registry: GameSummary[] }) {
+  const qc = useQueryClient();
+  const list = registry;
   // Share Settings' query keys so path entry, detection, and setup refresh
   // the tab strip through their existing invalidation paths.
   const installPaths = useQueries({
@@ -146,13 +189,24 @@ function MainApp({
       queryFn: () => getGameInstallPath(game.code),
     })),
   });
-  // Query data retains the last successful saved path when a refresh rejects.
-  // Filesystem health and Model Importer presence do not determine tab membership.
-  const installed = list.filter((_, index) => Boolean(installPaths[index].data?.trim()));
-  const remaining = list.filter((game) => !installed.some((entry) => entry.code === game.code));
-  const pathsPending = games.isPending || installPaths.some((path) => path.isPending);
-  const pathErrors = installPaths.flatMap((path, index) => path.isError
-    ? [`${list[index].displayName}: ${commandFailureMessage(path.error)}`]
+  // A Game's saved path decides whether it has a tab. A path GMM could not
+  // read says nothing either way, so that Game keeps its place and is marked
+  // instead of vanishing: the tab strip and the notice below must agree.
+  // A Game still being read waits for the checking line instead.
+  const pathEvidence = installPaths.map((path) => readEvidence(path));
+  const installed = list.filter((_, index) => {
+    const path = pathEvidence[index];
+    return path.kind === "unavailable" || (path.kind !== "pending" && Boolean(path.value?.trim()));
+  });
+  const pathsPending = pathEvidence.some((path) => path.kind === "pending");
+  const unverifiedPaths = new Set(list.filter((_, index) => pathEvidence[index].kind === "unavailable")
+    .map((game) => game.code));
+  // A Game with an unverified path also stays in Add game, so its setup route
+  // is reachable from there as well as from its own tab.
+  const remaining = list.filter((game) => unverifiedPaths.has(game.code)
+    || !installed.some((entry) => entry.code === game.code));
+  const pathErrors = pathEvidence.flatMap((path, index) => path.kind === "unavailable" || path.kind === "stale"
+    ? [`${list[index].displayName}: ${evidenceDetail(path)}`]
     : []);
   const [selectedGame, setActiveGame] = useState<ApiGameCode | null>(null);
   // Settings never writes this selection. Freeze the first installed Game
@@ -309,7 +363,9 @@ function MainApp({
           {sessionSurface.context}
         </GlobalHeaderLine>
         <GameTabs
-          games={installed}
+          games={installed.map((game) => unverifiedPaths.has(game.code)
+            ? { ...game, displayName: `${game.displayName} (path unverified)` }
+            : game)}
           remaining={remaining}
           pending={pathsPending}
           pathsUnavailable={pathErrors.length > 0}
@@ -424,18 +480,31 @@ function StartupReconcileNotice({ games }: { games: GameSummary[] }) {
     queryFn: getStartupReconcileStatus,
     refetchInterval: (query) => (query.state.data?.finished ? false : 250),
   });
-  const failures = status.data?.failures ?? [];
-  if (failures.length === 0) return null;
-
+  const evidence = readEvidence(status);
+  const failures = evidenceValue(evidence)?.failures ?? [];
+  if (failures.length > 0) {
+    return (
+      <section className="card" aria-label="Startup game link check">
+        <OperationFailureNotice
+          heading="GMM could not finish checking your game links at startup."
+          detail="The affected game was left unchanged; other games were checked independently."
+          errors={failures.map(
+            (failure) => `${games.find((game) => game.code === failure.game)?.displayName ?? failure.game.toUpperCase()} (${failure.game.toUpperCase()}): ${failure.error}`,
+          )}
+        />
+      </section>
+    );
+  }
+  // Silence says the check passed. It may say so only for a read that
+  // established zero failures, or a finished check whose refresh failed later.
+  if (evidence.kind === "fresh" || (evidence.kind === "stale" && evidence.value.finished)) return null;
   return (
     <section className="card" aria-label="Startup game link check">
-      <OperationFailureNotice
-        heading="GMM could not finish checking your game links at startup."
-        detail="The affected game was left unchanged; other games were checked independently."
-        errors={failures.map(
-          (failure) => `${games.find((game) => game.code === failure.game)?.displayName ?? failure.game.toUpperCase()} (${failure.game.toUpperCase()}): ${failure.error}`,
-        )}
-      />
+      <p className="muted small">
+        {evidence.kind === "pending"
+          ? "Checking your game links at startup…"
+          : `GMM could not confirm that your game links were checked at startup. ${evidenceDetail(evidence)}`}
+      </p>
     </section>
   );
 }
