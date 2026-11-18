@@ -16,6 +16,7 @@ import { GlobalLibraryRootEditor, GameLibraryOverrideEditor } from "./LibraryPat
 import { UpdatesPanel } from "./UpdatesPanel";
 import { Diagnostics } from "./Diagnostics.tsx";
 import { ImporterRecommendations } from "./ImporterRecommendations";
+import { evidenceValue, readEvidence } from "./queryEvidence";
 
 export type SettingsPage = GameCode | "gmm";
 
@@ -288,6 +289,9 @@ function GamePathExplanation({ game }: { game: GameCode }) {
 function NetworkPanel() {
   const qc = useQueryClient();
   const cfg = useQuery({ queryKey: ["proxyConfig"], queryFn: getProxyConfig });
+  // "password" as the placeholder says none is saved. That is only known from
+  // a read of the configuration, so without one the field says it cannot tell.
+  const passwordSet = evidenceValue(readEvidence(cfg))?.passwordSet;
   const [url, setUrl] = useState<string>("");
   const [username, setUsername] = useState<string>("");
   const [password, setPassword] = useState<string>("");
@@ -346,7 +350,8 @@ function NetworkPanel() {
         />
         <input
           type="password"
-          placeholder={cfg.data?.passwordSet ? "(set — leave blank to keep)" : "password"}
+          placeholder={passwordSet === undefined ? "password (saved status unknown)"
+            : passwordSet ? "(set — leave blank to keep)" : "password"}
           value={password}
           disabled={clearPassword}
           onChange={(e) => setPassword(e.currentTarget.value)}
