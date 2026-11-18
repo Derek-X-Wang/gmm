@@ -57,7 +57,9 @@ foreach ($Name in @("gmm-cli.exe", "concurrency-probe.exe", "gmm_lib.dll")) {
 }
 
 Write-Host "=== app-local DLL candidates ==="
-Get-ChildItem -Path $BinaryDir, (Join-Path $BinaryDir "deps") -Filter *.dll |
+# Only the executable's own directory is an app-local search location. Cargo
+# 1.100 no longer creates target/<profile>/deps, so it is not listed.
+Get-ChildItem -Path $BinaryDir -Filter *.dll |
     Select-Object FullName, Length | Format-Table -AutoSize
 
 # No Cargo/probe environment or app-local DLL may make this load check pass.

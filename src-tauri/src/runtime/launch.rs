@@ -136,9 +136,12 @@ fn locate_loader_dll() -> Result<PathBuf, String> {
         if candidate.exists() {
             return Ok(candidate);
         }
-        // Dev fallback: target/<profile>/gmm[.exe] → ../../../vendor/...
+        // Dev fallback: walk up from the executable to the repository root.
+        // The deepest caller is a test executable, which Rust 1.100 places at
+        // src-tauri/target/<profile>/build/<pkg>/<hash>/out: the root is
+        // seven levels up, so eight directories are checked.
         let mut walker = dir.to_path_buf();
-        for _ in 0..6 {
+        for _ in 0..8 {
             let candidate = walker.join("vendor/3dmloader/3dmloader.dll");
             if candidate.exists() {
                 return Ok(candidate);
