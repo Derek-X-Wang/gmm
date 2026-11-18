@@ -59,12 +59,11 @@ fn documented_command_table_matches_binary() {
     let mut candidates = CommandCandidates::default();
     collect_candidates(&manifest.join("crates/cli/src"), &mut candidates);
     candidates.0.extend(documented.iter().cloned());
-    let test_exe = std::env::current_exe().expect("locate test executable");
-    let binary = test_exe
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+    // Resolve the uplifted binary from the manifest, as the other fixture
+    // tests do. The test executable's own location is not stable: Rust 1.100
+    // moved it from target/debug/deps to target/debug/build/<pkg>/<hash>/out.
+    let binary = manifest
+        .join("target/debug")
         .join(format!("gmm-cli{}", std::env::consts::EXE_SUFFIX));
     let data = tempfile::tempdir().unwrap();
     let mut actual = BTreeSet::new();
