@@ -318,7 +318,17 @@ function NetworkPanel() {
       setPassword("");
       setClearPassword(false);
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: ["proxyConfig"] }),
+    // Settlement, not success: the URL, username and password are separate
+    // writes, so a failed save may still have changed the effective proxy.
+    // The Loader version check is refreshed here because a proxy change is
+    // the event that makes a failed upstream read worth retrying, and that
+    // check has no other trigger — it runs once per process, with retries
+    // off, so without this a failure outlived the fix until the next launch
+    // (#496).
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["proxyConfig"] });
+      qc.invalidateQueries({ queryKey: ["loader", "version"] });
+    },
   });
   const test = useMutation({
     mutationFn: testProxyConnection,
