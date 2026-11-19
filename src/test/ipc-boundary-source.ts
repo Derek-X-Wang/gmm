@@ -1,4 +1,4 @@
-// Shared only by the two IPC gates. The older invalidation gate stays independent.
+// Shared only by the three IPC gates. The older invalidation gate stays independent.
 import ts from "typescript";
 
 export type Source = { path: string; text: string };
@@ -69,7 +69,7 @@ export function resolve(node: ts.Expression, seen = new Set<ts.Node>()): ts.Expr
   return resolve(decl.initializer, seen);
 }
 export type Hook = { call: ts.CallExpression; owner?: Fn; key: string; location: string; options?: ts.Expression };
-export function hooks(source: Source, hook: "useQuery" | "useMutation"): Hook[] {
+export function hooks(source: Source, hook: "useQuery" | "useQueries" | "useMutation"): Hook[] {
   const file = ts.createSourceFile(source.path, source.text, ts.ScriptTarget.Latest, true);
   const names = new Set([hook]);
   for (const stmt of file.statements) {
@@ -105,7 +105,7 @@ export function productionSources(): Source[] {
 }
 export type Row = { rule: string; key: string; opaque: string; reason: string };
 export function inventory(audit: string): Row[] {
-  return audit.split("\n").filter((line) => /^\s*\| [12] \|/.test(line)).map((line) => {
+  return audit.split("\n").filter((line) => /^\s*\| [123] \|/.test(line)).map((line) => {
     const cells = line.trim().split("|").slice(1, -1).map((cell) => cell.trim());
     return { rule: cells[0], key: cells[1], opaque: cells[2], reason: cells[3] };
   });
