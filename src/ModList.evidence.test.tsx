@@ -210,13 +210,36 @@ it("marks the Variant choice as unverified when the Variant refresh is paused", 
   expect(screen.getByRole("radio", { name: "Red" })).toBeChecked();
 });
 
-it("says a single-folder Mod has no Variant choice only from a current read", async () => {
+it("stays silent when the refresh of a Mod with no Variant choice is paused", async () => {
+  // Deliberately silent. The selector renders once per Mod row, so a line here
+  // would land on every single-folder row at once, and a previous read did
+  // establish that there is no choice to offer. Only the never-read case speaks.
   const { client } = renderMods();
   await screen.findByText("March Outfit");
   await waitFor(() => expect(screen.queryByRole("radio")).not.toBeInTheDocument());
-  expect(screen.queryByText(/Variants/i)).not.toBeInTheDocument();
 
   await pause(client, ["variants", outfit.id]);
 
-  expect(await screen.findByText(/could not refresh this Mod's Variants/i)).toBeVisible();
+  await waitFor(() => expect(client.getQueryState(["variants", outfit.id])?.fetchStatus).toBe("paused"));
+  expect(screen.queryByText(/Variants/i)).not.toBeInTheDocument();
+  expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+});
+
+it("holds off a Variant switch while a refresh of the Variant list is in flight", async () => {
+  // This test is what guarantees the re-render behind VariantSelector's cached
+  // fetch-status read: the component re-renders on `fetchStatus` only because
+  // `readEvidence` reads it. Without this, that coupling could break silently.
+  variants = () => twoVariants;
+  const { client } = renderMods();
+  expect(await screen.findByRole("radio", { name: "Red" })).toBeEnabled();
+
+  let finish!: (value: ModVariants) => void;
+  variants = () => new Promise((resolve) => { finish = resolve; });
+  await act(async () => { void client.invalidateQueries({ queryKey: ["variants", outfit.id] }); });
+
+  await waitFor(() => expect(screen.getByRole("radio", { name: "Blue" })).toBeDisabled());
+  expect(screen.getByRole("radio", { name: "Red" })).toBeDisabled();
+
+  await act(async () => finish(twoVariants));
+  await waitFor(() => expect(screen.getByRole("radio", { name: "Blue" })).toBeEnabled());
 });

@@ -724,7 +724,11 @@ function VariantSelector({
   // request, not a claim about the value, which is why the evidence rule has no
   // case for it: the cached fetch status answers it directly. Reading the cache
   // rather than subscribing to it keeps this to the renders the observer below
-  // already causes, since reading `fetchStatus` through `readEvidence` tracks it.
+  // already causes, since reading `fetchStatus` through `readEvidence` tracks
+  // it. That indirect coupling is pinned by the ModList.evidence test "holds off
+  // a Variant switch while a refresh of the Variant list is in flight"; without
+  // it, a change to what `readEvidence` touches would stop the radios
+  // disabling in silence.
   const refreshing = qc.getQueryState(["variants", modId])?.fetchStatus === "fetching";
 
   const evidence = readEvidence(v);
@@ -743,17 +747,13 @@ function VariantSelector({
       </p>
     );
   }
-  if (list.variants.length < 2) {
-    // Say which it is: a Mod with no choice to offer, or a reading that could
-    // no longer be confirmed to be one.
-    return evidence.kind === "stale" ? (
-      <p className="muted small" role="status">
-        GMM could not refresh this Mod's Variants; the previous read found no Variant to choose.
-        {" "}
-        {evidenceDetail(evidence)}
-      </p>
-    ) : null;
-  }
+  // A Mod with no choice to offer stays silent, including when the read that
+  // established that could not be refreshed. This renders once per Mod row, so
+  // a line here would appear on every single-folder row at once, and a stale
+  // "no choice to offer" changes nothing the user can act on. The unavailable
+  // case above is the one that must speak, because the Variant count is
+  // precisely what GMM does not know there.
+  if (list.variants.length < 2) return null;
 
   return (
     <div className="variants">
