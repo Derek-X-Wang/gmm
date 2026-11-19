@@ -150,21 +150,20 @@ async fn main() -> ExitCode {
             }
         };
 
-        let outcome = match importer::fetch_latest_release(
-            &client, &endpoints, &slug, &pattern, None,
-        )
-        .await
-        {
-            Ok(Some(release)) => Ok(release.asset_name),
-            // Only reachable with a conditional request, which this
-            // never makes. Treated as a failure rather than silently
-            // passing: #78 is the precedent for a check that reported
-            // health by collapsing an unexpected state into "fine".
-            Ok(None) => {
-                Err("upstream answered 304 Not Modified to an unconditional request".into())
-            }
-            Err(e) => Err(e.to_string()),
-        };
+        let outcome =
+            match importer::fetch_latest_release(&client, &endpoints, &slug, &pattern, None, false)
+                .await
+            {
+                Ok(Some(release)) => Ok(release.asset_name),
+                // Only reachable with a conditional request, which this
+                // never makes. Treated as a failure rather than silently
+                // passing: #78 is the precedent for a check that reported
+                // health by collapsing an unexpected state into "fine".
+                Ok(None) => {
+                    Err("upstream answered 304 Not Modified to an unconditional request".into())
+                }
+                Err(e) => Err(e.to_string()),
+            };
 
         match &outcome {
             Ok(asset) => println!("ok    {}  {slug}  → {asset}", code.as_str()),

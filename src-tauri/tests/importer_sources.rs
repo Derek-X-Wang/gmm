@@ -127,6 +127,7 @@ async fn every_importer_origin_reaches_the_verdict_its_recording_predicts() {
             repo,
             &pattern,
             None,
+            false,
         )
         .await;
 

@@ -1603,12 +1603,14 @@ impl Core {
     ) -> Result<updates::UpdateStatus> {
         let pattern = importer::AssetPattern::new(asset_pattern)?;
         let client = self.http_client().await?;
+        let proxy_configured = self.proxy_config().await?.is_configured();
         let latest = match importer::fetch_latest_release(
             &client,
             &importer::Endpoints::default(),
             repo,
             &pattern,
             None,
+            proxy_configured,
         )
         .await
         {
@@ -1729,12 +1731,14 @@ impl Core {
 
         let pattern = importer::AssetPattern::new(origin.asset_pattern())?;
         let client = self.http_client().await?;
+        let proxy_configured = self.proxy_config().await?.is_configured();
         let latest = match importer::fetch_latest_release(
             &client,
             endpoints,
             &origin.repo_slug(),
             &pattern,
             None,
+            proxy_configured,
         )
         .await
         {
@@ -1779,12 +1783,14 @@ impl Core {
     ) -> Result<updates::LoaderVersionStatus> {
         let pattern = importer::AssetPattern::new(asset_pattern)?;
         let client = self.http_client().await?;
+        let proxy_configured = self.proxy_config().await?.is_configured();
         let latest = importer::fetch_latest_release(
             &client,
             &importer::Endpoints::default(),
             repo,
             &pattern,
             None,
+            proxy_configured,
         )
         .await;
 
@@ -2684,12 +2690,14 @@ impl Core {
     ) -> Result<Option<importer::LatestRelease>> {
         let (origin, pattern) = self.resolved_importer_origin(game).await?;
         let client = self.http_client().await?;
+        let proxy_configured = self.proxy_config().await?.is_configured();
         importer::fetch_latest_release(
             &client,
             &importer::Endpoints::default(),
             &origin.repo_slug(),
             &pattern,
             None,
+            proxy_configured,
         )
         .await
     }
@@ -2886,15 +2894,18 @@ impl Core {
 
         let client = self.http_client().await?;
         let proxy_configured = self.proxy_config().await?.is_configured();
-        let release =
-            importer::fetch_latest_release(&client, endpoints, &origin.repo_slug(), &pattern, None)
-                .await?
-                .ok_or_else(|| {
-                    Error::ReleaseMetadata(format!(
-                        "no release returned for {}",
-                        origin.repo_slug()
-                    ))
-                })?;
+        let release = importer::fetch_latest_release(
+            &client,
+            endpoints,
+            &origin.repo_slug(),
+            &pattern,
+            None,
+            proxy_configured,
+        )
+        .await?
+        .ok_or_else(|| {
+            Error::ReleaseMetadata(format!("no release returned for {}", origin.repo_slug()))
+        })?;
 
         let data = self.data_dir();
         let backups_root = data.join("backups").join(game.as_str());

@@ -1526,12 +1526,16 @@ impl Default for Endpoints {
 /// The caller must build the `client` via
 /// [`crate::core::Core::http_client`] so the request honours any
 /// configured proxy.
+///
+/// `proxy_configured` lets a transport failure say that the proxy is
+/// the thing that could not be reached, as [`download_to`] does (#481).
 pub async fn fetch_latest_release(
     client: &reqwest::Client,
     endpoints: &Endpoints,
     owner_repo: &str,
     pattern: &AssetPattern,
     etag: Option<&str>,
+    proxy_configured: bool,
 ) -> Result<Option<LatestRelease>> {
     let url = format!(
         "{}/repos/{owner_repo}/releases/latest",
@@ -1541,10 +1545,12 @@ pub async fn fetch_latest_release(
     if let Some(tag) = etag {
         req = req.header("If-None-Match", tag);
     }
-    let res = req
-        .send()
-        .await
-        .map_err(|e| Error::ReleaseMetadata(format!("GET {url}: {e}")))?;
+    let res = req.send().await.map_err(|e| {
+        Error::ReleaseMetadata(format!(
+            "GET {url}: {}",
+            super::network::classify_error(&e, proxy_configured)
+        ))
+    })?;
 
     if res.status().as_u16() == 304 {
         return Ok(None);
