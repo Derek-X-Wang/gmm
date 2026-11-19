@@ -1097,9 +1097,10 @@ mod manifest_refresh_started_marker {
             "the launch clock must start immediately before Start-Process",
         );
 
-        // The timeout message must tell the two failures apart.
+        // The timeout message must tell the two failures apart: a window that
+        // never appeared, and a shown window whose frontend missed the IPC budget.
         assert!(startup.contains("the main window never appeared"));
-        assert!(startup.contains("but the frontend never reached the backend"));
+        assert!(startup.contains("did not reach the backend"));
     }
 
     #[test]
