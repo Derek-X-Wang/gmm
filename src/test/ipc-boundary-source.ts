@@ -58,6 +58,29 @@ export function binding(name: string, at: ts.Node): ts.Node | undefined {
     }
   }
 }
+/**
+ * False where the identifier is a name being written rather than a value being
+ * read: the `data` in `q.data`, the `mods` in `mods={…}`, a declared binding.
+ * `binding()` resolves by name, so it happily resolves those to a same-named
+ * query observer, and `conflicts.data.conflicts` would otherwise read as a use
+ * of `conflicts`. An unlisted position counts as a reference, so every gate
+ * built on this stays strict rather than silently permissive.
+ */
+export function reference(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  if (ts.isPropertyAccessExpression(parent)) return parent.expression === node;
+  if (ts.isQualifiedName(parent)) return parent.left === node;
+  if (ts.isBindingElement(parent) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) return false;
+  if (ts.isJsxAttribute(parent) || ts.isPropertyAssignment(parent)) return parent.name !== node;
+  if (ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent) || ts.isJsxClosingElement(parent))
+    return parent.tagName !== node;
+  if (ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isFunctionDeclaration(parent) ||
+    ts.isFunctionExpression(parent) || ts.isClassDeclaration(parent) || ts.isMethodDeclaration(parent) ||
+    ts.isPropertyDeclaration(parent) || ts.isPropertySignature(parent) || ts.isEnumMember(parent) ||
+    ts.isTypeAliasDeclaration(parent) || ts.isInterfaceDeclaration(parent) ||
+    ts.isTypeParameterDeclaration(parent)) return parent.name !== node;
+  return true;
+}
 export function resolve(node: ts.Expression, seen = new Set<ts.Node>()): ts.Expression {
   node = unwrap(node);
   if (!ts.isIdentifier(node)) return node;
