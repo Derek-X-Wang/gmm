@@ -11,7 +11,7 @@ import type { GameCode, ModUpdateBatchReport, ModUpdateRow } from "../api";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 import audit from "./ipc-boundary-audit.md?raw";
 import { binding, checkInventory, hooks, inlineOptions, inventory, isFn, productionSources,
-  property, resolve, unwrap, walk, type Hook, type Source } from "./ipc-boundary-source";
+  property, reference, resolve, unwrap, walk, type Hook, type Source } from "./ipc-boundary-source";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke, Channel: class {} }));
 
@@ -69,7 +69,9 @@ function mutationWriters(sources: Source[]): Writer[] {
       if (visited.has(callback)) return;
       visited.add(callback);
       if (ts.isIdentifier(callback)) {
-        const decl = binding(callback.text, callback);
+        // Resolve only a value being read. A name being written is nobody's
+        // callback, and an unclassifiable position counts as a read.
+        const decl = reference(callback) ? binding(callback.text, callback) : undefined;
         if (decl && ts.isFunctionDeclaration(decl)) inspect(decl);
         else if (decl && ts.isVariableDeclaration(decl) && decl.initializer && ts.isIdentifier(decl.name)) inspect(decl.initializer);
         else writer.opaque.add(callback.text);
@@ -92,7 +94,7 @@ function mutationWriters(sources: Source[]): Writer[] {
           // Refreshes re-read the authoritative value; they do not install a
           // mutation's possibly stale return value into the cache.
         } else if (ts.isIdentifier(callee)) {
-          const decl = binding(callee.text, callee);
+          const decl = reference(callee) ? binding(callee.text, callee) : undefined;
           if (decl && ts.isFunctionDeclaration(decl)) inspect(decl);
           else if (decl && ts.isVariableDeclaration(decl) && decl.initializer && ts.isIdentifier(decl.name) &&
             (isFn(unwrap(decl.initializer)) || ts.isIdentifier(unwrap(decl.initializer)))) inspect(decl.initializer);
@@ -231,6 +233,12 @@ describe("same-key mutation scope boundary", () => {
     expect(opaqueViolations(sources, row)).toEqual([]);
     expect(opaqueViolations(sources, row + '\n' + row)).toContainEqual(expect.stringContaining("exactly one explained"));
     expect(opaqueViolations(source('const save = useMutation({});'), row)).toContainEqual(expect.stringContaining('handoffs "none"'));
+  });
+  it("follows a shorthand callback handoff, whose position the classifier counts as a read", () => {
+    const sources = [{ path: "src/Fixture.tsx", text: `function Widget() { const onSuccess = () => qc.setQueryData(["modPanelWidth"], 320);
+      const save = useMutation({ scope: { id: "modPanelWidth" }, onSuccess }); }` }];
+    expect(mutationWriters(sources).map((w) => [...w.heads])).toEqual([[expect.stringContaining("modPanelWidth")]]);
+    expect(scopeViolations(sources)).toEqual([]);
   });
   it("does not borrow local helper bodies from a sibling component", () => {
     const sources = [{ path: "src/Fixture.tsx", text: `function Other() { const publish = () => qc.setQueryData(["width"], 3); }
