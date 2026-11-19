@@ -31,6 +31,7 @@ import {
   SESSION_STARTED_EVENT,
   type AvGuidance,
   type GameSummary,
+  type InterruptedSessionLaunch,
   type OnboardingStatus,
   type SessionInfo,
   checkModUpdatesNow,
@@ -49,7 +50,7 @@ import { InterruptedSessionLaunchWarning } from "./InterruptedSessionLaunchWarni
 import { OnboardingWizard } from "./OnboardingWizard";
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { commandFailureMessage, type CommandFailure } from "./commandError";
-import { evidenceDetail, evidenceValue, readEvidence } from "./queryEvidence";
+import { evidenceDetail, evidenceValue, readEvidence, type Evidence } from "./queryEvidence";
 import "./App.css";
 
 function App() {
@@ -551,6 +552,36 @@ function useSessionLifecycle() {
   return { staleSession, dismissStaleSession: () => setStaleSession(null) };
 }
 
+/**
+ * What GMM knows about this install's interrupted launch reservations, said
+ * out loud.
+ *
+ * An outstanding reservation locks the Library, and the warning beside this
+ * notice is the only surface that explains it and the only route to the
+ * explicit confirmation that retires one. An unread list used to render
+ * exactly like a read list with nothing in it — no warnings at all — so Mod
+ * editing was refused with no explanation and no way out. A paused read is the
+ * same silence: it keeps `status: "success"`, keeps `data` and sets only
+ * `fetchStatus`, so nothing else notices it.
+ */
+function InterruptedLaunchReadNotice({ evidence }: { evidence: Evidence<InterruptedSessionLaunch[]> }) {
+  // A first read still in flight has not failed; the warnings appear when it
+  // lands, as they always did.
+  if (evidence.kind === "fresh" || evidence.kind === "pending") return null;
+  return (
+    <section className="card" aria-label="Interrupted launch reservations">
+      <CommandErrorNotice error={"error" in evidence ? evidence.error : null} />
+      <p className="muted small" role="status">
+        {evidence.kind === "stale"
+          ? "GMM could not re-read whether an interrupted Game launch is outstanding. Any interrupted launch below is from the previous read."
+          : "GMM could not read whether an interrupted Game launch is outstanding. If Mod changes are refused, an outstanding launch reservation may be why, and GMM cannot offer the confirmation that retires one until it can read the list."}
+        {/* A failed read already names its failure above; do not repeat it. */}
+        {"error" in evidence ? "" : ` ${evidenceDetail(evidence)}`}
+      </p>
+    </section>
+  );
+}
+
 function useSessionPresentation({ games, staleSession, onDismiss }: {
   games: GameSummary[];
   staleSession: SessionInfo | null;
@@ -567,6 +598,12 @@ function useSessionPresentation({ games, staleSession, onDismiss }: {
     queryFn: interruptedSessionLaunches,
     refetchOnWindowFocus: true,
   });
+  // The whole reservation reading goes through the evidence rule, so "no
+  // interrupted launch" is only ever said about a list GMM read. A list a read
+  // did establish still renders its warnings, stale or not: the user needs the
+  // confirmation button, and the notice beside it says the list is not current.
+  const launchesEvidence = readEvidence(interruptedLaunches);
+  const establishedLaunches = evidenceValue(launchesEvidence) ?? [];
   const retirement = useRecoveryOutcomes();
   const retireLaunch = useMutation({
     mutationFn: ({ id }: { id: string; game: ApiGameCode }) => retireInterruptedSessionLaunch(id),
@@ -584,7 +621,8 @@ function useSessionPresentation({ games, staleSession, onDismiss }: {
   return {
     notices: <>
       {games.map(({ code, displayName }) => retirement.region(code, `${displayName} launch recovery outcome`))}
-      {(interruptedLaunches.data ?? []).map((launch) => (
+      <InterruptedLaunchReadNotice evidence={launchesEvidence} />
+      {establishedLaunches.map((launch) => (
         <InterruptedSessionLaunchWarning
           key={launch.id}
           launch={launch}
@@ -721,6 +759,37 @@ function AvGuidanceCallout({
 }
 
 /**
+ * What GMM knows about the weekly Mod check preference, said out loud.
+ *
+ * The checkbox beside this notice may state the preference only from a read
+ * that established it, so this is where every other case is accounted for: a
+ * never-read preference says GMM does not know whether it is checking, and a
+ * read whose refresh failed or paused keeps the value it read but marks it as
+ * not re-read. Only `isPending` and a failure are visible to the observer's
+ * own flags — a paused refresh keeps `status: "success"` and sets only
+ * `fetchStatus` — which is why the evidence rule decides this, and not
+ * `isFetching` as `ImporterRecommendations` still does.
+ */
+function WeeklyCheckReadNotice({ evidence }: { evidence: Evidence<boolean> }) {
+  if (evidence.kind === "fresh") return null;
+  if (evidence.kind === "pending") {
+    return <p className="muted small" role="status">Reading the weekly Mod check preference…</p>;
+  }
+  return (
+    <>
+      <CommandErrorNotice error={"error" in evidence ? evidence.error : null} />
+      <p className="muted small" role="status">
+        {evidence.kind === "stale"
+          ? "GMM could not re-read whether the weekly Mod check is enabled, so the setting above is from the previous read and cannot be changed until GMM can read it again."
+          : "GMM could not read whether the weekly Mod check is enabled, so it is not shown. GMM cannot say whether it is checking weekly for Mod updates."}
+        {/* A failed read already names its failure above; do not repeat it. */}
+        {"error" in evidence ? "" : ` ${evidenceDetail(evidence)}`}
+      </p>
+    </>
+  );
+}
+
+/**
  * Settings → Mod updates. Global toggle, "Check now" button, and a
  * status line showing how many mods have upstream updates available.
  * Per-mod badges live in each Mod row (see ModUpdateBadge).
@@ -743,6 +812,13 @@ function ModUpdatesPanel({ game, mods }: { game: ApiGameCode; mods: Mod[] }) {
     mutationFn: (enabled: boolean) => setModUpdatesGloballyEnabled(enabled),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", "globalEnabled"] }),
   });
+  // The weekly-check preference goes through the evidence rule. The checkbox
+  // used to read `global.data ?? true`, which stated that GMM checks weekly
+  // without having read the setting, and offered a write derived from that
+  // invented value. A checkbox has no third state, so it appears only for a
+  // value a read established, and only a current read may be changed from.
+  const globalEvidence = readEvidence(global);
+  const globalEnabled = evidenceValue(globalEvidence);
   const ahead = rows.data?.filter((r) => r.upstreamAhead).length ?? 0;
   // Only the last check's own report: the cached rows say nothing about
   // whether upstream was reached.
@@ -764,16 +840,19 @@ function ModUpdatesPanel({ game, mods }: { game: ApiGameCode; mods: Mod[] }) {
         <button onClick={() => check.mutate()} disabled={check.isPending}>
           {check.isPending ? "Checking…" : "Check now"}
         </button>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={global.data ?? true}
-            disabled={toggleGlobal.isPending}
-            onChange={(e) => toggleGlobal.mutate(e.currentTarget.checked)}
-          />
-          <span>Weekly check enabled</span>
-        </label>
+        {globalEnabled !== undefined ? (
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={globalEnabled}
+              disabled={toggleGlobal.isPending || globalEvidence.kind !== "fresh"}
+              onChange={(e) => toggleGlobal.mutate(e.currentTarget.checked)}
+            />
+            <span>Weekly check enabled</span>
+          </label>
+        ) : null}
       </div>
+      <WeeklyCheckReadNotice evidence={globalEvidence} />
       <ModUpdateBatchAction game={game} mods={mods} rows={rows.data ?? []} verified={rows.isSuccess} checking={check.isPending} />
       {unchecked.length > 0 ? (
         <div className="error" role="alert">
