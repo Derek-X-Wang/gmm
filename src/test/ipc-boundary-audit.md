@@ -130,9 +130,7 @@ is listed under the findings below; those are defects for #483, not fixed here.
 | 3 | App / MainApp::mods | data | Pairs update rows with Mod names in the Mod updates panel only. The Mod list beside it owns the Library reading and renders its failure, so the empty fallback drops update rows rather than claiming an empty Library. |
 | 3 | App / MainApp::installPaths | <forwarded> | The tab strip reads this collection through readEvidence. The one element forwarded to GameStatusStrip is the saved install path, a stored setting only the user changes, and the strip labels it "Last saved Game path" whenever that read failed or is in flight. |
 | 3 | App / useSessionPresentation::session | data, isSuccess | The running banner appears only for a Session a read established, and the Mod lock it explains is enforced in the Core. A Session that ended while the refresh was paused leaves the banner withholding editing rather than permitting it. |
-| 3 | App / useSessionPresentation::interruptedLaunches | data | No honest reason. An unread list renders no warnings at all, an interrupted launch reservation needs the user's explicit confirmation, and nothing on the main screen says this read failed. Defect for #483. |
 | 3 | App / useLaunchGame::guidance | data | Disabled until a launch fails with an AV-pattern error, then refetched. Absent guidance falls back to the plain failure notice, so this read decides how much help text is shown and claims nothing about the Game. |
-| 3 | App / ModUpdatesPanel::global | data | No honest reason. The checkbox is `global.data ?? true`, which states that the weekly check is enabled without having read the preference. ImporterRecommendations is the honest treatment of the same preference shape. Defect for #483. |
 | 3 | App / ModUpdatesPanel::rows | data, isSuccess | The count beside the heading is a hint and is omitted at zero, and isSuccess is forwarded to ModUpdateBatchAction as `verified`, which disables Apply all and says "Available Mod updates are unverified". A paused refresh keeps isSuccess true; closing that is a migration step. |
 | 3 | AttentionView::report | data, dataUpdatedAt, error, isError, isFetching, isSuccess | Every claim is dated. The report renders dataUpdatedAt as "Checked at", says "Previous snapshot" while refetching or after a failure, requires an explicit safeToProceed boolean before saying anything about safety, and states that each action checks its own availability. |
 | 3 | Diagnostics::logDir | data, error, isError, isFetching, isPending, isSuccess | The log directory is a fixed per-install path. Pending, failed and "from the previous check" are each rendered, Export is disabled unless the last read succeeded, and the Core re-reads the directory when the bundle is written. |
@@ -168,30 +166,29 @@ is listed under the findings below; those are defects for #483, not fixed here.
 
 ### What rule 3 found
 
-45 readings in 17 production files produce a value. Seven are routed entirely
+45 readings in 17 production files produce a value. Nine are routed entirely
 through `readEvidence` and carry no row: `App::onboarding`,
 `App / GameRegistryGate::games`, `App / StartupReconcileNotice::status`,
-`LoaderVersionNote::loader` and, since #489, the three `src/ModList.tsx` readings
-`ModList::mods`, `ModList / ModUpdateBadge::rows` and
-`ModList / VariantSelector::v`. `src/App.tsx` is mixed, as #475 left it; `ModList`
-is mixed too, with `ModList::conflicts` still presence-keyed; and
+`LoaderVersionNote::loader`, the three `src/ModList.tsx` readings `ModList::mods`,
+`ModList / ModUpdateBadge::rows` and `ModList / VariantSelector::v` since #489, and
+`App / useSessionPresentation::interruptedLaunches` and
+`App / ModUpdatesPanel::global` since #490. `src/App.tsx` is mixed, as #475 left it;
+`ModList` is mixed too, with `ModList::conflicts` still presence-keyed; and
 `SessionCheckNotice` and `SettingsDestination` each consume one reading through
-`readEvidence` while still forwarding or presence-keying another. The remaining 38
+`readEvidence` while still forwarding or presence-keying another. The remaining 36
 are inventoried above. A `useQuery` whose result is discarded is not a reading and is
 outside the rule; `src/App.tsx` has one, kept mounted only to observe the session.
 
-Three rows could not be given an honest reason. Each states something GMM has not
-established, and none is fixed here:
+One row still has no honest reason, and is not fixed here:
 
-- `App / useSessionPresentation::interruptedLaunches` — no warnings for an unread
-  reservation list.
-- `App / ModUpdatesPanel::global` — `?? true` invents an unread preference.
 - `GameRecoveryNotice::recovery` — a paused or never-completed read renders silence
-  on the main screen.
+  on the main screen. #491 is queued on it.
 
-The three `ModList` rows that #482 could not justify — the heading's Mod count, the
-update badge and the Variant selector — went through `readEvidence` in #489 and their
-rows are gone.
+The other four rows #482 could not justify have gone through `readEvidence` and their
+rows are gone: the `ModList` heading's Mod count, the update badge and the Variant
+selector in #489, and in #490 the two in `src/App.tsx` — an unread launch-reservation
+list that rendered no warnings at all, and the `?? true` that invented an unread
+weekly-check preference.
 
 Three rows name a residual gap narrower than a defect: `App / ModUpdatesPanel::rows`,
 `ModList::conflicts` and `SessionCheckNotice / useSessionCheck::session` all handle a
