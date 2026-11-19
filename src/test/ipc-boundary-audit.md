@@ -136,7 +136,6 @@ is listed under the findings below; those are defects for #483, not fixed here.
 | 3 | Diagnostics::logDir | data, error, isError, isFetching, isPending, isSuccess | The log directory is a fixed per-install path. Pending, failed and "from the previous check" are each rendered, Export is disabled unless the last read succeeded, and the Core re-reads the directory when the bundle is written. |
 | 3 | GamePresets::currentMods | data, error, isFetching, isSuccess | Enabled only while the re-capture dialog is open. Confirm requires isSuccess with no refresh in flight, so a failed read leaves the dialog unable to re-capture and says so instead of capturing a guessed setup. |
 | 3 | GamePresets::presets | data, error, isPending, isSuccess | A saved preset list changes only through this panel's own mutations, which invalidate it. "No saved presets for this Game" is gated on isSuccess, and a failed read renders "Could not list presets." |
-| 3 | GameRecoveryNotice::recovery | data, error, isError, isFetching | No honest reason for the unestablished case. A failed read renders the failure and a refetch is marked as the previous report, but a paused or never-completed read renders nothing, which on the main screen reads as "no Model Importer recovery outstanding". Defect for #483. |
 | 3 | GameStatusStrip::status | data, error, isFetching | The summary line is all this strip claims, and every branch it cannot verify says "Cannot tell" or "unverified". A failed or in-flight read replaces the line rather than dressing it, and the path is labelled "Last saved Game path" in both. |
 | 3 | ImporterOriginPanel::path | data, isError, isFetching | The filesystem reading is dropped unless the last read succeeded and no refresh is in flight, so Install availability and the files description fall back to unavailable rather than to the previous answer. |
 | 3 | ImporterOriginPanel::status | data, error, isError, isFetching, isPending, isSuccess | Pending and failed reads each get their own line, a retained Origin is labelled "from the previous check", and an Importer Origin is a recorded setting that only an explicit origin change moves. |
@@ -166,29 +165,29 @@ is listed under the findings below; those are defects for #483, not fixed here.
 
 ### What rule 3 found
 
-45 readings in 17 production files produce a value. Nine are routed entirely
+45 readings in 17 production files produce a value. Ten are routed entirely
 through `readEvidence` and carry no row: `App::onboarding`,
 `App / GameRegistryGate::games`, `App / StartupReconcileNotice::status`,
 `LoaderVersionNote::loader`, the three `src/ModList.tsx` readings `ModList::mods`,
-`ModList / ModUpdateBadge::rows` and `ModList / VariantSelector::v` since #489, and
+`ModList / ModUpdateBadge::rows` and `ModList / VariantSelector::v` since #489,
 `App / useSessionPresentation::interruptedLaunches` and
-`App / ModUpdatesPanel::global` since #490. `src/App.tsx` is mixed, as #475 left it;
+`App / ModUpdatesPanel::global` since #490, and
+`GameRecoveryNotice::recovery` since #491. `src/App.tsx` is mixed, as #475 left it;
 `ModList` is mixed too, with `ModList::conflicts` still presence-keyed; and
 `SessionCheckNotice` and `SettingsDestination` each consume one reading through
-`readEvidence` while still forwarding or presence-keying another. The remaining 36
+`readEvidence` while still forwarding or presence-keying another. The remaining 35
 are inventoried above. A `useQuery` whose result is discarded is not a reading and is
 outside the rule; `src/App.tsx` has one, kept mounted only to observe the session.
 
-One row still has no honest reason, and is not fixed here:
+Every remaining row carries a reason that could be written honestly.
 
-- `GameRecoveryNotice::recovery` — a paused or never-completed read renders silence
-  on the main screen. #491 is queued on it.
-
-The other four rows #482 could not justify have gone through `readEvidence` and their
+All five rows #482 could not justify have gone through `readEvidence` and their
 rows are gone: the `ModList` heading's Mod count, the update badge and the Variant
-selector in #489, and in #490 the two in `src/App.tsx` — an unread launch-reservation
+selector in #489; in #490 the two in `src/App.tsx` — an unread launch-reservation
 list that rendered no warnings at all, and the `?? true` that invented an unread
-weekly-check preference.
+weekly-check preference; and in #491 the main screen's Model Importer recovery
+summary, which rendered nothing for a read it never completed and rendered an old
+report as a current one whenever a refresh paused rather than failed.
 
 Three rows name a residual gap narrower than a defect: `App / ModUpdatesPanel::rows`,
 `ModList::conflicts` and `SessionCheckNotice / useSessionCheck::session` all handle a
