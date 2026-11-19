@@ -30,7 +30,26 @@
 
     Any failure dumps the MSI verbose log and GMM's own logs to stdout so
     a CI reader can diagnose without a Windows machine.
+
+.PARAMETER WindowBudgetSeconds
+    Seconds from launch until the main window must be shown. Window and
+    webview construction is the only startup phase with real variance on
+    shared runners, so this budget keeps headroom (#455).
+
+.PARAMETER IpcBudgetSeconds
+    Seconds from the main window being shown until the frontend must reach
+    the backend. That phase has measured 0.0-0.6 s, so this budget is tight:
+    it exists to catch a hang, not a slow runner (#455).
+
+    Keep the two budgets together below the 120-second client timeout of the
+    held manifest request (`PACKAGED_SMOKE_FETCH_TIMEOUT`); see the comment
+    where that request is accepted.
 #>
+
+param(
+    [int]$WindowBudgetSeconds = 60,
+    [int]$IpcBudgetSeconds = 15
+)
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -485,7 +504,7 @@ function Invoke-StartupSmoke {
 
     # Accept the refresh request but do not answer until IPC is ready. The
     # loopback override's 120-second client timeout is deliberately longer than
-    # this smoke's 90-second startup deadline. A blocking startup therefore
+    # this smoke's whole startup poll (both budgets together). A blocking startup therefore
     # cannot escape the assertion through a client timeout, while a slow but
     # non-blocking startup cannot invert two independently scheduled timestamps.
     $manifestAccept = $script:ManifestListener.AcceptTcpClientAsync()
@@ -524,7 +543,10 @@ function Invoke-StartupSmoke {
         Write-Host "manifest fixture deliberately stopped after GMM launch"
     }
 
-    $deadline = (Get-Date).AddSeconds(90)
+    # Two budgets: launch to the main window, then window to IPC readiness.
+    # The second starts when the window is seen, so a frontend that never
+    # reaches the backend fails fast and is not reported as a slow startup.
+    $deadline = (Get-Date).AddSeconds($WindowBudgetSeconds)
     $dbSeen = $false
     $logSeen = $false
     $ipcSeen = $false
@@ -561,6 +583,7 @@ function Invoke-StartupSmoke {
                 (Get-DiagnosticMarkerCount $MainWindowShownMarker) -gt $windowBefore) {
                 $windowSeen = $true
                 $windowAt = Get-LaunchElapsedSeconds
+                $deadline = (Get-Date).AddSeconds($IpcBudgetSeconds)
                 Write-Host "new main-window-shown marker seen (show() succeeded) at $(Format-LaunchElapsed $windowAt)"
             }
             if (-not $ipcSeen -and
@@ -603,9 +626,20 @@ function Invoke-StartupSmoke {
     if (-not $dbSeen) { throw "timed out waiting for $dbPath" }
     if (-not $logSeen) { throw "timed out waiting for a log file in $logDir" }
     Assert-ManifestFixtureAcceptHealthy $manifestAccept "startup-post-loop"
-    # Name the phase that consumed the deadline. These are different product
-    # failures: a window that never appeared, and a window whose frontend never
-    # reached the backend.
+    # Name the budget that ran out. These are different product failures: a
+    # window that never appeared, and a window whose frontend never reached
+    # the backend. The second is a hang, not a slow startup.
+    if ($windowSeen -and -not $ipcSeen) {
+        $heldText = if ($manifestRequestSeen) {
+            " The manifest request was being held open and unanswered throughout."
+        } else { "" }
+        throw "the main window was shown at $(Format-LaunchElapsed $windowAt), but the frontend " +
+              "did not reach the backend within the $IpcBudgetSeconds-second IPC budget " +
+              "(IPC readiness marker '$IpcReadyMarker' not seen in $logDir). " +
+              "This is not a slow startup: the window was up, and this step normally takes " +
+              "under a second. Look for an unregistered command, an ACL denial, a frontend " +
+              "that failed to load, or frontend startup waiting on something it should not.$heldText"
+    }
     if (-not $windowSeen) {
         $handoffText = if ($handoffSeen) {
             "the Tauri-handoff marker '$StartupHandoffMarker' was seen at $(Format-LaunchElapsed $handoffAt), " +
@@ -614,10 +648,8 @@ function Invoke-StartupSmoke {
             "the Tauri-handoff marker '$StartupHandoffMarker' was not seen either, " +
             "so startup never finished native startup and reached the Tauri handoff"
         }
-        $startupPhase = "the main window never appeared (marker '$MainWindowShownMarker' not seen); $handoffText"
-    } elseif (-not $ipcSeen) {
-        $startupPhase = "the main window appeared at $(Format-LaunchElapsed $windowAt) " +
-                        "but the frontend never reached the backend"
+        $startupPhase = "the main window never appeared within the $WindowBudgetSeconds-second window budget " +
+                        "(marker '$MainWindowShownMarker' not seen); $handoffText"
     } else {
         $startupPhase = $null
     }
