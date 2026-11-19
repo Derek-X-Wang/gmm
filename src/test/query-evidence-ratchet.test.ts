@@ -7,7 +7,7 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import audit from "./ipc-boundary-audit.md?raw";
 import { binding, checkInventory, hooks, inventory, isFn, productionSources,
-  unwrap, walk, type Hook, type Source } from "./ipc-boundary-source";
+  reference, unwrap, walk, type Hook, type Source } from "./ipc-boundary-source";
 
 // Observer properties that say something about the value or about how the last
 // read went. Reading any of them off the observer is a claim this gate records.
@@ -45,29 +45,6 @@ function mapsEvidence(access: ts.PropertyAccessExpression): boolean {
     if (ts.isIdentifier(node) && node.text === parameter.text && readsEvidence(node)) mapped = true;
   });
   return mapped;
-}
-
-/**
- * False where the identifier is a name being written rather than a value being
- * read: the `data` in `q.data`, the `mods` in `mods={…}`, a declared binding.
- * `binding()` happily resolves those to a same-named query observer, and
- * `conflicts.data.conflicts` would otherwise read as a use of `conflicts`.
- * An unlisted position counts as a reference, so the gate fails closed.
- */
-function reference(node: ts.Identifier): boolean {
-  const parent = node.parent;
-  if (ts.isPropertyAccessExpression(parent)) return parent.expression === node;
-  if (ts.isQualifiedName(parent)) return parent.left === node;
-  if (ts.isBindingElement(parent) || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) return false;
-  if (ts.isJsxAttribute(parent) || ts.isPropertyAssignment(parent)) return parent.name !== node;
-  if (ts.isJsxOpeningElement(parent) || ts.isJsxSelfClosingElement(parent) || ts.isJsxClosingElement(parent))
-    return parent.tagName !== node;
-  if (ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isFunctionDeclaration(parent) ||
-    ts.isFunctionExpression(parent) || ts.isClassDeclaration(parent) || ts.isMethodDeclaration(parent) ||
-    ts.isPropertyDeclaration(parent) || ts.isPropertySignature(parent) || ts.isEnumMember(parent) ||
-    ts.isTypeAliasDeclaration(parent) || ts.isInterfaceDeclaration(parent) ||
-    ts.isTypeParameterDeclaration(parent)) return parent.name !== node;
-  return true;
 }
 
 type Reading = Hook & { claims: Set<string>; errors: string[] };
