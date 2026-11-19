@@ -62,21 +62,13 @@ pub struct ModUpdateCheckReport {
     pub unchecked: Vec<ModCheckFailure>,
 }
 
-/// Settings keys for the global toggle + per-Game last-check time.
+/// Settings key for the global toggle.
+///
+/// When each Mod was last checked is `mods.upstream_reached_at`, not a
+/// setting (#471). The per-Game `mod_updates.last_check_at.<game>` keys it
+/// replaced are deleted by that column's migration.
 pub mod keys {
-    use crate::core::games::GameCode;
-
     pub const GLOBAL_ENABLED: &str = "mod_updates.enabled";
-
-    /// When a check of `game`'s Mods last reached upstream, as RFC 3339.
-    ///
-    /// Per Game because a check covers one Game: "GIMI was checked, ZZMI
-    /// was not" has to be expressible. It means *reached*, not *ran* (see
-    /// `Core::check_mod_updates_at`). The pre-scheduler global key
-    /// `mod_updates.last_check_at` was never read and is not migrated.
-    pub fn last_check_at(game: GameCode) -> String {
-        format!("mod_updates.last_check_at.{}", game.as_str())
-    }
 }
 
 /// Compute the `upstream_ahead` flag from the two version strings.

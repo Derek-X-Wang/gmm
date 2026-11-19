@@ -1,7 +1,7 @@
 # 0004 — Conservative auto-update defaults for game-touching artefacts
 
 Date: 2026-05-20
-Status: Accepted; GMM self-update decision amended 2026-10-16 (#325, #373, #380, #336); weekly Mod check implemented 2026-11-12 (#461)
+Status: Accepted; GMM self-update decision amended 2026-10-16 (#325, #373, #380, #336); weekly Mod check implemented 2026-11-12 (#461); its cadence made per Mod 2026-11-18 (#471)
 
 ## Context
 
@@ -50,6 +50,15 @@ The **Mods** decision above is unchanged. It was accepted but never built: the s
 - The recorded time means "upstream was actually reached for this Game then". A check that reached no Mod records nothing, so the Game stays due and the next launch or pass tries again. A partial check does record, and names the Mods it missed.
 - The global toggle and each Mod's own toggle keep their meaning. With the global toggle off the schedule makes no network call.
 - The old global `mod_updates.last_check_at` was written unconditionally and never read. It is not migrated.
+
+### Cadence made per Mod — 2026-11-18
+
+The **Mods** decision is still unchanged: the check refreshes the badge only and never applies an update. #471 changes only how dueness is recorded, because the per-Game time above let a partial check stamp the whole Game. A Mod the check could not reach then waited a full week.
+
+- Each Mod records `mods.upstream_reached_at`: when GameBanana last answered about it. A Mod is due when that time is missing, unreadable, in the future, or a week old.
+- An answer counts even when it says the submission is gone or withheld, so such a Mod settles until the next week. No answer does not count: a transport failure, an unreachable proxy, or a server failure (5xx, 429). That Mod alone stays due, and the next pass, about six hours later, retries it.
+- A Game is due when any Mod the check would poll is due. A scheduled pass polls only the due Mods. "Check now" still polls every Mod with its check on.
+- `mod_updates.last_check_at.<game>` is removed and its rows are deleted, so no second value can disagree about dueness. The new column is not backfilled, so every Mod is due once after upgrade.
 
 ## Consequences
 
