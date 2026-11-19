@@ -70,7 +70,7 @@ from the production inventory.
 | ModUpdateBatchAction | apply | Settles Mods/update rows/Conflicts/Variants/attention/audit after success or rejection; publishes backend Conflict findings with omissions marked unverified and unconditionally refreshes mounted Conflict observers. Unknown results and errors survive refreshed update rows; preflight refusals do not invent Unknown outcomes. |
 | ModList / ModUpdateBadge | apply | Unchanged: already settles `mods/game`, `modUpdates/game`, `variants/modId`, and `conflicts/game`; error remains outside the disappearing badge. |
 | ModList / ModUpdateBadge | toggle | Unchanged: one Mod setting write already refreshes `modUpdates/game` on success. |
-| SettingsDestination / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. |
+| SettingsDestination / NetworkPanel | save | Changed: settles `proxyConfig`; URL, username, and password are separate writes. Success still clears the password draft. Since #496 settlement also refreshes `loader/version`, whose one-shot check has no other trigger, so a read that a bad proxy broke is retried once the proxy changes. |
 | SettingsDestination / NetworkPanel | test | Unchanged: connection probe; no persisted query state to refresh. |
 | ImporterPanel | install | Changed helper: already settled, now also refreshes `gamePathStatus/game`, `importerOrigin/game` and all `importer` queries, including latest release; stable install feedback remains on the Game page. |
 | ImporterPanel | rollback | Changed: same expanded helper, including `gamePathStatus/game`, runs on settlement; filesystem restoration can fail before provenance is recorded; null success explicitly reports no rollback backup. |
@@ -114,7 +114,10 @@ refreshes all `gamePathStatus` queries when setup completes.
 `AttentionView` intentionally remains an explicit-refresh, time-stamped snapshot
 per its existing product contract. Its query is not automatically invalidated.
 Static registry, AV guidance, loader version, startup reconcile report, and
-informational diagnostics queries have no missing writer among these hooks.
+informational diagnostics queries have no missing writer among these hooks. The
+loader version query is nonetheless refreshed by `NetworkPanel.save` (#496): a
+proxy change does not write the Loader's state, it decides whether that state
+can be read at all, and the check runs once per process with retries off.
 
 ## Settings destination relocation — #292
 
