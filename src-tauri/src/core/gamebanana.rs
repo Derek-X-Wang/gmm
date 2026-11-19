@@ -79,6 +79,33 @@ pub fn parse_url_or_id(input: &str) -> Option<u64> {
     None
 }
 
+/// Why [`fetch_submission`] returned no submission.
+///
+/// The weekly Mod check needs this split (#471): a Mod GameBanana answered
+/// about has been checked, even when the answer was that it is gone, while
+/// a Mod GameBanana could not answer about must be retried soon. Every
+/// other caller only needs the [`Error`], which `?` converts to.
+#[derive(Debug)]
+pub enum SubmissionFetchError {
+    /// GameBanana gave no answer about the submission: a transport failure
+    /// (offline, refused, timed out, an unreachable proxy, a body cut off
+    /// mid-read) or a status that says nothing about the Mod (any 5xx,
+    /// 429, 408, or a proxy's 407).
+    NotReached(Error),
+    /// GameBanana answered, and the answer is not a usable submission: it
+    /// is gone or withheld (any other non-success status), or its payload
+    /// lacks what GMM reads.
+    Answered(Error),
+}
+
+impl From<SubmissionFetchError> for Error {
+    fn from(e: SubmissionFetchError) -> Self {
+        match e {
+            SubmissionFetchError::NotReached(e) | SubmissionFetchError::Answered(e) => e,
+        }
+    }
+}
+
 /// Fetch a single submission's metadata. The API is GET
 /// `<api_base>/apiv11/Mod/<id>?_csvProperties=...` and returns JSON.
 ///
@@ -93,33 +120,53 @@ pub async fn fetch_submission(
     endpoints: &Endpoints,
     id: u64,
     proxy_configured: bool,
-) -> Result<GameBananaSubmission> {
+) -> std::result::Result<GameBananaSubmission, SubmissionFetchError> {
+    use SubmissionFetchError::{Answered, NotReached};
     let url = format!(
         "{}/apiv11/Mod/{id}?\
          _csvProperties=_idRow,_sName,_sProfileUrl,_aPreviewMedia,_aFiles,_aSubmitter,_sVersion",
         endpoints.api_base
     );
-    let res = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| {
-            Error::GameBanana(format!(
-                "GET {url}: {}",
-                network::classify_error(&e, proxy_configured)
-            ))
-        })?
-        .error_for_status()
-        .map_err(|e| Error::GameBanana(format!("status {url}: {e}")))?;
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| Error::GameBanana(format!("parse {url}: {e}")))?;
+    let res = client.get(&url).send().await.map_err(|e| {
+        NotReached(Error::GameBanana(format!(
+            "GET {url}: {}",
+            network::classify_error(&e, proxy_configured)
+        )))
+    })?;
+    let status = res.status();
+    let res = res.error_for_status().map_err(|e| {
+        let e = Error::GameBanana(format!("status {url}: {e}"));
+        // These statuses say nothing about the submission: the server
+        // failed, refused for now, timed out, or a proxy refused to pass
+        // the request on.
+        use reqwest::StatusCode as S;
+        let not_about_the_mod = status.is_server_error()
+            || matches!(
+                status,
+                S::TOO_MANY_REQUESTS | S::REQUEST_TIMEOUT | S::PROXY_AUTHENTICATION_REQUIRED
+            );
+        if not_about_the_mod {
+            NotReached(e)
+        } else {
+            Answered(e)
+        }
+    })?;
+    let json: serde_json::Value = res.json().await.map_err(|e| {
+        // A body that arrived but is not JSON is an answer; a body that
+        // stopped arriving is a transport failure.
+        let decode = e.is_decode();
+        let e = Error::GameBanana(format!("parse {url}: {e}"));
+        if decode {
+            Answered(e)
+        } else {
+            NotReached(e)
+        }
+    })?;
 
     let name = json
         .get("_sName")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::GameBanana("missing _sName".to_string()))?
+        .ok_or_else(|| Answered(Error::GameBanana("missing _sName".to_string())))?
         .to_string();
     let profile_url = json
         .get("_sProfileUrl")
@@ -165,7 +212,11 @@ pub async fn fetch_submission(
             let name = file.get("_sFile").and_then(|v| v.as_str())?;
             Some((url.to_string(), name.to_string()))
         })
-        .ok_or_else(|| Error::GameBanana("submission has no downloadable files".to_string()))?;
+        .ok_or_else(|| {
+            Answered(Error::GameBanana(
+                "submission has no downloadable files".to_string(),
+            ))
+        })?;
 
     Ok(GameBananaSubmission {
         id,

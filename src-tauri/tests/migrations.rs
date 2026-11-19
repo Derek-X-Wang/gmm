@@ -68,6 +68,7 @@ const SEEDED_INSTALL_PATH: &str = r"C:\Games\Genshin Impact\Genshin Impact Game"
 const SEEDED_LIBRARY_ROOT: &str = r"D:\gmm-library";
 const SEEDED_VARIANT_NAME: &str = "Hu Tao — Snow";
 const SEEDED_UPSTREAM_VERSION: &str = "2.1.0";
+const SEEDED_UPSTREAM_REACHED_AT: &str = "2026-11-18T00:00:00+00:00";
 
 /// Two Mods, deliberately including an enabled one: `enabled` and
 /// `junction_dir_name` together decide which Junctions the startup
@@ -341,6 +342,23 @@ async fn every_schema_version_migrates_and_keeps_the_users_data() {
                 Some(SEEDED_UPSTREAM_VERSION),
                 "{label}: the last-seen upstream version must survive",
             );
+        }
+
+        // The per-Mod check cadence arrived with migration 19 (#471).
+        if version >= 19 {
+            let pool = raw_pool(&db).await;
+            let reached: Option<String> =
+                sqlx::query_scalar("SELECT upstream_reached_at FROM mods WHERE id = ?")
+                    .bind(SEED_MODS[0].id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read upstream_reached_at");
+            assert_eq!(
+                reached.as_deref(),
+                Some(SEEDED_UPSTREAM_REACHED_AT),
+                "{label}: when upstream last answered about a Mod must survive",
+            );
+            pool.close().await;
         }
     }
 }
@@ -1280,6 +1298,15 @@ async fn seed(pool: &SqlitePool, version: usize) {
             .expect("seed upstream version");
     }
 
+    if version >= 19 {
+        sqlx::query("UPDATE mods SET upstream_reached_at = ? WHERE id = ?")
+            .bind(SEEDED_UPSTREAM_REACHED_AT)
+            .bind(SEED_MODS[0].id)
+            .execute(pool)
+            .await
+            .expect("seed upstream reached at");
+    }
+
     if version >= 17 {
         for (id, name) in [
             ("corpus-populated", "Populated setup"),
@@ -1472,4 +1499,64 @@ async fn the_corpus_really_holds_old_schema_versions() {
             .collect();
         assert_eq!(recorded, expected, "{label}: unexpected migration set");
     }
+}
+
+/// Migration 19 (#471) moves the Mod check's cadence from one setting per
+/// Game to one column per Mod. The per-Game setting is deleted rather than
+/// left as a second, disagreeing answer to "is a check due", and it is not
+/// copied into the column: it could not say which Mods a partial check
+/// missed. So every Mod is due once after the upgrade.
+#[tokio::test]
+async fn the_per_mod_cadence_migration_drops_the_per_game_record() {
+    let (_, fixture) = corpus()
+        .into_iter()
+        .find(|(version, _)| *version == 18)
+        .expect("schema-18 fixture");
+    let tmp = TempDir::new().expect("tmp");
+    let db = stage(&fixture, &tmp);
+    let pool = raw_pool(&db).await;
+    sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?)")
+        .bind("mod_updates.last_check_at.gimi")
+        .bind("2026-11-17T00:00:00+00:00")
+        .execute(&pool)
+        .await
+        .expect("seed per-Game record");
+    pool.close().await;
+
+    let core = open_core(&db, &tmp).await;
+
+    let pool = raw_pool(&db).await;
+    let leftover: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM settings WHERE key LIKE 'mod_updates.last_check_at%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count per-Game records");
+    assert_eq!(leftover, 0, "the per-Game record must be gone");
+    let reached: Option<String> =
+        sqlx::query_scalar("SELECT upstream_reached_at FROM mods WHERE id = ?")
+            .bind(SEED_MODS[0].id)
+            .fetch_one(&pool)
+            .await
+            .expect("read upstream_reached_at");
+    assert_eq!(reached, None, "nothing is backfilled");
+    pool.close().await;
+
+    assert_eq!(
+        core.library_root_override()
+            .await
+            .expect("library root override")
+            .map(|p| p.to_string_lossy().to_string()),
+        Some(SEEDED_LIBRARY_ROOT.to_string()),
+        "other settings are untouched",
+    );
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-18T12:00:00+00:00")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(
+        core.mod_update_check_due(GameCode::Gimi, now)
+            .await
+            .expect("dueness"),
+        "the seeded GameBanana Mod is due once after the upgrade",
+    );
 }
