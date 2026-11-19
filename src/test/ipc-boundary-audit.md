@@ -153,10 +153,7 @@ is listed under the findings below; those are defects for #483, not fixed here.
 | 3 | ModDetailPanel / ModScreenshotFigure::screenshot | data, isPending | Every state is a statement about the image and never about the Mod. "No screenshot available" always carries its reason, and with no value that reason is "GMM could not ask for the screenshot.", so an unread image never reads as a Mod without one. |
 | 3 | ModDetailPanel::remembered | data, error | A remembered panel width is a preference with a 320px default. An unread width opens the panel at that default and renders the read failure, and neither states anything about the Mod. |
 | 3 | ModDetailPanel::updates | data, error | The only value taken from the list is the row's upstreamVersion, shown under the label "Last seen upstream", which is a past reading by construction. The failed read renders under the same guard that enables the query. |
-| 3 | ModList / ModUpdateBadge::rows | data | No honest reason. A missing row renders no badge and no per-Mod check toggle, which is exactly how a Mod with no upstream update renders, and ModList shows no notice for this read. The same claim as #471. Defect for #483. |
-| 3 | ModList::mods | data, error, isLoading, isSuccess | No honest reason. The heading states a Mod count from the last read while the failure notice beside it says GMM could not read the Library. This is the instance measured on #419. Defect for #483. |
 | 3 | ModList::conflicts | data, error | Conflicts are advisory in v1, and the failure notice says in so many words that this is not a "no conflicts" result. The per-Mod counts and the unscanned badge come from the backend's own omitted entries. A paused read still shows zero conflicts unmarked; closing that is a migration step. |
-| 3 | ModList / VariantSelector::v | data, isFetching | No honest reason. An unread Variant list renders no selector, which is indistinguishable from a single-folder Mod, and nothing reports the failed read. Defect for #483. |
 | 3 | OnboardingWizard / WelcomeStep::guidance | data, error, isError | The AV guidance block is extra reading shown only when it was read, with the failure rendered instead when it was not. The step's own acknowledgement does not depend on it. |
 | 3 | OnboardingWizard / DetectStep::detect | data, error, isError, isFetching, isLoading | Detection has its own loading and error screens and a Re-scan control. A detected path is only ever a suggestion the user accepts, browses past or skips before anything is written. |
 | 3 | OnboardingWizard / LibraryStep::paths | data, error, isError | The same stored Library paths as the Settings editor, with the same unavailable placeholder and failure notice. The step writes the root the user picks rather than deriving anything from the read. |
@@ -171,16 +168,19 @@ is listed under the findings below; those are defects for #483, not fixed here.
 
 ### What rule 3 found
 
-45 readings in 17 production files produce a value. Four are already routed entirely
+45 readings in 17 production files produce a value. Seven are routed entirely
 through `readEvidence` and carry no row: `App::onboarding`,
-`App / GameRegistryGate::games`, `App / StartupReconcileNotice::status` and
-`LoaderVersionNote::loader`. `src/App.tsx` is mixed, as #475 left it, and
+`App / GameRegistryGate::games`, `App / StartupReconcileNotice::status`,
+`LoaderVersionNote::loader` and, since #489, the three `src/ModList.tsx` readings
+`ModList::mods`, `ModList / ModUpdateBadge::rows` and
+`ModList / VariantSelector::v`. `src/App.tsx` is mixed, as #475 left it; `ModList`
+is mixed too, with `ModList::conflicts` still presence-keyed; and
 `SessionCheckNotice` and `SettingsDestination` each consume one reading through
-`readEvidence` while still forwarding or presence-keying another. The remaining 41
+`readEvidence` while still forwarding or presence-keying another. The remaining 38
 are inventoried above. A `useQuery` whose result is discarded is not a reading and is
 outside the rule; `src/App.tsx` has one, kept mounted only to observe the session.
 
-Six rows could not be given an honest reason. Each states something GMM has not
+Three rows could not be given an honest reason. Each states something GMM has not
 established, and none is fixed here:
 
 - `App / useSessionPresentation::interruptedLaunches` — no warnings for an unread
@@ -188,12 +188,10 @@ established, and none is fixed here:
 - `App / ModUpdatesPanel::global` — `?? true` invents an unread preference.
 - `GameRecoveryNotice::recovery` — a paused or never-completed read renders silence
   on the main screen.
-- `ModList / ModUpdateBadge::rows` — a Mod with an unread update row renders as a
-  Mod with no update.
-- `ModList::mods` — the heading's count contradicts the failure notice beside it,
-  the instance measured on #419.
-- `ModList / VariantSelector::v` — an unread Variant list renders as a Mod with no
-  Variants.
+
+The three `ModList` rows that #482 could not justify — the heading's Mod count, the
+update badge and the Variant selector — went through `readEvidence` in #489 and their
+rows are gone.
 
 Three rows name a residual gap narrower than a defect: `App / ModUpdatesPanel::rows`,
 `ModList::conflicts` and `SessionCheckNotice / useSessionCheck::session` all handle a

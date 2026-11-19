@@ -19,6 +19,7 @@ import {
   type Conflict,
   type ConflictReport,
   type GameCode as ApiGameCode,
+  type Mod,
 } from "./api";
 import { SessionCheckNotice, useSessionCheck } from "./SessionCheckNotice";
 import { useRecoveryOutcomes } from "./RecoveryOutcome";
@@ -31,6 +32,7 @@ import {
 import { CommandErrorNotice } from "./CommandErrorNotice";
 import { commandFailureMessage } from "./commandError";
 import { ModDetailPanel } from "./ModDetailPanel";
+import { evidenceDetail, evidenceValue, readEvidence, type Evidence } from "./queryEvidence";
 
 export function hasOnlyInFlightOmissions(omitted: ConflictReport["omitted"]): boolean {
   return omitted.length > 0 && omitted.every((entry) => entry.cause === "inFlight");
@@ -40,13 +42,22 @@ export function hasOnlyInFlightOmissions(omitted: ConflictReport["omitted"]): bo
  * Per-mod badge that surfaces an available upstream version + Apply
  * + per-mod opt-out toggle. Renders nothing for mods without a
  * gamebanana_id.
+ *
+ * The update rows are one Game-wide read shared by every badge, so a Mod's
+ * own badge used to disappear when that read failed — the same render as a Mod
+ * with no upstream update, and the same render as a Mod the user opted out of
+ * checking. The reading goes through `readEvidence` so that "no update" is only
+ * ever said about a row GMM actually read, and so that the per-Mod check
+ * control survives a failed read of someone else's data.
  */
 function ModUpdateBadge({
   modId,
+  modName,
   game,
   disabled = false,
 }: {
   modId: string;
+  modName: string;
   game: ApiGameCode;
   disabled?: boolean;
 }) {
@@ -69,8 +80,42 @@ function ModUpdateBadge({
     onSuccess: () => qc.invalidateQueries({ queryKey: ["modUpdates", game] }),
   });
 
-  const row = rows.data?.find((r) => r.modId === modId);
-  if (!row) return <CommandErrorNotice error={apply.error} />;
+  const evidence = readEvidence(rows);
+  const row = evidenceValue(evidence)?.find((r) => r.modId === modId);
+  if (!row) {
+    // A first read still in flight has nothing to report yet; the badge appears
+    // when it lands. A read that succeeded and has no row for this Mod is the
+    // one honest "no update here", and renders as it always did.
+    if (evidence.kind === "pending" || evidence.kind === "fresh") {
+      return <CommandErrorNotice error={apply.error} />;
+    }
+    return (
+      <>
+        <span className="conflict-inline">
+          <span className="muted small">
+            {`Update status unknown — GMM could not ${evidence.kind === "stale" ? "refresh" : "read"} `}
+            {`this Game's Mod updates. ${evidenceDetail(evidence)}`}
+          </span>
+          {/* The check preference is this Mod's own setting. Offer it as the two
+              states it can be set to, rather than a checkbox that would have to
+              show one of them as current without having read it. */}
+          <span className="toggle" role="group" aria-label={`Set update checks for ${modName}`}>
+            {([true, false] as const).map((enabled) => (
+              <button
+                key={String(enabled)}
+                type="button"
+                disabled={disabled || toggle.isPending}
+                onClick={() => toggle.mutate(enabled)}
+              >
+                {enabled ? "Check for updates" : "Don't check"}
+              </button>
+            ))}
+          </span>
+        </span>
+        <CommandErrorNotice error={apply.error} />
+      </>
+    );
+  }
   return (
     <>
       <span className="conflict-inline">
@@ -93,8 +138,39 @@ function ModUpdateBadge({
           />
           <span className="muted small">check</span>
         </label>
+        {evidence.kind === "stale" ? (
+          <span className="muted small">
+            {" · update status unverified: GMM could not re-read this Game's Mod updates. "}
+            {evidenceDetail(evidence)}
+          </span>
+        ) : null}
       </span>
       <CommandErrorNotice error={apply.error} />
+    </>
+  );
+}
+
+/**
+ * What GMM knows about this Game's Mod Library, said out loud.
+ *
+ * The heading beside this notice carries a Mod count, and may only carry one
+ * for a read that is both established and current. This is where every other
+ * case is accounted for: a failed read keeps rendering the command failure it
+ * always did, and a paused read — which keeps `status: "success"` and sets only
+ * `fetchStatus`, so nothing else notices it — used to show nothing at all.
+ */
+function LibraryReadNotice({ evidence }: { evidence: Evidence<Mod[]> }) {
+  if (evidence.kind === "fresh" || evidence.kind === "pending") return null;
+  const message = evidence.kind === "stale"
+    ? "GMM could not refresh this Game's Mod Library, so the Mod count is withheld and the Mods listed are from the previous read."
+    : "GMM could not read this Game's Mod Library. This is not an empty Library.";
+  return (
+    <>
+      <CommandErrorNotice error={"error" in evidence ? evidence.error : null} />
+      <p className="muted small" role="status">
+        {/* A failed read already names its failure above; do not repeat it. */}
+        {"error" in evidence ? message : `${message} ${evidenceDetail(evidence)}`}
+      </p>
     </>
   );
 }
@@ -109,18 +185,23 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
     queryKey: ["mods", game],
     queryFn: () => listMods(game),
   });
+  // The whole Library reading goes through the evidence rule, so the heading
+  // cannot state a count GMM has not just read. `establishedMods` is the list
+  // a read did establish, stale or not, and is what the rows below show.
+  const modsEvidence = readEvidence(mods);
+  const establishedMods = evidenceValue(modsEvidence);
   const [selection, setSelection] = useState<{ game: ApiGameCode; id: string } | null>(null);
   // Keep identity through refreshes, but never resurrect a removed Mod or a
   // previous Game's selection. Unknown query data is not an empty Library.
   useEffect(() => {
     setSelection((previous) => previous && (previous.game !== game
-      || (mods.data !== undefined && !mods.data.some((mod) => mod.id === previous.id)))
+      || (establishedMods !== undefined && !establishedMods.some((mod) => mod.id === previous.id)))
       ? null : previous);
-  }, [game, mods.data]);
+  }, [game, establishedMods]);
   const selectedId = selection?.game === game
-    && mods.data?.some((mod) => mod.id === selection.id) ? selection.id : null;
+    && establishedMods?.some((mod) => mod.id === selection.id) ? selection.id : null;
 
-  const renderedMods = mods.data ?? [];
+  const renderedMods = establishedMods ?? [];
   const rowRefs = useRef(new Map<string, HTMLLIElement>());
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [focusInspector, setFocusInspector] = useState(false);
@@ -231,7 +312,10 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
     },
   });
 
-  const confirmedEmpty = mods.isSuccess && mods.data.length === 0;
+  // "Your Library has no Mods" is a claim about now, so only a current read
+  // may make it. A read whose refresh failed or paused falls back to the
+  // ordinary list, where LibraryReadNotice says what GMM could not establish.
+  const confirmedEmpty = modsEvidence.kind === "fresh" && modsEvidence.value.length === 0;
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["mods", game] });
@@ -245,7 +329,9 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       {retirement.region(game, `${displayName} deployment recovery outcome`)}
       <div className={confirmedEmpty ? "mod-import-landing" : "row row--between"}>
         <h2>
-          {confirmedEmpty ? `Add Mods for ${displayName}` : mods.data === undefined ? "Mods" : `Mods (${mods.data.length})`}
+          {confirmedEmpty
+            ? `Add Mods for ${displayName}`
+            : modsEvidence.kind === "fresh" ? `Mods (${modsEvidence.value.length})` : "Mods"}
           {conflicts.data && conflicts.data.omitted.length > 0 ? (
             <span className="conflict-badge">
               {conflicts.data.conflicts.length > 0
@@ -279,8 +365,8 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
       </div>
       <ZipDropZone key={`drop:${game}`} game={game} displayName={displayName} onImported={invalidate} />
 
-      {mods.isLoading ? <p>Loading…</p> : null}
-      <CommandErrorNotice error={mods.error} />
+      {modsEvidence.kind === "pending" ? <p>Loading…</p> : null}
+      <LibraryReadNotice evidence={modsEvidence} />
       <CommandErrorNotice
         error={conflicts.error}
         heading="GMM could not check this game's Mod conflicts."
@@ -329,6 +415,7 @@ export function ModList({ game, displayName }: { game: ApiGameCode; displayName:
                   {m.version ? <span className="muted small"> · v{m.version}</span> : null}
                   <ModUpdateBadge
                     modId={m.id}
+                    modName={m.name}
                     game={game}
                     disabled={
                       m.reinstallRecovery !== null || m.enabledTransitionRecovery !== null
@@ -604,6 +691,11 @@ function ConflictBadge({
  * with 0 or 1 Variants — the AC explicitly says single-folder mods
  * see no UI change. Switching the active Variant retargets the
  * junction in place; no full toggle cycle needed.
+ *
+ * "No Variant to choose" is a claim, so it is made only about a list GMM read.
+ * The reading goes through `readEvidence`: an unread list says so instead of
+ * rendering the single-folder Mod's silence, and a list whose refresh failed or
+ * paused keeps its choice but stops presenting it as current.
  */
 function VariantSelector({
   modId,
@@ -627,25 +719,66 @@ function VariantSelector({
     },
   });
 
-  if (!v.data || v.data.variants.length < 2) return null;
+  // A refresh in flight still holds off a switch, as it always has — including
+  // the refresh this component's own switch triggers. That is a fact about the
+  // request, not a claim about the value, which is why the evidence rule has no
+  // case for it: the cached fetch status answers it directly. Reading the cache
+  // rather than subscribing to it keeps this to the renders the observer below
+  // already causes, since reading `fetchStatus` through `readEvidence` tracks it.
+  const refreshing = qc.getQueryState(["variants", modId])?.fetchStatus === "fetching";
+
+  const evidence = readEvidence(v);
+  if (evidence.kind === "pending") return null;
+  const list = evidenceValue(evidence);
+  if (!list) {
+    // A successful read with no list reports nothing, as before.
+    if (evidence.kind === "fresh") return null;
+    return (
+      <p className="muted small" role="status">
+        {evidence.kind === "stale"
+          ? "GMM could not refresh this Mod's Variants."
+          : "GMM could not read this Mod's Variants, so it cannot tell whether there is a Variant to choose."}
+        {" "}
+        {evidenceDetail(evidence)}
+      </p>
+    );
+  }
+  if (list.variants.length < 2) {
+    // Say which it is: a Mod with no choice to offer, or a reading that could
+    // no longer be confirmed to be one.
+    return evidence.kind === "stale" ? (
+      <p className="muted small" role="status">
+        GMM could not refresh this Mod's Variants; the previous read found no Variant to choose.
+        {" "}
+        {evidenceDetail(evidence)}
+      </p>
+    ) : null;
+  }
 
   return (
     <div className="variants">
-      {v.data.variants.map((variant) => {
-        const active = variant.id === v.data!.activeVariantId;
+      {list.variants.map((variant) => {
+        const active = variant.id === list.activeVariantId;
         return (
           <label key={variant.id} className="variants__row">
             <input
               type="radio"
               name={`variant-${modId}`}
               checked={active}
-              disabled={disabled || switchVariant.isPending || v.isFetching}
+              disabled={disabled || switchVariant.isPending || refreshing}
               onChange={() => switchVariant.mutate(variant.id)}
             />
             <span>{variant.name}</span>
           </label>
         );
       })}
+      {evidence.kind === "stale" ? (
+        <p className="muted small" role="status">
+          GMM could not refresh this Mod's Variants; the choice above is from the previous read.
+          {" "}
+          {evidenceDetail(evidence)}
+        </p>
+      ) : null}
       <CommandErrorNotice error={switchVariant.error} />
     </div>
   );
