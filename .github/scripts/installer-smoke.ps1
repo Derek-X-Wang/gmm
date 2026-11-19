@@ -629,17 +629,6 @@ function Invoke-StartupSmoke {
     # Name the budget that ran out. These are different product failures: a
     # window that never appeared, and a window whose frontend never reached
     # the backend. The second is a hang, not a slow startup.
-    if ($windowSeen -and -not $ipcSeen) {
-        $heldText = if ($manifestRequestSeen) {
-            " The manifest request was being held open and unanswered throughout."
-        } else { "" }
-        throw "the main window was shown at $(Format-LaunchElapsed $windowAt), but the frontend " +
-              "did not reach the backend within the $IpcBudgetSeconds-second IPC budget " +
-              "(IPC readiness marker '$IpcReadyMarker' not seen in $logDir). " +
-              "This is not a slow startup: the window was up, and this step normally takes " +
-              "under a second. Look for an unregistered command, an ACL denial, a frontend " +
-              "that failed to load, or frontend startup waiting on something it should not.$heldText"
-    }
     if (-not $windowSeen) {
         $handoffText = if ($handoffSeen) {
             "the Tauri-handoff marker '$StartupHandoffMarker' was seen at $(Format-LaunchElapsed $handoffAt), " +
@@ -650,6 +639,12 @@ function Invoke-StartupSmoke {
         }
         $startupPhase = "the main window never appeared within the $WindowBudgetSeconds-second window budget " +
                         "(marker '$MainWindowShownMarker' not seen); $handoffText"
+    } elseif (-not $ipcSeen) {
+        $startupPhase = "the main window was shown at $(Format-LaunchElapsed $windowAt), but the frontend " +
+                        "did not reach the backend within the $IpcBudgetSeconds-second IPC budget. " +
+                        "This is not a slow startup: the window was up, and this step normally takes " +
+                        "under a second. Look for an unregistered command, an ACL denial, a frontend " +
+                        "that failed to load, or frontend startup waiting on something it should not"
     } else {
         $startupPhase = $null
     }
