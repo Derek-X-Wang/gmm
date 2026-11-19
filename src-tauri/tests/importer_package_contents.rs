@@ -126,6 +126,7 @@ async fn every_live_importer_package_installs_as_a_model_importer() {
             repo,
             &pattern,
             None,
+            false,
         )
         .await
         {
