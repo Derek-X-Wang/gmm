@@ -1029,11 +1029,11 @@ impl Core {
 
     /// Poll upstream for every GameBanana mod whose
     /// `update_check_enabled` is true. Updates `upstream_version` in
-    /// the DB and, when the check reached at least one Mod, records the
-    /// Game's last-check time (see [`mod_updates::keys::last_check_at`]). Honours the
-    /// global toggle: if `mod_updates.enabled` is `false`, returns the
-    /// existing rows without a fetch. Mods whose fetch failed keep their
-    /// cached row and are named in the report's `unchecked`.
+    /// the DB and records when upstream answered about each Mod (see
+    /// [`Core::poll_mod_updates`]). Honours the global toggle: if
+    /// `mod_updates.enabled` is `false`, returns the existing rows without
+    /// a fetch. Mods whose fetch failed keep their cached row and are
+    /// named in the report's `unchecked`.
     pub async fn check_mod_updates_now(
         &self,
         game: GameCode,
@@ -1054,13 +1054,27 @@ impl Core {
     }
 
     /// The check itself, with the clock injected so the scheduler's
-    /// cadence can be exercised without waiting. `now` is only what a
-    /// successful check records as the Game's last-check time.
+    /// cadence can be exercised without waiting. Polls every Mod with its
+    /// check on, as "Check now" does.
     pub async fn check_mod_updates_at(
         &self,
         game: GameCode,
         endpoints: &gamebanana::Endpoints,
         now: chrono::DateTime<Utc>,
+    ) -> Result<mod_updates::ModUpdateCheckReport> {
+        self.poll_mod_updates(game, endpoints, now, false).await
+    }
+
+    /// Poll `game`'s GameBanana Mods; with `only_due`, only those
+    /// [`mod_update_schedule::mod_due`] at `now`, which is what a
+    /// scheduled pass does. `now` is what an answered Mod records as
+    /// `upstream_reached_at`.
+    pub(crate) async fn poll_mod_updates(
+        &self,
+        game: GameCode,
+        endpoints: &gamebanana::Endpoints,
+        now: chrono::DateTime<Utc>,
+        only_due: bool,
     ) -> Result<mod_updates::ModUpdateCheckReport> {
         if !self.mod_updates_globally_enabled().await? {
             return Ok(mod_updates::ModUpdateCheckReport {
@@ -1070,7 +1084,7 @@ impl Core {
         }
 
         let rows = sqlx::query(
-            "SELECT id, name, gamebanana_id, update_check_enabled
+            "SELECT id, name, gamebanana_id, update_check_enabled, upstream_reached_at
              FROM mods
              WHERE game_code = ? AND source = ?",
         )
@@ -1082,8 +1096,8 @@ impl Core {
         let client = self.http_client().await?;
         // The proxy setting cannot change mid-check, so read it once.
         let proxy_configured = self.proxy_config().await?.is_configured();
+        let reached_at = now.to_rfc3339();
         let mut unchecked = Vec::new();
-        let mut reached = 0_usize;
         for row in rows {
             let enabled: i64 = row.try_get("update_check_enabled")?;
             if enabled == 0 {
@@ -1092,53 +1106,63 @@ impl Core {
             let mod_id: String = row.try_get("id")?;
             let gid: Option<i64> = row.try_get("gamebanana_id")?;
             let Some(gid) = gid else { continue };
+            let last_reached: Option<String> = row.try_get("upstream_reached_at")?;
+            if only_due && !mod_update_schedule::mod_due(last_reached.as_deref(), now) {
+                continue;
+            }
             // Best-effort: a single failed fetch must not abort the
             // batch. It is logged for diagnostics and returned in the
             // report so the user can see which Mods were not checked.
-            match gamebanana::fetch_submission(&client, endpoints, gid as u64, proxy_configured)
-                .await
+            //
+            // `upstream_reached_at` means "GameBanana answered about this
+            // Mod then", because the scheduler reads it as "not due yet"
+            // (#471). An answer that the Mod is gone is recorded: it
+            // will be the same answer next time, so retrying on every
+            // pass would only spend calls. No answer is not recorded, so
+            // that Mod alone stays due and the next pass retries it.
+            let failure = match gamebanana::fetch_submission(
+                &client,
+                endpoints,
+                gid as u64,
+                proxy_configured,
+            )
+            .await
             {
                 Ok(s) => {
-                    sqlx::query("UPDATE mods SET upstream_version = ? WHERE id = ?")
-                        .bind(s.version.as_deref())
+                    sqlx::query(
+                        "UPDATE mods SET upstream_version = ?, upstream_reached_at = ? WHERE id = ?",
+                    )
+                    .bind(s.version.as_deref())
+                    .bind(&reached_at)
+                    .bind(&mod_id)
+                    .execute(&self.pool)
+                    .await?;
+                    continue;
+                }
+                Err(gamebanana::SubmissionFetchError::Answered(e)) => {
+                    sqlx::query("UPDATE mods SET upstream_reached_at = ? WHERE id = ?")
+                        .bind(&reached_at)
                         .bind(&mod_id)
                         .execute(&self.pool)
                         .await?;
-                    reached += 1;
+                    e
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "gmm::mod_updates",
-                        mod_id = %mod_id,
-                        gamebanana_id = gid,
-                        error = %e,
-                        "skipping mod update poll",
-                    );
-                    unchecked.push(mod_updates::ModCheckFailure {
-                        mod_id,
-                        name: row.try_get("name")?,
-                        reason: e.to_string(),
-                    });
-                }
-            }
+                Err(gamebanana::SubmissionFetchError::NotReached(e)) => e,
+            };
+            tracing::warn!(
+                target: "gmm::mod_updates",
+                mod_id = %mod_id,
+                gamebanana_id = gid,
+                error = %failure,
+                "skipping mod update poll",
+            );
+            unchecked.push(mod_updates::ModCheckFailure {
+                mod_id,
+                name: row.try_get("name")?,
+                reason: failure.to_string(),
+            });
         }
 
-        // The recorded time means "upstream was actually reached for this
-        // Game at this moment", because the scheduler reads it as "no
-        // check is due yet". A check that reached no Mod (offline, a dead
-        // proxy, every submission failing) therefore records nothing and
-        // leaves the Game due. A partial check does record: the Mods it
-        // missed are named in `unchecked`, and holding the whole Game
-        // back would re-poll every reached Mod on each launch for as long
-        // as one submission stays unreachable.
-        if reached > 0 {
-            put_setting(
-                &self.pool,
-                &mod_updates::keys::last_check_at(game),
-                Some(now.to_rfc3339().as_str()),
-            )
-            .await?;
-        }
         Ok(mod_updates::ModUpdateCheckReport {
             rows: self.list_mod_updates(game).await?,
             unchecked,
