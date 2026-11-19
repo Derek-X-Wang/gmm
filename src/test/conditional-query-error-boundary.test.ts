@@ -4,7 +4,7 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import audit from "./ipc-boundary-audit.md?raw";
 import { binding, checkInventory, hooks, inlineOptions, isFn, ownerOf, productionSources,
-  property, resolve, walk, type Hook, type Source } from "./ipc-boundary-source";
+  property, reference, resolve, walk, type Hook, type Source } from "./ipc-boundary-source";
 
 function shape(node: ts.Expression): string {
   node = resolve(node);
@@ -93,8 +93,11 @@ function queryViolations(sources: Source[]): string[] {
         errors.push(`${label}: query error render must share its enabled condition.`);
     });
     // Destructuring/property forwarding is not covered by direct .error reads.
+    // reference() keeps a name being written — the declaration's own name, a
+    // property name, a JSX attribute name — from resolving to the same-named
+    // observer and reading as a use of it.
     walk(owner.body!, (node) => {
-      if (!ts.isIdentifier(node) || binding(node.text, node) !== declaration || node === (declaration as ts.VariableDeclaration).name) return;
+      if (!ts.isIdentifier(node) || !reference(node) || binding(node.text, node) !== declaration) return;
       const p = node.parent;
       if (ts.isPropertyAccessExpression(p) && p.expression === node) return;
       errors.push(`${label}: opaque query result use; use direct observer properties.`);
@@ -121,6 +124,23 @@ describe("conditional query error boundary", () => {
   });
   it("allows stale data reads without treating them as failure messaging", () => {
     expect(queryViolations(source(`${query} return <p>{updates.data}</p>;`))).toEqual([]);
+  });
+  it("does not mistake a property or JSX prop named after the query for a use of it", () => {
+    expect(queryViolations(source('const conflicts = useQuery({ enabled: open }); return <List rows={conflicts.data.conflicts} />;'))).toEqual([]);
+    expect(queryViolations(source('const mods = useQuery({ enabled: open }); return <List mods={mods.data} />;'))).toEqual([]);
+    expect(queryViolations(source('const data = useQuery({ enabled: open }); return <List rows={{ data: data.data }} />;'))).toEqual([]);
+  });
+  it("still reports a genuine opaque use of the observer itself", () => {
+    expect(queryViolations(source(`${query} return <List updates={updates} />;`)))
+      .toContainEqual(expect.stringContaining("opaque query result use"));
+    expect(queryViolations(source(`${query} const { error } = updates; return <>{hasUpstream && <p>{error}</p>}</>;`)))
+      .toContainEqual(expect.stringContaining("opaque query result use"));
+  });
+  it("counts an identifier position it cannot classify as a use, so the rule fails closed", () => {
+    expect(queryViolations(source(`${query} report(updates); return null;`)))
+      .toContainEqual(expect.stringContaining("opaque query result use"));
+    expect(queryViolations(source(`${query} return <Notice {...updates} />;`)))
+      .toContainEqual(expect.stringContaining("opaque query result use"));
   });
   it("accepts a negated disjunction early return with Boolean coercion", () => {
     expect(queryViolations(source('const q = useQuery({ enabled: open && Boolean(mod) }); if (!open || !mod) return null; return <p>{q.error}</p>;'))).toEqual([]);
